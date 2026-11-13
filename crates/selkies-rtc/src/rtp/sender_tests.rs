@@ -541,7 +541,7 @@ fn sender_reports_map_a_frame_to_its_capture_and_abs_capture_time_rides_as_paced
     let mut worst = 0.0f64;
     for (ntp, rtp) in &parsed {
         for packet in &packets {
-            let offset = rtp.wrapping_sub(packet.timestamp) as i32 as f64;
+            let offset = f64::from(rtp.wrapping_sub(packet.timestamp) as i32);
             let estimate = ntp_seconds(*ntp) - offset / 90000.0;
             let capture = captures[&packet.timestamp.wrapping_sub(origin)];
             worst = worst.max((estimate - ntp_seconds(ntp_from_monotonic_ns(capture))).abs());
@@ -634,7 +634,7 @@ fn a_reference_time_is_answered_beside_every_sender_report() {
     assert_eq!(report.dlrr.len(), 1);
     let (ssrc, lrr, delay) = report.dlrr[0];
     assert_eq!((ssrc, lrr), (1, 0x1234_5678));
-    assert!((delay as i64 - 16384).abs() <= 2, "{delay}");
+    assert!((i64::from(delay) - 16384).abs() <= 2, "{delay}");
     assert_eq!(report.ssrc, s.ssrc());
     s.handle_rtcp(&rrtr(ntp + (1 << 32)), &mut tr, 1000.0);
     assert_eq!(
@@ -643,7 +643,7 @@ fn a_reference_time_is_answered_beside_every_sender_report() {
         "a newer one replaces the reporter's last"
     );
     for i in 0..3 {
-        s.send_report(&mut tr, 1001.0 + i as f64);
+        s.send_report(&mut tr, 1001.0 + f64::from(i));
     }
     for compound in &tr.rtcp[1..] {
         let packets = RtcpPacket::parse(compound).unwrap();
@@ -1047,7 +1047,7 @@ fn a_real_pacer_cut_reaches_the_sender_through_the_verdict() {
         data.resize(5 + size, 0x88);
         EncodedFrame {
             data: Bytes::from(data),
-            timestamp: id as u32 * 3000,
+            timestamp: u32::from(id) * 3000,
             keyframe: key,
             dependency: Some((id, reference)),
             ..Default::default()
@@ -1095,7 +1095,7 @@ fn a_receiver_pli_retires_stale_media_and_delivers_the_fresh_idr() {
         data.resize(5 + size, if key { 0x77 } else { 0x66 });
         EncodedFrame {
             data: Bytes::from(data),
-            timestamp: id as u32 * 3000,
+            timestamp: u32::from(id) * 3000,
             keyframe: key,
             dependency: Some((id, reference)),
             ..Default::default()
@@ -1237,7 +1237,7 @@ fn an_older_queued_idr_preserves_stock_history_without_gated_recovery() {
         data.resize(2_005, 0x77);
         EncodedFrame {
             data: Bytes::from(data),
-            timestamp: id as u32 * 3000,
+            timestamp: u32::from(id) * 3000,
             keyframe: true,
             dependency: Some((id, None)),
             ..Default::default()
@@ -2118,7 +2118,7 @@ fn every_single_loss_comes_back_as_the_receivers_copy() {
                 packet.payload = Payload::from(payload);
                 packet.extensions = HeaderExtensions {
                     mid: Some("0".into()),
-                    abs_send_time: Some(0x314159 + i as u32),
+                    abs_send_time: Some(0x314159 + u32::from(i)),
                     transport_sequence_number: Some(200 + i),
                     playout_delay: Some((0, 0)),
                     dependency_descriptor: Some(Bytes::from_static(b"\x01\x00\x08")),
@@ -2262,7 +2262,7 @@ fn the_real_sender_protects_what_the_receiver_recovers() {
             );
         }
         let repairs = tr.media(118);
-        assert_eq!(repairs.len(), fec_enabled as usize);
+        assert_eq!(repairs.len(), usize::from(fec_enabled));
         if fec_enabled {
             let mut known = HashMap::new();
             known.insert(media[1].sequence_number, receiver_packet(&media[1], &map));
@@ -2755,10 +2755,10 @@ fn routed_feedback_reaches_the_aggregate_measurement() {
     router.register_sender("audio", 5, false);
     let mut tr = FakeTransport::new(10.0);
     for i in 0..400u16 {
-        tr.twcc.seed_sent(i, 1000, 10.0 + i as f64 * 0.00125);
+        tr.twcc.seed_sent(i, 1000, 10.0 + f64::from(i) * 0.00125);
     }
     let times: Vec<Option<f64>> = (0..400)
-        .map(|i| Some(1000.0 + (i / 20) as f64 * 25.0 + (i % 20) as f64 * 0.25))
+        .map(|i| Some(1000.0 + f64::from(i / 20) * 25.0 + f64::from(i % 20) * 0.25))
         .collect();
     for i in (0..400).step_by(20) {
         let fci = pack_twcc_fci(i as u16, &times[i..i + 20], 0);
@@ -2874,7 +2874,7 @@ fn nothing_a_peer_sends_panics() {
             }
             data.truncate(next() as usize % (data.len() + 1));
         }
-        let t = 1000.0 + round as f64 * 0.001;
+        let t = 1000.0 + f64::from(round) * 0.001;
         if let Ok(packets) = RtcpPacket::parse(&data) {
             for packet in &packets {
                 h.s.handle_rtcp(packet, &mut h.tr, t);
@@ -2886,7 +2886,7 @@ fn nothing_a_peer_sends_panics() {
         if let Ok(mut packet) = RtpPacket::parse(&bytes, &map) {
             codec = (codec + 1) % 5;
             packet.payload_type = 96 + codec;
-            rx.handle_rtp(packet, round as i64, t, &mut twcc);
+            rx.handle_rtp(packet, i64::from(round), t, &mut twcc);
         }
         for kind in [Codec::H264, Codec::H265, Codec::Vp8, Codec::Vp9, Codec::Av1] {
             let _ = codecs::depayload(kind, &bytes);
@@ -2994,7 +2994,7 @@ fn bench_row(label: &str, density: usize, pacer: bool, sink: BenchSink) {
         assert_eq!(queued, 0, "the rate covers the frame: nothing queues");
     }
     samples.sort_by(|a, b| a.total_cmp(b));
-    let media = s.packet_count() as f64 / FRAMES as f64;
+    let media = s.packet_count() as f64 / f64::from(FRAMES);
     let datagrams = media
         + if density > 0 {
             (media / 10.0).ceil() * density as f64

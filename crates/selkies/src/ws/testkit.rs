@@ -111,7 +111,7 @@ impl FakeCapture {
             codec: Codec::H264,
             stripe_y_start: 0,
             stripe_height: 0,
-            frame_id: frame_id as i32,
+            frame_id: i32::from(frame_id),
             timing: FrameTiming::default(),
             reference: Reference::None,
         };

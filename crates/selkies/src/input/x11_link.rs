@@ -395,7 +395,7 @@ impl XLink for X11Link {
             .conn
             .xtest_fake_input(
                 xproto::MOTION_NOTIFY_EVENT,
-                relative as u8,
+                u8::from(relative),
                 x11rb::CURRENT_TIME,
                 x11rb::NONE,
                 x,
@@ -568,10 +568,10 @@ impl XLink for X11Link {
                 .and_then(|c| c.reply()),
         )?;
         Ok(XCursorImage {
-            width: reply.width as u32,
-            height: reply.height as u32,
-            xhot: reply.xhot as i32,
-            yhot: reply.yhot as i32,
+            width: u32::from(reply.width),
+            height: u32::from(reply.height),
+            xhot: i32::from(reply.xhot),
+            yhot: i32::from(reply.yhot),
             serial: reply.cursor_serial,
             pixels: reply.cursor_image,
         })
@@ -585,14 +585,14 @@ impl XLink for X11Link {
             .iter()
             .find(|s| s.root == self.root)?;
         let (w_mm, h_mm) = (
-            screen.width_in_millimeters as f64,
-            screen.height_in_millimeters as f64,
+            f64::from(screen.width_in_millimeters),
+            f64::from(screen.height_in_millimeters),
         );
         if w_mm <= 0.0 || h_mm <= 0.0 {
             return None;
         }
-        let dpi_x = screen.width_in_pixels as f64 * 25.4 / w_mm;
-        let dpi_y = screen.height_in_pixels as f64 * 25.4 / h_mm;
+        let dpi_x = f64::from(screen.width_in_pixels) * 25.4 / w_mm;
+        let dpi_y = f64::from(screen.height_in_pixels) * 25.4 / h_mm;
         Some((dpi_x + dpi_y) / 2.0)
     }
 

@@ -282,8 +282,8 @@ fn push_window_elements<R>(
                 .map(CompositionElements::Cursor),
             );
         }
-        let sx = effect.rect.w as f64 / geometry.size.w.max(1) as f64;
-        let sy = effect.rect.h as f64 / geometry.size.h.max(1) as f64;
+        let sx = f64::from(effect.rect.w) / f64::from(geometry.size.w.max(1));
+        let sy = f64::from(effect.rect.h) / f64::from(geometry.size.h.max(1));
         let target: Point<i32, smithay::utils::Logical> =
             (effect.rect.x - origin.x, effect.rect.y - origin.y).into();
         let origin_phys = target.to_physical_precise_round(scale);
@@ -1727,7 +1727,7 @@ fn wayland_encode_loop<B: WlPayload>(
         if cfg.controls.rate_dirty.swap(false, Ordering::Acquire) {
             settings.video_bitrate_kbps = cfg.controls.bitrate_kbps.load(Ordering::Relaxed);
             settings.video_vbv_multiplier =
-                cfg.controls.vbv_mult_milli.load(Ordering::Relaxed) as f64 / 1000.0;
+                f64::from(cfg.controls.vbv_mult_milli.load(Ordering::Relaxed)) / 1000.0;
             let fps = f64::from_bits(cfg.controls.fps_bits.load(Ordering::Relaxed));
             if fps > 0.0 {
                 settings.target_fps = fps;
@@ -1825,7 +1825,7 @@ fn wayland_encode_loop<B: WlPayload>(
                                 rows,
                                 (width.max(0) as usize) * 4,
                                 cfg.use_gpu,
-                                f.frame_id as u64,
+                                u64::from(f.frame_id),
                                 decision.target_qp,
                                 force_idr,
                             )
@@ -1835,13 +1835,13 @@ fn wayland_encode_loop<B: WlPayload>(
                             encoder,
                             width,
                             cfg.use_gpu,
-                            f.frame_id as u64,
+                            u64::from(f.frame_id),
                             decision.target_qp,
                             force_idr,
                         ),
                     }
                 } else {
-                    encoder.push_held(f.frame_id as u64)
+                    encoder.push_held(u64::from(f.frame_id))
                 };
                 crate::pipeline::refinement_coded(
                     &mut hw_state,
@@ -1873,7 +1873,7 @@ fn wayland_encode_loop<B: WlPayload>(
                                     codec: settings.codec,
                                     stripe_y_start: 0,
                                     stripe_height: height,
-                                    frame_id: id as i32,
+                                    frame_id: i32::from(id),
                                     timing: FrameTiming {
                                         capture_ns: f.captured_ns,
                                         encode_start_ns,
@@ -2613,8 +2613,8 @@ where
         elements.push(CompositionElements::Cursor(elem));
     }
     let logical: Size<i32, Logical> = (
-        (scene.size.0 as f64 / scale).round() as i32,
-        (scene.size.1 as f64 / scale).round() as i32,
+        (f64::from(scene.size.0) / scale).round() as i32,
+        (f64::from(scene.size.1) / scale).round() as i32,
     )
         .into();
     elements.extend(
@@ -2739,8 +2739,9 @@ where
     if surface.transform() != Transform::Normal {
         return Err("the buffer is transformed");
     }
-    let buffer_full =
-        Rectangle::<f64, smithay::utils::Buffer>::from_size((size.0 as f64, size.1 as f64).into());
+    let buffer_full = Rectangle::<f64, smithay::utils::Buffer>::from_size(
+        (f64::from(size.0), f64::from(size.1)).into(),
+    );
     if surface.src() != buffer_full {
         return Err("the buffer is scaled or cropped");
     }
@@ -3441,7 +3442,7 @@ fn start_capture_on_display(
                 settings.width = current_w;
                 settings.height = current_h;
                 settings.scale = current_scale;
-                settings.target_fps = current_refresh as f64 / 1000.0;
+                settings.target_fps = f64::from(current_refresh) / 1000.0;
             } else {
                 println!(
                     "[Wayland] Configuring Output {} ({}): {}x{} @ {:.2} FPS (Scale {:.2})",
@@ -3887,7 +3888,7 @@ fn compose_host_frame(
     frame
         .render_texture_from_to(
             &tex,
-            Rectangle::from_size((size.0 as f64, size.1 as f64).into()),
+            Rectangle::from_size((f64::from(size.0), f64::from(size.1)).into()),
             full,
             &[full],
             // Opaque: the capture format's undefined alpha must not blend, it
@@ -4768,8 +4769,8 @@ fn render_node_tick(
         node.view_size = (width, height);
         node.view_scale = output_scale_val;
     }
-    let logical_w = (width as f64 / output_scale_val).round();
-    let logical_h = (height as f64 / output_scale_val).round();
+    let logical_w = (f64::from(width) / output_scale_val).round();
+    let logical_h = (f64::from(height) / output_scale_val).round();
 
     // A reconfigured or freshly created output composites its clear color wherever a client
     // has not yet answered the new size; publishing is held until one covers the output so
@@ -5267,7 +5268,7 @@ fn render_node_tick(
     // readback encode reads in place.
     let mut scanout_hold: Option<SurfaceBuffer> = None;
     let mut shm_hold: Option<SurfaceBuffer> = None;
-    let cursor_time = Duration::from_millis(state.clock.now().as_millis() as u64);
+    let cursor_time = Duration::from_millis(u64::from(state.clock.now().as_millis()));
     let drag_icon = state
         .dnd_icon
         .as_ref()
@@ -5827,8 +5828,18 @@ fn render_node_tick(
 /// touching edges do not count and empty (non-positive-dimension) rectangles never
 /// overlap anything. Arithmetic is widened so extreme coordinates cannot wrap.
 fn rects_overlap(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {
-    let (ax, ay, aw, ah) = (a.0 as i64, a.1 as i64, a.2 as i64, a.3 as i64);
-    let (bx, by, bw, bh) = (b.0 as i64, b.1 as i64, b.2 as i64, b.3 as i64);
+    let (ax, ay, aw, ah) = (
+        i64::from(a.0),
+        i64::from(a.1),
+        i64::from(a.2),
+        i64::from(a.3),
+    );
+    let (bx, by, bw, bh) = (
+        i64::from(b.0),
+        i64::from(b.1),
+        i64::from(b.2),
+        i64::from(b.3),
+    );
     aw > 0
         && ah > 0
         && bw > 0
@@ -5907,8 +5918,8 @@ fn create_output_on(
         }
     }
     let logical_size = (
-        (width as f64 / scale).round() as i32,
-        (height as f64 / scale).round() as i32,
+        (f64::from(width) / scale).round() as i32,
+        (f64::from(height) / scale).round() as i32,
     );
     if let Some((oid, flavor, other)) = find_output_overlap(
         &state.output_nodes,
@@ -6323,8 +6334,8 @@ fn configure_windows_for_mode(
     scale: f64,
 ) {
     let scale = scale.max(0.1);
-    let logical_width = (width as f64 / scale).round() as i32;
-    let logical_height = (height as f64 / scale).round() as i32;
+    let logical_width = (f64::from(width) / scale).round() as i32;
+    let logical_height = (f64::from(height) / scale).round() as i32;
     announce_scale_to_windows(state, display_id, output, scale);
     for window in windows_on_display(state, display_id, output) {
         if let Some(toplevel) = window.toplevel() {
@@ -7508,14 +7519,14 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                     .map(|kb| {
                         let pressed: Vec<u32> = kb.pressed_keys().iter().map(|c| c.raw()).collect();
                         let m = kb.modifier_state();
-                        let mask = (m.ctrl as u32)
-                            | (m.shift as u32) << 1
-                            | (m.alt as u32) << 2
-                            | (m.logo as u32) << 3
-                            | (m.caps_lock as u32) << 4
-                            | (m.num_lock as u32) << 5
-                            | (m.iso_level3_shift as u32) << 6
-                            | (m.iso_level5_shift as u32) << 7;
+                        let mask = u32::from(m.ctrl)
+                            | u32::from(m.shift) << 1
+                            | u32::from(m.alt) << 2
+                            | u32::from(m.logo) << 3
+                            | u32::from(m.caps_lock) << 4
+                            | u32::from(m.num_lock) << 5
+                            | u32::from(m.iso_level3_shift) << 6
+                            | u32::from(m.iso_level5_shift) << 7;
                         (pressed, mask)
                     })
                     .unwrap_or_default();
@@ -8189,8 +8200,8 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                     let frames = cap.encode_stats.frames.swap(0, Ordering::Relaxed);
                     let stripes = cap.encode_stats.stripes.swap(0, Ordering::Relaxed);
                     if crate::log::debug_enabled() {
-                        let actual_fps = frames as f64 / elapsed;
-                        let stripes_per_sec = stripes as f64 / elapsed;
+                        let actual_fps = f64::from(frames) / elapsed;
+                        let stripes_per_sec = f64::from(stripes) / elapsed;
                         let mode_str = cap.encode_stats.desc.lock().unwrap().clone();
                         let n_stripes = cap.encode_stats.n_stripes.load(Ordering::Relaxed);
                         let (current_rss, shm_usage) = *mem
@@ -9101,12 +9112,12 @@ fn live_x11() -> &'static Mutex<Vec<Arc<crate::x11::Controls>>> {
 /// to the same content handle.
 pub(crate) fn unpremultiply_rgba(image: &mut image::RgbaImage) {
     for p in image.pixels_mut() {
-        let a = p.0[3] as u32;
+        let a = u32::from(p.0[3]);
         if a == 0 {
             p.0 = [0, 0, 0, 0];
         } else if a < 255 {
             for c in &mut p.0[..3] {
-                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+                *c = ((u32::from(*c) * 255 + a / 2) / a).min(255) as u8;
             }
         }
     }

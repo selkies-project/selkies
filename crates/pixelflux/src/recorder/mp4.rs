@@ -57,7 +57,7 @@ pub fn opus_packet_samples(packet: &[u8]) -> u32 {
     let frames = match toc & 3 {
         0 => 1,
         1 | 2 => 2,
-        _ => packet.get(1).map_or(0, |&b| (b & 0x3f) as u32),
+        _ => packet.get(1).map_or(0, |&b| u32::from(b & 0x3f)),
     };
     frames * tenths_ms * OPUS_TIMESCALE / 10_000
 }
@@ -127,7 +127,7 @@ impl<'a> BitReader<'a> {
         let byte = *self.data.get(self.pos / 8)?;
         let bit = (byte >> (7 - (self.pos % 8))) & 1;
         self.pos += 1;
-        Some(bit as u32)
+        Some(u32::from(bit))
     }
 
     fn bits(&mut self, n: u32) -> Option<u32> {
@@ -152,7 +152,7 @@ impl<'a> BitReader<'a> {
     }
 
     fn se(&mut self) -> Option<i32> {
-        let k = self.ue()? as i64;
+        let k = i64::from(self.ue()?);
         Some(if k % 2 == 0 {
             -(k / 2) as i32
         } else {
@@ -311,7 +311,7 @@ pub fn opus_sample_entry(head: &super::ogg::OpusHead) -> Vec<u8> {
     entry_p.extend_from_slice(&[0u8; 6]);
     entry_p.extend_from_slice(&1u16.to_be_bytes());
     entry_p.extend_from_slice(&[0u8; 8]);
-    entry_p.extend_from_slice(&(head.channels as u16).to_be_bytes());
+    entry_p.extend_from_slice(&u16::from(head.channels).to_be_bytes());
     entry_p.extend_from_slice(&16u16.to_be_bytes());
     entry_p.extend_from_slice(&[0u8; 4]);
     entry_p.extend_from_slice(&(OPUS_TIMESCALE << 16).to_be_bytes());
@@ -562,7 +562,7 @@ impl<W: Write> FragmentWriter<W> {
     /// clamped strictly monotonic so a repeated or reordered clock can never emit a
     /// zero/negative duration.
     pub fn push_sample(&mut self, data: Vec<u8>, sync: bool, pts_us: u64) -> std::io::Result<()> {
-        let mut dts = pts_us * (TIMESCALE as u64 / 1000) / 1000;
+        let mut dts = pts_us * (u64::from(TIMESCALE) / 1000) / 1000;
         if let Some(last) = self.last_dts
             && dts <= last
         {
@@ -570,7 +570,7 @@ impl<W: Write> FragmentWriter<W> {
         }
         self.last_dts = Some(dts);
         if let Some(prev) = self.pending.take() {
-            let duration = (dts - prev.dts).min(u32::MAX as u64) as u32;
+            let duration = (dts - prev.dts).min(u64::from(u32::MAX)) as u32;
             self.durations.push(duration);
             self.write_fragment(&prev, duration)?;
         }
@@ -644,7 +644,7 @@ impl<W: Write> FragmentWriter<W> {
         self.stats.duration_us = self
             .stats
             .duration_us
-            .max((s.dts + duration as u64) * 1000 / (TIMESCALE as u64 / 1000));
+            .max((s.dts + u64::from(duration)) * 1000 / (u64::from(TIMESCALE) / 1000));
         Ok(())
     }
 
@@ -663,7 +663,7 @@ impl<W: Write> FragmentWriter<W> {
             self.audio_batch_dts = dts;
         }
         self.audio_pending.push((data, samples));
-        self.audio_next_dts = dts + samples as u64;
+        self.audio_next_dts = dts + u64::from(samples);
         if self.audio_pending.len() >= AUDIO_FLUSH_SAMPLES {
             self.flush_audio()?;
         }
@@ -718,11 +718,11 @@ impl<W: Write> FragmentWriter<W> {
         self.out.flush()?;
         self.stats.audio_samples += samples.len() as u64;
         self.stats.bytes += (moof.len() + 8 + data_len) as u64;
-        let end = self.audio_batch_dts + samples.iter().map(|(_, d)| *d as u64).sum::<u64>();
+        let end = self.audio_batch_dts + samples.iter().map(|(_, d)| u64::from(*d)).sum::<u64>();
         self.stats.duration_us = self
             .stats
             .duration_us
-            .max(end * 1_000_000 / OPUS_TIMESCALE as u64);
+            .max(end * 1_000_000 / u64::from(OPUS_TIMESCALE));
         Ok(())
     }
 

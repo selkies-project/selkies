@@ -381,7 +381,7 @@ pub fn with_alpha(color: Color, alpha: u8) -> Color {
 /// A color moved towards black or white by `by` steps a channel, negative to darken.
 pub fn shifted(color: Color, by: i32) -> Color {
     let c = color.to_color_u8();
-    let step = |v: u8| (v as i32 + by).clamp(0, 255) as u8;
+    let step = |v: u8| (i32::from(v) + by).clamp(0, 255) as u8;
     rgba(step(c.red()), step(c.green()), step(c.blue()), c.alpha())
 }
 

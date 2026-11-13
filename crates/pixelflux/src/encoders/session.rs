@@ -295,7 +295,7 @@ impl RateSettings {
     /// The VBV buffer, in bits, the constant-rate target is held to.
     pub fn vbv(&self) -> u32 {
         vbv_bits(
-            self.bps().min(u32::MAX as u64) as u32,
+            self.bps().min(u64::from(u32::MAX)) as u32,
             self.fps.fps(),
             self.keyframe_interval_s,
             self.vbv_multiplier,
@@ -354,9 +354,9 @@ impl PeakBucket {
     /// session's quality (`None` for a held frame, whose quantizer is not the rate control's):
     /// `Some(true)` to bind the session to the peak, `Some(false)` to release it.
     pub fn note(&mut self, bits: f64, at_floor: Option<bool>) -> Option<bool> {
-        self.fill = (self.fill - self.bps as f64 / self.fps).max(0.0) + bits;
+        self.fill = (self.fill - f64::from(self.bps) / self.fps).max(0.0) + bits;
         if !self.binding {
-            self.binding = self.fill > self.vbv as f64;
+            self.binding = self.fill > f64::from(self.vbv);
             self.at_floor = 0;
             return self.binding.then_some(true);
         }
@@ -365,7 +365,7 @@ impl PeakBucket {
             Some(false) => self.at_floor = 0,
             None => {}
         }
-        if self.at_floor < Self::RELEASE_FRAMES || self.fill > self.vbv as f64 {
+        if self.at_floor < Self::RELEASE_FRAMES || self.fill > f64::from(self.vbv) {
             return None;
         }
         self.binding = false;
@@ -407,8 +407,8 @@ impl PeakOffset {
 
     /// Take a live peak and buffer.
     pub fn follow(&mut self, bitrate_kbps: i32, vbv_kbit: i32, fps: f64) {
-        self.per_frame = bitrate_kbps.max(1) as f64 * 1000.0 / fps.max(1.0);
-        self.buffer = vbv_kbit.max(1) as f64 * 1000.0;
+        self.per_frame = f64::from(bitrate_kbps.max(1)) * 1000.0 / fps.max(1.0);
+        self.buffer = f64::from(vbv_kbit.max(1)) * 1000.0;
     }
 
     /// Fold in a frame of `bits` and return the offset the next frame takes. A key frame, or a

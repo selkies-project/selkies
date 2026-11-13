@@ -669,7 +669,7 @@ pub(crate) fn bound_import(object: &str, symbol: &[u8]) -> Option<usize> {
                 }
             }
         }));
-        q.done as c_int
+        c_int::from(q.done)
     }
     let mut q = Query {
         object,

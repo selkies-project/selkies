@@ -115,7 +115,7 @@ impl NackGenerator {
     /// Limit the missing packets tracked: otherwise the RTCP feedback grows indefinitely.
     fn truncate(&mut self) {
         if let Some(max_seq) = self.max_seq {
-            let min_seq = uint16_add(max_seq, -(RTP_HISTORY_SIZE as i32));
+            let min_seq = uint16_add(max_seq, -i32::from(RTP_HISTORY_SIZE));
             self.missing.retain(|seq| !uint16_gt(min_seq, *seq));
         }
     }
@@ -166,7 +166,7 @@ impl StreamStatistics {
             self.base_seq = Some(sequence_number);
         }
         if in_order {
-            let arrival = (now * self.clockrate as f64) as i64;
+            let arrival = (now * f64::from(self.clockrate)) as i64;
             if self.max_seq.is_some_and(|m| sequence_number < m) {
                 self.cycles += 1 << 16;
             }
@@ -174,7 +174,7 @@ impl StreamStatistics {
             if let (Some(last_ts), Some(last_arrival)) = (self.last_timestamp, self.last_arrival)
                 && timestamp != last_ts
             {
-                let spread = timestamp.wrapping_sub(last_ts) as i32 as i64;
+                let spread = i64::from(timestamp.wrapping_sub(last_ts) as i32);
                 let diff = ((arrival - last_arrival) - spread).abs();
                 self.jitter_q4 += diff - ((self.jitter_q4 + 8) >> 4);
             }
@@ -204,19 +204,19 @@ impl StreamStatistics {
 
     pub fn packets_expected(&self) -> i64 {
         match (self.max_seq, self.base_seq) {
-            (Some(max), Some(base)) => self.cycles + max as i64 - base as i64 + 1,
+            (Some(max), Some(base)) => self.cycles + i64::from(max) - i64::from(base) + 1,
             _ => 0,
         }
     }
 
     pub fn packets_lost(&self) -> i32 {
         let lost = self.packets_expected() - self.packets_received;
-        clamp_packets_lost(lost.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
+        clamp_packets_lost(lost.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
     }
 
     /// The extended highest sequence number received (RFC 3550 6.4.1).
     pub fn highest_sequence(&self) -> u32 {
-        (self.cycles + self.max_seq.unwrap_or(0) as i64) as u32
+        (self.cycles + i64::from(self.max_seq.unwrap_or(0))) as u32
     }
 
     pub fn packets_received(&self) -> i64 {
@@ -234,13 +234,13 @@ pub struct TimestampMapper {
 impl TimestampMapper {
     pub fn map(&mut self, timestamp: u32) -> i64 {
         let origin = match (self.origin, self.last) {
-            (None, _) => timestamp as i64,
+            (None, _) => i64::from(timestamp),
             (Some(origin), Some(last)) if timestamp < last => origin - (1 << 32),
             (Some(origin), _) => origin,
         };
         self.origin = Some(origin);
         self.last = Some(timestamp);
-        timestamp as i64 - origin
+        i64::from(timestamp) - origin
     }
 }
 

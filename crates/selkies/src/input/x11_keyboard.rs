@@ -417,10 +417,10 @@ impl<L: XLink> XTestKeyboard<L> {
     /// keymap cache the notify just refreshed for its range, not a request per binding; a
     /// binding outside the range is one whose own notify is still on its way.
     pub fn bindings_intact(&self, first_keycode: u8, count: u8) -> bool {
-        let last = first_keycode as u32 + count as u32;
+        let last = u32::from(first_keycode) + u32::from(count);
         self.overlay
             .iter()
-            .filter(|(_, kc)| (first_keycode as u32..last).contains(&(**kc as u32)))
+            .filter(|(_, kc)| (u32::from(first_keycode)..last).contains(&u32::from(**kc)))
             .all(|(ks, kc)| self.link.keycode_to_keysym(*kc, 0) == overlay_bind_keysym(*ks))
     }
 
@@ -459,7 +459,7 @@ impl<L: XLink> XTestKeyboard<L> {
             return;
         }
         if self.spare_keycodes.is_some()
-            && (first_keycode as u32..first_keycode as u32 + count as u32)
+            && (u32::from(first_keycode)..u32::from(first_keycode) + u32::from(count))
                 .all(|kc| self.spare_set.contains(&(kc as u8)))
         {
             return;
@@ -1038,7 +1038,7 @@ pub(crate) mod testing {
         fn keyboard_mapping(&self, first: u8, count: u8) -> Result<Vec<Vec<u32>>, String> {
             self.recorded.lock().unwrap().requests += 1;
             let map = self.map.lock().unwrap();
-            Ok((first as u32..first as u32 + count as u32)
+            Ok((u32::from(first)..u32::from(first) + u32::from(count))
                 .map(|kc| {
                     let mut row = map.get(&(kc as u8)).cloned().unwrap_or_default();
                     row.resize(4, 0);
@@ -1140,7 +1140,7 @@ pub(crate) mod testing {
     /// Latin letters on keycodes 38 to 63.
     pub fn latin_letters() -> HashMap<u8, Vec<u32>> {
         (38u8..64)
-            .map(|kc| (kc, vec![0x61 + kc as u32 - 38]))
+            .map(|kc| (kc, vec![0x61 + u32::from(kc) - 38]))
             .collect()
     }
 
@@ -1153,7 +1153,7 @@ pub(crate) mod testing {
     /// Super_R at 116, and 101, 114, 118-131 and 133-146 left unbound beside the text spares.
     pub fn xfree86() -> HashMap<u8, Vec<u32>> {
         let mut m: HashMap<u8, Vec<u32>> = (8u8..101)
-            .map(|kc| (kc, vec![0x61 + (kc as u32 % 26)]))
+            .map(|kc| (kc, vec![0x61 + (u32::from(kc) % 26)]))
             .collect();
         for (kc, ks) in [
             (97u8, 0xFF50u32),
@@ -1182,7 +1182,7 @@ pub(crate) mod testing {
     /// others free.
     pub fn evdev() -> HashMap<u8, Vec<u32>> {
         let mut m: HashMap<u8, Vec<u32>> = (8u8..248)
-            .map(|kc| (kc, vec![0x61 + (kc as u32 % 26)]))
+            .map(|kc| (kc, vec![0x61 + (u32::from(kc) % 26)]))
             .collect();
         m.insert(113, vec![0xFF51]);
         for kc in [93u8, 132, 157, 202] {

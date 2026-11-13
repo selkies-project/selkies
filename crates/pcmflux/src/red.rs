@@ -28,10 +28,10 @@ pub(crate) fn red_blocks(payload: &[u8], primary_ts: i64) -> Option<(Blocks, usi
         if i + 4 > n || nh >= RED_MAX_DISTANCE as usize {
             return None;
         }
-        let field = ((payload[i + 1] as u32) << 16)
-            | ((payload[i + 2] as u32) << 8)
-            | (payload[i + 3] as u32);
-        offs[nh] = ((field >> 10) & 0x3FFF) as i64;
+        let field = (u32::from(payload[i + 1]) << 16)
+            | (u32::from(payload[i + 2]) << 8)
+            | u32::from(payload[i + 3]);
+        offs[nh] = i64::from((field >> 10) & 0x3FFF);
         lens[nh] = (field & 0x3FF) as usize;
         nh += 1;
         i += 4;

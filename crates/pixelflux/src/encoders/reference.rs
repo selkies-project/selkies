@@ -83,7 +83,7 @@ impl Reference {
         match self {
             Reference::Untracked => -2,
             Reference::None => -1,
-            Reference::Frame(id) => id as i32,
+            Reference::Frame(id) => i32::from(id),
         }
     }
 }
@@ -157,7 +157,7 @@ impl KeyAge {
         self.since_key = if key {
             0
         } else {
-            self.since_key + frame_id.wrapping_sub(self.newest) as u64
+            self.since_key + u64::from(frame_id.wrapping_sub(self.newest))
         };
         self.newest = frame_id;
     }
@@ -165,7 +165,7 @@ impl KeyAge {
     /// How many frames `frame_id` went out before the newest one; `None` for a frame before the
     /// last key frame or one never sent.
     fn behind(&self, frame_id: u16) -> Option<u64> {
-        let behind = self.newest.wrapping_sub(frame_id) as u64;
+        let behind = u64::from(self.newest.wrapping_sub(frame_id));
         (behind < 0x8000 && behind <= self.since_key).then_some(behind)
     }
 }
@@ -490,10 +490,10 @@ impl ReferenceWindow {
     /// How many values the stream's `frame_num` takes before it wraps; 0 for a codec without
     /// that counter. A range other than the one before is logged (`frame_num_range_line`).
     pub fn set_frame_num_range(&mut self, range: u32) {
-        if let Some(line) = frame_num_range_line(self.frame_num_range, range as u64) {
+        if let Some(line) = frame_num_range_line(self.frame_num_range, u64::from(range)) {
             println!("{line}");
         }
-        self.frame_num_range = range as u64;
+        self.frame_num_range = u64::from(range);
     }
 
     /// Forget every frame held, for a stream the session restarts with a key frame of its own.
@@ -689,7 +689,7 @@ impl ReferenceWindow {
             None if self
                 .age
                 .behind(frame_id)
-                .is_some_and(|b| b > self.age.newest.wrapping_sub(oldest) as u64) =>
+                .is_some_and(|b| b > u64::from(self.age.newest.wrapping_sub(oldest))) =>
             {
                 for f in self.frames.iter_mut() {
                     f.2 = true;
@@ -721,7 +721,7 @@ impl ReferenceWindow {
                 if !self
                     .age
                     .behind(frame_id)
-                    .is_some_and(|b| b > self.age.newest.wrapping_sub(oldest) as u64)
+                    .is_some_and(|b| b > u64::from(self.age.newest.wrapping_sub(oldest)))
                 {
                     return Invalidation::Ignored;
                 }
@@ -1061,7 +1061,7 @@ impl ReferenceSlots {
                 if !self
                     .age
                     .behind(frame_id)
-                    .is_some_and(|b| b > self.age.newest.wrapping_sub(oldest) as u64)
+                    .is_some_and(|b| b > u64::from(self.age.newest.wrapping_sub(oldest)))
                 {
                     return Invalidation::Ignored;
                 }

@@ -69,17 +69,17 @@ impl Arm {
         }
         unsafe {
             let r = &mut pic.ref_flags.bits;
-            r.set_force_kf(frame.key as u32);
-            r.set_no_ref_last((plan.predict_from != SlotRefresh::LAST) as u32);
-            r.set_no_ref_gf((plan.predict_from != SlotRefresh::GOLDEN) as u32);
-            r.set_no_ref_arf((plan.predict_from != SlotRefresh::ALTREF) as u32);
+            r.set_force_kf(u32::from(frame.key));
+            r.set_no_ref_last(u32::from(plan.predict_from != SlotRefresh::LAST));
+            r.set_no_ref_gf(u32::from(plan.predict_from != SlotRefresh::GOLDEN));
+            r.set_no_ref_arf(u32::from(plan.predict_from != SlotRefresh::ALTREF));
             let p = &mut pic.pic_flags.bits;
-            p.set_frame_type((!frame.key) as u32);
+            p.set_frame_type(u32::from(!frame.key));
             p.set_show_frame(1);
             p.set_refresh_entropy_probs(0);
-            p.set_refresh_last(plan.refresh.refreshes(SlotRefresh::LAST) as u32);
-            p.set_refresh_golden_frame(plan.refresh.refreshes(SlotRefresh::GOLDEN) as u32);
-            p.set_refresh_alternate_frame(plan.refresh.refreshes(SlotRefresh::ALTREF) as u32);
+            p.set_refresh_last(u32::from(plan.refresh.refreshes(SlotRefresh::LAST)));
+            p.set_refresh_golden_frame(u32::from(plan.refresh.refreshes(SlotRefresh::GOLDEN)));
+            p.set_refresh_alternate_frame(u32::from(plan.refresh.refreshes(SlotRefresh::ALTREF)));
         }
         pic.loop_filter_level = [LOOP_FILTER_LEVEL; 4];
         pic.sharpness_level = SHARPNESS;

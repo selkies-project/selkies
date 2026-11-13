@@ -484,7 +484,7 @@ impl BlockLedger {
         if n == 0 || max == 0 {
             return None;
         }
-        let trigger = trigger.min(u16::MAX as u32) as u16;
+        let trigger = trigger.min(u32::from(u16::MAX)) as u16;
         let mut refine = vec![0u64; n.div_ceil(64)];
         let (mut count, mut started) = (0, 0);
         let mut last: Option<usize> = None;

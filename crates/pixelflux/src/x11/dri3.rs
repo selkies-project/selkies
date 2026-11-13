@@ -511,8 +511,8 @@ impl GpuCapture {
             // Linear as the one modifier allowed first: NVIDIA's GBM takes that and refuses the
             // LINEAR usage flag, which Mesa's takes.
             let by_modifier = self.gbm.create_buffer_object_with_modifiers::<()>(
-                w as u32,
-                h as u32,
+                u32::from(w),
+                u32::from(h),
                 GbmFormat::Argb8888,
                 std::iter::once(gbm::Modifier::Linear),
             );
@@ -521,8 +521,8 @@ impl GpuCapture {
                 Err(first) => self
                     .gbm
                     .create_buffer_object::<()>(
-                        w as u32,
-                        h as u32,
+                        u32::from(w),
+                        u32::from(h),
                         GbmFormat::Argb8888,
                         gbm::BufferObjectFlags::RENDERING | gbm::BufferObjectFlags::LINEAR,
                     )
@@ -535,15 +535,20 @@ impl GpuCapture {
         }
         loop {
             let bo = if self.x.modifiers.is_empty() {
-                crate::alloc_render_target(&self.gbm, w as u32, h as u32, GbmFormat::Argb8888)
+                crate::alloc_render_target(
+                    &self.gbm,
+                    u32::from(w),
+                    u32::from(h),
+                    GbmFormat::Argb8888,
+                )
             } else {
                 // The entry point without the flags argument, which implies exactly the
                 // rendering use this asks for: the one that takes flags arrived in Mesa 21.1
                 // and a wheel referencing it does not load at all against an older libgbm,
                 // since Python resolves an extension's symbols eagerly.
                 self.gbm.create_buffer_object_with_modifiers::<()>(
-                    w as u32,
-                    h as u32,
+                    u32::from(w),
+                    u32::from(h),
                     GbmFormat::Argb8888,
                     self.x.modifiers.iter().map(|&m| gbm::Modifier::from(m)),
                 )
@@ -630,7 +635,7 @@ impl GpuCapture {
                     .dri3_pixmap_from_buffer(
                         pixmap,
                         self.x.root,
-                        bo.stride() * h as u32,
+                        bo.stride() * u32::from(h),
                         w,
                         h,
                         stride,
@@ -681,8 +686,8 @@ impl GpuCapture {
     /// that cannot is rebuilt through the same ladder that chose it.
     fn reshape(&mut self, w: u16, h: u16) -> Result<(), String> {
         self.alloc_buffers(w, h)?;
-        self.settings.width = w as i32;
-        self.settings.height = h as i32;
+        self.settings.width = i32::from(w);
+        self.settings.height = i32::from(h);
         let in_place = match self.encoder.as_mut() {
             Some(FrameEncoder::Nvenc(enc)) => {
                 enc.reconfigure_resolution(&self.settings).map(|_| ())
@@ -840,8 +845,8 @@ impl GpuCapture {
                 .0
                 .iter()
                 .map(|p| {
-                    let a = p[3] as u32;
-                    let pm = |c: u8| (c as u32 * a / 255) & 0xff;
+                    let a = u32::from(p[3]);
+                    let pm = |c: u8| (u32::from(c) * a / 255) & 0xff;
                     (a << 24) | (pm(p[0]) << 16) | (pm(p[1]) << 8) | pm(p[2])
                 })
                 .collect();
@@ -852,7 +857,11 @@ impl GpuCapture {
             .update_position(fw, fh, self.request.watermark_location_enum);
         let (x, y) = self.overlay.position();
         let sprite = self.watermark.as_ref().unwrap();
-        if x >= fw || y >= fh || x + sprite.width as i32 <= 0 || y + sprite.height as i32 <= 0 {
+        if x >= fw
+            || y >= fh
+            || x + i32::from(sprite.width) <= 0
+            || y + i32::from(sprite.height) <= 0
+        {
             return Ok(());
         }
         self.x
@@ -866,8 +875,8 @@ impl GpuCapture {
                 0,
                 0,
                 0,
-                x.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
-                y.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                x.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+                y.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
                 sprite.width,
                 sprite.height,
             )
@@ -957,17 +966,20 @@ impl GpuCapture {
             c.y,
             c.xhot,
             c.yhot,
-            self.cap_x as i32,
-            self.cap_y as i32,
+            i32::from(self.cap_x),
+            i32::from(self.cap_y),
         );
         let (fw, fh) = (self.settings.width, self.settings.height);
-        if img_x >= fw || img_y >= fh || img_x + c.width as i32 <= 0 || img_y + c.height as i32 <= 0
+        if img_x >= fw
+            || img_y >= fh
+            || img_x + i32::from(c.width) <= 0
+            || img_y + i32::from(c.height) <= 0
         {
             return Ok(());
         }
         self.cursor_drawn = Some(smithay::utils::Rectangle::new(
             (img_x, img_y).into(),
-            (c.width as i32, c.height as i32).into(),
+            (i32::from(c.width), i32::from(c.height)).into(),
         ));
         self.x
             .conn
@@ -980,8 +992,8 @@ impl GpuCapture {
                 0,
                 0,
                 0,
-                img_x.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
-                img_y.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                img_x.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+                img_y.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
                 sprite.width,
                 sprite.height,
             )
@@ -1070,8 +1082,8 @@ fn open(settings: &CaptureSettings) -> Option<GpuCapture> {
     let request = settings.clone();
     let mut live = settings.clone();
     let (w, h) = resolve_dims(geo.width, geo.height, &request);
-    live.width = w as i32;
-    live.height = h as i32;
+    live.width = i32::from(w);
+    live.height = i32::from(h);
 
     let mut gpu = GpuCapture {
         encoder: None,
@@ -1224,7 +1236,7 @@ where
         // Where the root changed, None where the server cannot say or the frame is the first.
         let mut changed = changed.filter(|rects| !first_frame && !rects.is_empty());
         first_frame = false;
-        damaged_frames += is_dirty as u64;
+        damaged_frames += u64::from(is_dirty);
         if controls.stop.load(Ordering::Relaxed) {
             break;
         }
@@ -1245,7 +1257,7 @@ where
         if controls.rate_dirty.swap(false, Ordering::Acquire) {
             gpu.settings.video_bitrate_kbps = controls.bitrate_kbps.load(Ordering::Relaxed);
             gpu.settings.video_vbv_multiplier =
-                controls.vbv_mult_milli.load(Ordering::Relaxed) as f64 / 1000.0;
+                f64::from(controls.vbv_mult_milli.load(Ordering::Relaxed)) / 1000.0;
             gpu.settings.target_fps =
                 f64::from_bits(controls.fps_bits.load(Ordering::Relaxed)).max(1.0);
             let live = gpu.settings.clone();
@@ -1322,7 +1334,7 @@ where
             gpu.cap_x = clamp_offset(gpu.request.capture_x, gpu.root_w);
             gpu.cap_y = clamp_offset(gpu.request.capture_y, gpu.root_h);
             let (w, h) = resolve_dims(gpu.root_w, gpu.root_h, &gpu.request);
-            if w as i32 != gpu.settings.width || h as i32 != gpu.settings.height {
+            if i32::from(w) != gpu.settings.width || i32::from(h) != gpu.settings.height {
                 if let Err(e) = gpu.reshape(w, h) {
                     return Some(Err(format!(
                         "DRI3 capture could not follow the new geometry: {e}"
@@ -1441,14 +1453,14 @@ where
             let result = if after_blit {
                 gpu.enc().encode_dmabuf_after_blit(
                     &dmabuf,
-                    frame_counter as u64,
+                    u64::from(frame_counter),
                     decision.target_qp,
                     decision.force_idr,
                 )
             } else {
                 gpu.enc().encode_dmabuf(
                     &dmabuf,
-                    frame_counter as u64,
+                    u64::from(frame_counter),
                     decision.target_qp,
                     decision.force_idr,
                 )
@@ -1473,7 +1485,7 @@ where
                         codec: gpu.settings.codec,
                         stripe_y_start: 0,
                         stripe_height: gpu.settings.height,
-                        frame_id: frame_counter as i32,
+                        frame_id: i32::from(frame_counter),
                         timing: FrameTiming {
                             capture_ns: grabbed_ns,
                             encode_start_ns,
@@ -1770,8 +1782,9 @@ mod gpu_tests {
         );
         let v = dec.frame().expect("decoded frame");
         // Straight-alpha source over the painted screen, which is what both paths must produce.
-        let blend =
-            |m: u8, bg: u8| (m as f64 * ALPHA as f64 + bg as f64 * (255.0 - ALPHA as f64)) / 255.0;
+        let blend = |m: u8, bg: u8| {
+            (f64::from(m) * f64::from(ALPHA) + f64::from(bg) * (255.0 - f64::from(ALPHA))) / 255.0
+        };
         let want = crate::encoders::chroma_siting::ycbcr(
             [
                 blend(MARK.0, SCREEN.0),
@@ -1782,9 +1795,9 @@ mod gpu_tests {
         );
         let (mx, my) = (48usize, 48usize);
         let got = [
-            v.y[my * v.y_stride + mx] as f64,
-            v.u[(my / 2) * v.uv_stride + mx / 2] as f64,
-            v.v[(my / 2) * v.uv_stride + mx / 2] as f64,
+            f64::from(v.y[my * v.y_stride + mx]),
+            f64::from(v.u[(my / 2) * v.uv_stride + mx / 2]),
+            f64::from(v.v[(my / 2) * v.uv_stride + mx / 2]),
         ];
         for i in 0..3 {
             assert!(

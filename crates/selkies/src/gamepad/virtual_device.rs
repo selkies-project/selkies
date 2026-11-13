@@ -274,13 +274,13 @@ impl VirtualInputDevice {
         let raw = fd.as_raw_fd();
         let setup = || -> std::io::Result<()> {
             for ev in self.caps.evbits.iter().copied().chain([EV_SYN]) {
-                ioctl_int(raw, UI_SET_EVBIT, ev as i64)?;
+                ioctl_int(raw, UI_SET_EVBIT, i64::from(ev))?;
             }
             for code in &self.caps.keybits {
-                ioctl_int(raw, UI_SET_KEYBIT, *code as i64)?;
+                ioctl_int(raw, UI_SET_KEYBIT, i64::from(*code))?;
             }
             for code in &self.caps.relbits {
-                ioctl_int(raw, UI_SET_RELBIT, *code as i64)?;
+                ioctl_int(raw, UI_SET_RELBIT, i64::from(*code))?;
             }
             if !self.phys.is_empty() {
                 set_uinput_phys(raw, &self.phys)?;

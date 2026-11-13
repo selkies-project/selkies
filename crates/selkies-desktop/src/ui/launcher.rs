@@ -194,7 +194,7 @@ pub fn hit(d: &mut Desktop, x: f64, y: f64) -> Option<Hover> {
         return None;
     }
     if layout.rows.contains(x, y) {
-        let row = ((y - layout.rows.y as f64) / ROW as f64).floor();
+        let row = ((y - f64::from(layout.rows.y)) / f64::from(ROW)).floor();
         if row >= 0.0 && (row as usize) < d.launcher.items.len() {
             return Some(Hover::LauncherRow(row as usize));
         }

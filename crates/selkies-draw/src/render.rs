@@ -415,8 +415,16 @@ impl<'a> Canvas<'a> {
         };
         let r = rect.scaled(self.scale);
         let (top, bottom) = (top.to_color_u8(), bottom.to_color_u8());
-        let channels_top = [top.red() as f32, top.green() as f32, top.blue() as f32];
-        let channels_bottom = [bottom.red() as f32, bottom.green() as f32, bottom.blue() as f32];
+        let channels_top = [
+            f32::from(top.red()),
+            f32::from(top.green()),
+            f32::from(top.blue()),
+        ];
+        let channels_bottom = [
+            f32::from(bottom.red()),
+            f32::from(bottom.green()),
+            f32::from(bottom.blue()),
+        ];
         let span = (r.h - 1).max(1) as f32;
         let stride = self.pix.width() as usize * 4;
         let data = self.pix.data_mut();
@@ -425,7 +433,7 @@ impl<'a> Canvas<'a> {
             let row = [0, 1, 2].map(|i| channels_top[i] + (channels_bottom[i] - channels_top[i]) * t);
             let base = y as usize * stride;
             for x in area.x()..area.right() {
-                let noise = BAYER[(y as usize & 7) * 8 + (x as usize & 7)] as f32 / 64.0;
+                let noise = f32::from(BAYER[(y as usize & 7) * 8 + (x as usize & 7)]) / 64.0;
                 let d = base + x as usize * 4;
                 data[d] = (row[0] + noise).floor().clamp(0.0, 255.0) as u8;
                 data[d + 1] = (row[1] + noise).floor().clamp(0.0, 255.0) as u8;
@@ -768,10 +776,10 @@ impl<'a> Canvas<'a> {
         let (cr, cg, cb, ca) = {
             let c = color.to_color_u8();
             (
-                c.red() as u32,
-                c.green() as u32,
-                c.blue() as u32,
-                c.alpha() as u32,
+                u32::from(c.red()),
+                u32::from(c.green()),
+                u32::from(c.blue()),
+                u32::from(c.alpha()),
             )
         };
         let data = self.pix.data_mut();
@@ -798,7 +806,7 @@ impl<'a> Canvas<'a> {
                             let src_row = ((py - gy) * gw) as usize;
                             let dst_row = py as usize * stride;
                             for px in x0..x1 {
-                                let cov = image.data[src_row + (px - gx) as usize] as u32;
+                                let cov = u32::from(image.data[src_row + (px - gx) as usize]);
                                 if cov == 0 {
                                     continue;
                                 }
@@ -814,13 +822,13 @@ impl<'a> Canvas<'a> {
                             let dst_row = py as usize * stride;
                             for px in x0..x1 {
                                 let sidx = src_row + (px - gx) as usize * 4;
-                                let a = image.data[sidx + 3] as u32;
+                                let a = u32::from(image.data[sidx + 3]);
                                 if a == 0 {
                                     continue;
                                 }
-                                let r = image.data[sidx] as u32 * a / 255;
-                                let g = image.data[sidx + 1] as u32 * a / 255;
-                                let b = image.data[sidx + 2] as u32 * a / 255;
+                                let r = u32::from(image.data[sidx]) * a / 255;
+                                let g = u32::from(image.data[sidx + 1]) * a / 255;
+                                let b = u32::from(image.data[sidx + 2]) * a / 255;
                                 let d = dst_row + px as usize * 4;
                                 blend_pixel(&mut data[d..d + 4], r, g, b, a);
                             }
@@ -832,9 +840,9 @@ impl<'a> Canvas<'a> {
                             let dst_row = py as usize * stride;
                             for px in x0..x1 {
                                 let sidx = src_row + (px - gx) as usize * 4;
-                                let cov = (image.data[sidx] as u32
-                                    + image.data[sidx + 1] as u32
-                                    + image.data[sidx + 2] as u32)
+                                let cov = (u32::from(image.data[sidx])
+                                    + u32::from(image.data[sidx + 1])
+                                    + u32::from(image.data[sidx + 2]))
                                     / 3;
                                 if cov == 0 {
                                     continue;
@@ -855,10 +863,10 @@ impl<'a> Canvas<'a> {
 #[inline]
 fn blend_pixel(dst: &mut [u8], r: u32, g: u32, b: u32, a: u32) {
     let inv = 255 - a;
-    dst[0] = (r + dst[0] as u32 * inv / 255).min(255) as u8;
-    dst[1] = (g + dst[1] as u32 * inv / 255).min(255) as u8;
-    dst[2] = (b + dst[2] as u32 * inv / 255).min(255) as u8;
-    dst[3] = (a + dst[3] as u32 * inv / 255).min(255) as u8;
+    dst[0] = (r + u32::from(dst[0]) * inv / 255).min(255) as u8;
+    dst[1] = (g + u32::from(dst[1]) * inv / 255).min(255) as u8;
+    dst[2] = (b + u32::from(dst[2]) * inv / 255).min(255) as u8;
+    dst[3] = (a + u32::from(dst[3]) * inv / 255).min(255) as u8;
 }
 
 /// Converts straight-alpha RGBA pixels into a premultiplied pixmap.
@@ -882,10 +890,10 @@ pub fn pixmap_from_rgba(width: u32, height: u32, rgba: &[u8]) -> Option<Pixmap> 
         .iter_mut()
         .zip(rgba.as_chunks::<4>().0)
     {
-        let a = src[3] as u32;
-        dst[0] = (src[0] as u32 * a / 255) as u8;
-        dst[1] = (src[1] as u32 * a / 255) as u8;
-        dst[2] = (src[2] as u32 * a / 255) as u8;
+        let a = u32::from(src[3]);
+        dst[0] = (u32::from(src[0]) * a / 255) as u8;
+        dst[1] = (u32::from(src[1]) * a / 255) as u8;
+        dst[2] = (u32::from(src[2]) * a / 255) as u8;
         dst[3] = src[3];
     }
     Some(pix)
@@ -918,9 +926,15 @@ pub fn decode_raster(bytes: &[u8], size: u32) -> Option<Pixmap> {
     }
     let scaled = if size > 0 && w.max(h) != size {
         let (nw, nh) = if w >= h {
-            (size, (h as u64 * size as u64 / w as u64).max(1) as u32)
+            (
+                size,
+                (u64::from(h) * u64::from(size) / u64::from(w)).max(1) as u32,
+            )
         } else {
-            ((w as u64 * size as u64 / h as u64).max(1) as u32, size)
+            (
+                (u64::from(w) * u64::from(size) / u64::from(h)).max(1) as u32,
+                size,
+            )
         };
         image::imageops::resize(&decoded, nw, nh, image::imageops::FilterType::Triangle)
     } else {
@@ -939,8 +953,8 @@ pub fn flatten_pixmap(image: &Pixmap, color: Color) -> Pixmap {
     let mut out = image.clone();
     let c = color.to_color_u8();
     for pixel in out.pixels_mut() {
-        let a = pixel.alpha() as u16;
-        let scale = |v: u8| ((v as u16 * a + 127) / 255) as u8;
+        let a = u16::from(pixel.alpha());
+        let scale = |v: u8| ((u16::from(v) * a + 127) / 255) as u8;
         if let Some(flat) = tiny_skia::PremultipliedColorU8::from_rgba(
             scale(c.red()),
             scale(c.green()),
@@ -967,14 +981,20 @@ pub fn resize_pixmap(image: &Pixmap, size: u32) -> Option<Pixmap> {
         return Some(image.clone());
     }
     let (nw, nh) = if w >= h {
-        (size, (h as u64 * size as u64 / w as u64).max(1) as u32)
+        (
+            size,
+            (u64::from(h) * u64::from(size) / u64::from(w)).max(1) as u32,
+        )
     } else {
-        ((w as u64 * size as u64 / h as u64).max(1) as u32, size)
+        (
+            (u64::from(w) * u64::from(size) / u64::from(h)).max(1) as u32,
+            size,
+        )
     };
     let mut straight = Vec::with_capacity(image.data().len());
     for px in image.data().as_chunks::<4>().0 {
-        let a = px[3] as u32;
-        let unmul = |c: u8| (c as u32 * 255).checked_div(a).unwrap_or(0).min(255) as u8;
+        let a = u32::from(px[3]);
+        let unmul = |c: u8| (u32::from(c) * 255).checked_div(a).unwrap_or(0).min(255) as u8;
         straight.extend_from_slice(&[unmul(px[0]), unmul(px[1]), unmul(px[2]), px[3]]);
     }
     let buffer = image::RgbaImage::from_raw(w, h, straight)?;
@@ -1037,7 +1057,7 @@ pub fn load_svg_colored(path: &std::path::Path, size: u32, color: Color) -> Opti
         c.red(),
         c.green(),
         c.blue(),
-        c.alpha() as f32 / 255.0
+        f32::from(c.alpha()) / 255.0
     );
     let sheet: String = SCHEME_TEXT_CLASSES
         .iter()

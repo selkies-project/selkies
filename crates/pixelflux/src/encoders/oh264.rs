@@ -251,7 +251,7 @@ impl Openh264Encoder {
         let config = if settings.video_cbr_mode {
             let min_qp = settings.video_min_qp.clamp(1, 51) as u8;
             let max_qp = if settings.video_max_qp > 0 {
-                settings.video_max_qp.clamp(min_qp as i32, 51) as u8
+                settings.video_max_qp.clamp(i32::from(min_qp), 51) as u8
             } else {
                 51
             };
@@ -681,7 +681,7 @@ mod tests {
                 ra[..a.width]
                     .iter()
                     .zip(&rb[..a.width])
-                    .map(|(&x, &y)| (x as f64 - y as f64).abs())
+                    .map(|(&x, &y)| (f64::from(x) - f64::from(y)).abs())
             })
             .sum::<f64>()
             / (a.width * a.height) as f64
@@ -735,7 +735,7 @@ mod tests {
                 .encode_host_argb(
                     &gradient_frame(w, h, i as usize),
                     w * 4,
-                    i as u64,
+                    u64::from(i),
                     i == 0,
                     false,
                 )

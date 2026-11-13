@@ -562,7 +562,7 @@ unsafe fn read_cursor(shared: &Shared, meta: &SpaMeta, motion: u64) {
         return;
     }
     shared.cursor_pos.store(
-        ((cursor.x as i64) << 32) | (cursor.y as u32 as i64),
+        (i64::from(cursor.x) << 32) | i64::from(cursor.y as u32),
         Ordering::Relaxed,
     );
     publish_host_pointer(shared, cursor.x, cursor.y, motion);
@@ -626,7 +626,7 @@ unsafe fn read_cursor(shared: &Shared, meta: &SpaMeta, motion: u64) {
             rgba.extend_from_slice(&[r, g, b, a]);
         }
     }
-    let hash = xxhash_rust::xxh3::xxh3_64(&rgba) ^ ((w as u64) << 32 | h as u64);
+    let hash = xxhash_rust::xxh3::xxh3_64(&rgba) ^ (u64::from(w) << 32 | u64::from(h));
     let previous = shared.cursor_hash.swap(hash, Ordering::Relaxed);
     if previous != hash {
         if previous == 0 {
@@ -784,7 +784,7 @@ unsafe fn import_slot(slot: &mut BufferSlot, buf: &SpaBuffer, n: &Negotiated) ->
         let file = unsafe { std::fs::File::from_raw_fd(libc::dup(d0.fd as c_int)) };
         let map = unsafe {
             memmap2::MmapOptions::new()
-                .offset(d0.mapoffset as u64)
+                .offset(u64::from(d0.mapoffset))
                 .len(d0.maxsize as usize)
                 .map(&file)
         };
@@ -815,7 +815,7 @@ unsafe extern "C" fn on_process(data: *mut c_void) {
     // Take everything queued: cursor-only buffers go straight back, and of several frames
     // only the newest is worth publishing.
     let arrival = now_ns();
-    let period_ns = 1_000_000_000_000 / shared.cfg.lock().unwrap().fps_milli.max(1000) as i64;
+    let period_ns = 1_000_000_000_000 / i64::from(shared.cfg.lock().unwrap().fps_milli.max(1000));
     let mut newest: Option<ptr::NonNull<PwBuffer>> = None;
     loop {
         let b = unsafe { (shared.api.stream_dequeue_buffer)(stream) };

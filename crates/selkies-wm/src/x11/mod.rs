@@ -934,10 +934,10 @@ impl Manager {
                     .map(|m| {
                         (
                             self.to_logical(Rect::new(
-                                m.x as i32,
-                                m.y as i32,
-                                m.width as i32,
-                                m.height as i32,
+                                i32::from(m.x),
+                                i32::from(m.y),
+                                i32::from(m.width),
+                                i32::from(m.height),
                             )),
                             m.primary,
                         )
@@ -952,8 +952,8 @@ impl Manager {
                 self.to_logical(Rect::new(
                     0,
                     0,
-                    screen.width_in_pixels as i32,
-                    screen.height_in_pixels as i32,
+                    i32::from(screen.width_in_pixels),
+                    i32::from(screen.height_in_pixels),
                 )),
                 true,
             ));
@@ -1028,7 +1028,7 @@ impl Manager {
                     id: i as u32,
                     rect,
                     workarea: area,
-                    scale: self.scale as f64,
+                    scale: f64::from(self.scale),
                     primary,
                 }
             })
@@ -1271,10 +1271,10 @@ impl Manager {
         let id = self.next_id;
         self.next_id += 1;
         let rect = self.to_logical(Rect::new(
-            geometry.x as i32,
-            geometry.y as i32,
-            geometry.width as i32,
-            geometry.height as i32,
+            i32::from(geometry.x),
+            i32::from(geometry.y),
+            i32::from(geometry.width),
+            i32::from(geometry.height),
         ));
         let props = self.props();
         let parent = props.transient_for(window).and_then(|p| self.id_of(p));
@@ -1285,8 +1285,8 @@ impl Manager {
             .and_then(|c| c.reply().ok())
             .map(|r| {
                 (
-                    self.logical_pos(r.root_x as i32),
-                    self.logical_pos(r.root_y as i32),
+                    self.logical_pos(i32::from(r.root_x)),
+                    self.logical_pos(i32::from(r.root_y)),
                 )
             })
             .unwrap_or((0, 0));
@@ -1399,8 +1399,8 @@ impl Manager {
             !(rects.len() == 1
                 && rects[0].x == 0
                 && rects[0].y == 0
-                && rects[0].width as i32 >= client.w
-                && rects[0].height as i32 >= client.h)
+                && i32::from(rects[0].width) >= client.w
+                && i32::from(rects[0].height) >= client.h)
         });
         if let Some(client) = self.clients.get_mut(&window) {
             client.frame.set_client_shape(&self.conn, bounding, input);
@@ -1977,7 +1977,7 @@ impl Manager {
             look.palette.title_inactive
         }
         .to_color_u8();
-        ((color.red() as u32) << 16) | ((color.green() as u32) << 8) | color.blue() as u32
+        (u32::from(color.red()) << 16) | (u32::from(color.green()) << 8) | u32::from(color.blue())
     }
 
     // ---- events ----------------------------------------------------------------------------------
@@ -2042,8 +2042,8 @@ impl Manager {
                 self.button(
                     e.event,
                     e.child,
-                    e.root_x as f64 / self.scale as f64,
-                    e.root_y as f64 / self.scale as f64,
+                    f64::from(e.root_x) / f64::from(self.scale),
+                    f64::from(e.root_y) / f64::from(self.scale),
                     e.detail,
                     e.state.into(),
                     true,
@@ -2055,8 +2055,8 @@ impl Manager {
                 self.button(
                     e.event,
                     e.child,
-                    e.root_x as f64 / self.scale as f64,
-                    e.root_y as f64 / self.scale as f64,
+                    f64::from(e.root_x) / f64::from(self.scale),
+                    f64::from(e.root_y) / f64::from(self.scale),
                     e.detail,
                     e.state.into(),
                     false,
@@ -2068,8 +2068,8 @@ impl Manager {
                 let under = self.under_at(e.event, e.child);
                 self.dispatch(Event::Pointer(
                     PointerEvent {
-                        x: e.root_x as f64 / self.scale as f64,
-                        y: e.root_y as f64 / self.scale as f64,
+                        x: f64::from(e.root_x) / f64::from(self.scale),
+                        y: f64::from(e.root_y) / f64::from(self.scale),
                         kind: PointerKind::Motion,
                         modifiers: self.keymap.modifiers(e.state.into()),
                         time: e.time,
@@ -2082,8 +2082,8 @@ impl Manager {
                 let under = self.under_at(e.event, e.child);
                 self.dispatch(Event::Pointer(
                     PointerEvent {
-                        x: e.root_x as f64 / self.scale as f64,
-                        y: e.root_y as f64 / self.scale as f64,
+                        x: f64::from(e.root_x) / f64::from(self.scale),
+                        y: f64::from(e.root_y) / f64::from(self.scale),
                         kind: PointerKind::Motion,
                         modifiers: self.keymap.modifiers(e.state.into()),
                         time: e.time,
@@ -2179,7 +2179,7 @@ impl Manager {
                 }
             }
             other => PointerKind::Button {
-                button: 0x110 + other as u32 - 1,
+                button: 0x110 + u32::from(other) - 1,
                 pressed,
             },
         };
@@ -2234,7 +2234,7 @@ impl Manager {
         self.dispatch(Event::Key(KeyEvent {
             keysym,
             base_keysym: base,
-            keycode: keycode as u32,
+            keycode: u32::from(keycode),
             pressed,
             modifiers,
         }));
@@ -2245,19 +2245,19 @@ impl Manager {
         let Some(client) = self.clients.get(&e.window) else {
             let mut aux = ConfigureWindowAux::new();
             if mask.contains(xproto::ConfigWindow::X) {
-                aux = aux.x(e.x as i32);
+                aux = aux.x(i32::from(e.x));
             }
             if mask.contains(xproto::ConfigWindow::Y) {
-                aux = aux.y(e.y as i32);
+                aux = aux.y(i32::from(e.y));
             }
             if mask.contains(xproto::ConfigWindow::WIDTH) {
-                aux = aux.width(e.width as u32);
+                aux = aux.width(u32::from(e.width));
             }
             if mask.contains(xproto::ConfigWindow::HEIGHT) {
-                aux = aux.height(e.height as u32);
+                aux = aux.height(u32::from(e.height));
             }
             if mask.contains(xproto::ConfigWindow::BORDER_WIDTH) {
-                aux = aux.border_width(e.border_width as u32);
+                aux = aux.border_width(u32::from(e.border_width));
             }
             if mask.contains(xproto::ConfigWindow::SIBLING) {
                 aux = aux.sibling(e.sibling);
@@ -2271,16 +2271,16 @@ impl Manager {
         let id = client.id;
         let mut rect = client.rect;
         if mask.contains(xproto::ConfigWindow::X) {
-            rect.x = self.logical_pos(e.x as i32);
+            rect.x = self.logical_pos(i32::from(e.x));
         }
         if mask.contains(xproto::ConfigWindow::Y) {
-            rect.y = self.logical_pos(e.y as i32);
+            rect.y = self.logical_pos(i32::from(e.y));
         }
         if mask.contains(xproto::ConfigWindow::WIDTH) {
-            rect.w = self.logical_len(e.width as i32);
+            rect.w = self.logical_len(i32::from(e.width));
         }
         if mask.contains(xproto::ConfigWindow::HEIGHT) {
-            rect.h = self.logical_len(e.height as i32);
+            rect.h = self.logical_len(i32::from(e.height));
         }
         self.dispatch(Event::Request {
             id,
@@ -2372,7 +2372,7 @@ impl Manager {
                 self.root,
                 a._NET_SHOWING_DESKTOP,
                 AtomEnum::CARDINAL,
-                &[on as u32],
+                &[u32::from(on)],
             );
             self.dispatch(Event::ShowDesktop(on));
             return;

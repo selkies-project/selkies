@@ -206,7 +206,12 @@ impl Arm {
             ));
         }
         let _ = (surface_width, surface_height);
-        self.level_idx = av1_level(n.width, n.height, n.fps.ceil(), n.bits_per_second as u64);
+        self.level_idx = av1_level(
+            n.width,
+            n.height,
+            n.fps.ceil(),
+            u64::from(n.bits_per_second),
+        );
         let cbr = n.rc_mode != VA_RC_CQP;
 
         let mut w = BitWriter::new();
@@ -217,15 +222,15 @@ impl Arm {
         w.flag(false);
         w.u(5, 0);
         w.u(12, 0);
-        w.u(5, self.level_idx as u64);
+        w.u(5, u64::from(self.level_idx));
         if self.level_idx > 7 {
             w.flag(false);
         }
         let (wbits, hbits) = (bit_width(n.width - 1), bit_width(n.height - 1));
-        w.u(4, (wbits - 1) as u64);
-        w.u(4, (hbits - 1) as u64);
-        w.u(wbits, (n.width - 1) as u64);
-        w.u(hbits, (n.height - 1) as u64);
+        w.u(4, u64::from(wbits - 1));
+        w.u(4, u64::from(hbits - 1));
+        w.u(wbits, u64::from(n.width - 1));
+        w.u(hbits, u64::from(n.height - 1));
         w.flag(false);
         w.flag(false);
         w.flag(false);
@@ -239,7 +244,7 @@ impl Arm {
         w.flag(false);
         w.flag(false);
         w.u(1, 0);
-        w.u(3, (ORDER_HINT_BITS - 1) as u64);
+        w.u(3, u64::from(ORDER_HINT_BITS - 1));
         w.flag(false);
         w.flag(true);
         w.flag(false);
@@ -312,7 +317,7 @@ impl Arm {
                 }
                 let bit = pos * 8 + self.qindex_offset as usize;
                 let (byte, lead) = (bit / 8, bit % 8);
-                let pair = ((*tu.get(byte)? as u32) << 8) | *tu.get(byte + 1)? as u32;
+                let pair = (u32::from(*tu.get(byte)?) << 8) | u32::from(*tu.get(byte + 1)?);
                 return Some((pair >> (8 - lead)) & 0xff);
             }
             pos = i + size;
@@ -328,7 +333,7 @@ impl Arm {
         frame: &Frame,
         out: &mut Buffers,
     ) -> Result<(), String> {
-        let slot_of = |pts: u64| (pts % REFERENCE_FRAMES as u64) as u8;
+        let slot_of = |pts: u64| (pts % u64::from(REFERENCE_FRAMES)) as u8;
         let cbr = n.rc_mode != VA_RC_CQP;
         let qindex = if cbr {
             RATE_CONTROLLED_QINDEX
@@ -346,8 +351,8 @@ impl Arm {
 
         let render_size = |w: &mut BitWriter| {
             w.flag(true);
-            w.u(16, (n.width - 1) as u64);
-            w.u(16, (n.height - 1) as u64);
+            w.u(16, u64::from(n.width - 1));
+            w.u(16, u64::from(n.height - 1));
         };
         let mut w = BitWriter::new();
         w.flag(false);
@@ -358,13 +363,13 @@ impl Arm {
         }
         w.flag(false);
         w.flag(false);
-        w.u(ORDER_HINT_BITS, order_hint as u64);
+        w.u(ORDER_HINT_BITS, u64::from(order_hint));
         if !frame.key {
             w.u(3, 0);
             w.u(8, 1 << slot);
             w.flag(false);
             for _ in 0..7 {
-                w.u(3, reference_slot.unwrap() as u64);
+                w.u(3, u64::from(reference_slot.unwrap()));
             }
             render_size(&mut w);
             w.flag(false);
@@ -392,11 +397,14 @@ impl Arm {
         }
         if t.cols_log2 > 0 || t.rows_log2 > 0 {
             w.u(t.cols_log2 + t.rows_log2, 0);
-            w.u(2, unsafe { self.ext2.bits.tile_size_bytes_minus1() } as u64);
+            w.u(
+                2,
+                u64::from(unsafe { self.ext2.bits.tile_size_bytes_minus1() }),
+            );
         }
         let header_prefix_bits = 8 * (1 + self.obu_size_bytes);
         let qindex_offset = header_prefix_bits + w.len() as u32;
-        w.u(8, qindex as u64);
+        w.u(8, u64::from(qindex));
         w.flag(false);
         w.flag(false);
         w.flag(false);
@@ -409,19 +417,19 @@ impl Arm {
             Filters::at(qindex)
         };
         let loopfilter_offset = header_prefix_bits + w.len() as u32;
-        w.u(6, filters.level as u64);
-        w.u(6, filters.level as u64);
+        w.u(6, u64::from(filters.level));
+        w.u(6, u64::from(filters.level));
         if filters.level > 0 {
-            w.u(6, filters.level as u64);
-            w.u(6, filters.level as u64);
+            w.u(6, u64::from(filters.level));
+            w.u(6, u64::from(filters.level));
         }
         w.u(3, 0);
         w.flag(false);
         let cdef_offset = header_prefix_bits + w.len() as u32;
-        w.u(2, filters.cdef_damping_minus_3 as u64);
+        w.u(2, u64::from(filters.cdef_damping_minus_3));
         w.u(2, 0);
-        w.u(6, filters.cdef_strength as u64);
-        w.u(6, filters.cdef_strength as u64);
+        w.u(6, u64::from(filters.cdef_strength));
+        w.u(6, u64::from(filters.cdef_strength));
         let cdef_size = header_prefix_bits + w.len() as u32 - cdef_offset;
         w.flag(self.tx_mode_select);
         if !frame.key {
@@ -455,7 +463,7 @@ impl Arm {
                 .set_search_idx0(if frame.key { 0 } else { 1 });
             let f = &mut pic.picture_flags.bits;
             f.set_frame_type(if frame.key { 0 } else { 1 });
-            f.set_error_resilient_mode(frame.key as u32);
+            f.set_error_resilient_mode(u32::from(frame.key));
             f.set_enable_frame_obu(0);
             let m = &mut pic.mode_control_flags.bits;
             m.set_reference_mode(0);

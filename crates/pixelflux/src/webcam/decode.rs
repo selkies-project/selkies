@@ -185,20 +185,20 @@ impl VideoDecoder {
             for row in 0..ch {
                 for x in 0..cw {
                     let sum: u32 = match p.chroma {
-                        Chroma::C420 => src[row * s + x] as u32 * 4,
+                        Chroma::C420 => u32::from(src[row * s + x]) * 4,
                         Chroma::C422 => {
                             let (r0, r1) =
                                 ((2 * row).min(src_ch - 1), (2 * row + 1).min(src_ch - 1));
-                            (src[r0 * s + x] as u32 + src[r1 * s + x] as u32) * 2
+                            (u32::from(src[r0 * s + x]) + u32::from(src[r1 * s + x])) * 2
                         }
                         Chroma::C444 => {
                             let (r0, r1) =
                                 ((2 * row).min(src_ch - 1), (2 * row + 1).min(src_ch - 1));
                             let (x0, x1) = (2 * x, (2 * x + 1).min(src_cw - 1));
-                            src[r0 * s + x0] as u32
-                                + src[r0 * s + x1] as u32
-                                + src[r1 * s + x0] as u32
-                                + src[r1 * s + x1] as u32
+                            u32::from(src[r0 * s + x0])
+                                + u32::from(src[r0 * s + x1])
+                                + u32::from(src[r1 * s + x0])
+                                + u32::from(src[r1 * s + x1])
                         }
                     };
                     dst[row * cw + x] = ((sum + 2) / 4) as u8;
@@ -409,7 +409,7 @@ fn vp8_color_bits(frame: &[u8]) -> Option<(bool, bool)> {
         return None;
     }
     let data = &frame[10..];
-    let mut value = ((data[0] as u32) << 8) | data[1] as u32;
+    let mut value = (u32::from(data[0]) << 8) | u32::from(data[1]);
     let mut range = 255u32;
     let mut bit_count = 0;
     let mut at = 2;
@@ -429,7 +429,7 @@ fn vp8_color_bits(frame: &[u8]) -> Option<(bool, bool)> {
             bit_count += 1;
             if bit_count == 8 {
                 bit_count = 0;
-                value |= data.get(at).copied().unwrap_or(0) as u32;
+                value |= u32::from(data.get(at).copied().unwrap_or(0));
                 at += 1;
             }
         }
@@ -983,9 +983,9 @@ mod tests {
         assert_eq!((v.width, v.height), (w, h));
         assert!(v.full_range);
         let mid = v.y[(h / 2) * v.y_stride + w / 2];
-        assert!((mid as i32 - 200).abs() <= 3, "luma {}", mid);
+        assert!((i32::from(mid) - 200).abs() <= 3, "luma {}", mid);
         let cu = v.u[(h / 4) * v.uv_stride + w / 4];
-        assert!((cu as i32 - 100).abs() <= 3, "cb {}", cu);
+        assert!((i32::from(cu) - 100).abs() <= 3, "cb {}", cu);
     }
 
     /// A JPEG whose header claims a picture past `MAX_JPEG_SIDE` is refused before its
@@ -1083,9 +1083,9 @@ mod tests {
                 let u = v.u[(h / 4) * v.uv_stride + w / 4];
                 let vv = v.v[(h / 4) * v.uv_stride + w / 4];
                 assert!(
-                    (y as i32 - 145).abs() <= 6
-                        && (u as i32 - 54).abs() <= 6
-                        && (vv as i32 - 34).abs() <= 6,
+                    (i32::from(y) - 145).abs() <= 6
+                        && (i32::from(u) - 54).abs() <= 6
+                        && (i32::from(vv) - 34).abs() <= 6,
                     "yuv {} {} {}",
                     y,
                     u,
@@ -1177,7 +1177,7 @@ mod tests {
             idr.ue(25);
             idr.align();
             for _ in 0..384 {
-                idr.u(sample as u32, 8);
+                idr.u(u32::from(sample), 8);
             }
         }
         let mut units = vec![[sps.nal(0x67), pps.nal(0x68), idr.nal(0x65)].concat()];

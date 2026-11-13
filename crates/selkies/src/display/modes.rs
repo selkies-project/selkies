@@ -52,7 +52,7 @@ pub struct ModeTimings {
 impl ModeTimings {
     /// The refresh these timings run at.
     pub fn refresh(&self) -> f64 {
-        self.dot_clock as f64 / (self.h_total as f64 * self.v_total as f64)
+        self.dot_clock as f64 / (f64::from(self.h_total) * f64::from(self.v_total))
     }
 
     /// The timings as `xrandr --newmode` takes them after the mode's name: the clock in MHz,
@@ -103,11 +103,11 @@ pub fn cvt_rb_mode_info(width: u32, height: u32, refresh: f64) -> ModeTimings {
     } else {
         10
     };
-    let h_period_est = (1_000_000.0 / refresh - 460.0) / v_active as f64;
+    let h_period_est = (1_000_000.0 / refresh - 460.0) / f64::from(v_active);
     let vbi_lines = ((460.0 / h_period_est) as u32 + 1).max(3 + v_sync + 6);
     let v_total = v_active + vbi_lines;
     let h_total = h_active + 160;
-    let mut clock_khz = h_total as f64 * 1_000.0 / h_period_est;
+    let mut clock_khz = f64::from(h_total) * 1_000.0 / h_period_est;
     clock_khz -= clock_khz % 250.0;
     ModeTimings {
         width: h_active,
@@ -133,7 +133,7 @@ pub fn cvt_rb_mode_info(width: u32, height: u32, refresh: f64) -> ModeTimings {
 /// neither slower than asked nor faster by more than 0.01 Hz.
 pub fn mode_timings(width: u32, height: u32, refresh: f64) -> ModeTimings {
     let mut info = cvt_rb_mode_info(width, height, refresh);
-    let exact = (info.h_total as f64 * info.v_total as f64 * refresh) as u64;
+    let exact = (f64::from(info.h_total) * f64::from(info.v_total) * refresh) as u64;
     info.dot_clock = exact.div_ceil(10_000) * 10_000;
     info
 }
@@ -155,7 +155,7 @@ impl Mode {
     /// The mode's refresh in Hz as xrandr reports it (the field rate of an interlaced
     /// mode), or 0 for a mode without timings.
     pub fn refresh(&self) -> f64 {
-        let mut v_total = self.v_total as f64;
+        let mut v_total = f64::from(self.v_total);
         if self.flags & DOUBLE_SCAN != 0 {
             v_total *= 2.0;
         }
@@ -165,7 +165,7 @@ impl Mode {
         if self.h_total == 0 || v_total == 0.0 {
             return 0.0;
         }
-        self.dot_clock as f64 / (self.h_total as f64 * v_total)
+        self.dot_clock as f64 / (f64::from(self.h_total) * v_total)
     }
 }
 
@@ -329,7 +329,7 @@ mod tests {
     /// A RandR mode whose timings give `hz`.
     fn mode(id: u32, w: u32, h: u32, hz: f64, flags: u32) -> Mode {
         let (h_total, v_total) = (w + 160, h + 30);
-        let mut v_scan = v_total as f64;
+        let mut v_scan = f64::from(v_total);
         if flags & DOUBLE_SCAN != 0 {
             v_scan *= 2.0;
         }
@@ -340,7 +340,7 @@ mod tests {
             id,
             width: w,
             height: h,
-            dot_clock: (hz * h_total as f64 * v_scan).round() as u64,
+            dot_clock: (hz * f64::from(h_total) * v_scan).round() as u64,
             h_total,
             v_total,
             flags,

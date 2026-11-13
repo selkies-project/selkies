@@ -132,7 +132,7 @@ impl Codec {
 
     /// The video codec a wire id names.
     pub fn from_wire_id(id: u8) -> Option<Codec> {
-        Codec::from_id(id as u32).filter(|c| c.is_video())
+        Codec::from_id(u32::from(id)).filter(|c| c.is_video())
     }
 
     /// The codec tag the Python `StripeFrame` carries: the codec id.
@@ -285,7 +285,7 @@ impl Codec {
 /// The quality index in `0..=51` whose quantizer is nearest `q`, the lowest on a tie.
 fn nearest_index(q: u32, quantizer: impl Fn(i32) -> u32) -> u32 {
     (0..=51)
-        .min_by_key(|&crf| (quantizer(crf) as i64 - q as i64).abs())
+        .min_by_key(|&crf| (i64::from(quantizer(crf)) - i64::from(q)).abs())
         .unwrap_or(0) as u32
 }
 
@@ -429,10 +429,10 @@ fn interpolate(points: &[(u32, u32)], x: u32) -> u32 {
     for pair in points.windows(2) {
         let ((x0, y0), (x1, y1)) = (pair[0], pair[1]);
         if x >= x0 && x <= x1 {
-            let span = (x1 - x0) as i64;
-            let along = (x - x0) as i64;
-            let delta = y1 as i64 - y0 as i64;
-            return (y0 as i64 + (delta * along + span / 2) / span) as u32;
+            let span = i64::from(x1 - x0);
+            let along = i64::from(x - x0);
+            let delta = i64::from(y1) - i64::from(y0);
+            return (i64::from(y0) + (delta * along + span / 2) / span) as u32;
         }
     }
     last.1
@@ -461,10 +461,10 @@ pub fn vpx_level(codec: Codec, qindex: u32) -> u32 {
     } else {
         &VPX_QINDEX
     };
-    let target = qindex.min(codec.quantizer_max()) as i64;
+    let target = i64::from(qindex.min(codec.quantizer_max()));
     let mut best = 0usize;
     for (level, &q) in table.iter().enumerate() {
-        if (q as i64 - target).abs() < (table[best] as i64 - target).abs() {
+        if (i64::from(q) - target).abs() < (i64::from(table[best]) - target).abs() {
             best = level;
         }
     }
@@ -531,8 +531,8 @@ pub fn frame_type_from_key(key: bool) -> u8 {
 /// raises the floor itself. Above 6.2's limits there is no higher level, so it returns 62 as
 /// a best effort.
 pub fn h264_level(width: u32, height: u32, fps: u32, bitrate_bps: u64) -> u32 {
-    let mbs = (width as u64).div_ceil(16) * (height as u64).div_ceil(16);
-    let mbps = mbs * fps.max(1) as u64;
+    let mbs = u64::from(width).div_ceil(16) * u64::from(height).div_ceil(16);
+    let mbps = mbs * u64::from(fps.max(1));
     const LEVELS: [(u32, u64, u64, u64); 8] = [
         (41, 8192, 245760, 50_000_000),
         (42, 8704, 522240, 50_000_000),
@@ -555,7 +555,7 @@ pub fn h264_level(width: u32, height: u32, fps: u32, bitrate_bps: u64) -> u32 {
 /// `width` x `height` picture: the level's MaxDpbMbs over the picture's macroblocks, at most
 /// `REFERENCE_FRAMES`.
 pub fn h264_dpb_frames(level: u32, width: u32, height: u32) -> u32 {
-    let mbs = (width as u64).div_ceil(16) * (height as u64).div_ceil(16);
+    let mbs = u64::from(width).div_ceil(16) * u64::from(height).div_ceil(16);
     let max_dpb_mbs: u64 = match level {
         41 => 32768,
         42 => 34816,
@@ -590,8 +590,8 @@ pub fn h264_reference_level(level: u32, width: u32, height: u32) -> u32 {
 /// level against the rate refuses a CBR target past. The ladder starts at 4.1 like the H.264
 /// one and answers 6.2 for anything beyond its limits.
 pub fn h265_level(width: u32, height: u32, fps: u32, bitrate_bps: u64, high_tier: bool) -> u32 {
-    let ps = width as u64 * height as u64;
-    let sr = ps * fps.max(1) as u64;
+    let ps = u64::from(width) * u64::from(height);
+    let sr = ps * u64::from(fps.max(1));
     const LEVELS: [(u32, u64, u64, u64, u64); 7] = [
         (123, 2_228_224, 133_693_440, 20_000_000, 50_000_000),
         (150, 8_912_896, 267_386_880, 25_000_000, 100_000_000),
@@ -620,7 +620,7 @@ pub fn h265_dpb_frames(level: u32, width: u32, height: u32) -> u32 {
         150..=156 => 8_912_896,
         _ => 35_651_584,
     };
-    let picture = width as u64 * height as u64;
+    let picture = u64::from(width) * u64::from(height);
     let pictures = if picture <= max_luma_ps / 4 {
         16
     } else if picture <= max_luma_ps / 2 {
@@ -653,8 +653,8 @@ pub fn h265_tier(level: u32) -> u32 {
 /// it is carried per level rather than derived. The ladder starts at 4.0 and answers 6.3 for
 /// anything beyond its limits.
 pub fn av1_level(width: u32, height: u32, fps: u32, bitrate_bps: u64) -> u32 {
-    let ps = width as u64 * height as u64;
-    let rate = ps * fps.max(1) as u64;
+    let ps = u64::from(width) * u64::from(height);
+    let rate = ps * u64::from(fps.max(1));
     const LEVELS: [(u32, u64, u32, u32, u64, u64); 10] = [
         (8, 2_359_296, 6144, 3456, 70_778_880, 12_000_000),
         (9, 2_359_296, 6144, 3456, 141_557_760, 20_000_000),
@@ -746,7 +746,7 @@ pub fn vp9_base_q_idx(frame: &[u8]) -> Option<u32> {
         let mut value = 0u32;
         for _ in 0..n {
             let byte = *frame.get(pos / 8)?;
-            value = (value << 1) | ((byte >> (7 - pos % 8)) & 1) as u32;
+            value = (value << 1) | u32::from((byte >> (7 - pos % 8)) & 1);
             pos += 1;
         }
         Some(value)
@@ -848,7 +848,7 @@ pub fn av1_is_key(tu: &[u8]) -> bool {
         let obu_type = (header >> 3) & 0x0f;
         let has_extension = header & 0x04 != 0;
         let has_size = header & 0x02 != 0;
-        let mut i = pos + 1 + has_extension as usize;
+        let mut i = pos + 1 + usize::from(has_extension);
         let size = if has_size {
             let mut value = 0u64;
             let mut shift = 0u32;
@@ -858,7 +858,7 @@ pub fn av1_is_key(tu: &[u8]) -> bool {
                 }
                 let byte = tu[i];
                 i += 1;
-                value |= ((byte & 0x7f) as u64) << shift;
+                value |= u64::from(byte & 0x7f) << shift;
                 if byte & 0x80 == 0 {
                     break;
                 }
@@ -921,7 +921,7 @@ fn h264_slice_is_intra(payload: &[u8]) -> Option<bool> {
         }
         let mut val = 0u32;
         for _ in 0..leading {
-            val = (val << 1) | bit(p)? as u32;
+            val = (val << 1) | u32::from(bit(p)?);
         }
         Some((1u32 << leading) - 1 + val)
     };
@@ -1131,11 +1131,11 @@ mod tests {
         );
         for level in 0..64u32 {
             assert_eq!(
-                vpx_level(Codec::Vp9, VPX_QINDEX[level as usize] as u32),
+                vpx_level(Codec::Vp9, u32::from(VPX_QINDEX[level as usize])),
                 level
             );
             assert_eq!(
-                vpx_level(Codec::Vp8, VP8_LEVEL_QINDEX[level as usize] as u32),
+                vpx_level(Codec::Vp8, u32::from(VP8_LEVEL_QINDEX[level as usize])),
                 level
             );
         }

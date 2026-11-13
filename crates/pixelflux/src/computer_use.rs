@@ -768,8 +768,8 @@ fn handle_action_inner(req: CuActionRequest, b: &dyn CuBackend) -> Result<String
 
     let handle_coord = |coord: [f64; 2]| -> (f64, f64) {
         (
-            clamp(coord[0], 0.0, (fb_w - 1) as f64),
-            clamp(coord[1], 0.0, (fb_h - 1) as f64),
+            clamp(coord[0], 0.0, f64::from(fb_w - 1)),
+            clamp(coord[1], 0.0, f64::from(fb_h - 1)),
         )
     };
 
@@ -1053,7 +1053,7 @@ fn handle_action_inner(req: CuActionRequest, b: &dyn CuBackend) -> Result<String
                 .scroll_direction
                 .as_deref()
                 .ok_or("Missing scroll_direction")?;
-            let amount = req.scroll_amount.unwrap_or(1).max(0) as f64;
+            let amount = f64::from(req.scroll_amount.unwrap_or(1).max(0));
             if let Some(coord) = req.coordinate {
                 let (fx, fy) = handle_coord(coord);
                 b.mouse_move(fx, fy);

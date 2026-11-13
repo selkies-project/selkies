@@ -133,13 +133,13 @@ impl Damage {
         width: i32,
         height: i32,
     ) -> Self {
-        let frame = (width.max(1) as f64) * (height.max(1) as f64);
+        let frame = f64::from(width.max(1)) * f64::from(height.max(1));
         let mut area = 0f64;
         for r in rects {
             let w = (r.loc.x + r.size.w).min(width) - r.loc.x.max(0);
             let h = (r.loc.y + r.size.h).min(height) - r.loc.y.max(0);
             if w > 0 && h > 0 {
-                area += w as f64 * h as f64;
+                area += f64::from(w) * f64::from(h);
             }
         }
         if area > 0.0 {
@@ -318,7 +318,7 @@ impl StripeState {
 /// The share of a region's recent frames that carried more than a small change, `motion` taking
 /// in one more frame: an average over `LOW_MOTION_TRIGGERS` trigger periods.
 fn recent_motion(motion: f32, trigger: u32, moved: bool) -> f32 {
-    motion + (moved as u8 as f32 - motion) / (trigger * LOW_MOTION_TRIGGERS) as f32
+    motion + (f32::from(u8::from(moved)) - motion) / (trigger * LOW_MOTION_TRIGGERS) as f32
 }
 
 /// The cleanup a region is due with `still` frames held still, `unclean` frames since it first
@@ -358,7 +358,9 @@ pub fn cleanup_pending(
     enabled: bool,
     keys: bool,
 ) -> bool {
-    let unclean = st.unclean_frames.saturating_add(!st.paint_over_sent as u32);
+    let unclean = st
+        .unclean_frames
+        .saturating_add(u32::from(!st.paint_over_sent));
     let motion = recent_motion(st.motion, trigger.max(1), false);
     enabled
         && due_cleanup(
@@ -494,7 +496,7 @@ const CLEANUP_RATE_MAX: i32 = 4;
 
 /// Bytes a frame of the constant-rate target, at `kbps` and `fps`.
 pub fn frame_budget(kbps: i32, fps: f64) -> f64 {
-    kbps.max(1) as f64 * 125.0 / fps.max(1.0)
+    f64::from(kbps.max(1)) * 125.0 / fps.max(1.0)
 }
 
 /// The bytes a constant-rate cleanup's frame may come to: the session's own buffer, what its rate
@@ -509,7 +511,7 @@ fn cleanup_cap(settings: &CaptureSettings) -> usize {
         settings.keyframe_interval_s,
         settings.video_vbv_multiplier,
     ) / 8) as usize;
-    vbv.max((cleanup_rate(settings) as f64 * 125.0 * CLEANUP_FRAME_S) as usize)
+    vbv.max((f64::from(cleanup_rate(settings)) * 125.0 * CLEANUP_FRAME_S) as usize)
 }
 
 /// The rate (kbps) a constant-rate cleanup's sweep is paced to and its frames capped by: what the
@@ -920,7 +922,7 @@ pub fn periodic_idr_due(settings: &CaptureSettings, frame_counter: u16) -> bool 
     }
     let safe_fps = settings.target_fps.max(1.0);
     let interval = ((safe_fps * secs).round() as u64).max(1);
-    (frame_counter as u64).is_multiple_of(interval)
+    u64::from(frame_counter).is_multiple_of(interval)
 }
 
 /// The quality index a refresh held in one frame (a predicted frame) is coded at: the paint-over
@@ -1262,7 +1264,7 @@ fn decide_constant_rate(
         // What the whole picture comes to at the refresh's quantizer by the bands so far, each at
         // what it came out, six steps coarser a halving.
         if let Some(bytes) = held.filter(|&b| b > 0 && size > 0.0) {
-            let cost = bytes as f64 / size * 2f64.powf(st.sweep_coarser as f64 / 6.0);
+            let cost = bytes as f64 / size * 2f64.powf(f64::from(st.sweep_coarser) / 6.0);
             if st.sweep_cost == 0.0 {
                 st.sweep_first = cost;
             }
@@ -1278,7 +1280,7 @@ fn decide_constant_rate(
         // Mbit/s, and its sweep crawled on without end; at 720p and 0.5 Mbit/s it stepped coarser
         // to the rate control's quantizer and ended at 8.9 levels. The rest of the picture is
         // refreshed in one held frame instead, as a pinned rate control's is.
-        let band = st.sweep_first * size * 0.5f64.powf(st.sweep_coarser as f64 / 6.0);
+        let band = st.sweep_first * size * 0.5f64.powf(f64::from(st.sweep_coarser) / 6.0);
         if let Some(bytes) = held.filter(|&b| {
             size <= LEAST_BAND && b as f64 > BAND_BUDGETS * pace && b as f64 > 2.0 * band
         }) {
@@ -1294,7 +1296,7 @@ fn decide_constant_rate(
         let size = band_share(size, encoder.band, pace);
         let to = (from + size).min(1.0);
         st.sweep_frames = st.sweep_frames.saturating_add(1);
-        let left = (REFINE_S * settings.target_fps.max(1.0)).round() - st.sweep_frames as f64;
+        let left = (REFINE_S * settings.target_fps.max(1.0)).round() - f64::from(st.sweep_frames);
         let paced = encoder
             .band
             .is_some_and(|b| b as f64 <= 2.0 * BAND_BUDGETS * pace);
@@ -1305,7 +1307,7 @@ fn decide_constant_rate(
         // them to quantizer 43 and ended the sweep at 32.5 dB in 9 s of a 30 s window.
         if paced && st.sweep_cost > 0.0 {
             let frames = |coarser: u32| {
-                (1.0 - to) * st.sweep_cost * 0.5f64.powf(coarser as f64 / 6.0) / pace
+                (1.0 - to) * st.sweep_cost * 0.5f64.powf(f64::from(coarser) / 6.0) / pace
             };
             if frames(st.sweep_coarser) > left.max(1.0) {
                 st.sweep_coarser += 1;
@@ -1421,9 +1423,9 @@ fn decide_constant_rate(
             // with a still screen (60 fps at 8 Mbit/s: 16 kB frames for 8 s after the picture
             // stopped at 54 dB), where frames it still refines with vary.
             let same = !repaying
-                && st.same_frames as f64 >= EMPTY_S * settings.target_fps
+                && f64::from(st.same_frames) >= EMPTY_S * settings.target_fps
                 && encoder.last.is_none_or(|q| q >= SAME_FRAME_QUALITY);
-            let level = st.finest_frames as f64 >= LEVEL_S * settings.target_fps;
+            let level = f64::from(st.finest_frames) >= LEVEL_S * settings.target_fps;
             if ((stalled || same || level) && !encoder.measures)
                 || done
                 || st.h264_burst_frames_remaining == 0
@@ -2352,7 +2354,7 @@ impl X11Pipeline {
                     bound,
                 );
             }
-            let fc = self.frame_counter as u64;
+            let fc = u64::from(self.frame_counter);
             if !d.send && !self.hw.as_ref().unwrap().holds_frame() {
                 self.hw.as_mut().unwrap().idle();
             }
@@ -2429,7 +2431,7 @@ impl X11Pipeline {
                                 codec,
                                 stripe_y_start: 0,
                                 stripe_height: height,
-                                frame_id: id as i32,
+                                frame_id: i32::from(id),
                                 timing: Default::default(),
                                 reference,
                             })
@@ -3181,7 +3183,7 @@ mod tests {
         let step = (2.0 * s.target_fps) as u32;
         let refining = (1..u16::MAX)
             .filter(|&i| {
-                let q = 44 - (i as u32 / step).min(20);
+                let q = 44 - (u32::from(i) / step).min(20);
                 decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, at(q)).send
             })
             .count() as f64
@@ -3830,7 +3832,7 @@ mod tests {
                 }
                 None => {
                     assert!(d.hold_qp.is_none(), "every held frame is a band");
-                    sent_after += (!bands.is_empty() && d.send) as u32;
+                    sent_after += u32::from(!bands.is_empty() && d.send);
                 }
             }
         }
@@ -3975,7 +3977,7 @@ mod tests {
         let s = hw_settings();
         let budget = frame_budget(s.video_bitrate_kbps, s.target_fps);
         let cap = Some(cleanup_cap(&s));
-        let link = cleanup_rate(&s) as f64 * 125.0 * CLEANUP_FRAME_S;
+        let link = f64::from(cleanup_rate(&s)) * 125.0 * CLEANUP_FRAME_S;
         assert!(
             (cleanup_cap(&s) as f64 - link.max(budget * 1.5)).abs() <= 1.0,
             "{cap:?}"
@@ -4195,7 +4197,7 @@ mod tests {
         let mut bands: Vec<(f64, f64, u32)> = Vec::new();
         for i in 1..=(2 * window) as u16 {
             let held = bands.last().map_or(0, |(a, b, q)| {
-                let cost = 4.0 * window as f64 * 2f64.powf(-((q - refresh) as f64) / 6.0);
+                let cost = 4.0 * window as f64 * 2f64.powf(-f64::from(q - refresh) / 6.0);
                 ((b - a) * cost * budget) as usize
             });
             let d = decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, idle(held));
@@ -4514,7 +4516,7 @@ mod tests {
         }
         let (at, key) = fired.expect("a cleanup under low motion");
         assert_eq!(
-            at as u32 + 4,
+            u32::from(at) + 4,
             s.paint_over_trigger_frames * LOW_MOTION_TRIGGERS,
             "at the end of the window since the scroll began"
         );
@@ -4533,7 +4535,7 @@ mod tests {
             };
             decide_hw_fullframe(&mut st, &s, 300 + i, damage, false, false, HOLDS).force_idr
         });
-        let at = fired.expect("a key frame under low motion after a long scroll") as u32;
+        let at = u32::from(fired.expect("a key frame under low motion after a long scroll"));
         assert!(
             at >= window && at <= window * 2,
             "{at} frames after the scroll stopped, window {window}"
@@ -5088,7 +5090,7 @@ mod tests {
             .map(|i| {
                 (i as u32)
                     .wrapping_mul(2654435761)
-                    .wrapping_add(seed as u32 * 97) as u8
+                    .wrapping_add(u32::from(seed) * 97) as u8
             })
             .collect()
     }
@@ -5100,7 +5102,7 @@ mod tests {
     fn scattered(seed: u8) -> Vec<u8> {
         (0..640 * 4 * 384u32)
             .map(|i| {
-                let mut x = i ^ (seed as u32).wrapping_mul(0x9e37_79b9);
+                let mut x = i ^ u32::from(seed).wrapping_mul(0x9e37_79b9);
                 x ^= x >> 16;
                 x = x.wrapping_mul(0x7feb_352d);
                 x ^= x >> 15;
@@ -6057,8 +6059,8 @@ mod refresh_tests {
         let mut mse = 0.0;
         for y in 0..H {
             for x in 0..W {
-                let want = 16.0 + page[(y * W + x) * 4] as f64 * 219.0 / 255.0;
-                let d = shown.y[y * shown.y_stride + x] as f64 - want;
+                let want = 16.0 + f64::from(page[(y * W + x) * 4]) * 219.0 / 255.0;
+                let d = f64::from(shown.y[y * shown.y_stride + x]) - want;
                 mse += d * d;
             }
         }

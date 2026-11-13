@@ -133,7 +133,7 @@ impl Device {
             .map_err(|e| format!("open /dev/uinput: {e}"))?;
         let fd: OwnedFd = file.into();
         let raw = fd.as_raw_fd();
-        unsafe { set(raw, UI_SET_EVBIT, EV_SYN as c_ulong)? };
+        unsafe { set(raw, UI_SET_EVBIT, c_ulong::from(EV_SYN))? };
         build(raw)?;
         let mut setup = UinputSetup {
             id: InputId {
@@ -164,9 +164,9 @@ impl Device {
     /// are left out, or the device reads as a pad rather than a keyboard.
     pub fn keyboard() -> Result<Self, String> {
         Self::open("Selkies Virtual Keyboard", 0x0001, |fd| unsafe {
-            set(fd, UI_SET_EVBIT, EV_KEY as c_ulong)?;
+            set(fd, UI_SET_EVBIT, c_ulong::from(EV_KEY))?;
             for code in 1..BTN_MISC {
-                set(fd, UI_SET_KEYBIT, code as c_ulong)?;
+                set(fd, UI_SET_KEYBIT, c_ulong::from(code))?;
             }
             Ok(())
         })
@@ -176,17 +176,17 @@ impl Device {
     /// relative for a locked pointer whose delta must stay a delta.
     pub fn pointer() -> Result<Self, String> {
         Self::open("Selkies Virtual Pointer", 0x0002, |fd| unsafe {
-            set(fd, UI_SET_EVBIT, EV_KEY as c_ulong)?;
-            set(fd, UI_SET_EVBIT, EV_REL as c_ulong)?;
-            set(fd, UI_SET_EVBIT, EV_ABS as c_ulong)?;
+            set(fd, UI_SET_EVBIT, c_ulong::from(EV_KEY))?;
+            set(fd, UI_SET_EVBIT, c_ulong::from(EV_REL))?;
+            set(fd, UI_SET_EVBIT, c_ulong::from(EV_ABS))?;
             for code in [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE] {
-                set(fd, UI_SET_KEYBIT, code as c_ulong)?;
+                set(fd, UI_SET_KEYBIT, c_ulong::from(code))?;
             }
             for code in [REL_X, REL_Y, REL_WHEEL, REL_HWHEEL] {
-                set(fd, UI_SET_RELBIT, code as c_ulong)?;
+                set(fd, UI_SET_RELBIT, c_ulong::from(code))?;
             }
             for code in [ABS_X, ABS_Y] {
-                set(fd, UI_SET_ABSBIT, code as c_ulong)?;
+                set(fd, UI_SET_ABSBIT, c_ulong::from(code))?;
                 let abs = UinputAbsSetup {
                     code,
                     absinfo: AbsInfo {

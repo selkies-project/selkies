@@ -45,14 +45,14 @@ pub struct CursorMessage {
 /// live path hash a cursor to the same content handle.
 pub fn unpremultiply_rgba(img: &mut RgbaImage) {
     for px in img.pixels_mut() {
-        let a = px[3] as u32;
+        let a = u32::from(px[3]);
         if a == 0 {
             px[0] = 0;
             px[1] = 0;
             px[2] = 0;
         } else if a < 255 {
             for c in &mut px.0[..3] {
-                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+                *c = ((u32::from(*c) * 255 + a / 2) / a).min(255) as u8;
             }
         }
     }
@@ -119,13 +119,13 @@ pub fn cursor_to_msg(cursor: &XCursorImage, size_cap: u32, debug_log: bool) -> C
         if debug_log {
             log::info!(target: "input", "Cursor ({}x{}) exceeds cap ({size_cap}x{size_cap}). Resizing.", cropped.width(), cropped.height());
         }
-        let max_dim = cropped.width().max(cropped.height()) as f64;
-        let scale = size_cap as f64 / max_dim;
-        let new_w = ((cropped.width() as f64 * scale) as u32).max(1);
-        let new_h = ((cropped.height() as f64 * scale) as u32).max(1);
+        let max_dim = f64::from(cropped.width().max(cropped.height()));
+        let scale = f64::from(size_cap) / max_dim;
+        let new_w = ((f64::from(cropped.width()) * scale) as u32).max(1);
+        let new_h = ((f64::from(cropped.height()) * scale) as u32).max(1);
         cropped = image::imageops::resize(&cropped, new_w, new_h, FilterType::Lanczos3);
-        hotx = ((hotx as f64 * scale).round() as u32).min(new_w.saturating_sub(1));
-        hoty = ((hoty as f64 * scale).round() as u32).min(new_h.saturating_sub(1));
+        hotx = ((f64::from(hotx) * scale).round() as u32).min(new_w.saturating_sub(1));
+        hoty = ((f64::from(hoty) * scale).round() as u32).min(new_h.saturating_sub(1));
     }
     // After the resize, never before (module docstring).
     unpremultiply_rgba(&mut cropped);

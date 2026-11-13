@@ -1827,7 +1827,7 @@ async fn a_steered_rate_held_is_told_to_its_page() {
     let steered = crate::settings::settings().congestion_control().on;
     let mut bytes = 0u64;
     for tick in 0..30 {
-        let at = crate::ws::now() + tick as f64 * 0.5;
+        let at = crate::ws::now() + f64::from(tick) * 0.5;
         {
             let mut l = link.lock();
             l.acknowledged_frame_id = 1;
@@ -1836,7 +1836,7 @@ async fn a_steered_rate_held_is_told_to_its_page() {
             for ack in 0..10 {
                 bytes += 25_000;
                 l.sent_bytes = bytes;
-                l.note_round_trip(20.0, bytes, at - 0.5 + ack as f64 * 0.05);
+                l.note_round_trip(20.0, bytes, at - 0.5 + f64::from(ack) * 0.05);
             }
         }
         rig.service
@@ -1886,7 +1886,7 @@ async fn a_crf_display_is_steered_by_its_peak() {
     let hi = crate::settings::settings().video_bitrate().1.as_f64();
     let mut bytes = 0u64;
     for tick in 0..30 {
-        let at = crate::ws::now() + tick as f64 * 0.5;
+        let at = crate::ws::now() + f64::from(tick) * 0.5;
         {
             let mut l = link.lock();
             l.acknowledged_frame_id = 1;
@@ -1895,7 +1895,7 @@ async fn a_crf_display_is_steered_by_its_peak() {
             for ack in 0..10 {
                 bytes += 25_000;
                 l.sent_bytes = bytes;
-                l.note_round_trip(20.0, bytes, at - 0.5 + ack as f64 * 0.05);
+                l.note_round_trip(20.0, bytes, at - 0.5 + f64::from(ack) * 0.05);
             }
         }
         rig.service
@@ -1962,7 +1962,7 @@ async fn a_crf_display_whose_encoder_reads_no_peak_is_not_steered() {
     let link = rig.service.link(PRIMARY_DISPLAY).unwrap();
     let mut bytes = 0u64;
     for tick in 0..30 {
-        let at = crate::ws::now() + tick as f64 * 0.5;
+        let at = crate::ws::now() + f64::from(tick) * 0.5;
         {
             let mut l = link.lock();
             l.acknowledged_frame_id = 1;
@@ -1971,7 +1971,7 @@ async fn a_crf_display_whose_encoder_reads_no_peak_is_not_steered() {
             for ack in 0..10 {
                 bytes += 25_000;
                 l.sent_bytes = bytes;
-                l.note_round_trip(20.0, bytes, at - 0.5 + ack as f64 * 0.05);
+                l.note_round_trip(20.0, bytes, at - 0.5 + f64::from(ack) * 0.05);
             }
         }
         rig.service

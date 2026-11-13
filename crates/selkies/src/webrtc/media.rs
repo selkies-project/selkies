@@ -66,7 +66,7 @@ impl VideoClock {
     pub fn stamp(&mut self, capture_ns: i64, now_ns: i64) -> (u32, i64) {
         let captured = if capture_ns > 0 { capture_ns } else { now_ns };
         let anchor = *self.anchor_ns.get_or_insert(captured);
-        let mut pts = ((captured - anchor).max(0) as i128 * 9 / 100_000) as u64;
+        let mut pts = (i128::from((captured - anchor).max(0)) * 9 / 100_000) as u64;
         if let Some(last) = self.last
             && pts <= last
         {

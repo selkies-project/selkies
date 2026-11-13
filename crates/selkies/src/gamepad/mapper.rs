@@ -138,11 +138,11 @@ pub fn normalize_axis_value(
         let hat = (client_value.round_ties_even() as i32).clamp(ABS_HAT_MIN_VAL, ABS_HAT_MAX_VAL);
         return if for_js { hat * ABS_MAX_VAL } else { hat };
     }
-    let span = (ABS_MAX_VAL - ABS_MIN_VAL) as f64;
+    let span = f64::from(ABS_MAX_VAL - ABS_MIN_VAL);
     if is_trigger {
-        return (ABS_MIN_VAL as f64 + client_value * span) as i32;
+        return (f64::from(ABS_MIN_VAL) + client_value * span) as i32;
     }
-    (ABS_MIN_VAL as f64 + ((client_value + 1.0) / 2.0) * span) as i32
+    (f64::from(ABS_MIN_VAL) + ((client_value + 1.0) / 2.0) * span) as i32
 }
 
 /// One client control change mapped onto the pad: the joydev event and the evdev event it
@@ -170,7 +170,7 @@ pub fn map_event(client_index: u32, client_value: f64, is_button: bool) -> Optio
             (
                 axis,
                 EV_ABS,
-                (direction * client_value as i32) as f64,
+                f64::from(direction * client_value as i32),
                 false,
                 true,
             )
@@ -186,7 +186,7 @@ pub fn map_event(client_index: u32, client_value: f64, is_button: bool) -> Optio
             (
                 button_index(client_index)?,
                 EV_KEY,
-                (client_value as i32) as f64,
+                f64::from(client_value as i32),
                 false,
                 false,
             )
@@ -219,7 +219,7 @@ pub fn map_event(client_index: u32, client_value: f64, is_button: bool) -> Optio
             JS_EVENT_AXIS
         },
         js_number: internal,
-        js_value: js_value.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        js_value: js_value.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
         ev_type,
         ev_code,
         ev_value,

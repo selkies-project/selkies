@@ -271,7 +271,9 @@ fn require_32bpp(conn: &RustConnection, screen: usize) -> Result<(), String> {
 /// failure budget with no chance of recovery. The upper clamp also keeps protocol-range roots
 /// (INT16 coordinates) from truncating a wider value through the `as i16` cast.
 fn clamp_offset(x: i32, root: u16) -> i16 {
-    let upper = (root as i32).saturating_sub(1).min(i16::MAX as i32 - 1);
+    let upper = i32::from(root)
+        .saturating_sub(1)
+        .min(i32::from(i16::MAX) - 1);
     x.max(0).min(upper) as i16
 }
 
@@ -283,10 +285,10 @@ fn clamp_offset(x: i32, root: u16) -> i16 {
 /// unusable surface. Video codecs require even dimensions, so both are then rounded down to
 /// a multiple of two.
 fn resolve_dims(root_w: u16, root_h: u16, s: &CaptureSettings) -> (u16, u16) {
-    let cap_x = clamp_offset(s.capture_x, root_w) as i32;
-    let cap_y = clamp_offset(s.capture_y, root_h) as i32;
-    let avail_w = (root_w as i32).saturating_sub(cap_x).max(2);
-    let avail_h = (root_h as i32).saturating_sub(cap_y).max(2);
+    let cap_x = i32::from(clamp_offset(s.capture_x, root_w));
+    let cap_y = i32::from(clamp_offset(s.capture_y, root_h));
+    let avail_w = i32::from(root_w).saturating_sub(cap_x).max(2);
+    let avail_h = i32::from(root_h).saturating_sub(cap_y).max(2);
     let mut w = if s.auto_adjust_screen_capture_size || s.width <= 0 {
         avail_w
     } else {
@@ -297,8 +299,8 @@ fn resolve_dims(root_w: u16, root_h: u16, s: &CaptureSettings) -> (u16, u16) {
     } else {
         s.height.min(avail_h)
     };
-    w = w.clamp(2, u16::MAX as i32);
-    h = h.clamp(2, u16::MAX as i32);
+    w = w.clamp(2, i32::from(u16::MAX));
+    h = h.clamp(2, i32::from(u16::MAX));
     if s.codec.is_video() {
         w &= !1;
         h &= !1;
@@ -543,7 +545,7 @@ fn readable(conn: &RustConnection, timeout: Duration) -> bool {
     };
     let deadline = libc::timespec {
         tv_sec: timeout.as_secs() as _,
-        tv_nsec: timeout.subsec_nanos() as libc::c_long,
+        tv_nsec: libc::c_long::from(timeout.subsec_nanos()),
     };
     unsafe { libc::ppoll(&mut poll, 1, &deadline, std::ptr::null()) > 0 }
 }
@@ -636,7 +638,7 @@ fn open_framebuffer(
                 0,
                 &mut read,
                 surface.stride,
-                (x as u32, y as u32, w as u32, h as u32),
+                (x as u32, y as u32, u32::from(w), u32::from(h)),
             )
             && read == surface.as_slice()
     });
@@ -702,8 +704,8 @@ pub(crate) fn cursor_image_origin(
     cap_y: i32,
 ) -> (i32, i32) {
     (
-        x as i32 - xhot as i32 - cap_x,
-        y as i32 - yhot as i32 - cap_y,
+        i32::from(x) - i32::from(xhot) - cap_x,
+        i32::from(y) - i32::from(yhot) - cap_y,
     )
 }
 
@@ -1044,14 +1046,14 @@ fn encode_loop<F>(
         }
         held = None;
     }) {
-        let (fw, fh) = (frame.width as i32, frame.height as i32);
+        let (fw, fh) = (i32::from(frame.width), i32::from(frame.height));
         if pipeline.is_none() || pw != fw || ph != fh || pgen != frame.generation {
             let size_changed = pw != fw || ph != fh;
             psettings.width = fw;
             psettings.height = fh;
             psettings.video_bitrate_kbps = controls.bitrate_kbps.load(Ordering::Relaxed);
             psettings.video_vbv_multiplier =
-                controls.vbv_mult_milli.load(Ordering::Relaxed) as f64 / 1000.0;
+                f64::from(controls.vbv_mult_milli.load(Ordering::Relaxed)) / 1000.0;
             psettings.target_fps =
                 f64::from_bits(controls.fps_bits.load(Ordering::Relaxed)).max(1.0);
             let reshaped = pipeline
@@ -1122,7 +1124,7 @@ fn encode_loop<F>(
         }
         if controls.rate_dirty.swap(false, Ordering::Acquire) {
             let b = controls.bitrate_kbps.load(Ordering::Relaxed);
-            let v = controls.vbv_mult_milli.load(Ordering::Relaxed) as f64 / 1000.0;
+            let v = f64::from(controls.vbv_mult_milli.load(Ordering::Relaxed)) / 1000.0;
             let fps = f64::from_bits(controls.fps_bits.load(Ordering::Relaxed)).max(1.0);
             pl.update_rate(b, v, fps);
         }
@@ -1681,7 +1683,12 @@ where
             let grab_result = {
                 let surface = &mut surfaces[idx];
                 let stride = surface.stride;
-                let region = (cap_x as u32, cap_y as u32, cap_w as u32, cap_h as u32);
+                let region = (
+                    cap_x as u32,
+                    cap_y as u32,
+                    u32::from(cap_w),
+                    u32::from(cap_h),
+                );
                 match shared.as_mut() {
                     Some(grab) if use_planes => {
                         let planes = &mut planes_pool[idx];
@@ -1724,7 +1731,12 @@ where
                     }
                 }
             };
-            let region = (cap_x as u32, cap_y as u32, cap_w as u32, cap_h as u32);
+            let region = (
+                cap_x as u32,
+                cap_y as u32,
+                u32::from(cap_w),
+                u32::from(cap_h),
+            );
             let mut changed = match (shared.as_mut(), reported.take()) {
                 (Some(grab), _) => grab.changed(region),
                 (None, Some(rects)) => frame_rects(&rects, cap_x, cap_y, cap_w, cap_h),
@@ -1798,8 +1810,8 @@ where
             reconnect_streak = 0;
             let surface = &mut surfaces[idx];
 
-            let frame_w = cap_w as i32;
-            let frame_h = cap_h as i32;
+            let frame_w = i32::from(cap_w);
+            let frame_h = i32::from(cap_h);
             let stride = surface.stride;
             let buf = surface.as_mut_slice();
             let mut overlays = Vec::new();
@@ -1817,16 +1829,22 @@ where
                 // (cap_x/cap_y follow region_dirty pans and clamp negatives
                 // exactly like the grab itself), never the immutable startup
                 // settings — those go stale on the first live region move.
-                let (img_x, img_y) =
-                    cursor_image_origin(c.x, c.y, c.xhot, c.yhot, cap_x as i32, cap_y as i32);
+                let (img_x, img_y) = cursor_image_origin(
+                    c.x,
+                    c.y,
+                    c.xhot,
+                    c.yhot,
+                    i32::from(cap_x),
+                    i32::from(cap_y),
+                );
                 cursor_serial = Some(c.cursor_serial);
                 overlay_cursor(
                     buf,
                     stride,
                     frame_w,
                     frame_h,
-                    c.width as i32,
-                    c.height as i32,
+                    i32::from(c.width),
+                    i32::from(c.height),
                     &c.cursor_image,
                     img_x,
                     img_y,
@@ -1834,15 +1852,15 @@ where
                 if let Some(grab) = shared.as_mut() {
                     grab.overlaid(
                         idx,
-                        img_x + cap_x as i32,
-                        img_y + cap_y as i32,
-                        c.width as i32,
-                        c.height as i32,
+                        img_x + i32::from(cap_x),
+                        img_y + i32::from(cap_y),
+                        i32::from(c.width),
+                        i32::from(c.height),
                     );
                 }
                 overlays.push(smithay::utils::Rectangle::new(
                     (img_x, img_y).into(),
-                    (c.width as i32, c.height as i32).into(),
+                    (i32::from(c.width), i32::from(c.height)).into(),
                 ));
             }
 
@@ -1854,8 +1872,8 @@ where
                 if let (Some(grab), Some(r)) = (shared.as_mut(), drawn) {
                     grab.overlaid(
                         idx,
-                        r.loc.x + cap_x as i32,
-                        r.loc.y + cap_y as i32,
+                        r.loc.x + i32::from(cap_x),
+                        r.loc.y + i32::from(cap_y),
                         r.size.w,
                         r.size.h,
                     );
@@ -1977,9 +1995,9 @@ pub(crate) mod gpu_test_support {
         let mut n = 0f64;
         for y in 0..v.height {
             for x in 0..v.width {
-                acc[0] += v.y[y * v.y_stride + x] as f64;
-                acc[1] += v.u[(y / 2) * v.uv_stride + x / 2] as f64;
-                acc[2] += v.v[(y / 2) * v.uv_stride + x / 2] as f64;
+                acc[0] += f64::from(v.y[y * v.y_stride + x]);
+                acc[1] += f64::from(v.u[(y / 2) * v.uv_stride + x / 2]);
+                acc[2] += f64::from(v.v[(y / 2) * v.uv_stride + x / 2]);
                 n += 1.0;
             }
         }
@@ -2113,8 +2131,8 @@ pub(crate) mod gpu_test_support {
             let mut mse = 0.0;
             for y in 0..H {
                 for x in 0..W {
-                    let want = 16.0 + page[(y * W + x) * 4] as f64 * 219.0 / 255.0;
-                    let d = shown.y[y * shown.y_stride + x] as f64 - want;
+                    let want = 16.0 + f64::from(page[(y * W + x) * 4]) * 219.0 / 255.0;
+                    let d = f64::from(shown.y[y * shown.y_stride + x]) - want;
                     mse += d * d;
                 }
             }
@@ -2577,7 +2595,7 @@ mod damage_tests {
         let caret = captured_damage(&rects, 0, 0, w, h);
         assert_eq!(
             caret,
-            Changed::Area((40.0 / (w * h) as f64) as f32),
+            Changed::Area((40.0 / f64::from(w * h)) as f32),
             "{rects:?}"
         );
         assert_eq!(
@@ -2844,8 +2862,8 @@ mod damage_tests {
             codec: Codec::H264,
             use_cpu: true,
             target_fps: 30.0,
-            width: width as i32,
-            height: height as i32,
+            width: i32::from(width),
+            height: i32::from(height),
             capture_cursor: true,
             use_paint_over_quality: false,
             ..Default::default()
@@ -2916,8 +2934,8 @@ mod damage_tests {
             codec: Codec::H264,
             use_cpu: true,
             target_fps: 60.0,
-            width: width as i32,
-            height: height as i32,
+            width: i32::from(width),
+            height: i32::from(height),
             capture_cursor: true,
             ..Default::default()
         };
@@ -2969,7 +2987,7 @@ mod damage_tests {
             height,
             boxed,
             if boxed.is_some() {
-                n as f64 / secs
+                f64::from(n) / secs
             } else {
                 0.0
             },
@@ -3006,8 +3024,8 @@ mod damage_tests {
             codec,
             use_cpu: std::env::var("PF_BENCH_CPU").map_or(true, |v| v != "0"),
             target_fps: 60.0,
-            width: width as i32,
-            height: height as i32,
+            width: i32::from(width),
+            height: i32::from(height),
             use_paint_over_quality: false,
             ..Default::default()
         };
@@ -3138,8 +3156,8 @@ mod damage_tests {
             use_paint_over_quality: true,
             paint_over_trigger_frames: 15,
             target_fps: 60.0,
-            width: w as i32,
-            height: h as i32,
+            width: i32::from(w),
+            height: i32::from(h),
             capture_cursor: false,
             ..Default::default()
         };

@@ -823,7 +823,15 @@ pub(crate) mod tests {
         tick(&mut steer, 5600.0, DELIVERED, 0.0, 4.0, Some(0.1), None);
         assert!(steer.met_queue && steer.holds_to_target());
         for t in 5..40 {
-            tick(&mut steer, 8000.0, GOODPUT, 0.0, t as f64, Some(0.0), None);
+            tick(
+                &mut steer,
+                8000.0,
+                GOODPUT,
+                0.0,
+                f64::from(t),
+                Some(0.0),
+                None,
+            );
         }
         assert!(
             steer.holds_to_target(),
@@ -1129,7 +1137,7 @@ pub(crate) mod tests {
         ));
         for t in 1..41 {
             cur = steer.target(tick_of(
-                [cur, top, bottom, trickle, 0.0, t as f64],
+                [cur, top, bottom, trickle, 0.0, f64::from(t)],
                 [Some(0.0), Some(trickle), None, None],
             ));
         }
@@ -1179,7 +1187,7 @@ pub(crate) mod tests {
         ));
         for t in 2..20 {
             cur = steer.target(tick_of(
-                [cur, top, bottom, trickle, 0.0, t as f64],
+                [cur, top, bottom, trickle, 0.0, f64::from(t)],
                 [None, Some(trickle), None, None],
             ));
         }
@@ -1191,7 +1199,7 @@ pub(crate) mod tests {
         ));
         for t in 1..12 {
             cur = steer.target(tick_of(
-                [cur, top, bottom, trickle, 0.0, t as f64],
+                [cur, top, bottom, trickle, 0.0, f64::from(t)],
                 [Some(0.0), None, None, None],
             ));
         }

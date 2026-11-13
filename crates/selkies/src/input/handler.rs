@@ -391,7 +391,7 @@ impl Dispatcher {
     pub fn set_system_dpi(&self, dpi: f64) {
         let mut st = self.state.lock();
         st.system_dpi = dpi;
-        st.cursor_size_cap = (self.max_cursor_size() as f64 * dpi / 96.0).round() as u32;
+        st.cursor_size_cap = (f64::from(self.max_cursor_size()) * dpi / 96.0).round() as u32;
     }
 
     /// The remote-cursor cap at unity: the configured maximum, or the operator's cursor size above it.
@@ -421,10 +421,10 @@ impl Dispatcher {
                 let mut st = self.state.lock();
                 // Reject nonsense (a 0) that would busy-repeat or never repeat.
                 if (100..=2000).contains(&delay_ms) {
-                    st.key_repeat_delay = Duration::from_millis(delay_ms as u64);
+                    st.key_repeat_delay = Duration::from_millis(u64::from(delay_ms));
                 }
                 if (10..=1000).contains(&interval_ms) {
-                    st.key_repeat_interval = Duration::from_millis(interval_ms as u64);
+                    st.key_repeat_interval = Duration::from_millis(u64::from(interval_ms));
                 }
                 debug!(target: "input", "Server autorepeat: delay {:?}, interval {:?}.", st.key_repeat_delay, st.key_repeat_interval);
             }
@@ -1103,7 +1103,7 @@ impl Dispatcher {
         down: bool,
     ) {
         if let Some(devices) = devices {
-            let keycode = s.link().keysym_to_keycode(keysym) as u32;
+            let keycode = u32::from(s.link().keysym_to_keycode(keysym));
             if keycode > 8 {
                 devices.key(keycode - 8, down);
             }

@@ -664,7 +664,10 @@ impl Engine {
         let Some(origin) = self.primary_output().map(|o| (o.rect.x, o.rect.y)) else {
             return false;
         };
-        let (x, y) = (self.pointer.0 - origin.0 as f64, self.pointer.1 - origin.1 as f64);
+        let (x, y) = (
+            self.pointer.0 - f64::from(origin.0),
+            self.pointer.1 - f64::from(origin.1),
+        );
         self.shell_icons.1.iter().any(|cell| cell.contains(x, y))
     }
 
@@ -2711,14 +2714,14 @@ impl Engine {
         } else if maximized || tiled {
             let pointer_x = self.pointer.0;
             let rect = win.rect;
-            let ratio = ((pointer_x - rect.x as f64) / rect.w.max(1) as f64).clamp(0.0, 1.0);
+            let ratio = ((pointer_x - f64::from(rect.x)) / f64::from(rect.w.max(1))).clamp(0.0, 1.0);
             if maximized {
                 self.set_maximized(id, false);
             } else {
                 self.set_tile(id, None);
             }
             let restored = self.windows[&id].rect;
-            let x = (pointer_x - ratio * restored.w as f64).round() as i32;
+            let x = (pointer_x - ratio * f64::from(restored.w)).round() as i32;
             self.set_rect(id, Rect::new(x, rect.y, restored.w, restored.h));
             // The restore glides toward the saved place, which the drag has left behind.
             if self.effects.cancel(id).is_some() {
@@ -2936,7 +2939,7 @@ impl Engine {
                 if let Some(press) = self.press {
                     let dx = event.x - press.at.0;
                     let dy = event.y - press.at.1;
-                    let threshold = self.config.drag_threshold.max(1) as f64;
+                    let threshold = f64::from(self.config.drag_threshold.max(1));
                     if !press.dragged && (dx.abs() >= threshold || dy.abs() >= threshold) {
                         if let Some(p) = self.press.as_mut() {
                             p.dragged = true;
@@ -4147,7 +4150,7 @@ impl Engine {
     fn open_menu(&mut self, id: &str, at: (i32, i32), window: Option<WindowId>) {
         self.close_menu();
         let output = self
-            .output_at(at.0 as f64, at.1 as f64)
+            .output_at(f64::from(at.0), f64::from(at.1))
             .map(|o| o.id)
             .unwrap_or(0);
         let area = self.workarea(output);
@@ -5309,11 +5312,11 @@ mod tests {
         engine.set_tile(1, Some(Zone::Right));
         engine.handle(Event::Tick(engine.now + Duration::from_secs(1)), &mut Vec::new());
         let tile = engine.win(1).unwrap().rect;
-        engine.pointer = ((tile.x + tile.w / 2) as f64, (tile.y - 10) as f64);
+        engine.pointer = (f64::from(tile.x + tile.w / 2), f64::from(tile.y - 10));
         engine.begin_grab(1, GrabKind::Move, Some(BTN_LEFT));
         assert!(!engine.effects.running(1), "no glide toward the saved place");
         let rect = engine.win(1).unwrap().rect;
-        assert!(rect.x as f64 <= engine.pointer.0 && engine.pointer.0 <= rect.right() as f64);
+        assert!(f64::from(rect.x) <= engine.pointer.0 && engine.pointer.0 <= f64::from(rect.right()));
     }
 
     /// Two windows go side by side.
@@ -5383,7 +5386,7 @@ mod tests {
         engine.shell_icons_path = Some(path.clone());
         let origin = engine
             .primary_output()
-            .map(|o| (o.rect.x as f64, o.rect.y as f64))
+            .map(|o| (f64::from(o.rect.x), f64::from(o.rect.y)))
             .unwrap();
         let desktop = Under {
             desktop: true,
@@ -5528,7 +5531,7 @@ mod tests {
         open(&mut engine, 2, 300, 200);
         let rect1 = engine.windows[&1].rect;
         let mut out = Vec::new();
-        let title = (rect1.x as f64 + 200.0, rect1.y as f64 - 10.0);
+        let title = (f64::from(rect1.x) + 200.0, f64::from(rect1.y) - 10.0);
         let press = |x: f64, y: f64, pressed: bool| {
             Event::Pointer(
                 PointerEvent {
@@ -5588,7 +5591,7 @@ mod tests {
         );
         let (_, close) = layout.buttons.last().copied().unwrap();
         let frame = engine.frame_rect(1);
-        let at = ((frame.x + close.x + 5) as f64, (frame.y + close.y + 5) as f64);
+        let at = (f64::from(frame.x + close.x + 5), f64::from(frame.y + close.y + 5));
         out.clear();
         engine.handle(press(at.0, at.1, true), &mut out);
         engine.handle(press(at.0, at.1, false), &mut out);
@@ -5637,7 +5640,7 @@ mod tests {
         assert_eq!(engine.windows[&1].rect, before);
 
         let mut out = Vec::new();
-        let title = (before.x as f64 + 200.0, before.y as f64 - 10.0);
+        let title = (f64::from(before.x) + 200.0, f64::from(before.y) - 10.0);
         let press = |x: f64, y: f64, pressed: bool| {
             Event::Pointer(
                 PointerEvent {
@@ -5770,7 +5773,7 @@ mod tests {
         let (mut engine, _) = engine();
         open(&mut engine, 1, 600, 400);
         let start = engine.windows[&1].rect;
-        let at = (start.x as f64, start.y as f64 + 200.0);
+        let at = (f64::from(start.x), f64::from(start.y) + 200.0);
         engine.pointer = at;
         engine.run_action(&Action::Resize(Some(ResizeEdge::Left)), Some(1), at);
         engine.out.clear();
@@ -6063,8 +6066,8 @@ mod tests {
         let overlap = framed.intersection(&csd);
         assert!(!overlap.is_empty(), "the windows share a region on the work area");
         let (x, y) = (
-            overlap.x as f64 + overlap.w as f64 / 2.0,
-            overlap.y as f64 + overlap.h as f64 / 2.0,
+            f64::from(overlap.x) + f64::from(overlap.w) / 2.0,
+            f64::from(overlap.y) + f64::from(overlap.h) / 2.0,
         );
         let under = Under {
             window: Some(2),
@@ -6184,8 +6187,8 @@ mod tests {
         let verdict = engine.handle(
             Event::Pointer(
                 PointerEvent {
-                    x: rect1.x as f64 + 10.0,
-                    y: rect1.y as f64 + 10.0,
+                    x: f64::from(rect1.x) + 10.0,
+                    y: f64::from(rect1.y) + 10.0,
                     kind: PointerKind::Button {
                         button: BTN_LEFT,
                         pressed: true,
@@ -6282,7 +6285,7 @@ mod tests {
         let mut out = Vec::new();
         for _ in 0..2 {
             let at = engine.windows[&1].rect;
-            let (x, y) = (at.x as f64 + 100.0, at.y as f64 + 10.0);
+            let (x, y) = (f64::from(at.x) + 100.0, f64::from(at.y) + 10.0);
             assert_eq!(
                 engine.handle(pointer(x, y, button(true)), &mut out),
                 Verdict::Pass
@@ -6368,8 +6371,8 @@ mod tests {
         let click = |pressed: bool| {
             Event::Pointer(
                 PointerEvent {
-                    x: row.x as f64 + 20.0,
-                    y: row.y as f64 + 5.0,
+                    x: f64::from(row.x) + 20.0,
+                    y: f64::from(row.y) + 5.0,
                     kind: PointerKind::Button {
                         button: BTN_LEFT,
                         pressed,

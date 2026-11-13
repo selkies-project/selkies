@@ -413,7 +413,7 @@ pub fn output_content_covers(
 ) -> bool {
     windows_on_output(space, display_id).any(|w| {
         let size = w.geometry().size;
-        size.w as f64 >= logical_w && size.h as f64 >= logical_h
+        f64::from(size.w) >= logical_w && f64::from(size.h) >= logical_h
     })
 }
 
@@ -435,8 +435,8 @@ impl OutputNode {
         Some(Rectangle::new(
             Point::from(self.pos),
             (
-                (w as f64 / scale).round() as i32,
-                (h as f64 / scale).round() as i32,
+                (f64::from(w) / scale).round() as i32,
+                (f64::from(h) / scale).round() as i32,
             )
                 .into(),
         ))
@@ -824,7 +824,8 @@ pub struct PointerShare {
 impl PointerShare {
     /// Called from the compositor thread alone.
     pub fn publish(&self, at: PointerAt) {
-        let position = (at.x as f32).to_bits() as u64 | ((at.y as f32).to_bits() as u64) << 32;
+        let position =
+            u64::from((at.x as f32).to_bits()) | u64::from((at.y as f32).to_bits()) << 32;
         let scale = at.scale.to_bits();
         let version = self.version.load(Ordering::Relaxed);
         if version != 0
@@ -855,8 +856,8 @@ impl PointerShare {
                 fence(Ordering::Acquire);
                 if self.version.load(Ordering::Relaxed) == version {
                     return Some(PointerAt {
-                        x: f32::from_bits(position as u32) as f64,
-                        y: f32::from_bits((position >> 32) as u32) as f64,
+                        x: f64::from(f32::from_bits(position as u32)),
+                        y: f64::from(f32::from_bits((position >> 32) as u32)),
                         scale: f64::from_bits(scale),
                         motion,
                     });
@@ -1245,7 +1246,7 @@ impl WlrLayerShellHandler for AppState {
 
             surface.with_pending_state(|state| {
                 state.size =
-                    Some(((mode.size.w as f64) as i32, (mode.size.h as f64) as i32).into());
+                    Some((f64::from(mode.size.w) as i32, f64::from(mode.size.h) as i32).into());
             });
             surface.send_configure();
 
@@ -1507,8 +1508,8 @@ impl CompositorHandler for AppState {
                 } else {
                     let scale = self.settings.scale.max(0.1);
                     (
-                        (self.settings.width as f64 / scale).round() as i32,
-                        (self.settings.height as f64 / scale).round() as i32,
+                        (f64::from(self.settings.width) / scale).round() as i32,
+                        (f64::from(self.settings.height) / scale).round() as i32,
                     )
                 };
 
@@ -1707,13 +1708,13 @@ impl AppState {
                 continue;
             };
             let scale = node.output.current_scale().fractional_scale();
-            let (px, py) = (node.pos.0 as f64, node.pos.1 as f64);
-            let cx = x.max(px).min(px + mode.size.w as f64 - 1.0);
-            let cy = y.max(py).min(py + mode.size.h as f64 - 1.0);
+            let (px, py) = (f64::from(node.pos.0), f64::from(node.pos.1));
+            let cx = x.max(px).min(px + f64::from(mode.size.w) - 1.0);
+            let cy = y.max(py).min(py + f64::from(mode.size.h) - 1.0);
             let d2 = (x - cx).powi(2) + (y - cy).powi(2);
             let logical = Point::from((
-                node.pos.0 as f64 + (cx - px) / scale,
-                node.pos.1 as f64 + (cy - py) / scale,
+                f64::from(node.pos.0) + (cx - px) / scale,
+                f64::from(node.pos.1) + (cy - py) / scale,
             ));
             if best.as_ref().map(|(bd, _)| d2 < *bd).unwrap_or(true) {
                 best = Some((d2, logical));
@@ -1954,8 +1955,8 @@ impl AppState {
         };
         let scale = node.output.current_scale().fractional_scale();
         (
-            node.pos.0 as f64 + (p.x - node.pos.0 as f64) * scale,
-            node.pos.1 as f64 + (p.y - node.pos.1 as f64) * scale,
+            f64::from(node.pos.0) + (p.x - f64::from(node.pos.0)) * scale,
+            f64::from(node.pos.1) + (p.y - f64::from(node.pos.1)) * scale,
             scale,
         )
     }
@@ -2458,8 +2459,8 @@ impl AppState {
         } else {
             let scale = self.settings.scale.max(0.1);
             (
-                (self.settings.width as f64 / scale).round() as i32,
-                (self.settings.height as f64 / scale).round() as i32,
+                (f64::from(self.settings.width) / scale).round() as i32,
+                (f64::from(self.settings.height) / scale).round() as i32,
             )
         };
         toplevel.with_pending_state(|state| {
@@ -4219,7 +4220,7 @@ mod pointer_share_tests {
         let mut seen = 0;
         while !writer.is_finished() || seen == 0 {
             if let Some(p) = share.read() {
-                assert_eq!(p.x, p.motion as f32 as f64);
+                assert_eq!(p.x, f64::from(p.motion as f32));
                 assert_eq!(p.y, (p.motion % 4096) as f64);
                 seen += 1;
             }

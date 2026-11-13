@@ -104,7 +104,7 @@ mod tests {
         let timer = SendTimer::new();
         assert!(timer.take().is_none(), "an empty window is no reading");
         for i in 1..=100 {
-            timer.frame_sent(i, 1, 1 + i as i64 * 1_000_000);
+            timer.frame_sent(i, 1, 1 + i64::from(i) * 1_000_000);
         }
         timer.frame_sent(200, 0, 5);
         let p = timer.take().unwrap();
@@ -120,7 +120,7 @@ mod tests {
     fn the_window_is_bounded() {
         let timer = SendTimer::new();
         for i in 0..(WINDOW_FRAMES as i32 + 10) {
-            timer.frame_sent(i, 1, 1 + i as i64);
+            timer.frame_sent(i, 1, 1 + i64::from(i));
         }
         let p = timer.take().unwrap();
         assert_eq!(p.frames, WINDOW_FRAMES);

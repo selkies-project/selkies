@@ -308,7 +308,7 @@ fn scrollbar(w: &FilesWindow, layout: &Layout, area: ScrollArea, places: usize) 
 
 /// Clamps a window's scroll to its content.
 fn clamp_scroll(w: &mut FilesWindow, content: Rect) {
-    let max = (content_height(w, content) - content.h).max(0) as f64;
+    let max = f64::from((content_height(w, content) - content.h).max(0));
     w.scroll = w.scroll.clamp(0.0, max);
 }
 
@@ -341,7 +341,7 @@ fn menu_row_at(w: &FilesWindow, menu: &ContextMenu, x: f64, y: f64) -> Option<us
             MenuRow::Action(..) => MENU_ROW,
             MenuRow::Separator => MENU_SEP,
         };
-        if y >= top as f64 && y < (top + h) as f64 {
+        if y >= f64::from(top) && y < f64::from(top + h) {
             return matches!(row, MenuRow::Action(..)).then_some(i);
         }
         top += h;
@@ -445,7 +445,9 @@ pub fn hit(d: &mut Desktop, id: u32, x: f64, y: f64) -> Hit {
         }
     }
     if layout.sidebar.w > 0 && layout.sidebar.contains(x, y) {
-        let row = ((y - layout.sidebar.y as f64 - PAD as f64 + w.sidebar_scroll) / PLACE_ROW as f64).floor();
+        let row = ((y - f64::from(layout.sidebar.y) - f64::from(PAD) + w.sidebar_scroll)
+            / f64::from(PLACE_ROW))
+        .floor();
         if row >= 0.0 && (row as usize) < d.files.places.len() {
             return Hit::Place(row as usize);
         }
@@ -465,8 +467,8 @@ pub fn hit(d: &mut Desktop, id: u32, x: f64, y: f64) -> Hit {
             View::Icons => {
                 let cols = grid_columns(layout.content);
                 let first = cell_rect(layout.content, 0);
-                let col = ((x - first.x as f64) / CELL_W as f64).floor();
-                let row = ((sy - first.y as f64) / CELL_H as f64).floor();
+                let col = ((x - f64::from(first.x)) / f64::from(CELL_W)).floor();
+                let row = ((sy - f64::from(first.y)) / f64::from(CELL_H)).floor();
                 if col >= 0.0 && (col as i32) < cols && row >= 0.0 {
                     let index = row as usize * cols as usize + col as usize;
                     let cell = cell_rect(layout.content, index);
@@ -476,7 +478,7 @@ pub fn hit(d: &mut Desktop, id: u32, x: f64, y: f64) -> Hit {
                 }
             }
             View::List => {
-                let row = ((sy - layout.content.y as f64) / LIST_ROW as f64).floor();
+                let row = ((sy - f64::from(layout.content.y)) / f64::from(LIST_ROW)).floor();
                 (row >= 0.0 && (row as usize) < w.items.len()).then_some(row as usize)
             }
         };
@@ -1279,12 +1281,12 @@ fn commit_rename(d: &mut Desktop, id: u32) {
 fn scroll_to(w: &mut FilesWindow, index: usize) {
     let layout = layout(w);
     let rect = item_rect(w, layout.content, index);
-    let top = (rect.y - layout.content.y) as f64;
-    let bottom = top + rect.h as f64;
+    let top = f64::from(rect.y - layout.content.y);
+    let bottom = top + f64::from(rect.h);
     if top < w.scroll {
         w.scroll = top;
-    } else if bottom > w.scroll + layout.content.h as f64 {
-        w.scroll = bottom - layout.content.h as f64;
+    } else if bottom > w.scroll + f64::from(layout.content.h) {
+        w.scroll = bottom - f64::from(layout.content.h);
     }
     clamp_scroll(w, layout.content);
 }
@@ -1305,8 +1307,8 @@ pub fn pointer_axis(d: &mut Desktop, id: u32, x: f64, y: f64, delta: f64) {
     let layout = layout(w);
     let step = delta.signum() * ui::SCROLL_STEP;
     if layout.sidebar.w > 0 && layout.sidebar.contains(x, y) {
-        let content = places as f64 * PLACE_ROW as f64 + PAD as f64 * 2.0;
-        let max = (content - layout.sidebar.h as f64).max(0.0);
+        let content = places as f64 * f64::from(PLACE_ROW) + f64::from(PAD) * 2.0;
+        let max = (content - f64::from(layout.sidebar.h)).max(0.0);
         w.sidebar_scroll = (w.sidebar_scroll + step).clamp(0.0, max);
     } else if layout.content.contains(x, y) || layout.header.contains(x, y) {
         w.scroll += step;

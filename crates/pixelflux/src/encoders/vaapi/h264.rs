@@ -88,8 +88,13 @@ impl Arm {
         self.mb_height = surface_height / 16;
         self.slices = slices;
         self.dpb = n.dpb;
-        self.level_idc =
-            h264_level(n.width, n.height, n.fps.ceil(), n.bits_per_second as u64).max(n.dpb_level);
+        self.level_idc = h264_level(
+            n.width,
+            n.height,
+            n.fps.ceil(),
+            u64::from(n.bits_per_second),
+        )
+        .max(n.dpb_level);
         let profile_idc = if self.profile == VAProfileH264High {
             100
         } else if self.profile == VAProfileH264Main {
@@ -114,7 +119,7 @@ impl Arm {
         w.flag(set4);
         w.flag(set5);
         w.u(2, 0);
-        w.u(8, self.level_idc as u64);
+        w.u(8, u64::from(self.level_idc));
         w.ue(0);
         if profile_idc == 100 {
             w.ue(1);
@@ -150,8 +155,8 @@ impl Arm {
         w.u(8, 1);
         w.flag(false);
         w.flag(true);
-        w.u(32, n.fps.den as u64);
-        w.u(32, 2 * n.fps.num as u64);
+        w.u(32, u64::from(n.fps.den));
+        w.u(32, 2 * u64::from(n.fps.num));
         w.flag(true);
         w.flag(false);
         w.flag(false);
@@ -215,7 +220,7 @@ impl Arm {
             v.set_log2_max_mv_length_horizontal(15);
             v.set_log2_max_mv_length_vertical(15);
         }
-        s.frame_cropping_flag = crop as u8;
+        s.frame_cropping_flag = u8::from(crop);
         if crop {
             s.frame_crop_right_offset = (self.mb_width * 16 - n.width) / 2;
             s.frame_crop_bottom_offset = (self.mb_height * 16 - n.height) / 2;
@@ -248,7 +253,7 @@ impl Arm {
         frame: &Frame,
         out: &mut Buffers,
     ) -> Result<(), String> {
-        let frame_num = ((frame.pts - frame.key_pts) % self.frame_num_range() as u64) as u32;
+        let frame_num = ((frame.pts - frame.key_pts) % u64::from(self.frame_num_range())) as u32;
         let poc = 2 * (frame.pts - frame.key_pts) as i32;
         if frame.key {
             self.idr_pic_id = self
@@ -259,7 +264,7 @@ impl Arm {
         let picture = |pts: u64, surface: VASurfaceID| VAPictureH264 {
             picture_id: surface,
             frame_idx: long_term(pts).map_or(
-                ((pts - frame.key_pts) % self.frame_num_range() as u64) as u32,
+                ((pts - frame.key_pts) % u64::from(self.frame_num_range())) as u32,
                 u32::from,
             ),
             flags: if long_term(pts).is_some() {
@@ -314,10 +319,10 @@ impl Arm {
         pic.pic_init_qp = PIC_INIT_QP as u8;
         unsafe {
             let f = &mut pic.pic_fields.bits;
-            f.set_idr_pic_flag(frame.key as u32);
+            f.set_idr_pic_flag(u32::from(frame.key));
             f.set_reference_pic_flag(1);
-            f.set_entropy_coding_mode_flag(self.cabac as u32);
-            f.set_transform_8x8_mode_flag(self.transform_8x8 as u32);
+            f.set_entropy_coding_mode_flag(u32::from(self.cabac));
+            f.set_transform_8x8_mode_flag(u32::from(self.transform_8x8));
         }
         out.push(VAEncPictureParameterBufferType, &pic);
 
@@ -348,9 +353,9 @@ impl Arm {
                 w.ue(first_mb);
                 w.ue(slice_type);
                 w.ue(0);
-                w.u(4 + LOG2_MAX_FRAME_NUM_MINUS4, frame_num as u64);
+                w.u(4 + LOG2_MAX_FRAME_NUM_MINUS4, u64::from(frame_num));
                 if frame.key {
-                    w.ue(self.idr_pic_id as u32);
+                    w.ue(u32::from(self.idr_pic_id));
                 }
                 if !frame.key {
                     w.flag(false);
@@ -358,11 +363,11 @@ impl Arm {
                     if let Some(index) = long_term(ref_pts) {
                         w.flag(true);
                         w.ue(2);
-                        w.ue(index as u32);
+                        w.ue(u32::from(index));
                         w.ue(3);
                     } else {
                         let ref_frame_num =
-                            ((ref_pts - frame.key_pts) % self.frame_num_range() as u64) as u32;
+                            ((ref_pts - frame.key_pts) % u64::from(self.frame_num_range())) as u32;
                         let newest = held.iter().find(|h| long_term(h.0).is_none()).map(|h| h.0)
                             == Some(ref_pts);
                         w.flag(!newest);
@@ -381,7 +386,7 @@ impl Arm {
                 } else if let Some(index) = frame.anchor {
                     w.flag(true);
                     w.ue(6);
-                    w.ue(index as u32);
+                    w.ue(u32::from(index));
                     w.ue(0);
                 } else {
                     w.flag(false);

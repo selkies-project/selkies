@@ -1243,7 +1243,7 @@ impl VaapiEncoder {
         let height = settings.height.max(1) as u32;
         let fps = rate.fps;
         let bits_per_second = if rate.cbr {
-            rate.bps().min(u32::MAX as u64) as u32
+            rate.bps().min(u64::from(u32::MAX)) as u32
         } else {
             0
         };
@@ -1289,7 +1289,7 @@ impl VaapiEncoder {
         if ref_l0 < 1 {
             return Err("this VA-API driver takes no reference frames".into());
         }
-        let level_bitrate = bits_per_second as u64;
+        let level_bitrate = u64::from(bits_per_second);
         let dpb_level = match codec {
             Codec::H264 => super::codec::h264_level(width, height, fps.ceil(), level_bitrate),
             Codec::H265 => super::codec::h265_level(width, height, fps.ceil(), level_bitrate, true),
@@ -1836,7 +1836,7 @@ impl VaapiEncoder {
         self.rate = rate;
         self.negotiated.fps = rate.fps;
         self.negotiated.bits_per_second = if rate.cbr {
-            rate.bps().min(u32::MAX as u64) as u32
+            rate.bps().min(u64::from(u32::MAX)) as u32
         } else {
             0
         };
@@ -1932,7 +1932,7 @@ impl VaapiEncoder {
         let mut address: *mut c_void = ptr::null_mut();
         let mut rows = None;
         if bytes > 0
-            && image.height as u32 >= self.negotiated.height
+            && u32::from(image.height) >= self.negotiated.height
             && unsafe { (api.vaMapBuffer)(display, image.buf, &mut address) }
                 == VA_STATUS_SUCCESS as VAStatus
         {
@@ -1979,7 +1979,7 @@ impl VaapiEncoder {
             .iter()
             .zip(&coded)
             .map(|(&a, &b)| {
-                let d = a as i64 - b as i64;
+                let d = i64::from(a) - i64::from(b);
                 (d * d) as u64
             })
             .sum();
@@ -2029,8 +2029,8 @@ impl VaapiEncoder {
     /// (18 dB), where a cleanup at a 2 Mbit/s path's rate reaches 52 dB.
     pub fn cap(&mut self, bytes: usize) {
         if self.rate.cbr {
-            let bps =
-                (bytes as f64 * 8.0 / crate::pipeline::CLEANUP_FRAME_S).min(u32::MAX as f64) as u32;
+            let bps = (bytes as f64 * 8.0 / crate::pipeline::CLEANUP_FRAME_S)
+                .min(f64::from(u32::MAX)) as u32;
             self.cleanup_bps = Some(bps.max(self.negotiated.bits_per_second));
         }
     }
@@ -2127,13 +2127,13 @@ impl VaapiEncoder {
     fn rate_control_at(&self, out: &mut Buffers, bps: u32) {
         if self.rate.cbr {
             // The session's buffer spans the same time at a cleanup frame's rate.
-            let vbv = (self.rate.vbv() as u64 * bps as u64
-                / self.negotiated.bits_per_second.max(1) as u64)
-                .min(u32::MAX as u64) as u32;
+            let vbv = (u64::from(self.rate.vbv()) * u64::from(bps)
+                / u64::from(self.negotiated.bits_per_second.max(1)))
+            .min(u64::from(u32::MAX)) as u32;
             let mut rc: VAEncMiscParameterRateControl = unsafe { std::mem::zeroed() };
             rc.bits_per_second = bps;
             rc.target_percentage = 100;
-            rc.window_size = (vbv as u64 * 1000 / bps.max(1) as u64) as u32;
+            rc.window_size = (u64::from(vbv) * 1000 / u64::from(bps.max(1))) as u32;
             rc.initial_qp = 0;
             rc.min_qp = if matches!(self.arm, Arm::H264(_)) {
                 self.negotiated.min_qp.max(h264::MIN_QP)
@@ -2158,7 +2158,7 @@ impl VaapiEncoder {
             out.push_misc(VAEncMiscParameterTypeRateControl, &rc);
             let buffer = match bound {
                 ConstantRate::Buffer => Some(vbv),
-                ConstantRate::Seconds(s) => Some((bps as f64 * s) as u32),
+                ConstantRate::Seconds(s) => Some((f64::from(bps) * s) as u32),
                 ConstantRate::Unbounded => None,
             };
             if let Some(bits) = buffer {
@@ -2669,7 +2669,7 @@ impl VaapiEncoder {
                 self.negotiated.width,
                 self.negotiated.height,
             );
-            bps = (bits * fps).min(u32::MAX as f64) as u32;
+            bps = (bits * fps).min(f64::from(u32::MAX)) as u32;
         }
         if key {
             self.arm.sequence(&self.negotiated, &mut out);
@@ -2940,13 +2940,13 @@ fn color_standard(
         (VAProcColorStandardBT2020, 9, 14, 9),
     ];
     let matrix_counts = !wanted.rgb;
-    let worst = 4 * matrix_counts as u32 + 2 + 1;
+    let worst = 4 * u32::from(matrix_counts) + 2 + 1;
     let mut best = (worst, VAProcColorStandardNone);
     for &standard in offered {
         for &(_, primaries, transfer, matrix) in TABLE.iter().filter(|t| t.0 == standard) {
-            let score = 4 * (matrix_counts && wanted.matrix != matrix) as u32
-                + 2 * (wanted.transfer != transfer) as u32
-                + (wanted.primaries != primaries) as u32;
+            let score = 4 * u32::from(matrix_counts && wanted.matrix != matrix)
+                + 2 * u32::from(wanted.transfer != transfer)
+                + u32::from(wanted.primaries != primaries);
             if score < best.0 {
                 best = (score, standard);
             }
@@ -3338,11 +3338,15 @@ mod tests {
             for y in (0..480).step_by(2) {
                 for x in (0..w).step_by(2) {
                     let i = (y * w + x) * 4;
-                    let (bb, g, r) = (src[i] as f64, src[i + 1] as f64, src[i + 2] as f64);
+                    let (bb, g, r) = (
+                        f64::from(src[i]),
+                        f64::from(src[i + 1]),
+                        f64::from(src[i + 2]),
+                    );
                     let luma = 16.0 + (0.2126 * r + 0.7152 * g + 0.0722 * bb) * 219.0 / 255.0;
                     let (pa, pb) = (
-                        a.y[y * a.y_stride + x] as f64,
-                        b.y[y * b.y_stride + x] as f64,
+                        f64::from(a.y[y * a.y_stride + x]),
+                        f64::from(b.y[y * b.y_stride + x]),
                     );
                     sum += (pb - luma).abs();
                     apart = apart.max((pa - pb).abs());
@@ -3526,9 +3530,13 @@ mod tests {
                 for y in (0..h).step_by(4) {
                     for x in (0..w).step_by(4) {
                         let i = (y * w + x) * 4;
-                        let (b, g, r) = (src[i] as f64, src[i + 1] as f64, src[i + 2] as f64);
+                        let (b, g, r) = (
+                            f64::from(src[i]),
+                            f64::from(src[i + 1]),
+                            f64::from(src[i + 2]),
+                        );
                         let luma = 16.0 + (0.2126 * r + 0.7152 * g + 0.0722 * b) * 219.0 / 255.0;
-                        sum += (p.y[y * p.y_stride + x] as f64 - luma).abs();
+                        sum += (f64::from(p.y[y * p.y_stride + x]) - luma).abs();
                     }
                 }
                 worst = worst.max(sum / ((h / 4) * (w / 4)) as f64);

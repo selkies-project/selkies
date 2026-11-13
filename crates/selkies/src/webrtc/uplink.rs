@@ -85,7 +85,7 @@ fn on_mic(engine: &Arc<RtcEngine>, peer: &str, frame: ReceivedFrame) {
         return;
     }
     let red = frame.codec == Codec::Red;
-    let timestamp = red.then_some(frame.rtp_timestamp as i64);
+    let timestamp = red.then_some(i64::from(frame.rtp_timestamp));
     let (client_type, token) = {
         let peers = engine.peers.lock();
         let Some(entry) = peers.get(peer) else { return };

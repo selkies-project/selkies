@@ -536,7 +536,12 @@ impl PortalSession {
     pub fn pointer_button(&self, button: i32, pressed: bool) {
         self.notify(
             "NotifyPointerButton",
-            (self.session.clone(), Options::new(), button, pressed as u32),
+            (
+                self.session.clone(),
+                Options::new(),
+                button,
+                u32::from(pressed),
+            ),
         );
     }
 
@@ -562,7 +567,12 @@ impl PortalSession {
     pub fn keysym(&self, keysym: i32, pressed: bool) {
         self.notify(
             "NotifyKeyboardKeysym",
-            (self.session.clone(), Options::new(), keysym, pressed as u32),
+            (
+                self.session.clone(),
+                Options::new(),
+                keysym,
+                u32::from(pressed),
+            ),
         );
     }
 
@@ -574,7 +584,7 @@ impl PortalSession {
                 self.session.clone(),
                 Options::new(),
                 keycode,
-                pressed as u32,
+                u32::from(pressed),
             ),
         );
     }

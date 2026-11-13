@@ -170,7 +170,7 @@ pub struct SvtAv1Encoder {
 
 /// The id an anchor is stored under: its timestamp, off the zero the library reserves.
 fn anchor_id(pts: u64) -> u32 {
-    (pts % u32::MAX as u64) as u32 + 1
+    (pts % u64::from(u32::MAX)) as u32 + 1
 }
 
 unsafe impl Send for SvtAv1Encoder {}
@@ -305,7 +305,7 @@ impl SvtAv1Encoder {
                 };
                 // The library refuses a rate-control buffer shorter than 20 ms, which the
                 // 1.5-frame VBV falls under above 75 fps.
-                let vbv = (rate.vbv() as u64).max(bps / 50);
+                let vbv = u64::from(rate.vbv()).max(bps / 50);
                 cfg.maximum_buffer_size_ms = (vbv * 1000 / bps.max(1)) as i64;
             }
             if tracks {
@@ -547,7 +547,7 @@ impl SvtAv1Encoder {
     /// empty frame.
     pub fn idle(&mut self) {
         if let Some(peak) = self.peak.as_mut() {
-            peak.note(0.0, true, 51.0 - self.last_crf as f64);
+            peak.note(0.0, true, 51.0 - f64::from(self.last_crf));
         }
     }
 
@@ -752,14 +752,14 @@ impl SvtAv1Encoder {
             let packet_pts = p.pts.max(0) as u64;
             if !held {
                 self.last_quality =
-                    Some(Codec::Av1.quality_index(VPX_QINDEX[(p.qp as usize).min(63)] as u32));
+                    Some(Codec::Av1.quality_index(u32::from(VPX_QINDEX[(p.qp as usize).min(63)])));
             }
             unsafe { svt_av1_enc_release_out_buffer(&mut packet) };
             let id = self.pending.take(packet_pts).unwrap_or(frame_number as u16);
             let is_key = av1_is_key(&bytes);
             if let Some(peak) = self.peak.as_mut() {
                 self.last_capped = offset > 0.0;
-                let next = peak.note(bytes.len() as f64 * 8.0, !is_key, 51.0 - crf as f64);
+                let next = peak.note(bytes.len() as f64 * 8.0, !is_key, 51.0 - f64::from(crf));
                 self.bound_since_open |= next > 0.0;
             }
             let mut anchor = 0;
@@ -890,7 +890,7 @@ mod tests {
                     ra[..w]
                         .iter()
                         .zip(&rb[..w])
-                        .map(|(&x, &y)| (x as f64 - y as f64).abs())
+                        .map(|(&x, &y)| (f64::from(x) - f64::from(y)).abs())
                 })
                 .sum::<f64>()
                 / (w * h) as f64;
@@ -950,7 +950,7 @@ mod tests {
     #[test]
     fn the_frame_rate_reaches_the_library_as_its_fraction() {
         for (num, den) in [(60000u32, 1001u32), (120000, 1001), (144000, 1001), (60, 1)] {
-            let fps = num as f64 / den as f64;
+            let fps = f64::from(num) / f64::from(den);
             let settings = CaptureSettings {
                 width: 64,
                 height: 64,

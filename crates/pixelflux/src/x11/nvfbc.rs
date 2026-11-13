@@ -570,7 +570,7 @@ impl NvfbcSession {
             dwTimeoutMs: timeout
                 .as_micros()
                 .div_ceil(1000)
-                .clamp(1, u32::MAX as u128) as u32,
+                .clamp(1, u128::from(u32::MAX)) as u32,
         };
         let st = unsafe { (self.funcs.nvFBCToCudaGrabFrame.unwrap())(self.handle, &mut params) };
         if st != NVFBC_SUCCESS {
@@ -630,15 +630,17 @@ fn recovery_for(err: &NvfbcError) -> Recovery {
 /// it that way and keeps following a resize.
 fn resolve_region(screen: NVFBC_SIZE, s: &CaptureSettings) -> (NVFBC_BOX, NVFBC_SIZE) {
     let (w, h) = super::resolve_dims(
-        screen.w.min(u16::MAX as u32) as u16,
-        screen.h.min(u16::MAX as u32) as u16,
+        screen.w.min(u32::from(u16::MAX)) as u16,
+        screen.h.min(u32::from(u16::MAX)) as u16,
         s,
     );
-    let x = super::clamp_offset(s.capture_x, screen.w.min(u16::MAX as u32) as u16).max(0) as u32;
-    let y = super::clamp_offset(s.capture_y, screen.h.min(u16::MAX as u32) as u16).max(0) as u32;
+    let x =
+        super::clamp_offset(s.capture_x, screen.w.min(u32::from(u16::MAX)) as u16).max(0) as u32;
+    let y =
+        super::clamp_offset(s.capture_y, screen.h.min(u32::from(u16::MAX)) as u16).max(0) as u32;
     let size = NVFBC_SIZE {
-        w: w as u32,
-        h: h as u32,
+        w: u32::from(w),
+        h: u32::from(h),
     };
     // An empty box is the whole tracked region, which is what keeps a whole-screen capture
     // following a resize. It may only stand in for a frame that *is* the screen: a frame size
@@ -1059,7 +1061,7 @@ where
         if controls.rate_dirty.swap(false, Ordering::Acquire) {
             gpu.settings.video_bitrate_kbps = controls.bitrate_kbps.load(Ordering::Relaxed);
             gpu.settings.video_vbv_multiplier =
-                controls.vbv_mult_milli.load(Ordering::Relaxed) as f64 / 1000.0;
+                f64::from(controls.vbv_mult_milli.load(Ordering::Relaxed)) / 1000.0;
             gpu.settings.target_fps =
                 f64::from_bits(controls.fps_bits.load(Ordering::Relaxed)).max(1.0);
             gpu.encoder.reconfigure_rate(&gpu.settings);
@@ -1166,8 +1168,8 @@ where
         if frame.device_ptr == 0 || frame.width == 0 || frame.height == 0 {
             continue;
         }
-        new_frames += frame.is_new as u64;
-        direct_frames += frame.direct as u64;
+        new_frames += u64::from(frame.is_new);
+        direct_frames += u64::from(frame.direct);
 
         if frame.width != gpu.encoder.width() || frame.height != gpu.encoder.height() {
             gpu.settings.width = frame.width as i32;
@@ -1302,7 +1304,7 @@ where
                 frame.device_ptr,
                 pitch,
                 false,
-                frame_counter as u64,
+                u64::from(frame_counter),
                 decision.target_qp,
                 decision.force_idr,
             );
@@ -1339,7 +1341,7 @@ where
                         codec: gpu.settings.codec,
                         stripe_y_start: 0,
                         stripe_height: gpu.settings.height,
-                        frame_id: frame_counter as i32,
+                        frame_id: i32::from(frame_counter),
                         timing: FrameTiming {
                             capture_ns: grabbed_ns,
                             encode_start_ns,
@@ -2202,7 +2204,7 @@ mod gpu_tests {
                     wall += t.elapsed();
                     cpu += thread_cpu() - c;
                     bytes += pkt.len();
-                    news += f.is_new as usize;
+                    news += usize::from(f.is_new);
                 }
                 println!(
                     "{} {w}x{h} {label}: {:.0} fps ({:.2} ms/frame wall, {:.2} ms/frame host CPU), {news}/{n} new, {:.1} KiB/frame",

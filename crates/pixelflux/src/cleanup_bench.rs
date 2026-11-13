@@ -173,7 +173,7 @@ pub(crate) fn source_luma(bgra: &[u8], codec: Codec) -> Vec<u8> {
         .0
         .iter()
         .map(|p| {
-            let y = kr * p[2] as f64 + kg * p[1] as f64 + kb * p[0] as f64;
+            let y = kr * f64::from(p[2]) + kg * f64::from(p[1]) + kb * f64::from(p[0]);
             let v = if limited { 16.0 + y * 219.0 / 255.0 } else { y };
             v.round().clamp(0.0, 255.0) as u8
         })
@@ -189,7 +189,7 @@ fn ssim(a: &[u8], b: &[u8], w: usize, h: usize) -> f64 {
             let (mut sa, mut sb, mut saa, mut sbb, mut sab) = (0f64, 0f64, 0f64, 0f64, 0f64);
             for y in by..by + 8 {
                 for x in bx..bx + 8 {
-                    let (p, q) = (a[y * w + x] as f64, b[y * w + x] as f64);
+                    let (p, q) = (f64::from(a[y * w + x]), f64::from(b[y * w + x]));
                     sa += p;
                     sb += q;
                     saa += p * p;
@@ -262,7 +262,7 @@ fn psnr_inside(
     let mut sum = 0f64;
     for y in y0..y0 + vh {
         for x in x0..x0 + vw {
-            let d = a[y * w + x] as f64 - b[y * w + x] as f64;
+            let d = f64::from(a[y * w + x]) - f64::from(b[y * w + x]);
             sum += d * d;
         }
     }
@@ -287,7 +287,7 @@ pub(crate) fn psnr_outside(
         if (x0..x0 + vw).contains(&px) && (y0..y0 + vh).contains(&py) {
             continue;
         }
-        let d = x as f64 - y as f64;
+        let d = f64::from(x) - f64::from(y);
         sum += d * d;
         n += 1;
     }
@@ -338,7 +338,7 @@ fn psnr(a: &[u8], b: &[u8]) -> f64 {
         .iter()
         .zip(b)
         .map(|(&x, &y)| {
-            let d = x as f64 - y as f64;
+            let d = f64::from(x) - f64::from(y);
             d * d
         })
         .sum::<f64>()
@@ -424,7 +424,7 @@ fn cleanup_bench() {
         caret_period,
         p.encoder_name()
     );
-    let budget = settings.video_bitrate_kbps as f64 * 1000.0 / 8.0 / fps;
+    let budget = f64::from(settings.video_bitrate_kbps) * 1000.0 / 8.0 / fps;
     let mut decoders: HashMap<i32, Box<dyn Decoder>> = HashMap::new();
     let mut shown = vec![0u8; w * h];
     let stop = motion + prestill;
@@ -815,7 +815,7 @@ fn cleanup_hold_experiment() {
     let paint: u32 = env("PAINT_CRF", 18);
     let crf = settings.video_crf as u32;
     let canvas = Canvas::for_bench(w, h);
-    let budget = settings.video_bitrate_kbps as f64 * 1000.0 / 8.0 / fps;
+    let budget = f64::from(settings.video_bitrate_kbps) * 1000.0 / 8.0 / fps;
     for mode in ["none", "key", "delta"] {
         let (mut session, name) = Session::open(&settings);
         let mut dec = VideoDecoder::new(codec).expect("decoder");

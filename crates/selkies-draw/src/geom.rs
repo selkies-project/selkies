@@ -57,7 +57,10 @@ impl Rect {
     /// * `px` - Point X coordinate.
     /// * `py` - Point Y coordinate.
     pub fn contains(&self, px: f64, py: f64) -> bool {
-        px >= self.x as f64 && px < self.right() as f64 && py >= self.y as f64 && py < self.bottom() as f64
+        px >= f64::from(self.x)
+            && px < f64::from(self.right())
+            && py >= f64::from(self.y)
+            && py < f64::from(self.bottom())
     }
 
     /// The overlap of two rectangles, empty when they do not meet.

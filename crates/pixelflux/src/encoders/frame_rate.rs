@@ -40,7 +40,7 @@ impl FrameRate {
             fps.clamp(MIN_FPS, MAX_FPS)
         };
         let bits = fps.to_bits();
-        let mantissa = ((bits & ((1 << 52) - 1)) | (1 << 52)) as u128;
+        let mantissa = u128::from((bits & ((1 << 52) - 1)) | (1 << 52));
         let shift = 1075 - ((bits >> 52) & 0x7ff) as i32;
         let (num, den) = limit_denominator(mantissa, 1 << shift, MAX_DENOMINATOR);
         Self {
@@ -51,7 +51,7 @@ impl FrameRate {
 
     /// The rate in frames per second.
     pub fn fps(self) -> f64 {
-        self.num as f64 / self.den as f64
+        f64::from(self.num) / f64::from(self.den)
     }
 
     /// The whole frames per second a level has to admit: the rate, rounded up.
@@ -62,12 +62,13 @@ impl FrameRate {
     /// The fraction nearest the rate whose terms both fit `max`, for a field narrower than 32
     /// bits (VA-API packs each into 16).
     pub fn within(self, max: u32) -> Self {
-        let mut bound = (max as u64 * self.den as u64 / self.num as u64).max(1) as u128;
+        let mut bound =
+            u128::from((u64::from(max) * u64::from(self.den) / u64::from(self.num)).max(1));
         loop {
-            let (num, den) = limit_denominator(self.num as u128, self.den as u128, bound);
-            if num <= max as u128 || bound == 1 {
+            let (num, den) = limit_denominator(u128::from(self.num), u128::from(self.den), bound);
+            if num <= u128::from(max) || bound == 1 {
                 return Self {
-                    num: num.min(max as u128) as u32,
+                    num: num.min(u128::from(max)) as u32,
                     den: den as u32,
                 };
             }
@@ -124,10 +125,10 @@ mod tests {
     #[test]
     fn a_rate_carried_as_its_fraction_reads_back_exactly() {
         for n in [24, 25, 30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 240] {
-            assert_eq!(FrameRate::of(n as f64), rate(n, 1));
-            let g = gcd(n as u128 * 1000, 1001) as u32;
+            assert_eq!(FrameRate::of(f64::from(n)), rate(n, 1));
+            let g = gcd(u128::from(n) * 1000, 1001) as u32;
             assert_eq!(
-                FrameRate::of(n as f64 * 1000.0 / 1001.0),
+                FrameRate::of(f64::from(n) * 1000.0 / 1001.0),
                 rate(n * 1000 / g, 1001 / g),
                 "{n}000/1001"
             );
@@ -146,7 +147,7 @@ mod tests {
         assert_eq!(FrameRate::of(29.97), rate(2997, 100));
         assert_eq!(FrameRate::of(12.5), rate(25, 2));
         for (decimal, n) in [(59.94, 60), (119.88, 120), (143.856, 144)] {
-            let ntsc = n as f64 * 1000.0 / 1001.0;
+            let ntsc = f64::from(n) * 1000.0 / 1001.0;
             assert!((FrameRate::of(decimal).fps() - ntsc).abs() / ntsc < 1.1e-6);
         }
     }

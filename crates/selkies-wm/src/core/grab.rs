@@ -173,8 +173,8 @@ pub fn dragged(grab: &Grab, x: f64, y: f64) -> Rect {
 /// The edge of a resize the pointer's position inside the client picks when a resize names
 /// none: the nearest corner, as openbox's `Resize` without an edge does.
 pub fn edge_for(rect: Rect, x: f64, y: f64) -> ResizeEdge {
-    let left = x - (rect.x as f64) < rect.w as f64 / 2.0;
-    let top = y - (rect.y as f64) < rect.h as f64 / 2.0;
+    let left = x - f64::from(rect.x) < f64::from(rect.w) / 2.0;
+    let top = y - f64::from(rect.y) < f64::from(rect.h) / 2.0;
     match (top, left) {
         (true, true) => ResizeEdge::TopLeft,
         (true, false) => ResizeEdge::TopRight,

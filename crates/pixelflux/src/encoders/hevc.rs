@@ -1309,7 +1309,7 @@ mod tests {
             let settings = CaptureSettings {
                 width: 64,
                 height: 48,
-                target_fps: num as f64 / den as f64,
+                target_fps: f64::from(num) / f64::from(den),
                 codec: Codec::H265,
                 video_cbr_mode: true,
                 video_bitrate_kbps: 2000,

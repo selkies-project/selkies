@@ -194,7 +194,7 @@ pub fn text_alpha(alpha: u8) -> Color {
 /// Text drawn over the accent: black on a light accent, white on a dark one.
 pub fn on_accent() -> Color {
     let c = theme().accent.to_color_u8();
-    let luma = 0.299 * c.red() as f32 + 0.587 * c.green() as f32 + 0.114 * c.blue() as f32;
+    let luma = 0.299 * f32::from(c.red()) + 0.587 * f32::from(c.green()) + 0.114 * f32::from(c.blue());
     if luma > 160.0 {
         rgb(0x10, 0x10, 0x10)
     } else {
@@ -230,14 +230,15 @@ impl Scrollbar {
     /// * `content` - Height of the content.
     /// * `scroll` - The current scroll offset.
     pub fn new(area: Rect, content: i32, scroll: f64) -> Option<Scrollbar> {
-        let max = (content - area.h) as f64;
+        let max = f64::from(content - area.h);
         let run = area.h - 2 * THUMB_INSET;
         if max <= 0.0 || run <= 0 {
             return None;
         }
         let track = Rect::new(area.right() - SCROLLBAR, area.y, SCROLLBAR, area.h);
-        let thumb_h = ((run as f64 * area.h as f64 / content as f64) as i32).clamp(THUMB_MIN.min(run), run);
-        let travel = (run - thumb_h) as f64;
+        let thumb_h =
+            ((f64::from(run) * f64::from(area.h) / f64::from(content)) as i32).clamp(THUMB_MIN.min(run), run);
+        let travel = f64::from(run - thumb_h);
         let y = track.y + THUMB_INSET + (travel * (scroll / max).clamp(0.0, 1.0)).round() as i32;
         let thumb = Rect::new(track.x + 3, y, SCROLLBAR - 6, thumb_h);
         Some(Scrollbar { track, thumb, max })
@@ -250,10 +251,10 @@ impl Scrollbar {
     /// # Arguments
     /// * `y` - Pointer Y.
     pub fn grab(&self, y: f64) -> f64 {
-        if y >= self.thumb.y as f64 && y < self.thumb.bottom() as f64 {
-            y - self.thumb.y as f64
+        if y >= f64::from(self.thumb.y) && y < f64::from(self.thumb.bottom()) {
+            y - f64::from(self.thumb.y)
         } else {
-            self.thumb.h as f64 / 2.0
+            f64::from(self.thumb.h) / 2.0
         }
     }
 
@@ -264,11 +265,11 @@ impl Scrollbar {
     /// * `y` - Pointer Y.
     /// * `grab` - The offset into the thumb the press grabbed.
     pub fn scroll_at(&self, y: f64, grab: f64) -> f64 {
-        let travel = (self.track.h - 2 * THUMB_INSET - self.thumb.h) as f64;
+        let travel = f64::from(self.track.h - 2 * THUMB_INSET - self.thumb.h);
         if travel <= 0.0 {
             return 0.0;
         }
-        let top = y - grab - (self.track.y + THUMB_INSET) as f64;
+        let top = y - grab - f64::from(self.track.y + THUMB_INSET);
         (top / travel * self.max).clamp(0.0, self.max)
     }
 
@@ -517,12 +518,12 @@ mod tests {
         let end = Scrollbar::new(area, 4000, 3800.0).unwrap();
         assert_eq!(end.thumb.bottom(), area.bottom() - THUMB_INSET);
         let mid = Scrollbar::new(area, 400, 100.0).unwrap();
-        let y = mid.thumb.y as f64 + 5.0;
+        let y = f64::from(mid.thumb.y) + 5.0;
         let grab = mid.grab(y);
         assert_eq!(grab, 5.0);
         assert!((mid.scroll_at(y, grab) - 100.0).abs() < 1.0);
         let outside = mid.grab(1.0);
-        assert_eq!(outside, mid.thumb.h as f64 / 2.0);
+        assert_eq!(outside, f64::from(mid.thumb.h) / 2.0);
         assert_eq!(mid.scroll_at(-50.0, grab), 0.0);
         assert_eq!(mid.scroll_at(1000.0, grab), 200.0);
     }

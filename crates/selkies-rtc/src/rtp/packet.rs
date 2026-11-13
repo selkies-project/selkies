@@ -309,8 +309,8 @@ impl HeaderExtensionsMap {
                 }
             } else if id == self.playout_delay && id != 0 {
                 if value.len() >= 3 {
-                    let min = ((value[0] as u16) << 4) | (value[1] as u16 >> 4);
-                    let max = ((value[1] as u16 & 0x0F) << 8) | value[2] as u16;
+                    let min = (u16::from(value[0]) << 4) | (u16::from(value[1]) >> 4);
+                    let max = ((u16::from(value[1]) & 0x0F) << 8) | u16::from(value[2]);
                     values.playout_delay = Some((min, max));
                 }
             } else if id == self.video_timing && id != 0 {
@@ -755,20 +755,20 @@ pub fn dependency_descriptor(
     fdiff: Option<u16>,
     keyframe: bool,
 ) -> Bytes {
-    let mut bits: u128 = ((first as u128) << 23)
-        | ((last as u128) << 22)
-        | ((fdiff.is_some() as u128) << 16)
-        | frame_number as u128;
+    let mut bits: u128 = (u128::from(first) << 23)
+        | (u128::from(last) << 22)
+        | (u128::from(fdiff.is_some()) << 16)
+        | u128::from(frame_number);
     let mut count = 24;
     let structure = keyframe && first;
     let custom = fdiff.is_some_and(|d| d != 1);
     if !structure && !custom {
         return Bytes::copy_from_slice(&(bits as u32).to_be_bytes()[1..]);
     }
-    bits = (bits << 5) | ((structure as u128) << 4) | ((custom as u128) << 1);
+    bits = (bits << 5) | (u128::from(structure) << 4) | (u128::from(custom) << 1);
     count += 5;
     if structure {
-        bits = (bits << 28) | DEPENDENCY_STRUCTURE as u128;
+        bits = (bits << 28) | u128::from(DEPENDENCY_STRUCTURE);
         count += 28;
     }
     if let (true, Some(fdiff)) = (custom, fdiff) {
@@ -779,7 +779,7 @@ pub fn dependency_descriptor(
         } else {
             3
         };
-        bits = ((((bits << 2) | size as u128) << (4 * size)) | (fdiff as u128 - 1)) << 2;
+        bits = ((((bits << 2) | u128::from(size)) << (4 * size)) | (u128::from(fdiff) - 1)) << 2;
         count += 4 + 4 * size;
     }
     let padding = (8 - count % 8) % 8;
@@ -790,7 +790,7 @@ pub fn dependency_descriptor(
 }
 
 pub fn uint16_add(a: u16, b: i32) -> u16 {
-    (a as i32 + b) as u16
+    (i32::from(a) + b) as u16
 }
 
 /// Whether `a` is after `b` in 16-bit sequence space.
@@ -800,7 +800,7 @@ pub fn uint16_gt(a: u16, b: u16) -> bool {
 }
 
 pub fn uint32_add(a: u32, b: i64) -> u32 {
-    (a as i64 + b) as u32
+    (i64::from(a) + b) as u32
 }
 
 pub fn uint32_gt(a: u32, b: u32) -> bool {
@@ -940,7 +940,7 @@ mod tests {
         fn read(&mut self, n: usize) -> u32 {
             let mut v = 0;
             for _ in 0..n {
-                v = (v << 1) | ((self.data[self.pos >> 3] >> (7 - (self.pos & 7))) & 1) as u32;
+                v = (v << 1) | u32::from((self.data[self.pos >> 3] >> (7 - (self.pos & 7))) & 1);
                 self.pos += 1;
             }
             v
@@ -1106,7 +1106,7 @@ mod tests {
             assert_eq!(raw.len(), size, "fdiff {fdiff}");
             assert_eq!(
                 frame_of(&raw),
-                (0, 0, 7, vec![fdiff as u32]),
+                (0, 0, 7, vec![u32::from(fdiff)]),
                 "fdiff {fdiff}"
             );
         }

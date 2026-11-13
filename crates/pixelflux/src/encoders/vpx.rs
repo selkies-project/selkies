@@ -107,7 +107,7 @@ pub fn encodes_444() -> bool {
 /// need.
 pub fn encodes_ten_bit() -> bool {
     (unsafe { vpx_codec_get_caps(vpx_codec_vp9_cx()) })
-        & VPX_CODEC_CAP_HIGHBITDEPTH as vpx_codec_caps_t
+        & vpx_codec_caps_t::from(VPX_CODEC_CAP_HIGHBITDEPTH)
         != 0
 }
 
@@ -180,7 +180,7 @@ impl Drop for VpxEncoder {
 /// over mutable because libvpx before 1.14 declares the parameter so, though it only reads it.
 /// The peak of a capped constant quality in bits per second, as its bucket counts it.
 fn peak_bps(rate: RateSettings) -> u32 {
-    rate.bps().min(u32::MAX as u64) as u32
+    rate.bps().min(u64::from(u32::MAX)) as u32
 }
 
 fn error(ctx: &vpx_codec_ctx_t, what: &str) -> String {
@@ -231,7 +231,7 @@ impl VpxEncoder {
         cfg.g_lag_in_frames = 0;
         cfg.g_pass = VPX_RC_ONE_PASS;
         cfg.g_error_resilient = VPX_ERROR_RESILIENT_DEFAULT;
-        cfg.g_profile = fullcolor as u32 + 2 * ten_bit as u32;
+        cfg.g_profile = u32::from(fullcolor) + 2 * u32::from(ten_bit);
         cfg.g_bit_depth = if ten_bit { VPX_BITS_10 } else { VPX_BITS_8 };
         cfg.g_input_bit_depth = if ten_bit { 10 } else { 8 };
         cfg.rc_dropframe_thresh = 0;
@@ -296,7 +296,7 @@ impl VpxEncoder {
                 iface,
                 &me.cfg,
                 if ten_bit {
-                    VPX_CODEC_USE_HIGHBITDEPTH as vpx_codec_flags_t
+                    vpx_codec_flags_t::from(VPX_CODEC_USE_HIGHBITDEPTH)
                 } else {
                     0
                 },
@@ -395,8 +395,8 @@ impl VpxEncoder {
         };
         cfg.rc_end_usage = VPX_CBR;
         if rate.cbr || rate.capped {
-            let kbps = (rate.bps() / 1000).clamp(1, u32::MAX as u64) as u32;
-            let ms = (rate.vbv() as u64 * 1000 / rate.bps().max(1)) as u32;
+            let kbps = (rate.bps() / 1000).clamp(1, u64::from(u32::MAX)) as u32;
+            let ms = (u64::from(rate.vbv()) * 1000 / rate.bps().max(1)) as u32;
             cfg.rc_target_bitrate = kbps;
             cfg.rc_buf_sz = ms;
             cfg.rc_buf_initial_sz = ms;
@@ -911,14 +911,18 @@ impl VpxEncoder {
 
         let key = force_idr || !self.references.has_reference();
         let pts = self.references.next_pts();
-        let mut flags: c_long = if key { VPX_EFLAG_FORCE_KF as c_long } else { 0 };
+        let mut flags: c_long = if key {
+            c_long::from(VPX_EFLAG_FORCE_KF)
+        } else {
+            0
+        };
         self.plan = self.references.plan(key);
         self.arm_active_map(!key && self.last_refresh.refreshes(self.plan.predict_from))?;
         self.active_map.clear();
         match self.codec {
             Codec::Vp9 => {
                 let mut refs: vpx_svc_ref_frame_config = unsafe { std::mem::zeroed() };
-                refs.update_buffer_slot[0] = self.plan.refresh.0 as c_int;
+                refs.update_buffer_slot[0] = c_int::from(self.plan.refresh.0);
                 if !key {
                     let slot = self.plan.predict_from.trailing_zeros() as c_int;
                     refs.lst_fb_idx[0] = slot;
@@ -941,7 +945,7 @@ impl VpxEncoder {
                 }
             }
             _ => {
-                flags |= VP8_EFLAG_NO_UPD_ENTROPY as c_long;
+                flags |= c_long::from(VP8_EFLAG_NO_UPD_ENTROPY);
                 if !key {
                     for (buffer, no_ref, no_upd, force) in [
                         (
@@ -964,12 +968,12 @@ impl VpxEncoder {
                         ),
                     ] {
                         if self.plan.predict_from != buffer {
-                            flags |= no_ref as c_long;
+                            flags |= c_long::from(no_ref);
                         }
                         if self.plan.refresh.refreshes(buffer) {
-                            flags |= force as c_long;
+                            flags |= c_long::from(force);
                         } else {
-                            flags |= no_upd as c_long;
+                            flags |= c_long::from(no_upd);
                         }
                     }
                 }
@@ -1011,7 +1015,7 @@ impl VpxEncoder {
                 pts as i64,
                 1,
                 flags,
-                VPX_DL_REALTIME as u64,
+                u64::from(VPX_DL_REALTIME),
             )
         };
         if res != VPX_CODEC_OK {
@@ -1138,7 +1142,7 @@ mod tests {
                 ra[..a.width]
                     .iter()
                     .zip(&rb[..a.width])
-                    .map(|(&x, &y)| (x as f64 - y as f64).abs())
+                    .map(|(&x, &y)| (f64::from(x) - f64::from(y)).abs())
             })
             .sum::<f64>()
             / (a.width * a.height) as f64
@@ -1230,7 +1234,7 @@ mod tests {
     fn the_time_base_is_one_frame_of_the_rate() {
         for codec in [Codec::Vp8, Codec::Vp9] {
             for (num, den) in [(60000i32, 1001i32), (120000, 1001), (144000, 1001), (60, 1)] {
-                let fps = num as f64 / den as f64;
+                let fps = f64::from(num) / f64::from(den);
                 let mut enc = VpxEncoder::new(
                     &CaptureSettings {
                         target_fps: fps,
@@ -1454,7 +1458,7 @@ mod tests {
         a[rows.start * W..rows.end * W]
             .iter()
             .zip(&b[rows.start * W..rows.end * W])
-            .map(|(&x, &y)| (x as f64 - y as f64).abs())
+            .map(|(&x, &y)| (f64::from(x) - f64::from(y)).abs())
             .sum::<f64>()
             / n as f64
     }
@@ -1539,7 +1543,7 @@ mod tests {
         let source: Vec<u8> = still
             .chunks(4)
             .map(|p| {
-                let (b, g, r) = (p[0] as f64, p[1] as f64, p[2] as f64);
+                let (b, g, r) = (f64::from(p[0]), f64::from(p[1]), f64::from(p[2]));
                 (16.0 + (65.481 * r + 128.553 * g + 24.966 * b) / 255.0).round() as u8
             })
             .collect();
@@ -1739,7 +1743,7 @@ mod tests {
             }
             let after = kbps(&sizes[CUT + 10..]);
             assert!(
-                after <= 1.1 * s.video_bitrate_kbps as f64,
+                after <= 1.1 * f64::from(s.video_bitrate_kbps),
                 "{codec:?}: the scroll ran at {after:.0} kbps under a {} kbps peak",
                 s.video_bitrate_kbps
             );

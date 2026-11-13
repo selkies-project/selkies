@@ -555,7 +555,7 @@ impl<'a> Bits<'a> {
     }
 
     fn se(&mut self) -> Option<i32> {
-        let k = self.ue()? as i64;
+        let k = i64::from(self.ue()?);
         Some(if k % 2 == 1 { (k + 1) / 2 } else { -(k / 2) } as i32)
     }
 }

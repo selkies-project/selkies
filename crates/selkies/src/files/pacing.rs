@@ -197,7 +197,7 @@ impl UplinkClock {
         if rtt == 0 {
             return None;
         }
-        Some((rtt as f64 / 100.0).round() / 10.0)
+        Some((f64::from(rtt) / 100.0).round() / 10.0)
     }
 
     /// When the newest answered ping went out, on the [`monotonic`] clock: everything
@@ -600,7 +600,7 @@ mod tests {
         let rate = 2 * 1024 * 1024;
         let pacer = TransferPacer::static_cap(rate as u64);
         let sent = 3 * 1024 * 1024;
-        let expected = (sent as f64 - rate as f64 * 0.5) / rate as f64;
+        let expected = (sent as f64 - f64::from(rate) * 0.5) / f64::from(rate);
         let elapsed = timed_pace(&pacer, sent, false).await;
         assert!(
             expected * 0.85 <= elapsed && elapsed <= expected * 1.4,
@@ -745,7 +745,7 @@ mod tests {
         let rate = 2 * 1024 * 1024;
         let pacer = TransferPacer::static_cap(rate as u64);
         let sent = 3 * 1024 * 1024;
-        let expected = (sent as f64 - rate as f64 * 0.5) / rate as f64;
+        let expected = (sent as f64 - f64::from(rate) * 0.5) / f64::from(rate);
         let elapsed = timed_pace(&pacer, sent, true).await;
         assert!(
             expected * 0.85 <= elapsed && elapsed <= expected * 1.4,
@@ -788,7 +788,10 @@ mod tests {
         gauge.last_ping = f64::NEG_INFINITY;
         gauge.sample();
         let late = socket.pings.lock().last().cloned().expect("a second ping");
-        clock.backdate_pending(&late, (UplinkGauge::INFLATION_US as f64 + 10_000.0) / 1e6);
+        clock.backdate_pending(
+            &late,
+            (f64::from(UplinkGauge::INFLATION_US) + 10_000.0) / 1e6,
+        );
         clock.note_pong(&late);
         assert_eq!(
             gauge.sample(),

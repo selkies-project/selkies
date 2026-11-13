@@ -1810,7 +1810,9 @@ impl HostSession {
             })
             .or_else(|| self.geoms.get(rank).map(|g| g.logical));
         match logical {
-            Some((w, _)) if w > 0 && slots[rank].want.0 > 0 => slots[rank].want.0 as f64 / w as f64,
+            Some((w, _)) if w > 0 && slots[rank].want.0 > 0 => {
+                f64::from(slots[rank].want.0) / f64::from(w)
+            }
             _ => 1.0,
         }
     }
@@ -1829,12 +1831,15 @@ impl HostSession {
                 ..
             }) = self.portal_target(x, y)
             {
-                ei.pointer_motion_abs(pos.0 as f64 + logical.0, pos.1 as f64 + logical.1);
+                ei.pointer_motion_abs(f64::from(pos.0) + logical.0, f64::from(pos.1) + logical.1);
                 return;
             }
             let (w, h) = self.extent();
             if w > 0 && h > 0 {
-                ei.pointer_motion_abs(x.clamp(0.0, (w - 1) as f64), y.clamp(0.0, (h - 1) as f64));
+                ei.pointer_motion_abs(
+                    x.clamp(0.0, f64::from(w - 1)),
+                    y.clamp(0.0, f64::from(h - 1)),
+                );
             }
             return;
         }
@@ -1843,9 +1848,9 @@ impl HostSession {
                 let (w, h) = self.extent();
                 if w > 1 && h > 1 {
                     let scale = |v: f64, span: i32| {
-                        (v.clamp(0.0, (span - 1) as f64) / (span - 1) as f64
-                            * crate::uinput::ABS_RANGE as f64)
-                            .round() as i32
+                        (v.clamp(0.0, f64::from(span - 1)) / f64::from(span - 1)
+                            * f64::from(crate::uinput::ABS_RANGE))
+                        .round() as i32
                     };
                     let _ =
                         u.pointer
@@ -1863,8 +1868,8 @@ impl HostSession {
         if w <= 0 || h <= 0 {
             return;
         }
-        let cx = x.clamp(0.0, (w - 1) as f64) as u32;
-        let cy = y.clamp(0.0, (h - 1) as f64) as u32;
+        let cx = x.clamp(0.0, f64::from(w - 1)) as u32;
+        let cy = y.clamp(0.0, f64::from(h - 1)) as u32;
         vp.motion_absolute(
             crate::wayland::frontend::wayland_time().millis(),
             cx,
@@ -2145,8 +2150,14 @@ fn nearest_slot(slots: &[LayoutSlot], x: f64, y: f64) -> Option<usize> {
         .iter()
         .enumerate()
         .map(|(rank, s)| {
-            let cx = x.clamp(s.pos.0 as f64, (s.pos.0 + s.want.0).max(s.pos.0) as f64);
-            let cy = y.clamp(s.pos.1 as f64, (s.pos.1 + s.want.1).max(s.pos.1) as f64);
+            let cx = x.clamp(
+                f64::from(s.pos.0),
+                f64::from((s.pos.0 + s.want.0).max(s.pos.0)),
+            );
+            let cy = y.clamp(
+                f64::from(s.pos.1),
+                f64::from((s.pos.1 + s.want.1).max(s.pos.1)),
+            );
             (rank, (cx - x).powi(2) + (cy - y).powi(2))
         })
         .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -2167,15 +2178,15 @@ struct PortalPoint {
 fn stream_point(slot: &LayoutSlot, logical: (i32, i32), x: f64, y: f64) -> (f64, f64) {
     let scale = |v: f64, from: i32, to: i32| {
         let mapped = if from > 0 {
-            v * to as f64 / from as f64
+            v * f64::from(to) / f64::from(from)
         } else {
             v
         };
-        mapped.clamp(0.0, (to.max(1) - 1) as f64)
+        mapped.clamp(0.0, f64::from(to.max(1) - 1))
     };
     (
-        scale(x - slot.pos.0 as f64, slot.want.0, logical.0),
-        scale(y - slot.pos.1 as f64, slot.want.1, logical.1),
+        scale(x - f64::from(slot.pos.0), slot.want.0, logical.0),
+        scale(y - f64::from(slot.pos.1), slot.want.1, logical.1),
     )
 }
 

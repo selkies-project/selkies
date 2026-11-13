@@ -75,10 +75,10 @@ impl Rect {
 
     /// Whether the point, in continuous coordinates, lies inside.
     pub fn contains_f64(&self, x: f64, y: f64) -> bool {
-        x >= self.x as f64
-            && y >= self.y as f64
-            && x < self.right() as f64
-            && y < self.bottom() as f64
+        x >= f64::from(self.x)
+            && y >= f64::from(self.y)
+            && x < f64::from(self.right())
+            && y < f64::from(self.bottom())
     }
 
     /// The overlap with another rectangle, empty when they are apart.

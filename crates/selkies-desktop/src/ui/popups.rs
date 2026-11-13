@@ -95,7 +95,7 @@ fn draw_volume(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Option<Rect> {
     }
     let track = volume_track(frame);
     canvas.fill_rounded(track, 3.0, ui::field_bg());
-    let fill_w = (track.w as f64 * (volume.percent.min(100) as f64 / 100.0)) as i32;
+    let fill_w = (f64::from(track.w) * (f64::from(volume.percent.min(100)) / 100.0)) as i32;
     let filled = Rect::new(track.x, track.y, fill_w, track.h);
     canvas.fill_rounded(
         filled,
@@ -139,7 +139,7 @@ fn draw_volume(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Option<Rect> {
 /// Sets the volume from a pointer X over the slider.
 fn volume_from_x(d: &mut Desktop, frame: Rect, x: f64) {
     let track = volume_track(frame);
-    let ratio = ((x - track.x as f64) / track.w as f64).clamp(0.0, 1.0);
+    let ratio = ((x - f64::from(track.x)) / f64::from(track.w)).clamp(0.0, 1.0);
     d.set_volume_target((ratio * 100.0).round() as u8);
 }
 
@@ -454,7 +454,7 @@ pub fn task_menu_hit(d: &mut Desktop, x: f64, y: f64) -> Option<Hover> {
     if !frame.contains(x, y) {
         return None;
     }
-    let row = ((y - frame.y as f64 - 6.0) / TASK_ROW as f64).floor();
+    let row = ((y - f64::from(frame.y) - 6.0) / f64::from(TASK_ROW)).floor();
     if row >= 0.0 && (row as usize) < task_menu_items(d, index).len() {
         return Some(Hover::TaskMenuItem(row as usize));
     }

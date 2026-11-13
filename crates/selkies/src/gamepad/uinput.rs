@@ -261,16 +261,16 @@ impl UInputGamepad {
         let raw = fd.as_raw_fd();
         let setup = || -> io::Result<()> {
             for ev in [EV_KEY, EV_ABS, EV_FF] {
-                ioctl_int(raw, UI_SET_EVBIT, ev as i64)?;
+                ioctl_int(raw, UI_SET_EVBIT, i64::from(ev))?;
             }
             for code in FF_MEMLESS_BITS {
-                ioctl_int(raw, UI_SET_FFBIT, code as i64)?;
+                ioctl_int(raw, UI_SET_FFBIT, i64::from(code))?;
             }
             for code in BTN_MAP {
-                ioctl_int(raw, UI_SET_KEYBIT, code as i64)?;
+                ioctl_int(raw, UI_SET_KEYBIT, i64::from(code))?;
             }
             for code in AXES_MAP {
-                ioctl_int(raw, UI_SET_ABSBIT, code as i64)?;
+                ioctl_int(raw, UI_SET_ABSBIT, i64::from(code))?;
                 let mut buf = pack_uinput_abs_setup(code, abs_info(code));
                 ioctl_buf(raw, UI_ABS_SETUP, &mut buf)?;
             }
@@ -382,7 +382,7 @@ impl UInputGamepad {
         let kept = if etype == FF_RUMBLE {
             Some((read_u16(&buf, union), read_u16(&buf, union + 2)))
         } else if etype == FF_PERIODIC {
-            let magnitude = (read_i16(&buf, union + 4) as i32).unsigned_abs() * 2;
+            let magnitude = i32::from(read_i16(&buf, union + 4)).unsigned_abs() * 2;
             let level = magnitude.min(0xffff) as u16;
             Some((level, level))
         } else {

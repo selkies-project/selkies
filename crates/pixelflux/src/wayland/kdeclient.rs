@@ -475,8 +475,8 @@ pub fn set_screen_layout(
         .map(|(&i, r)| {
             let scale = state.devices[i].scale;
             (
-                (r.2 as f64 / scale).round() as i32,
-                (r.3 as f64 / scale).round() as i32,
+                (f64::from(r.2) / scale).round() as i32,
+                (f64::from(r.3) / scale).round() as i32,
             )
         })
         .collect();

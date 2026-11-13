@@ -325,7 +325,7 @@ fn yuv10_coefficients(full_range: bool) -> ([[i32; 3]; 3], i32) {
     } else {
         (876.0 / 255.0, 896.0 / 255.0, 64)
     };
-    let fixed = |k: f64| (k * (1 << YUV10_SHIFT) as f64).round() as i32;
+    let fixed = |k: f64| (k * f64::from(1 << YUV10_SHIFT)).round() as i32;
     let (cb, cr) = (chroma / (2.0 * (1.0 - KB)), chroma / (2.0 * (1.0 - KR)));
     (
         [
@@ -378,7 +378,7 @@ pub(crate) fn convert_to_yuv10_mt(
             let line = &src[row * src_stride..row * src_stride + width * 4];
             let out = &mut y[row * y_stride..row * y_stride + width];
             for (px, y) in line.as_chunks::<4>().0.iter().zip(out.iter_mut()) {
-                *y = luma(px[ri] as i32, px[1] as i32, px[bi] as i32) as u16;
+                *y = luma(i32::from(px[ri]), i32::from(px[1]), i32::from(px[bi])) as u16;
             }
         }
         if i444 {
@@ -393,7 +393,7 @@ pub(crate) fn convert_to_yuv10_mt(
                     .zip(cb.iter_mut())
                     .zip(cr.iter_mut())
                 {
-                    let (r, g, b) = (px[ri] as i32, px[1] as i32, px[bi] as i32);
+                    let (r, g, b) = (i32::from(px[ri]), i32::from(px[1]), i32::from(px[bi]));
                     *cb = chroma(&k[1], r, g, b, YUV10_SHIFT);
                     *cr = chroma(&k[2], r, g, b, YUV10_SHIFT);
                 }
@@ -411,10 +411,10 @@ pub(crate) fn convert_to_yuv10_mt(
                 let left = 8 * col;
                 let right = (left + 4).min(width * 4 - 4);
                 let sum = |i: usize| {
-                    top[left + i] as i32
-                        + top[right + i] as i32
-                        + bottom[left + i] as i32
-                        + bottom[right + i] as i32
+                    i32::from(top[left + i])
+                        + i32::from(top[right + i])
+                        + i32::from(bottom[left + i])
+                        + i32::from(bottom[right + i])
                 };
                 let (r, g, b) = (sum(ri), sum(1), sum(bi));
                 *cb = chroma(&k[1], r, g, b, YUV10_SHIFT + 2);
@@ -847,7 +847,7 @@ impl H264EncoderWrapper {
                 param.rc.i_vbv_max_bitrate = bk;
                 param.rc.i_vbv_buffer_size = vbv_kbit.max(1);
                 if let Some((budget, level)) = key {
-                    let rate = ((budget as f64 * frame_rate.fps()) as i32).max(bk);
+                    let rate = ((f64::from(budget) * frame_rate.fps()) as i32).max(bk);
                     param.rc.i_bitrate = rate;
                     param.rc.i_vbv_max_bitrate = rate;
                     param.rc.i_vbv_buffer_size = budget.max(1);
@@ -933,7 +933,7 @@ impl H264EncoderWrapper {
                     current_min_qp: min_qp,
                     held_qp: None,
                     last_qp: None,
-                    rf_constant: param.rc.f_rf_constant as f64,
+                    rf_constant: f64::from(param.rc.f_rf_constant),
                     peak: (!cbr_mode && vbv_kbit > 0 && bitrate_kbps != 0).then(|| {
                         PeakOffset::new(bitrate_kbps.saturating_abs(), vbv_kbit, frame_rate.fps())
                     }),
@@ -977,7 +977,7 @@ impl H264EncoderWrapper {
         unsafe {
             let mut param: codec_sys::x264::x264_param_t = std::mem::zeroed();
             codec_sys::x264::x264_encoder_parameters(self.encoder, &mut param);
-            param.rc.f_rf_constant = (crf as f64 + offset) as f32;
+            param.rc.f_rf_constant = (f64::from(crf) + offset) as f32;
             param.rc.i_qp_max = if offset > 0.0 {
                 51 + qp_offset(self.bit_depth)
             } else {
@@ -985,7 +985,7 @@ impl H264EncoderWrapper {
             };
             let taken = codec_sys::x264::x264_encoder_reconfig(self.encoder, &mut param) == 0;
             if taken {
-                self.rf_constant = param.rc.f_rf_constant as f64;
+                self.rf_constant = f64::from(param.rc.f_rf_constant);
             }
             taken
         }
@@ -1203,7 +1203,7 @@ impl H264EncoderWrapper {
             codec_sys::x264::x264_encoder_parameters(self.encoder, &mut param);
             param.i_level_idc
         };
-        let budget = (self.current_bitrate as f64 * super::HELD_KEY_BUDGET_S).round() as i32;
+        let budget = (f64::from(self.current_bitrate) * super::HELD_KEY_BUDGET_S).round() as i32;
         let fresh = Self::open(
             self.width,
             self.height,
@@ -1268,7 +1268,7 @@ impl H264EncoderWrapper {
     /// Take a frame just coded into a capped CRF's peak, and move the rate factor where the
     /// peak says to.
     fn fold_frame(&mut self, frame: Coded) {
-        let max_offset = 51.0 - self.current_crf as f64;
+        let max_offset = 51.0 - f64::from(self.current_crf);
         let Some(peak) = self.peak.as_mut() else {
             return;
         };
@@ -1418,7 +1418,7 @@ impl H264EncoderWrapper {
             // The rate factor stands at the key frame's quantizer from here, so the frames after
             // it refine the picture as the peak lets them rather than code it again whole.
             self.last_capped = true;
-            let crf = self.current_crf as f64;
+            let crf = f64::from(self.current_crf);
             let offset = (q - crf).clamp(peak.offset, (51.0 - crf).max(0.0));
             if offset != peak.offset {
                 peak.offset = offset;
@@ -1443,7 +1443,7 @@ impl H264EncoderWrapper {
             return true;
         };
         let from = if last.held { last.qp } else { last.rf };
-        last.bits * 2f64.powf((from - crf as f64) / KEY_STEPS) <= peak.room()
+        last.bits * 2f64.powf((from - f64::from(crf)) / KEY_STEPS) <= peak.room()
     }
 
     /// The quantizer a capped CRF's key frame is held at from the start, where the last key
@@ -1587,7 +1587,7 @@ impl H264EncoderWrapper {
                 // which the plan stands in for (never under it, so the mean never reads finer).
                 if held.is_none() {
                     self.last_qp = (pic_out.i_qpplus1 > 0).then(|| {
-                        let planned = (pic_out.i_qpplus1 - 1) as f64;
+                        let planned = f64::from(pic_out.i_qpplus1 - 1);
                         let coded = planned + pic_out.prop.f_crf_avg - self.rf_constant;
                         (coded.round() as i32 - offset).clamp(0, 51) as u32
                     });
@@ -1600,8 +1600,8 @@ impl H264EncoderWrapper {
                     FRAME_DELTA
                 };
                 self.coded = Some(Coded {
-                    bits: frame_size as f64 * 8.0,
-                    qp: (pic_out.i_qpplus1 - 1 - offset) as f64,
+                    bits: f64::from(frame_size) * 8.0,
+                    qp: f64::from(pic_out.i_qpplus1 - 1 - offset),
                     key: frame_type == FRAME_KEY,
                     held: held.is_some(),
                 });
@@ -2603,7 +2603,7 @@ pub fn encode_cpu_from(
                 stripe_state.ledger.cleaned();
             }
             if stripe_state.fine_frames >= trigger_frames
-                || stripe_state.idle_frames as f64 >= crate::pipeline::EMPTY_S * target_fps
+                || f64::from(stripe_state.idle_frames) >= crate::pipeline::EMPTY_S * target_fps
             {
                 stripe_state.h264_burst_frames_remaining = 0;
             }
@@ -2736,7 +2736,7 @@ pub fn encode_cpu_from(
                         codec: Codec::Jpeg,
                         stripe_y_start: y_start as i32,
                         stripe_height: actual_height as i32,
-                        frame_id: frame_counter as i32,
+                        frame_id: i32::from(frame_counter),
                         timing: FrameTiming::default(),
                         reference: Reference::Untracked,
                     })
@@ -3048,7 +3048,7 @@ pub fn encode_cpu_from(
                             codec: Codec::H264,
                             stripe_y_start: y_start as i32,
                             stripe_height: actual_height as i32,
-                            frame_id: frame_counter as i32,
+                            frame_id: i32::from(frame_counter),
                             timing: FrameTiming::default(),
                             reference: enc.last_reference(),
                         })
@@ -3102,7 +3102,7 @@ pub fn encode_cpu_from(
                 let coded = stripe_state.h264_encoder.as_mut()?.encode_host_argb(
                     stripe_bytes,
                     width_usize * 4,
-                    frame_counter as u64,
+                    u64::from(frame_counter),
                     force_idr,
                     use_gpu,
                 );
@@ -3114,7 +3114,7 @@ pub fn encode_cpu_from(
                         codec: Codec::H264,
                         stripe_y_start: y_start as i32,
                         stripe_height: actual_height as i32,
-                        frame_id: frame_counter as i32,
+                        frame_id: i32::from(frame_counter),
                         timing: FrameTiming::default(),
                         reference: enc.last_reference(),
                     }),
@@ -3253,7 +3253,8 @@ fn cleanup_vbv_kbit(settings: &CaptureSettings, bitrate_kbps: i32) -> i32 {
         0.0,
         CLEANUP_VBV_FRAMES,
     ) / 1000;
-    let seconds = (bitrate_kbps.max(0) as f64 * crate::pipeline::CLEANUP_FRAME_S).round() as u32;
+    let seconds =
+        (f64::from(bitrate_kbps.max(0)) * crate::pipeline::CLEANUP_FRAME_S).round() as u32;
     frames.max(seconds).max(1) as i32
 }
 
@@ -3461,7 +3462,7 @@ mod tests {
             .iter()
             .zip(&luma)
             .map(|(&a, &b)| {
-                let d = (a as f64 - 16.0) * 255.0 / 219.0 - b as f64;
+                let d = (f64::from(a) - 16.0) * 255.0 / 219.0 - f64::from(b);
                 d * d
             })
             .sum::<f64>()
@@ -3578,8 +3579,8 @@ mod tests {
         assert_eq!(d[1], 0x11, "the first frame is an H.264 key frame");
         assert_eq!(u16::from_be_bytes([d[2], d[3]]), 0, "frame number");
         assert_eq!(u16::from_be_bytes([d[4], d[5]]), 0, "y-start");
-        assert_eq!(u16::from_be_bytes([d[6], d[7]]) as i32, w, "width");
-        assert_eq!(u16::from_be_bytes([d[8], d[9]]) as i32, h, "height");
+        assert_eq!(i32::from(u16::from_be_bytes([d[6], d[7]])), w, "width");
+        assert_eq!(i32::from(u16::from_be_bytes([d[8], d[9]])), h, "height");
         assert_eq!((first[0].stripe_y_start, first[0].stripe_height), (0, h));
         let mut dec = Decoder::new().expect("decoder");
         let img = dec
@@ -4079,7 +4080,7 @@ mod tests {
         };
         let rgb = |x: usize, y: usize| {
             let p = &bgra[(y * w + x) * 4..];
-            (p[2] as f64, p[1] as f64, p[0] as f64)
+            (f64::from(p[2]), f64::from(p[1]), f64::from(p[0]))
         };
         for full in [false, true] {
             for i444 in [false, true] {
@@ -4113,7 +4114,7 @@ mod tests {
                     for col in 0..w {
                         let (r, g, b) = rgb(col, row);
                         let want = reference(r, g, b, full).0;
-                        assert!((y[row * w + col] as f64 - want).abs() <= 1.0, "luma");
+                        assert!((f64::from(y[row * w + col]) - want).abs() <= 1.0, "luma");
                     }
                 }
                 for row in 0..ch {
@@ -4129,8 +4130,8 @@ mod tests {
                             sum
                         };
                         let (_, cb, cr) = reference(r, g, b, full);
-                        assert!((u[row * cw + col] as f64 - cb).abs() <= 1.0, "cb");
-                        assert!((v[row * cw + col] as f64 - cr).abs() <= 1.0, "cr");
+                        assert!((f64::from(u[row * cw + col]) - cb).abs() <= 1.0, "cb");
+                        assert!((f64::from(v[row * cw + col]) - cr).abs() <= 1.0, "cr");
                     }
                 }
             }
@@ -4559,7 +4560,7 @@ mod qp_bound_sweep {
                 h as i32,
                 25,
                 false,
-                num as f64 / den as f64,
+                f64::from(num) / f64::from(den),
                 1,
                 true,
                 4000,
@@ -4726,7 +4727,7 @@ mod qp_bound_sweep {
         for _ in 0..120 {
             enc.idle(&CaptureSettings {
                 video_bitrate_kbps: 8000,
-                video_vbv_multiplier: VBV_KBIT as f64 * 1000.0 / (8_000_000.0 / 60.0),
+                video_vbv_multiplier: f64::from(VBV_KBIT) * 1000.0 / (8_000_000.0 / 60.0),
                 target_fps: 60.0,
                 ..Default::default()
             });
@@ -5089,7 +5090,7 @@ mod qp_bound_sweep {
             .as_chunks::<4>()
             .0
             .iter()
-            .map(|px| (16.0 + px[0] as f64 * 219.0 / 255.0).round() as u8)
+            .map(|px| (16.0 + f64::from(px[0]) * 219.0 / 255.0).round() as u8)
             .collect()
     }
 
@@ -5156,7 +5157,7 @@ mod qp_bound_sweep {
         let (plain, plain_sizes, _, _) = scroll_then_still(0, 0, FRAMES, true);
         let (capped, sizes, keys, coarse) = scroll_then_still(300, THEN, FRAMES, true);
         let room =
-            (crate::encoders::CAPPED_VBV_FRAMES * THEN as f64 * 1000.0 / 8.0 / 60.0) as usize;
+            (crate::encoders::CAPPED_VBV_FRAMES * f64::from(THEN) * 1000.0 / 8.0 / 60.0) as usize;
         let still = &sizes[61..];
         let largest = still.iter().max().copied().unwrap_or(0);
         let sent = still.iter().filter(|&&n| n > 0).count();
@@ -5200,7 +5201,7 @@ mod qp_bound_sweep {
         };
         let (capped, sizes, keys, coarse) = scroll_then_still_under(&peaks, FRAMES, true);
         let room =
-            (crate::encoders::CAPPED_VBV_FRAMES * THEN as f64 * 1000.0 / 8.0 / 60.0) as usize;
+            (crate::encoders::CAPPED_VBV_FRAMES * f64::from(THEN) * 1000.0 / 8.0 / 60.0) as usize;
         let still = &sizes[61..];
         let largest = still.iter().max().copied().unwrap_or(0);
         let sent = still.iter().filter(|&&n| n > 0).count();
@@ -5244,7 +5245,7 @@ mod qp_bound_sweep {
         assert_eq!(keys, 0, "a key frame");
         assert!(!coarse, "the refresh did not end");
         assert!(
-            kbps <= 1.1 * THEN as f64,
+            kbps <= 1.1 * f64::from(THEN),
             "{kbps:.0} kbps under a {THEN} kbps peak"
         );
     }
@@ -5329,7 +5330,7 @@ mod qp_bound_sweep {
             "the refresh had ended before the page moved again"
         );
         assert!(
-            kbps <= 1.1 * THEN as f64,
+            kbps <= 1.1 * f64::from(THEN),
             "{kbps:.0} kbps under a {THEN} kbps peak"
         );
         assert!(
@@ -5387,7 +5388,7 @@ mod qp_bound_sweep {
         }
         let kbps = bits as f64 * 60.0 / 180.0 / 1000.0;
         assert!(
-            kbps <= 1.05 * KBPS as f64,
+            kbps <= 1.05 * f64::from(KBPS),
             "{kbps:.0} kbps under a {KBPS} kbps peak"
         );
     }
@@ -5453,11 +5454,11 @@ mod qp_bound_sweep {
         };
         let (before, after) = (kbps(&sizes[1..CUT]), kbps(&sizes[CUT + 10..]));
         assert!(
-            before > 2.0 * LOW_KBPS as f64,
+            before > 2.0 * f64::from(LOW_KBPS),
             "the scroll ran at {before:.0} kbps under the high peak"
         );
         assert!(
-            after <= 1.1 * LOW_KBPS as f64,
+            after <= 1.1 * f64::from(LOW_KBPS),
             "the scroll ran at {after:.0} kbps under a {LOW_KBPS} kbps peak"
         );
     }
@@ -5588,7 +5589,7 @@ mod qp_bound_sweep {
                 row[..W]
                     .iter()
                     .zip(src)
-                    .map(|(&a, &b)| (a as f64 - b as f64).abs())
+                    .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
             })
             .sum::<f64>()
             / (W * H) as f64;
@@ -5816,7 +5817,7 @@ mod qp_bound_sweep {
             ra[..a.width]
                 .iter()
                 .zip(&rb[..a.width])
-                .map(|(&x, &y)| (x as f64 - y as f64).abs())
+                .map(|(&x, &y)| (f64::from(x) - f64::from(y)).abs())
         })
         .sum::<f64>()
             / (a.width * a.height) as f64
@@ -5886,7 +5887,7 @@ mod qp_bound_sweep {
                 .iter()
                 .zip(b[i].iter())
                 .map(|(&x, &y)| {
-                    let d = x as f64 - y as f64;
+                    let d = f64::from(x) - f64::from(y);
                     d * d
                 })
                 .sum::<f64>()

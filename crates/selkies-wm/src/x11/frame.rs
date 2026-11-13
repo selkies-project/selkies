@@ -320,7 +320,7 @@ fn put_image(
                 if a == 0 {
                     0
                 } else {
-                    ((c as u32 * 255) / a as u32).min(255) as u8
+                    ((u32::from(c) * 255) / u32::from(a)).min(255) as u8
                 }
             };
             data.extend_from_slice(&[un(b), un(g), un(r), 0]);
@@ -389,7 +389,7 @@ fn merge_rows(mut rects: Vec<xproto::Rectangle>) -> Vec<xproto::Rectangle> {
         if let Some(last) = merged.last_mut()
             && last.x == r.x
             && last.width == r.width
-            && last.y as i32 + last.height as i32 == r.y as i32
+            && i32::from(last.y) + i32::from(last.height) == i32::from(r.y)
         {
             last.height += r.height;
         } else {

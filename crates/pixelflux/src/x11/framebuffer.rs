@@ -250,7 +250,10 @@ impl SharedFramebuffer {
                 }
                 e => format!("{EXTENSION} watch refused: {e}"),
             })?;
-        if reply.bpp != 32 || reply.tile == 0 || (reply.stride as u64) < reply.width as u64 * 4 {
+        if reply.bpp != 32
+            || reply.tile == 0
+            || u64::from(reply.stride) < u64::from(reply.width) * 4
+        {
             return Err(format!(
                 "{}x{} at {} bits a pixel, stride {}, tile {}",
                 reply.width, reply.height, reply.bpp, reply.stride, reply.tile
@@ -359,7 +362,7 @@ impl SharedFramebuffer {
         };
         let deadline = libc::timespec {
             tv_sec: timeout.as_secs() as _,
-            tv_nsec: timeout.subsec_nanos() as libc::c_long,
+            tv_nsec: libc::c_long::from(timeout.subsec_nanos()),
         };
         // SAFETY: one pollfd for the duration of the call.
         let ready = unsafe { libc::ppoll(&mut poll, 1, &deadline, std::ptr::null()) } > 0;

@@ -123,7 +123,7 @@ impl CuX11Backend {
                 .keysyms
                 .chunks_exact(per)
                 .position(|syms| syms.contains(&wanted))
-                .map(|i| lo as u32 + i as u32)
+                .map(|i| u32::from(lo) + i as u32)
         };
         km.altgr_keycode = keycode_of(KEYSYM_ISO_LEVEL3_SHIFT)
             .or_else(|| keycode_of(KEYSYM_MODE_SWITCH))
@@ -139,7 +139,7 @@ impl CuX11Backend {
                 if sym != 0 {
                     km.by_sym
                         .entry(sym)
-                        .or_insert((lo as u32 + i as u32, level));
+                        .or_insert((u32::from(lo) + i as u32, level));
                 }
             }
         }
@@ -217,7 +217,7 @@ impl CuX11Backend {
             // so an all-NoSymbol spare can never steal a key that is currently down.
             for (i, syms) in reply.keysyms.chunks_exact(per).enumerate().rev() {
                 if syms.iter().all(|&s| s == 0) {
-                    chosen.push(lo as u32 + i as u32);
+                    chosen.push(u32::from(lo) + i as u32);
                     if chosen.len() == keysyms.len() {
                         break;
                     }
@@ -238,8 +238,8 @@ impl CuX11Backend {
             // types.
             let span_lo = *chosen.last().unwrap();
             let span_hi = chosen[0];
-            let base = ((span_lo - lo as u32) as usize) * per;
-            let end = ((span_hi - lo as u32) as usize + 1) * per;
+            let base = ((span_lo - u32::from(lo)) as usize) * per;
+            let end = ((span_hi - u32::from(lo)) as usize + 1) * per;
             let mut bound_syms = reply.keysyms[base..end].to_vec();
             let mut map = HashMap::new();
             for (&sym, &kc) in keysyms.iter().zip(chosen.iter()) {
@@ -363,11 +363,11 @@ impl CuBackend for CuX11Backend {
 
     fn fb_size(&self) -> Result<(i32, i32), String> {
         let (w, h) = self.root_geometry()?;
-        Ok((w as i32, h as i32))
+        Ok((i32::from(w), i32::from(h)))
     }
 
     fn key(&self, scancode: u32, pressed: bool) {
-        if scancode > u8::MAX as u32 {
+        if scancode > u32::from(u8::MAX) {
             return;
         }
         let kind = if pressed {
@@ -458,10 +458,10 @@ impl CuBackend for CuX11Backend {
             super::overlay_cursor(
                 &mut data,
                 w as usize * 4,
-                w as i32,
-                h as i32,
-                c.width as i32,
-                c.height as i32,
+                i32::from(w),
+                i32::from(h),
+                i32::from(c.width),
+                i32::from(c.height),
                 &c.cursor_image,
                 img_x,
                 img_y,
@@ -473,7 +473,7 @@ impl CuBackend for CuX11Backend {
             px.swap(0, 2);
             px[3] = 0xFF;
         }
-        encode_png_rgba(&data, w as u32, h as u32)
+        encode_png_rgba(&data, u32::from(w), u32::from(h))
     }
 
     fn cursor_pos(&self) -> Result<(f64, f64), String> {
@@ -483,7 +483,7 @@ impl CuBackend for CuX11Backend {
             .map_err(|e| format!("query_pointer: {e}"))?
             .reply()
             .map_err(|e| format!("query_pointer reply: {e}"))?;
-        Ok((ptr.root_x as f64, ptr.root_y as f64))
+        Ok((f64::from(ptr.root_x), f64::from(ptr.root_y)))
     }
 
     fn resolve_keysyms(&self, keysyms: &[u32]) -> Vec<(u32, u32)> {

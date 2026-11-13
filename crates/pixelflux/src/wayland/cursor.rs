@@ -170,9 +170,9 @@ fn cap_and_encode(mut img: RgbaImage, cap: i32) -> Option<CappedSprite> {
     let longest = w.max(h);
     let mut scale = 1.0;
     if cap > 0 && longest > cap as u32 {
-        scale = cap as f64 / longest as f64;
-        let nw = ((w as f64 * scale).round() as u32).max(1);
-        let nh = ((h as f64 * scale).round() as u32).max(1);
+        scale = f64::from(cap) / f64::from(longest);
+        let nw = ((f64::from(w) * scale).round() as u32).max(1);
+        let nh = ((f64::from(h) * scale).round() as u32).max(1);
         img = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3);
     }
     crate::unpremultiply_rgba(&mut img);
@@ -192,8 +192,8 @@ fn cap_and_encode(mut img: RgbaImage, cap: i32) -> Option<CappedSprite> {
 /// land one pixel past its right or bottom edge.
 fn scaled_hotspot(sprite: &CappedSprite, hot_x: i32, hot_y: i32) -> (i32, i32) {
     (
-        ((hot_x as f64 * sprite.scale).round() as i32).clamp(0, sprite.width as i32 - 1),
-        ((hot_y as f64 * sprite.scale).round() as i32).clamp(0, sprite.height as i32 - 1),
+        ((f64::from(hot_x) * sprite.scale).round() as i32).clamp(0, sprite.width as i32 - 1),
+        ((f64::from(hot_y) * sprite.scale).round() as i32).clamp(0, sprite.height as i32 - 1),
     )
 }
 

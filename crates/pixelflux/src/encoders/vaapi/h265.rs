@@ -186,8 +186,8 @@ impl Arm {
         let (fullcolor, bit_depth) = (n.fullcolor, n.bit_depth);
         let profile_idc = Self::profile_idc(n);
         w.u(2, 0);
-        w.u(1, self.tier as u64);
-        w.u(5, profile_idc as u64);
+        w.u(1, u64::from(self.tier));
+        w.u(5, u64::from(profile_idc));
         let mut compat = [false; 32];
         compat[profile_idc as usize] = true;
         if compat[1] {
@@ -219,7 +219,7 @@ impl Arm {
             w.u(43, 0);
         }
         w.flag(false);
-        w.u(8, self.level_idc as u64);
+        w.u(8, u64::from(self.level_idc));
     }
 
     /// The stream's sequence: level and tier from the ladder, the level never below the one
@@ -241,7 +241,7 @@ impl Arm {
             n.width,
             n.height,
             n.fps.ceil(),
-            n.bits_per_second as u64,
+            u64::from(n.bits_per_second),
             true,
         )
         .max(n.dpb_level);
@@ -278,8 +278,8 @@ impl Arm {
         w.u(6, 0);
         w.ue(0);
         w.flag(true);
-        w.u(32, n.fps.den as u64);
-        w.u(32, n.fps.num as u64);
+        w.u(32, u64::from(n.fps.den));
+        w.u(32, u64::from(n.fps.num));
         w.flag(true);
         w.ue(0);
         w.ue(0);
@@ -350,8 +350,8 @@ impl Arm {
         w.flag(false);
         w.flag(false);
         w.flag(true);
-        w.u(32, n.fps.den as u64);
-        w.u(32, n.fps.num as u64);
+        w.u(32, u64::from(n.fps.den));
+        w.u(32, u64::from(n.fps.num));
         w.flag(true);
         w.ue(0);
         w.flag(false);
@@ -420,10 +420,10 @@ impl Arm {
             f.set_chroma_format_idc(if n.fullcolor { 3 } else { 1 });
             f.set_bit_depth_luma_minus8(n.bit_depth - 8);
             f.set_bit_depth_chroma_minus8(n.bit_depth - 8);
-            f.set_amp_enabled_flag(t.amp as u32);
-            f.set_sample_adaptive_offset_enabled_flag(t.sao as u32);
-            f.set_pcm_enabled_flag(t.pcm as u32);
-            f.set_sps_temporal_mvp_enabled_flag(t.temporal_mvp as u32);
+            f.set_amp_enabled_flag(u32::from(t.amp));
+            f.set_sample_adaptive_offset_enabled_flag(u32::from(t.sao));
+            f.set_pcm_enabled_flag(u32::from(t.pcm));
+            f.set_sps_temporal_mvp_enabled_flag(u32::from(t.temporal_mvp));
         }
         s.log2_min_luma_coding_block_size_minus3 = (log2_min_cb - 3) as u8;
         s.log2_diff_max_min_luma_coding_block_size = log2_diff_cb as u8;
@@ -511,11 +511,11 @@ impl Arm {
         pic.nal_unit_type = if frame.key { 19 } else { 1 };
         unsafe {
             let f = &mut pic.pic_fields.bits;
-            f.set_idr_pic_flag(frame.key as u32);
+            f.set_idr_pic_flag(u32::from(frame.key));
             f.set_coding_type(if frame.key { 1 } else { 2 });
             f.set_reference_pic_flag(1);
-            f.set_transform_skip_enabled_flag(t.transform_skip as u32);
-            f.set_cu_qp_delta_enabled_flag(self.cu_qp_delta as u32);
+            f.set_transform_skip_enabled_flag(u32::from(t.transform_skip));
+            f.set_cu_qp_delta_enabled_flag(u32::from(self.cu_qp_delta));
             f.set_pps_loop_filter_across_slices_enabled_flag(1);
         }
         out.push(VAEncPictureParameterBufferType, &pic);
@@ -553,7 +553,7 @@ impl Arm {
                 }
                 w.ue(0);
                 if i != 0 {
-                    w.u(address_bits, address as u64);
+                    w.u(address_bits, u64::from(address));
                 }
                 w.ue(slice_type);
                 if !frame.key {
@@ -614,10 +614,10 @@ impl Arm {
             slice.slice_qp_delta = slice_qp_delta as i8;
             unsafe {
                 let f = &mut slice.slice_fields.bits;
-                f.set_last_slice_of_pic_flag(last as u32);
-                f.set_slice_temporal_mvp_enabled_flag((t.temporal_mvp && !frame.key) as u32);
-                f.set_slice_sao_luma_flag(t.sao as u32);
-                f.set_slice_sao_chroma_flag(t.sao as u32);
+                f.set_last_slice_of_pic_flag(u32::from(last));
+                f.set_slice_temporal_mvp_enabled_flag(u32::from(t.temporal_mvp && !frame.key));
+                f.set_slice_sao_luma_flag(u32::from(t.sao));
+                f.set_slice_sao_chroma_flag(u32::from(t.sao));
                 f.set_collocated_from_l0_flag(1);
             }
             out.push(VAEncSliceParameterBufferType, &slice);

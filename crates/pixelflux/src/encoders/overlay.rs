@@ -104,10 +104,10 @@ pub(crate) fn blend_pixel(dst: &mut [u8], r: u8, g: u8, b: u8, a: u8) {
         dst[1] = g;
         dst[2] = r;
     } else if a > 0 {
-        let ia = 255 - a as u32;
-        dst[0] = ((b as u32 * a as u32 + dst[0] as u32 * ia) / 255) as u8;
-        dst[1] = ((g as u32 * a as u32 + dst[1] as u32 * ia) / 255) as u8;
-        dst[2] = ((r as u32 * a as u32 + dst[2] as u32 * ia) / 255) as u8;
+        let ia = 255 - u32::from(a);
+        dst[0] = ((u32::from(b) * u32::from(a) + u32::from(dst[0]) * ia) / 255) as u8;
+        dst[1] = ((u32::from(g) * u32::from(a) + u32::from(dst[1]) * ia) / 255) as u8;
+        dst[2] = ((u32::from(r) * u32::from(a) + u32::from(dst[2]) * ia) / 255) as u8;
     }
 }
 
@@ -124,10 +124,10 @@ pub(crate) fn blend_pixel_premultiplied(dst: &mut [u8], r: u8, g: u8, b: u8, a: 
         dst[1] = g;
         dst[2] = r;
     } else if a > 0 {
-        let ia = 255 - a as u32;
-        dst[0] = (b as u32 + dst[0] as u32 * ia / 255).min(255) as u8;
-        dst[1] = (g as u32 + dst[1] as u32 * ia / 255).min(255) as u8;
-        dst[2] = (r as u32 + dst[2] as u32 * ia / 255).min(255) as u8;
+        let ia = 255 - u32::from(a);
+        dst[0] = (u32::from(b) + u32::from(dst[0]) * ia / 255).min(255) as u8;
+        dst[1] = (u32::from(g) + u32::from(dst[1]) * ia / 255).min(255) as u8;
+        dst[2] = (u32::from(r) + u32::from(dst[2]) * ia / 255).min(255) as u8;
     }
 }
 
@@ -284,16 +284,16 @@ impl OverlayState {
                 if self.wm_subpixel_x <= 0.0 {
                     self.wm_subpixel_x = 0.0;
                     self.wm_velocity_x = self.wm_velocity_x.abs();
-                } else if self.wm_subpixel_x + (w as f64) >= frame_width as f64 {
-                    self.wm_subpixel_x = (frame_width - w) as f64;
+                } else if self.wm_subpixel_x + f64::from(w) >= f64::from(frame_width) {
+                    self.wm_subpixel_x = f64::from(frame_width - w);
                     self.wm_velocity_x = -self.wm_velocity_x.abs();
                 }
 
                 if self.wm_subpixel_y <= 0.0 {
                     self.wm_subpixel_y = 0.0;
                     self.wm_velocity_y = self.wm_velocity_y.abs();
-                } else if self.wm_subpixel_y + (h as f64) >= frame_height as f64 {
-                    self.wm_subpixel_y = (frame_height - h) as f64;
+                } else if self.wm_subpixel_y + f64::from(h) >= f64::from(frame_height) {
+                    self.wm_subpixel_y = f64::from(frame_height - h);
                     self.wm_velocity_y = -self.wm_velocity_y.abs();
                 }
 
@@ -315,7 +315,7 @@ impl OverlayState {
     {
         if let Some(buffer) = &self.render_buffer {
             let location =
-                Point::<f64, Physical>::from((self.wm_pos_x as f64, self.wm_pos_y as f64));
+                Point::<f64, Physical>::from((f64::from(self.wm_pos_x), f64::from(self.wm_pos_y)));
             MemoryRenderBufferRenderElement::from_buffer(
                 renderer,
                 location,

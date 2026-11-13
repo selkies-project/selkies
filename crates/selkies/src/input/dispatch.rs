@@ -111,7 +111,7 @@ impl PointerReader for XPointerReader {
 
 /// A coordinate a peer named, held to what the pointer logic computes in.
 fn saturate_i32(value: i64) -> i32 {
-    value.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+    value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
 impl Dispatcher {
@@ -619,9 +619,9 @@ impl Dispatcher {
         if let Some(seat) = self.seat.clone() {
             if !mv.static_relative {
                 let motion = if mv.relative {
-                    seat.inject_relative_mouse_move(mv.x as f64, mv.y as f64)
+                    seat.inject_relative_mouse_move(f64::from(mv.x), f64::from(mv.y))
                 } else {
-                    seat.inject_mouse_move(mv.x as f64, mv.y as f64)
+                    seat.inject_mouse_move(f64::from(mv.x), f64::from(mv.y))
                 };
                 match motion {
                     Ok(Some(n)) => self.state.lock().wl_motion = Some(n),
@@ -629,10 +629,10 @@ impl Dispatcher {
                     Err(e) => debug!(target: "input", "pointer injection failed: {e}"),
                 }
             }
-            let mag = scroll_magnitude.max(1) as f64;
+            let mag = f64::from(scroll_magnitude.max(1));
             for bit in changed_bits {
                 let pressed = button_mask & bit != 0;
-                let state = pressed as u32;
+                let state = u32::from(pressed);
                 let result = match bit {
                     1 => seat.inject_mouse_button(WL_BTN_LEFT, state),
                     2 => seat.inject_mouse_button(WL_BTN_MIDDLE, state),
@@ -778,7 +778,7 @@ impl Dispatcher {
                     MouseAction::ScrollY(n) => devices.pointer(EV_REL, REL_WHEEL, n),
                     MouseAction::ScrollX(n) => devices.pointer(EV_REL, REL_HWHEEL, n),
                     MouseAction::Button { evdev, down, .. } => {
-                        devices.pointer(EV_KEY, evdev, down as i32)
+                        devices.pointer(EV_KEY, evdev, i32::from(down))
                     }
                     // Absolute positions are left out: the device declares relative axes.
                     MouseAction::Warp(..) => {}
@@ -860,7 +860,7 @@ impl Dispatcher {
             MouseAction::ScrollY(n) => events.push(((EV_REL, REL_WHEEL), n, true)),
             MouseAction::ScrollX(n) => events.push(((EV_REL, REL_HWHEEL), n, true)),
             MouseAction::Button { evdev, down, .. } => {
-                events.push(((EV_KEY, evdev), down as i32, true))
+                events.push(((EV_KEY, evdev), i32::from(down), true))
             }
         }
         let Ok(socket) = std::os::unix::net::UnixDatagram::unbound() else {
@@ -934,7 +934,7 @@ impl Dispatcher {
             if let (Some(conn), Some(seq)) = (conn, seq)
                 && let Some(echo) = st.pointer_echoes.get_mut(&conn)
             {
-                echo.applied(motion, seq, dx as f64, dy as f64);
+                echo.applied(motion, seq, f64::from(dx), f64::from(dy));
             }
             st.pointer_moved_at = Some(now);
             st.pointer_echo_at.map(|at| at + POINTER_ECHO_MIN)
@@ -1033,8 +1033,8 @@ impl Dispatcher {
         }
         let st = self.state.lock();
         Some((
-            st.pointer.last_x as f64,
-            st.pointer.last_y as f64,
+            f64::from(st.pointer.last_x),
+            f64::from(st.pointer.last_y),
             1.0,
             None,
         ))
@@ -1069,8 +1069,8 @@ impl Dispatcher {
             drop(st);
             return self.pointer_at();
         }
-        st.pointer.last_x = xy.0 as i32;
-        st.pointer.last_y = xy.1 as i32;
-        Some((xy.0 as f64, xy.1 as f64, 1.0, None))
+        st.pointer.last_x = i32::from(xy.0);
+        st.pointer.last_y = i32::from(xy.1);
+        Some((f64::from(xy.0), f64::from(xy.1), 1.0, None))
     }
 }

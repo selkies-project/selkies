@@ -167,15 +167,18 @@ impl FfMixer {
         let key = (source, record.effect_id);
         match record.kind {
             FF_RECORD_PLAY if record.count > 0 => {
-                let start = now + Duration::from_millis(record.delay_ms as u64);
+                let start = now + Duration::from_millis(u64::from(record.delay_ms));
                 let end = (record.length_ms > 0).then(|| {
-                    start + Duration::from_millis(record.count as u64 * record.length_ms as u64)
+                    start
+                        + Duration::from_millis(
+                            u64::from(record.count) * u64::from(record.length_ms),
+                        )
                 });
                 self.playing.insert(
                     key,
                     Playing {
-                        strong: record.strong as u32,
-                        weak: record.weak as u32,
+                        strong: u32::from(record.strong),
+                        weak: u32::from(record.weak),
                         start,
                         end,
                     },
@@ -184,7 +187,7 @@ impl FfMixer {
             FF_RECORD_PLAY | FF_RECORD_STOP => {
                 self.playing.remove(&key);
             }
-            FF_RECORD_GAIN => self.gain = record.count as u32,
+            FF_RECORD_GAIN => self.gain = u32::from(record.count),
             _ => {}
         }
         self.update(now)
@@ -232,11 +235,11 @@ impl FfMixer {
                 Some(end) => boundaries.push(end),
             }
         }
-        let strong = (strong as u64 * self.gain as u64 / 0xffff).min(0xffff) as u16;
-        let weak = (weak as u64 * self.gain as u64 / 0xffff).min(0xffff) as u16;
+        let strong = (u64::from(strong) * u64::from(self.gain) / 0xffff).min(0xffff) as u16;
+        let weak = (u64::from(weak) * u64::from(self.gain) / 0xffff).min(0xffff) as u16;
         let mix = (strong, weak);
         let audible = strong > 0 || weak > 0;
-        let lease = Duration::from_millis(FF_LEASE_MS as u64);
+        let lease = Duration::from_millis(u64::from(FF_LEASE_MS));
         let change = boundaries.iter().copied().filter(|t| *t > now).min();
         let leased = audible && (endless || change.is_none_or(|c| c - now > lease));
         let hold = if leased {
@@ -253,8 +256,8 @@ impl FfMixer {
             self.sent = Some(mix);
             self.renew_at = leased.then(|| now + lease / 2);
             out = Some(Rumble {
-                strong: strong as f64 / 65535.0,
-                weak: weak as f64 / 65535.0,
+                strong: f64::from(strong) / 65535.0,
+                weak: f64::from(weak) / 65535.0,
                 hold_ms: (hold.as_secs_f64() * 1000.0).round() as u32,
             });
         }

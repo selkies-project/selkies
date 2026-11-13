@@ -581,9 +581,9 @@ fn apps_content_height(d: &Desktop, apps: Rect) -> f64 {
     match arrangement(d) {
         Arrangement::Grid { w, h, .. } => {
             let rows = d.menu.items.len().div_ceil(grid_columns(apps, w));
-            rows as f64 * h as f64
+            rows as f64 * f64::from(h)
         }
-        Arrangement::Rows => d.menu.items.len() as f64 * ROW as f64,
+        Arrangement::Rows => d.menu.items.len() as f64 * f64::from(ROW),
     }
 }
 
@@ -624,12 +624,12 @@ fn favorite_drop_at(d: &Desktop, layout: &Layout, x: f64, y: f64) -> Option<usiz
         return None;
     }
     let Arrangement::Grid { w, h, .. } = arrangement(d) else {
-        let line = ((y - layout.apps.y as f64 + d.menu.app_scroll) / ROW as f64).floor();
+        let line = ((y - f64::from(layout.apps.y) + d.menu.app_scroll) / f64::from(ROW)).floor();
         return Some((line.max(0.0) as usize).min(count - 1));
     };
     let columns = grid_columns(layout.apps, w);
-    let column = ((x - layout.apps.x as f64) / grid_cell_width(layout.apps, w) as f64).floor();
-    let line = ((y - layout.apps.y as f64 + d.menu.app_scroll) / h as f64).floor();
+    let column = ((x - f64::from(layout.apps.x)) / f64::from(grid_cell_width(layout.apps, w))).floor();
+    let line = ((y - f64::from(layout.apps.y) + d.menu.app_scroll) / f64::from(h)).floor();
     let place = line.max(0.0) as usize * columns + (column.max(0.0) as usize).min(columns - 1);
     Some(place.min(count - 1))
 }
@@ -774,7 +774,7 @@ fn column_rect(layout: &Layout, column: ScrollColumn) -> Rect {
 fn column_extent(d: &Desktop, layout: &Layout, column: ScrollColumn) -> (f64, f64) {
     match column {
         ScrollColumn::Categories => (
-            category_rows(d).len() as f64 * CATEGORY_ROW as f64,
+            category_rows(d).len() as f64 * f64::from(CATEGORY_ROW),
             d.menu.category_scroll,
         ),
         ScrollColumn::Apps => (apps_content_height(d, layout.apps), d.menu.app_scroll),
@@ -788,14 +788,14 @@ fn scrollbar(d: &Desktop, layout: &Layout, column: ScrollColumn) -> Option<(Rect
         return None;
     }
     let (content, scroll) = column_extent(d, layout, column);
-    let max = content - rect.h as f64;
+    let max = content - f64::from(rect.h);
     if max <= 0.0 {
         return None;
     }
     let track = Rect::new(rect.right() - SCROLLBAR_W, rect.y, SCROLLBAR_W, rect.h);
-    let thumb_h =
-        ((rect.h as f64 * rect.h as f64 / content) as i32).clamp(SCROLLBAR_MIN_THUMB.min(rect.h), rect.h);
-    let travel = (track.h - thumb_h) as f64;
+    let thumb_h = ((f64::from(rect.h) * f64::from(rect.h) / content) as i32)
+        .clamp(SCROLLBAR_MIN_THUMB.min(rect.h), rect.h);
+    let travel = f64::from(track.h - thumb_h);
     let thumb_y = track.y + (travel * (scroll / max).clamp(0.0, 1.0)).round() as i32;
     Some((track, Rect::new(track.x, thumb_y, SCROLLBAR_W, thumb_h)))
 }
@@ -814,9 +814,9 @@ pub fn scroll_drag(d: &mut Desktop, y: f64) {
         return;
     };
     let rect = column_rect(&layout, column);
-    let max = column_extent(d, &layout, column).0 - rect.h as f64;
-    let travel = (track.h - thumb.h).max(1) as f64;
-    let scroll = ((y - offset - track.y as f64) / travel).clamp(0.0, 1.0) * max;
+    let max = column_extent(d, &layout, column).0 - f64::from(rect.h);
+    let travel = f64::from((track.h - thumb.h).max(1));
+    let scroll = ((y - offset - f64::from(track.y)) / travel).clamp(0.0, 1.0) * max;
     match column {
         ScrollColumn::Categories => d.menu.category_scroll = scroll,
         ScrollColumn::Apps => d.menu.app_scroll = scroll,
@@ -910,7 +910,7 @@ pub fn hit(d: &mut Desktop, x: f64, y: f64) -> Option<Hover> {
         && let Some((index, _, _)) = d.menu.context
     {
         if rect.contains(x, y) {
-            let row = ((y - rect.y as f64 - 6.0) / CONTEXT_ROW as f64).floor();
+            let row = ((y - f64::from(rect.y) - 6.0) / f64::from(CONTEXT_ROW)).floor();
             if row >= 0.0 && (row as usize) < context_rows(d, index).len() {
                 return Some(Hover::MenuContextItem(row as usize));
             }
@@ -931,7 +931,8 @@ pub fn hit(d: &mut Desktop, x: f64, y: f64) -> Option<Hover> {
         }
     }
     if layout.categories.w > 0 && layout.categories.contains(x, y) {
-        let row = ((y - layout.categories.y as f64 + d.menu.category_scroll) / CATEGORY_ROW as f64).floor();
+        let row =
+            ((y - f64::from(layout.categories.y) + d.menu.category_scroll) / f64::from(CATEGORY_ROW)).floor();
         if row >= 0.0
             && let Some(CategoryRow::Section(_)) = category_rows(d).get(row as usize)
         {
@@ -943,15 +944,16 @@ pub fn hit(d: &mut Desktop, x: f64, y: f64) -> Option<Hover> {
         let row = match arrangement(d) {
             Arrangement::Grid { w, h, .. } => {
                 let columns = grid_columns(layout.apps, w);
-                let column = ((x - layout.apps.x as f64) / grid_cell_width(layout.apps, w) as f64).floor();
-                let line = ((y - layout.apps.y as f64 + d.menu.app_scroll) / h as f64).floor();
+                let column =
+                    ((x - f64::from(layout.apps.x)) / f64::from(grid_cell_width(layout.apps, w))).floor();
+                let line = ((y - f64::from(layout.apps.y) + d.menu.app_scroll) / f64::from(h)).floor();
                 if column < 0.0 || column as usize >= columns || line < 0.0 {
                     return Some(Hover::None);
                 }
                 line as usize * columns + column as usize
             }
             Arrangement::Rows => {
-                let line = ((y - layout.apps.y as f64 + d.menu.app_scroll) / ROW as f64).floor();
+                let line = ((y - f64::from(layout.apps.y) + d.menu.app_scroll) / f64::from(ROW)).floor();
                 if line < 0.0 {
                     return Some(Hover::None);
                 }
@@ -1045,9 +1047,9 @@ pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button) -> bool {
             let layout = layout(d);
             if let Some((_, thumb)) = scrollbar(d, &layout, column) {
                 let offset = if thumb.contains(x, y) {
-                    y - thumb.y as f64
+                    y - f64::from(thumb.y)
                 } else {
-                    thumb.h as f64 / 2.0
+                    f64::from(thumb.h) / 2.0
                 };
                 d.menu.scroll_drag = Some((column, offset));
                 scroll_drag(d, y);
@@ -1077,13 +1079,13 @@ pub fn scroll(d: &mut Desktop, x: f64, y: f64, delta: f64) -> bool {
     }
     let step = delta.signum() * ui::SCROLL_STEP;
     if layout.categories.w > 0 && layout.categories.contains(x, y) {
-        let content = category_rows(d).len() as f64 * CATEGORY_ROW as f64;
-        let max = (content - layout.categories.h as f64).max(0.0);
+        let content = category_rows(d).len() as f64 * f64::from(CATEGORY_ROW);
+        let max = (content - f64::from(layout.categories.h)).max(0.0);
         d.menu.category_scroll = (d.menu.category_scroll + step).clamp(0.0, max);
         d.redraw_panel();
     } else if layout.apps.contains(x, y) {
         let content = apps_content_height(d, layout.apps);
-        let max = (content - layout.apps.h as f64).max(0.0);
+        let max = (content - f64::from(layout.apps.h)).max(0.0);
         d.menu.app_scroll = (d.menu.app_scroll + step).clamp(0.0, max);
         if let Some(hover) = hit(d, x, y) {
             d.set_hover(hover);
@@ -1182,13 +1184,14 @@ pub fn key(d: &mut Desktop, key: Key) {
                         .position(|r| *r == CategoryRow::Section(sections[next]))
                         .unwrap_or(0);
                     let layout = layout(d);
-                    let row_top = row_index as f64 * CATEGORY_ROW as f64;
+                    let row_top = row_index as f64 * f64::from(CATEGORY_ROW);
                     if row_top < d.menu.category_scroll {
                         d.menu.category_scroll = row_top;
-                    } else if row_top + CATEGORY_ROW as f64
-                        > d.menu.category_scroll + layout.categories.h as f64
+                    } else if row_top + f64::from(CATEGORY_ROW)
+                        > d.menu.category_scroll + f64::from(layout.categories.h)
                     {
-                        d.menu.category_scroll = row_top + CATEGORY_ROW as f64 - layout.categories.h as f64;
+                        d.menu.category_scroll =
+                            row_top + f64::from(CATEGORY_ROW) - f64::from(layout.categories.h);
                     }
                 }
             }
@@ -1220,14 +1223,14 @@ fn scroll_to_selection(d: &mut Desktop) {
     let (top, height) = match arrangement(d) {
         Arrangement::Grid { w, h, .. } => {
             let row = selected / grid_columns(layout.apps, w);
-            (row as f64 * h as f64, h as f64)
+            (row as f64 * f64::from(h), f64::from(h))
         }
-        Arrangement::Rows => (selected as f64 * ROW as f64, ROW as f64),
+        Arrangement::Rows => (selected as f64 * f64::from(ROW), f64::from(ROW)),
     };
     if top < d.menu.app_scroll {
         d.menu.app_scroll = top;
-    } else if top + height > d.menu.app_scroll + layout.apps.h as f64 {
-        d.menu.app_scroll = top + height - layout.apps.h as f64;
+    } else if top + height > d.menu.app_scroll + f64::from(layout.apps.h) {
+        d.menu.app_scroll = top + height - f64::from(layout.apps.h);
     }
 }
 

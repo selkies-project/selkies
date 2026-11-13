@@ -76,8 +76,8 @@ pub fn item_cells(d: &Desktop) -> Vec<Cell> {
 /// * `y` - Pointer Y.
 pub fn cell_at(d: &Desktop, x: f64, y: f64) -> Option<Cell> {
     let area = icon_area(d);
-    let column = ((x - (area.x + MARGIN) as f64) / ui::DESKTOP_CELL_WIDTH as f64).floor() as i32;
-    let row = ((y - (area.y + MARGIN) as f64) / ui::DESKTOP_CELL_HEIGHT as f64).floor() as i32;
+    let column = ((x - f64::from(area.x + MARGIN)) / f64::from(ui::DESKTOP_CELL_WIDTH)).floor() as i32;
+    let row = ((y - f64::from(area.y + MARGIN)) / f64::from(ui::DESKTOP_CELL_HEIGHT)).floor() as i32;
     ((0..columns(area)).contains(&column) && (0..rows(area)).contains(&row)).then_some((column, row))
 }
 
@@ -474,7 +474,7 @@ pub fn paint_wallpaper(
         BackgroundStyle::Solid => canvas.fill_rect(area, wallpaper.color),
         BackgroundStyle::Gradient => {
             let base = wallpaper.color.to_color_u8();
-            let lighten = |c: u8, by: i32| (c as i32 + by).clamp(0, 255) as u8;
+            let lighten = |c: u8, by: i32| (i32::from(c) + by).clamp(0, 255) as u8;
             let top = tiny_skia::Color::from_rgba8(
                 lighten(base.red(), 26),
                 lighten(base.green(), 28),

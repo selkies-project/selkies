@@ -220,9 +220,15 @@ fn decode_thumbnail(key: &ThumbKey) -> Option<Pixmap> {
     }
     let size = key.size.max(1);
     let (nw, nh) = if w >= h {
-        (size, (h as u64 * size as u64 / w as u64).max(1) as u32)
+        (
+            size,
+            (u64::from(h) * u64::from(size) / u64::from(w)).max(1) as u32,
+        )
     } else {
-        ((w as u64 * size as u64 / h as u64).max(1) as u32, size)
+        (
+            (u64::from(w) * u64::from(size) / u64::from(h)).max(1) as u32,
+            size,
+        )
     };
     let scaled = if (nw, nh) == (w, h) {
         decoded

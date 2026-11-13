@@ -99,7 +99,7 @@ impl Formats {
                 let carried = match (fullcolor, ten_bit) {
                     (false, false) => true,
                     (true, false) => self.fullcolor,
-                    (_, true) => self.ten_bit[fullcolor as usize],
+                    (_, true) => self.ten_bit[usize::from(fullcolor)],
                 };
                 if carried {
                     names.push(format!("{chroma}-{depth}"));
@@ -414,7 +414,7 @@ pub(crate) fn held_key_retry(crf: u32, len: usize, cap: usize) -> Option<u32> {
 pub(crate) fn held_key_start(crf: u32, last: Option<(usize, u32)>, cap: usize) -> u32 {
     match last {
         Some((len, q)) if q.abs_diff(crf) <= 12 => {
-            let at_crf = len as f64 * 2f64.powf((q as f64 - crf as f64) / 6.0);
+            let at_crf = len as f64 * 2f64.powf((f64::from(q) - f64::from(crf)) / 6.0);
             held_key_retry(crf, at_crf.round() as usize, cap).unwrap_or(crf)
         }
         _ => crf,
@@ -472,7 +472,7 @@ pub fn reference_frames(settings: &CaptureSettings) -> u32 {
 }
 
 pub fn vbv_bits(bitrate_bps: u32, fps: f64, keyframe_interval_s: f64, multiplier: f64) -> u32 {
-    let frame_bits = bitrate_bps as f64 / fps.max(1.0);
+    let frame_bits = f64::from(bitrate_bps) / fps.max(1.0);
     let mult = if multiplier > 0.0 {
         multiplier
     } else if keyframe_interval_s > 0.0 {
@@ -480,7 +480,10 @@ pub fn vbv_bits(bitrate_bps: u32, fps: f64, keyframe_interval_s: f64, multiplier
     } else {
         1.5
     };
-    (frame_bits * mult).round().max(1.0).min(u32::MAX as f64) as u32
+    (frame_bits * mult)
+        .round()
+        .max(1.0)
+        .min(f64::from(u32::MAX)) as u32
 }
 
 /// The `Colorspace:` field of a stream log line, from what the session negotiated rather than
@@ -1886,7 +1889,7 @@ fn hardware_lacks_ten_bit(served: &HardwareEncoders, settings: &CaptureSettings)
         .find(|&&(c, ..)| c == codec)
         .is_some_and(|&(_, _, formats)| {
             let fullcolor = settings.video_fullcolor && codec.fullcolor() && formats.fullcolor;
-            !formats.ten_bit[fullcolor as usize]
+            !formats.ten_bit[usize::from(fullcolor)]
         })
 }
 
@@ -2329,9 +2332,13 @@ mod software_tests {
         for y in 0..H {
             for x in 0..W {
                 let i = (y * W + x) * 4;
-                let (b, g, r) = (bgra[i] as f64, bgra[i + 1] as f64, bgra[i + 2] as f64);
+                let (b, g, r) = (
+                    f64::from(bgra[i]),
+                    f64::from(bgra[i + 1]),
+                    f64::from(bgra[i + 2]),
+                );
                 let luma = 16.0 + (0.2126 * r + 0.7152 * g + 0.0722 * b) * 219.0 / 255.0;
-                let d = decoded.y[y * decoded.y_stride + x] as f64 - luma;
+                let d = f64::from(decoded.y[y * decoded.y_stride + x]) - luma;
                 mse += d * d;
             }
         }
@@ -2645,13 +2652,17 @@ mod software_tests {
                 for y in (by..(by + 64).min(480)).step_by(2) {
                     for x in (bx..bx + 64).step_by(2) {
                         let i = (y * w + x) * 4;
-                        let (b, g, r) = (src[i] as f64, src[i + 1] as f64, src[i + 2] as f64);
+                        let (b, g, r) = (
+                            f64::from(src[i]),
+                            f64::from(src[i + 1]),
+                            f64::from(src[i + 2]),
+                        );
                         let luma = 16.0 + (0.2126 * r + 0.7152 * g + 0.0722 * b) * 219.0 / 255.0;
-                        sum += (pic.y[y * pic.y_stride + x] as f64 - luma).abs();
+                        sum += (f64::from(pic.y[y * pic.y_stride + x]) - luma).abs();
                         n += 1;
                     }
                 }
-                let off = sum / n as f64;
+                let off = sum / f64::from(n);
                 assert!(
                     off <= 20.0,
                     "frame {id} (from {reference}): the block at ({bx}, {by}) is {off:.1} off its source"
@@ -2688,7 +2699,7 @@ mod software_tests {
                 let ch = f.chroma_height();
                 let v: f64 = (0..ch)
                     .flat_map(|y| (0..cw).map(move |x| (x, y)))
-                    .map(|(x, y)| f.v[y * f.uv_stride + x] as f64)
+                    .map(|(x, y)| f64::from(f.v[y * f.uv_stride + x]))
                     .sum::<f64>()
                     / (cw * ch) as f64;
                 means.push(v);
@@ -2750,7 +2761,7 @@ mod software_tests {
             let kbps = bytes as f64 * 8.0 * 30.0 / 60.0 / 1000.0;
             println!("{codec:?} CBR {KBPS} kbps on noise: {kbps:.0} kbps");
             assert!(
-                kbps > KBPS as f64 * 0.5 && kbps < KBPS as f64 * 1.6,
+                kbps > f64::from(KBPS) * 0.5 && kbps < f64::from(KBPS) * 1.6,
                 "{codec:?}: {kbps:.0} kbps"
             );
         }
@@ -3183,7 +3194,8 @@ pub(crate) mod mixed_screen {
         for y in 0..H {
             for x in 0..W {
                 if in_box(x, y) == boxed {
-                    sum += (decoded[y * W + x] as f64 - source[(y * W + x) * 4] as f64).abs();
+                    sum +=
+                        (f64::from(decoded[y * W + x]) - f64::from(source[(y * W + x) * 4])).abs();
                     n += 1;
                 }
             }

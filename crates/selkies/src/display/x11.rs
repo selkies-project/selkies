@@ -116,8 +116,8 @@ fn current_screen_mm(reply: &[u8]) -> Option<(u32, u32)> {
 
 /// The physical size RandR is told for `pixels` at the applied density (96 when none).
 fn millimeters(pixels: i32) -> u32 {
-    let dpi = applied_dpi().unwrap_or(96) as f64;
-    ((pixels as f64 * 25.4 / dpi).round() as u32).max(1)
+    let dpi = f64::from(applied_dpi().unwrap_or(96));
+    ((f64::from(pixels) * 25.4 / dpi).round() as u32).max(1)
 }
 
 /// The pluggable output each secondary display holds, so a display that stays from one
@@ -317,7 +317,7 @@ impl X11 {
     /// The root window's size.
     pub fn root_size(&self) -> Result<(i32, i32)> {
         let g = self.conn.get_geometry(self.root)?.reply()?;
-        Ok((g.width as i32, g.height as i32))
+        Ok((i32::from(g.width), i32::from(g.height)))
     }
 
     /// A 32-bit property of `win`, empty where it is unset.
@@ -337,10 +337,10 @@ impl X11 {
             .translate_coordinates(win, self.root, 0, 0)?
             .reply()?;
         Ok((
-            at.dst_x as i32,
-            at.dst_y as i32,
-            geom.width as i32,
-            geom.height as i32,
+            i32::from(at.dst_x),
+            i32::from(at.dst_y),
+            i32::from(geom.width),
+            i32::from(geom.height),
         ))
     }
 
@@ -392,11 +392,11 @@ impl X11 {
                 .iter()
                 .map(|m| modes::Mode {
                     id: m.id,
-                    width: m.width as u32,
-                    height: m.height as u32,
-                    dot_clock: m.dot_clock as u64,
-                    h_total: m.htotal as u32,
-                    v_total: m.vtotal as u32,
+                    width: u32::from(m.width),
+                    height: u32::from(m.height),
+                    dot_clock: u64::from(m.dot_clock),
+                    h_total: u32::from(m.htotal),
+                    v_total: u32::from(m.vtotal),
                     flags: u32::from(m.mode_flags),
                 })
                 .collect(),
@@ -458,7 +458,7 @@ impl X11 {
             if let Some(&mhz) = recorded.first()
                 && mhz > 0
             {
-                modes::note_configured_refresh(mhz as f64 / 1000.0);
+                modes::note_configured_refresh(f64::from(mhz) / 1000.0);
                 return Ok(());
             }
             let state = self.connected_output_state()?;
@@ -785,8 +785,8 @@ impl X11 {
     pub fn apply_mode_set(&mut self, set: &ModeSet) -> Result<()> {
         let (screen_w, screen_h) = set.screen;
         let ci = &set.current;
-        let crtc_fits = ci.x as i32 + ci.width as i32 <= screen_w as i32
-            && ci.y as i32 + ci.height as i32 <= screen_h as i32;
+        let crtc_fits = i32::from(ci.x) + i32::from(ci.width) <= screen_w as i32
+            && i32::from(ci.y) + i32::from(ci.height) <= screen_h as i32;
         if ci.mode != 0 && !crtc_fits {
             let status = self
                 .conn
@@ -901,8 +901,8 @@ impl X11 {
     /// all, so the idleness of repeated SETTINGS payloads stays ConfigureNotify-free.
     pub fn stamp_root_dpi(&mut self, dpi: i32) -> Result<()> {
         let (w, h) = self.root_size()?;
-        let mm_w = ((w as f64 * 25.4 / dpi as f64).round() as u32).max(1);
-        let mm_h = ((h as f64 * 25.4 / dpi as f64).round() as u32).max(1);
+        let mm_w = ((f64::from(w) * 25.4 / f64::from(dpi)).round() as u32).max(1);
+        let mm_h = ((f64::from(h) * 25.4 / f64::from(dpi)).round() as u32).max(1);
         let info = self.conn.randr_get_screen_info(self.root)?.raw_reply()?;
         if current_screen_mm(info.as_ref()) == Some((mm_w, mm_h)) {
             set_applied_dpi(dpi);
@@ -1010,7 +1010,13 @@ impl X11 {
         outputs: &[u32],
     ) -> Result<()> {
         let ci = self.crtc_info(crtc, ts)?;
-        if (ci.x as i32, ci.y as i32, ci.mode, ci.outputs.as_slice()) == (x, y, mode_id, outputs) {
+        if (
+            i32::from(ci.x),
+            i32::from(ci.y),
+            ci.mode,
+            ci.outputs.as_slice(),
+        ) == (x, y, mode_id, outputs)
+        {
             return Ok(());
         }
         let status = self
@@ -1093,7 +1099,12 @@ impl X11 {
                 if ci.mode != 0 {
                     rects.insert(
                         did.clone(),
-                        (ci.x as i32, ci.y as i32, ci.width as i32, ci.height as i32),
+                        (
+                            i32::from(ci.x),
+                            i32::from(ci.y),
+                            i32::from(ci.width),
+                            i32::from(ci.height),
+                        ),
                     );
                 }
             }
@@ -1322,7 +1333,12 @@ impl X11 {
             let oi = self.output_info(*out_id, ts)?;
             let got = if oi.crtc != 0 {
                 let ci = self.crtc_info(oi.crtc, ts)?;
-                Some((ci.x as i32, ci.y as i32, ci.width as i32, ci.height as i32))
+                Some((
+                    i32::from(ci.x),
+                    i32::from(ci.y),
+                    i32::from(ci.width),
+                    i32::from(ci.height),
+                ))
             } else {
                 None
             };
@@ -1374,7 +1390,7 @@ impl X11 {
             .collect();
         let primary_at = if state.oi.crtc != 0 {
             let ci = self.crtc_info(state.oi.crtc, ts)?;
-            (ci.mode != 0).then_some((ci.x as i32, ci.y as i32))
+            (ci.mode != 0).then_some((i32::from(ci.x), i32::from(ci.y)))
         } else {
             None
         };

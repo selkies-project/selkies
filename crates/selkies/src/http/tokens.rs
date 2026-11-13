@@ -100,7 +100,7 @@ pub fn token_slots(value: &Json) -> Vec<u8> {
             _ => None,
         };
         if let Some(slot) = slot
-            && (1..=GAMEPAD_SLOTS as i64).contains(&slot)
+            && (1..=i64::from(GAMEPAD_SLOTS)).contains(&slot)
             && !slots.contains(&(slot as u8))
         {
             slots.push(slot as u8);

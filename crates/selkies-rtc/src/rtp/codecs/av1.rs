@@ -97,7 +97,7 @@ pub fn obus(tu: &Bytes) -> Result<Vec<Obu>, PackError> {
         let obu_type = (header >> 3) & 0x0F;
         let has_extension = header & 0x04 != 0;
         let has_size = header & 0x02 != 0;
-        let mut start = pos + 1 + has_extension as usize;
+        let mut start = pos + 1 + usize::from(has_extension);
         let size = if has_size {
             let (size, next) = read_leb128(tu, start)?;
             start = next;

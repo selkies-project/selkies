@@ -161,13 +161,13 @@ impl HttpConfig {
             tokens_file: s.tokens_file().to_string(),
             listen: listen::ListenConfig {
                 addr: s.addr().to_string(),
-                port: s.port().clamp(0, u16::MAX as i64) as u16,
+                port: s.port().clamp(0, i64::from(u16::MAX)) as u16,
                 unix_socket: s.unix_socket().trim().to_string(),
                 idle_timeout: IDLE_CONNECTION_TIMEOUT,
                 access_log: false,
             },
             port_given: s.was_provided("port"),
-            https_port: s.https_port().clamp(0, u16::MAX as i64) as u16,
+            https_port: s.https_port().clamp(0, i64::from(u16::MAX)) as u16,
             tls: tls::TlsConfig {
                 enable_https: s.enable_https().on,
                 cert: s.https_cert().to_string(),

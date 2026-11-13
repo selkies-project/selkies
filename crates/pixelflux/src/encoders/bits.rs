@@ -52,12 +52,12 @@ impl BitWriter {
 
     /// One flag bit.
     pub fn flag(&mut self, value: bool) {
-        self.u(1, value as u64);
+        self.u(1, u64::from(value));
     }
 
     /// An unsigned Exp-Golomb code.
     pub fn ue(&mut self, value: u32) {
-        let v = value as u64 + 1;
+        let v = u64::from(value) + 1;
         let zeros = 63 - v.leading_zeros();
         self.u(zeros, 0);
         self.u(zeros + 1, v);

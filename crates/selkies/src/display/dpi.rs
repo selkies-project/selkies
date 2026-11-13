@@ -180,14 +180,14 @@ pub fn rewrite_lxqt_font(path: &Path, dpi: i32, current_dpi: i32) -> Option<(f64
             continue;
         };
         if points <= 0.0 {
-            points = pixels * 72.0 / current_dpi.max(1) as f64;
+            points = pixels * 72.0 / f64::from(current_dpi.max(1));
         }
         if points <= 0.0 {
             out.push_str(line);
             continue;
         }
         fields[1] = trim_float(points);
-        let px = ((points * dpi as f64 / 72.0).round() as i32).max(1);
+        let px = ((points * f64::from(dpi) / 72.0).round() as i32).max(1);
         fields[2] = px.to_string();
         out.push_str(&format!("{}\"{}\"\n", &m[1], fields.join(",")));
         resolved = Some((points, px));
@@ -447,7 +447,7 @@ async fn run_xfconf(dpi: i32) -> bool {
         return false;
     }
     debug!(target: "display", "Successfully set XFCE DPI to {dpi} using xfconf-query.");
-    let cursor = ((dpi as f64 / 96.0 * 32.0).round() as i32).to_string();
+    let cursor = ((f64::from(dpi) / 96.0 * 32.0).round() as i32).to_string();
     debug!(target: "display", "Attempting to set cursor size to: {cursor} (based on DPI {dpi})");
     let out = run_tool(
         "xfconf-query",
@@ -492,7 +492,7 @@ async fn run_mate_gsettings(dpi: i32) -> bool {
         debug!(target: "display", "No MATE session with a session bus runs on this display; gsettings left alone.");
         return false;
     };
-    let scale = dpi as f64 / 96.0;
+    let scale = f64::from(dpi) / 96.0;
     let factor = if scale.fract() == 0.0 {
         (scale as i32).max(1)
     } else {

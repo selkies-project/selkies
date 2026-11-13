@@ -205,7 +205,7 @@ pub async fn run() -> Result<(), String> {
         let startup_dpi = crate::display::dpi::restore_dpi(dpi, locked).await;
         if cursor > 0 {
             crate::display::dpi::set_cursor_size(crate::display::cursor_size_for_dpi(
-                startup_dpi as f64,
+                f64::from(startup_dpi),
                 cursor,
             ))
             .await;

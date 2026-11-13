@@ -142,7 +142,7 @@ pub fn slot_denied(msg: &str, role: Role, slot: Option<&Json>, secure: bool) -> 
     else {
         return true;
     };
-    !token_slots(slot).iter().any(|s| *s as i64 == index + 1)
+    !token_slots(slot).iter().any(|s| i64::from(*s) == index + 1)
 }
 
 /// What a client told a slot about the pad it drives.

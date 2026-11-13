@@ -226,7 +226,7 @@ pub fn pack_evdev_report(ev_type: u16, code: u16, value: i32, arch_bits: u8) -> 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    let (sec, usec) = (now.as_secs() as i64, now.subsec_micros() as i64);
+    let (sec, usec) = (now.as_secs() as i64, i64::from(now.subsec_micros()));
     let mut out = Vec::with_capacity(2 * input_event_size(arch_bits));
     pack_input_event_at(&mut out, sec, usec, ev_type, code, value, arch_bits);
     pack_input_event_at(&mut out, sec, usec, EV_SYN, SYN_REPORT, 0, arch_bits);

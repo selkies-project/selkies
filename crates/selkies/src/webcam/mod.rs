@@ -87,7 +87,7 @@ pub const MSG_WEBCAM_KEYFRAME: &str = "WEBCAM_KEYFRAME";
 
 /// Clockwise rotation degrees and horizontal flip carried by a `0x06` flags byte.
 pub fn orientation_from_flags(flags: u8) -> (u32, bool) {
-    let rotation = ((flags & WS_FLAG_ROTATION_MASK) as u32 >> WS_FLAG_ROTATION_SHIFT) * 90;
+    let rotation = (u32::from(flags & WS_FLAG_ROTATION_MASK) >> WS_FLAG_ROTATION_SHIFT) * 90;
     (rotation, flags & WS_FLAG_HFLIP != 0)
 }
 
@@ -113,7 +113,7 @@ impl<'a> WebcamFrame<'a> {
         }
         let (rotation, flip) = orientation_from_flags(message[2]);
         Some(WebcamFrame {
-            codec: message[1] as u32,
+            codec: u32::from(message[1]),
             keyframe: message[2] & WS_FLAG_KEYFRAME != 0,
             rotation,
             flip,

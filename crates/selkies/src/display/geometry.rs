@@ -21,15 +21,15 @@ pub fn fit_res(w: i32, h: i32, max_w: i32, max_h: i32) -> (i32, i32) {
     if w <= max_w && h <= max_h {
         return (w, h);
     }
-    let aspect = w as f64 / h as f64;
+    let aspect = f64::from(w) / f64::from(h);
     let (mut w, mut h) = (w, h);
     if w > max_w {
         w = max_w;
-        h = (w as f64 / aspect) as i32;
+        h = (f64::from(w) / aspect) as i32;
     }
     if h > max_h {
         h = max_h;
-        w = (h as f64 * aspect) as i32;
+        w = (f64::from(h) * aspect) as i32;
     }
     (w - (w % 2), h - (h % 2))
 }
@@ -63,7 +63,7 @@ pub fn parse_resize_dims(res_str: &str) -> Option<(i32, i32)> {
 /// Cursor pixel size scaled from its 96-DPI base; both transports derive the X cursor
 /// size from the desktop DPI with this.
 pub fn cursor_size_for_dpi(dpi: f64, base_size: i32) -> i32 {
-    ((dpi / 96.0 * base_size as f64).round() as i32).max(1)
+    ((dpi / 96.0 * f64::from(base_size)).round() as i32).max(1)
 }
 
 /// What a secondary display's DPI sync is refused with on X11.
@@ -333,7 +333,7 @@ mod tests {
         assert_eq!(fit_res(4000, 1000, 1920, 900), (1920, 480));
         let (w, h) = fit_res(4000, 3000, 1920, 1200);
         assert_eq!((w, h), (1600, 1200));
-        assert!(((w as f64 / h as f64) - 4000.0 / 3000.0).abs() < 0.001);
+        assert!(((f64::from(w) / f64::from(h)) - 4000.0 / 3000.0).abs() < 0.001);
         assert_eq!(fit_res(1000, 1001, 999, 1000), (998, 998));
     }
 

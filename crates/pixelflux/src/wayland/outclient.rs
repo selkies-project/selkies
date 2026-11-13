@@ -66,8 +66,8 @@ struct Screen {
 /// The logical size wlroots gives a mode at a scale (each axis truncated).
 fn logical_size(mode: (i32, i32), scale: f64) -> (i32, i32) {
     (
-        (mode.0 as f64 / scale) as i32,
-        (mode.1 as f64 / scale) as i32,
+        (f64::from(mode.0) / scale) as i32,
+        (f64::from(mode.1) / scale) as i32,
     )
 }
 

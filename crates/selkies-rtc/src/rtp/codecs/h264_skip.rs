@@ -146,7 +146,7 @@ impl Reader {
         let mut value = 0u32;
         for _ in 0..n {
             let bit = (self.rbsp[self.pos >> 3] >> (7 - (self.pos & 7))) & 1;
-            value = (value << 1) | bit as u32;
+            value = (value << 1) | u32::from(bit);
             self.pos += 1;
         }
         Ok(value)
@@ -158,7 +158,7 @@ impl Reader {
         let mut left = n;
         while left > 0 {
             let take = left.min(32);
-            value = (value << take) | self.u(take)? as u64;
+            value = (value << take) | u64::from(self.u(take)?);
             left -= take;
         }
         Ok(value)
@@ -172,11 +172,11 @@ impl Reader {
                 return Err(Unreadable);
             }
         }
-        Ok(((1u64 << zeros) - 1 + self.u(zeros)? as u64) as u32)
+        Ok(((1u64 << zeros) - 1 + u64::from(self.u(zeros)?)) as u32)
     }
 
     pub fn se(&mut self) -> Result<i32, Unreadable> {
-        let k = self.ue()? as i64;
+        let k = i64::from(self.ue()?);
         Ok(if k % 2 == 1 {
             ((k + 1) / 2) as i32
         } else {
@@ -199,7 +199,7 @@ impl Writer {
     }
 
     pub fn ue(&mut self, v: u32) {
-        let code = v as u64 + 1;
+        let code = u64::from(v) + 1;
         let width = 64 - code.leading_zeros() as usize;
         for _ in 0..width - 1 {
             self.bits.push(0);
@@ -210,7 +210,7 @@ impl Writer {
     }
 
     pub fn se(&mut self, v: i32) {
-        let v = v as i64;
+        let v = i64::from(v);
         self.ue(if v > 0 { 2 * v - 1 } else { -2 * v } as u32);
     }
 

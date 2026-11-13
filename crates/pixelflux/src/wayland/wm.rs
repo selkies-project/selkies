@@ -1133,16 +1133,18 @@ where
     if effect.alpha <= 0.0 || effect.rect.w <= 0 || effect.rect.h <= 0 {
         return out;
     }
-    let sx = effect.rect.w as f64 / ghost.geometry.w.max(1) as f64;
-    let sy = effect.rect.h as f64 / ghost.geometry.h.max(1) as f64;
+    let sx = f64::from(effect.rect.w) / f64::from(ghost.geometry.w.max(1));
+    let sy = f64::from(effect.rect.h) / f64::from(ghost.geometry.h.max(1));
     let place = |rect: Rect| -> (Point<f64, Physical>, smithay::utils::Size<i32, Logical>) {
-        let x = effect.rect.x as f64 + (rect.x - ghost.geometry.x) as f64 * sx - origin.x as f64;
-        let y = effect.rect.y as f64 + (rect.y - ghost.geometry.y) as f64 * sy - origin.y as f64;
+        let x = f64::from(effect.rect.x) + f64::from(rect.x - ghost.geometry.x) * sx
+            - f64::from(origin.x);
+        let y = f64::from(effect.rect.y) + f64::from(rect.y - ghost.geometry.y) * sy
+            - f64::from(origin.y);
         (
             Point::<f64, Logical>::from((x, y)).to_physical(Scale::from(scale)),
             (
-                (rect.w as f64 * sx).round().max(1.0) as i32,
-                (rect.h as f64 * sy).round().max(1.0) as i32,
+                (f64::from(rect.w) * sx).round().max(1.0) as i32,
+                (f64::from(rect.h) * sy).round().max(1.0) as i32,
             )
                 .into(),
         )
@@ -1222,15 +1224,15 @@ where
     let Some(frame) = wm.and_then(|wm| wm.frames.get(&id)) else {
         return elements;
     };
-    let sx = effect.rect.w as f64 / client.w.max(1) as f64;
-    let sy = effect.rect.h as f64 / client.h.max(1) as f64;
+    let sx = f64::from(effect.rect.w) / f64::from(client.w.max(1));
+    let sy = f64::from(effect.rect.h) / f64::from(client.h.max(1));
     for (rect, buffer) in &frame.parts {
-        let x = effect.rect.x as f64 + rect.x as f64 * sx - origin.x as f64;
-        let y = effect.rect.y as f64 + rect.y as f64 * sy - origin.y as f64;
+        let x = f64::from(effect.rect.x) + f64::from(rect.x) * sx - f64::from(origin.x);
+        let y = f64::from(effect.rect.y) + f64::from(rect.y) * sy - f64::from(origin.y);
         let location = Point::<f64, Logical>::from((x, y)).to_physical(Scale::from(scale));
         let size: smithay::utils::Size<i32, Logical> = (
-            (rect.w as f64 * sx).round().max(1.0) as i32,
-            (rect.h as f64 * sy).round().max(1.0) as i32,
+            (f64::from(rect.w) * sx).round().max(1.0) as i32,
+            (f64::from(rect.h) * sy).round().max(1.0) as i32,
         )
             .into();
         if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
@@ -1592,8 +1594,8 @@ fn set_state(
 /// client rectangle mostly lies on.
 fn move_to_output_under(state: &mut AppState, window: &Window, rect: Rect) {
     let center = Point::<f64, Logical>::from((
-        rect.x as f64 + rect.w as f64 / 2.0,
-        rect.y as f64 + rect.h as f64 / 2.0,
+        f64::from(rect.x) + f64::from(rect.w) / 2.0,
+        f64::from(rect.y) + f64::from(rect.h) / 2.0,
     ));
     let Some(idx) = state.node_idx_under(center) else {
         return;

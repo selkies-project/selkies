@@ -268,7 +268,7 @@ mod tests {
         assert_eq!(floors.observe(20.0, 10.0), 20.0);
         assert_eq!(floors.observe(50.0, 70.0), 20.0);
         for minute in 2..12 {
-            floors.observe(40.0, minute as f64 * 60.0);
+            floors.observe(40.0, f64::from(minute) * 60.0);
         }
         assert_eq!(
             floors.floor(),

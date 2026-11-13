@@ -36,7 +36,7 @@ impl BitReader<'_> {
         let mut value = 0u32;
         for _ in 0..bits {
             let byte = *self.data.get(self.pos >> 3)?;
-            value = (value << 1) | ((byte >> (7 - (self.pos & 7))) & 1) as u32;
+            value = (value << 1) | u32::from((byte >> (7 - (self.pos & 7))) & 1);
             self.pos += 1;
         }
         Some(value)
@@ -257,8 +257,8 @@ pub(crate) mod tests {
         let payloads2 = packetize(&delta, 1001, false);
         assert!(payloads2.iter().all(|p| p.to_bytes()[0] & FLAG_P != 0));
         assert_eq!(payloads2[0].to_bytes()[0] & FLAG_V, 0);
-        let pid =
-            ((payloads2[0].to_bytes()[1] & 0x7F) as u16) << 8 | payloads2[0].to_bytes()[2] as u16;
+        let pid = u16::from(payloads2[0].to_bytes()[1] & 0x7F) << 8
+            | u16::from(payloads2[0].to_bytes()[2]);
         assert_eq!(pid, 1001);
         let back: Vec<u8> = payloads2
             .iter()

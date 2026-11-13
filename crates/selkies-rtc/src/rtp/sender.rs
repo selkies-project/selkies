@@ -889,7 +889,7 @@ impl RtpSender {
             self.fec_clear_loss += (loss_fraction - self.fec_clear_loss) * 0.3;
         }
         self.fec_repair_packets =
-            1 + (self.fec_loss > 0.02) as usize + (self.fec_loss > 0.08) as usize;
+            1 + usize::from(self.fec_loss > 0.02) + usize::from(self.fec_loss > 0.08);
         self.fec_full = self.fec_clear_loss > FEC_FULL_LOSS && !queued;
     }
 
@@ -2018,7 +2018,7 @@ impl RtpSender {
             RtcpPacket::Rr { reports, .. } | RtcpPacket::Sr { reports, .. } => {
                 for report in reports.iter().filter(|r| r.ssrc == self.ssrc) {
                     if self.lsr == Some(report.lsr) && report.dlsr != 0 {
-                        let rtt = now - self.lsr_time - report.dlsr as f64 / 65536.0;
+                        let rtt = now - self.lsr_time - f64::from(report.dlsr) / 65536.0;
                         self.rtt = Some(match self.rtt {
                             None => rtt,
                             Some(old) => RTT_ALPHA * old + (1.0 - RTT_ALPHA) * rtt,
@@ -2132,11 +2132,11 @@ impl RtpSender {
         if self.rtp_instant_ns == 0 {
             return (0, 0);
         }
-        let elapsed =
-            (now_ns - self.rtp_instant_ns) as i128 * self.rtp_clock_rate as i128 / 1_000_000_000;
+        let elapsed = i128::from(now_ns - self.rtp_instant_ns) * i128::from(self.rtp_clock_rate)
+            / 1_000_000_000;
         (
             ntp_from_monotonic_ns(now_ns),
-            (self.rtp_timestamp as i128 + elapsed) as u32,
+            (i128::from(self.rtp_timestamp) + elapsed) as u32,
         )
     }
 
@@ -2154,7 +2154,7 @@ impl RtpSender {
                     (
                         ssrc,
                         *lrr,
-                        ((((now_ns - arrived_ns) as i128) << 16) / 1_000_000_000) as u32,
+                        ((i128::from(now_ns - arrived_ns) << 16) / 1_000_000_000) as u32,
                     )
                 })
                 .collect(),

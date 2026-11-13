@@ -239,14 +239,14 @@ fn read_nvml(nvml: &Nvml) -> Result<Vec<GpuStat>, nvml_wrapper::error::NvmlError
     let mut gpus = Vec::new();
     for idx in 0..nvml.device_count()? {
         let device = nvml.device_by_index(idx)?;
-        let graphics = device.utilization_rates()?.gpu as f64;
+        let graphics = f64::from(device.utilization_rates()?.gpu);
         let encoder = device
             .encoder_utilization()
-            .map(|u| u.utilization as f64)
+            .map(|u| f64::from(u.utilization))
             .unwrap_or(0.0);
         let decoder = device
             .decoder_utilization()
-            .map(|u| u.utilization as f64)
+            .map(|u| f64::from(u.utilization))
             .unwrap_or(0.0);
         let memory = device.memory_info()?;
         let bus_id = device.pci_info()?.bus_id;
@@ -857,7 +857,7 @@ fn allowed_cores() -> f64 {
         }
     };
     if count > 0 {
-        return count as f64;
+        return f64::from(count);
     }
     std::thread::available_parallelism()
         .map(|n| n.get() as f64)
@@ -1060,7 +1060,7 @@ impl SystemUsage {
         let percent = match cpu {
             None => self.system.as_mut().map_or(0.0, |system| {
                 system.refresh_cpu_usage();
-                system.global_cpu_usage() as f64
+                f64::from(system.global_cpu_usage())
             }),
             Some((used, cores)) => {
                 let mut percent = 0.0;

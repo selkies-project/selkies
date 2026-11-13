@@ -98,7 +98,7 @@ const CRC_TABLE: [u32; 256] = {
 
 fn crc32(data: &[u8]) -> u32 {
     data.iter().fold(0u32, |crc, &b| {
-        (crc << 8) ^ CRC_TABLE[((crc >> 24) ^ b as u32) as usize]
+        (crc << 8) ^ CRC_TABLE[((crc >> 24) ^ u32::from(b)) as usize]
     })
 }
 
@@ -324,7 +324,7 @@ mod tests {
         fn bitwise(data: &[u8]) -> u32 {
             let mut crc = 0u32;
             for &b in data {
-                crc ^= (b as u32) << 24;
+                crc ^= u32::from(b) << 24;
                 for _ in 0..8 {
                     crc = if crc & 0x8000_0000 != 0 {
                         (crc << 1) ^ CRC_POLY

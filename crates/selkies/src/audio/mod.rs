@@ -111,7 +111,7 @@ pub fn capture_channels() -> i32 {
     if channels < 1 {
         2
     } else {
-        channels.min(i32::MAX as i64) as i32
+        channels.min(i64::from(i32::MAX)) as i32
     }
 }
 

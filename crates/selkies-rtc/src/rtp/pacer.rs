@@ -1445,14 +1445,14 @@ mod tests {
         ] {
             let mut tr = TwccSender::new(now);
             for i in 0..10u16 {
-                tr.seed_sent(i, 1200, now + i as f64 * 50e-6);
+                tr.seed_sent(i, 1200, now + f64::from(i) * 50e-6);
             }
             let times: Vec<Option<f64>> = (0..10)
                 .map(|i| {
                     if lost && i == 5 {
                         None
                     } else {
-                        Some(100.0 + i as f64 * gap_ms)
+                        Some(100.0 + f64::from(i) * gap_ms)
                     }
                 })
                 .collect();

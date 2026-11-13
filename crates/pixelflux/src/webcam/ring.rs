@@ -406,13 +406,13 @@ mod tests {
         let f = RingFormat::raw(V4L2_PIX_FMT_YUYV, 16, 8, 30, 1).unwrap();
         let mut ring = Ring::new(f, 2).unwrap();
         for i in 1..=5u8 {
-            assert!(ring.publish(i as u64 * 1000, |slot| {
+            assert!(ring.publish(u64::from(i) * 1000, |slot| {
                 slot[..f.sizeimage as usize].fill(i);
                 f.sizeimage as usize
             }));
             let (used, seq, bytes) = ring.read_latest().unwrap();
             assert_eq!(used, f.sizeimage);
-            assert_eq!(seq, i as u64);
+            assert_eq!(seq, u64::from(i));
             assert!(bytes.iter().all(|b| *b == i));
         }
         assert_eq!(ring.frame_seq(), 5);

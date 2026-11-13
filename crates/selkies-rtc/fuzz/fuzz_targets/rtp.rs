@@ -109,7 +109,7 @@ fuzz_target!(|data: &[u8]| {
     let mut twcc_rx = TwccReceiver::new();
     let mut twcc_tx = TwccSender::new(0.0);
     for i in 0..512 {
-        twcc_tx.next(1200, i as f64 * 0.001);
+        twcc_tx.next(1200, f64::from(i) * 0.001);
     }
     let mut now = 1.0;
     for datagram in datagrams::split(data) {

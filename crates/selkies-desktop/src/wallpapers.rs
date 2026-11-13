@@ -230,7 +230,7 @@ fn pictures(dir: &Path, dark: bool) -> Vec<(PathBuf, (u32, u32))> {
 /// The picture for a target size: of those whose shape is closest to the target's, the
 /// smallest that covers it, else the largest; an unsized picture only when no other is there.
 fn pick(pictures: Vec<(PathBuf, (u32, u32))>, target: (u32, u32)) -> Option<PathBuf> {
-    let aspect = |(w, h): (u32, u32)| w as f64 / h.max(1) as f64;
+    let aspect = |(w, h): (u32, u32)| f64::from(w) / f64::from(h.max(1));
     let wanted = aspect((target.0.max(1), target.1.max(1)));
     let sized: Vec<_> = pictures.iter().filter(|(_, s)| s.0 > 0 && s.1 > 0).collect();
     if sized.is_empty() {
@@ -248,9 +248,9 @@ fn pick(pictures: Vec<(PathBuf, (u32, u32))>, target: (u32, u32)) -> Option<Path
     let covering = shaped
         .iter()
         .filter(|(_, s)| s.0 >= target.0 && s.1 >= target.1)
-        .min_by_key(|(_, s)| s.0 as u64 * s.1 as u64);
+        .min_by_key(|(_, s)| u64::from(s.0) * u64::from(s.1));
     covering
-        .or_else(|| shaped.iter().max_by_key(|(_, s)| s.0 as u64 * s.1 as u64))
+        .or_else(|| shaped.iter().max_by_key(|(_, s)| u64::from(s.0) * u64::from(s.1)))
         .map(|(p, _)| p.clone())
 }
 

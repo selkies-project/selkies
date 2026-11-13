@@ -1066,7 +1066,7 @@ fn draw_body(d: &mut Desktop, index: usize, hover: Option<CardPart>, canvas: &mu
     if let (Some(track), Some(value)) = (layout.progress, note.progress) {
         let radius = PROGRESS_HEIGHT as f32 / 2.0;
         canvas.fill_rounded(track, radius, ui::text_alpha(0x30));
-        let fill = Rect::new(track.x, track.y, track.w * value as i32 / 100, track.h);
+        let fill = Rect::new(track.x, track.y, track.w * i32::from(value) / 100, track.h);
         canvas.fill_rounded(fill, radius, ui::accent());
     }
     for (chip, action) in &layout.chips {
@@ -1106,7 +1106,7 @@ pub fn hit(d: &Desktop, x: f64, y: f64) -> Option<(u32, CardPart)> {
         .iter()
         .find(|c| c.closing.is_none() && c.rect(now).contains(x, y))?;
     let rect = card.rect(now);
-    let (lx, ly) = (x - rect.x as f64, y - rect.y as f64);
+    let (lx, ly) = (x - f64::from(rect.x), y - f64::from(rect.y));
     let close = Rect::new(CARD_WIDTH - PAD - CLOSE_SIZE, PAD + 1, CLOSE_SIZE, CLOSE_SIZE).inflate(4);
     if close.contains(lx, ly) {
         return Some((card.id, CardPart::Close));
@@ -1329,7 +1329,7 @@ fn center_row(d: &Desktop, list: Rect, index: usize) -> (Rect, Rect) {
 
 /// The largest scroll of the center's list.
 fn center_max_scroll(d: &Desktop, list: Rect) -> f64 {
-    (d.notifications.history().count() as i32 * CENTER_ROW - list.h).max(0) as f64
+    f64::from((d.notifications.history().count() as i32 * CENTER_ROW - list.h).max(0))
 }
 
 /// Draws the notification center; returns its rectangle.

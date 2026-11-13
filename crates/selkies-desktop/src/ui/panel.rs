@@ -762,7 +762,7 @@ mod tests {
         let layout = layout(&mut d);
         let (bell, volume) = (layout.notifications.unwrap(), layout.volume.unwrap());
         assert_eq!(bell.right() + GAP, volume.x);
-        let center = (bell.x as f64 + 4.0, bell.y as f64 + 4.0);
+        let center = (f64::from(bell.x) + 4.0, f64::from(bell.y) + 4.0);
         assert_eq!(hit(&mut d, center.0, center.1), Hover::Bell);
         click(&mut d, center.0, center.1, Button::Left, 0);
         assert_eq!(d.popup, Popup::Notifications);
@@ -831,7 +831,12 @@ mod tests {
     fn clicking_and_scrolling_the_pager_switch_desktops() {
         let mut d = desktop();
         let pills = layout(&mut d).pager;
-        let center = |r: Rect| (r.x as f64 + r.w as f64 / 2.0, r.y as f64 + r.h as f64 / 2.0);
+        let center = |r: Rect| {
+            (
+                f64::from(r.x) + f64::from(r.w) / 2.0,
+                f64::from(r.y) + f64::from(r.h) / 2.0,
+            )
+        };
         let (x, y) = center(pills[2]);
         assert_eq!(hit(&mut d, x, y), Hover::Pager(2));
         click(&mut d, x, y, Button::Left, 0);

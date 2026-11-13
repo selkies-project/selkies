@@ -709,7 +709,9 @@ impl VirtualCamera {
             .as_ref()
             .ok_or_else(|| Error::Capture("virtual camera is not running".into()))?;
         if data.is_empty() {
-            return Ok(running.keyframe_wanted.swap(false, Ordering::Relaxed) as u32);
+            return Ok(u32::from(
+                running.keyframe_wanted.swap(false, Ordering::Relaxed),
+            ));
         }
         let mut buf = running.pool.take(data.len());
         buf.extend_from_slice(data);
@@ -730,7 +732,9 @@ impl VirtualCamera {
             }
             running.pool.put(evicted.data);
         }
-        Ok(running.keyframe_wanted.swap(false, Ordering::Relaxed) as u32)
+        Ok(u32::from(
+            running.keyframe_wanted.swap(false, Ordering::Relaxed),
+        ))
     }
 
     /// Stop the decoder thread, close every interposer client, and remove the socket.

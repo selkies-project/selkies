@@ -99,7 +99,7 @@ fn uinput_abi_matches_kernel_headers() {
         ("UI_SET_ABSBIT", UI_SET_ABSBIT as i64),
         ("UI_GET_SYSNAME", UI_GET_SYSNAME as i64),
         ("UINPUT_MAX_NAME_SIZE", UINPUT_MAX_NAME_SIZE as i64),
-        ("BUS_USB", BUS_USB as i64),
+        ("BUS_USB", i64::from(BUS_USB)),
         ("sizeof_uinput_setup", UINPUT_SETUP_SIZE as i64),
         ("off_setup_name", 8),
         ("off_setup_ff", 88),
@@ -116,18 +116,18 @@ fn uinput_abi_matches_kernel_headers() {
         ("off_js_value", 4),
         ("off_js_type", 6),
         ("off_js_number", 7),
-        ("JS_EVENT_BUTTON", JS_EVENT_BUTTON as i64),
-        ("JS_EVENT_AXIS", JS_EVENT_AXIS as i64),
-        ("JS_EVENT_INIT", JS_EVENT_INIT as i64),
+        ("JS_EVENT_BUTTON", i64::from(JS_EVENT_BUTTON)),
+        ("JS_EVENT_AXIS", i64::from(JS_EVENT_AXIS)),
+        ("JS_EVENT_INIT", i64::from(JS_EVENT_INIT)),
         ("UI_SET_FFBIT", UI_SET_FFBIT as i64),
         ("UI_SET_PHYS", UI_SET_PHYS as i64),
         ("UI_BEGIN_FF_UPLOAD", UI_BEGIN_FF_UPLOAD as i64),
         ("UI_END_FF_UPLOAD", UI_END_FF_UPLOAD as i64),
         ("UI_BEGIN_FF_ERASE", UI_BEGIN_FF_ERASE as i64),
         ("UI_END_FF_ERASE", UI_END_FF_ERASE as i64),
-        ("EV_UINPUT", EV_UINPUT as i64),
-        ("UI_FF_UPLOAD", UI_FF_UPLOAD as i64),
-        ("UI_FF_ERASE", UI_FF_ERASE as i64),
+        ("EV_UINPUT", i64::from(EV_UINPUT)),
+        ("UI_FF_UPLOAD", i64::from(UI_FF_UPLOAD)),
+        ("UI_FF_ERASE", i64::from(UI_FF_ERASE)),
     ];
     for (name, got) in checks {
         assert_eq!(got, want(name), "{name}");
@@ -141,7 +141,7 @@ fn uinput_abi_matches_kernel_headers() {
         ("FF_SINE", FF_SINE),
         ("FF_GAIN", FF_GAIN),
     ] {
-        assert_eq!(got as i64, want(name), "{name}");
+        assert_eq!(i64::from(got), want(name), "{name}");
     }
     assert_eq!(FF_EFFECT_SIZE as i64, want("sizeof_ff_effect"));
     assert_eq!(10, want("off_ff_replay"));
@@ -157,7 +157,7 @@ fn uinput_abi_matches_kernel_headers() {
     let (ev_type, number, value) =
         unpack_js_event(&pack_js_event(JS_EVENT_BUTTON | JS_EVENT_INIT, 5, 1)).unwrap();
     assert_eq!(
-        ev_type as i64,
+        i64::from(ev_type),
         want("JS_EVENT_BUTTON") | want("JS_EVENT_INIT")
     );
     assert_eq!((number, value), (5, 1));
@@ -190,7 +190,8 @@ fn axis_values_land_on_the_declared_range() {
         let want = normalize_axis_value(client, false, false, false);
         let (_, _, value) = unpack_js_event(&pack_js_event(JS_EVENT_AXIS, 0, want as i16)).unwrap();
         assert_eq!(
-            value as i32, want,
+            i32::from(value),
+            want,
             "the axis value survives the joydev event"
         );
     }
@@ -303,7 +304,7 @@ int main(void) {
     );
     let axes_map = want("off_axes_map");
     for (i, code) in AXES_MAP.iter().enumerate() {
-        assert_eq!(config[axes_map + i] as u16, *code, "axis {i}");
+        assert_eq!(u16::from(config[axes_map + i]), *code, "axis {i}");
     }
     assert_eq!(FF_RECORD_SIZE, want("sizeof_ff_record"));
     let mut record = [0u8; FF_RECORD_SIZE];
@@ -667,7 +668,7 @@ fn force_feedback_mix() {
     );
     assert_eq!(
         mixer.next_wake(),
-        Some(t + ms(lease as u64 / 2)),
+        Some(t + ms(u64::from(lease) / 2)),
         "renewed at half the lease"
     );
     assert_eq!(
@@ -676,7 +677,7 @@ fn force_feedback_mix() {
         "an unchanged mix is not sent again before its renewal"
     );
     assert_eq!(
-        levels(mixer.update(t + ms(lease as u64 / 2))),
+        levels(mixer.update(t + ms(u64::from(lease) / 2))),
         Some((1.0, 1.0, lease)),
         "renewed while it plays"
     );
@@ -917,7 +918,7 @@ impl Handle {
             } else {
                 let (t, n, v) = unpack_js_event(chunk).unwrap();
                 self.state
-                    .insert(((t & !JS_EVENT_INIT) as u16, n as u16), v as i32);
+                    .insert((u16::from(t & !JS_EVENT_INIT), u16::from(n)), i32::from(v));
             }
         }
         self.pending.drain(..whole);
@@ -973,7 +974,7 @@ async fn an_unread_handle_is_shed_and_resynced_but_never_closed() {
     let start = Instant::now();
     for n in 0..20000u32 {
         pad.send_event(0, if n % 2 == 1 { 1.0 } else { -1.0 }, false);
-        pad.send_event(0, (n % 2) as f64, true);
+        pad.send_event(0, f64::from(n % 2), true);
         if n % 64 == 0 {
             tokio::task::yield_now().await;
         }
@@ -1069,22 +1070,22 @@ async fn a_js_handle_opens_on_the_pads_state_and_an_evdev_handle_writes_its_rumb
         "the init replay covers every control"
     );
     assert_eq!(
-        js.state.get(&(JS_EVENT_BUTTON as u16, 0)),
+        js.state.get(&(u16::from(JS_EVENT_BUTTON), 0)),
         Some(&1),
         "a held button opens held"
     );
     assert_eq!(
-        js.state.get(&(JS_EVENT_AXIS as u16, 2)),
+        js.state.get(&(u16::from(JS_EVENT_AXIS), 2)),
         Some(&32767),
         "the pressed trigger"
     );
     assert_eq!(
-        js.state.get(&(JS_EVENT_AXIS as u16, 5)),
+        js.state.get(&(u16::from(JS_EVENT_AXIS), 5)),
         Some(&-32767),
         "a trigger never moved rests released"
     );
     assert_eq!(
-        js.state.get(&(JS_EVENT_AXIS as u16, 6)),
+        js.state.get(&(u16::from(JS_EVENT_AXIS), 6)),
         Some(&0),
         "a hat never moved rests centered"
     );

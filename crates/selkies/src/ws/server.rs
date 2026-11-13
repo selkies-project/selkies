@@ -149,7 +149,7 @@ pub struct WsService {
 
 /// A number as a whole kbps for pixelflux.
 fn kbps_i32(kbps: f64) -> i32 {
-    kbps.round().clamp(0.0, i32::MAX as f64) as i32
+    kbps.round().clamp(0.0, f64::from(i32::MAX)) as i32
 }
 
 impl WsService {
@@ -873,7 +873,7 @@ impl WsService {
                 return;
             };
             update(cs);
-            cs.video_bitrate_kbps as i64
+            i64::from(cs.video_bitrate_kbps)
         };
         self.reg
             .lock()
@@ -1231,17 +1231,17 @@ impl WsService {
             } else {
                 error!(target: "ws", "Failed to set DPI to {dpi}");
             }
-            self.update_cursor_cap(dpi as f64);
+            self.update_cursor_cap(f64::from(dpi));
         } else {
             if display_id == PRIMARY_DISPLAY {
-                self.update_cursor_cap(dpi as f64);
+                self.update_cursor_cap(f64::from(dpi));
             }
             self.realize_wayland_display_dpi(display_id, dpi).await;
         }
         if let Some(d) = self.st.lock().displays.get_mut(display_id) {
             d.scaling_dpi = Some(dpi.to_string());
         }
-        self.apply_cursor_size_for_dpi(dpi as f64, display_id, wayland)
+        self.apply_cursor_size_for_dpi(f64::from(dpi), display_id, wayland)
             .await;
     }
 
@@ -2062,8 +2062,8 @@ impl WsService {
                     .unwrap_or_else(|| "its current size".into());
                 info!(target: "ws", "Primary {asked} ignored: dynamic resizing disabled; keeping the desktop at {kept}.");
                 return (
-                    current.map(|c| c.0 as i64),
-                    current.map(|c| c.1 as i64),
+                    current.map(|c| i64::from(c.0)),
+                    current.map(|c| i64::from(c.1)),
                     true,
                 );
             }
@@ -2680,7 +2680,7 @@ impl WsService {
             reg.framed.remove(display_id);
             reg.captures.insert(display_id.to_string(), capture.clone());
             reg.capture_kbps
-                .insert(display_id.to_string(), cs.video_bitrate_kbps as i64);
+                .insert(display_id.to_string(), i64::from(cs.video_bitrate_kbps));
         }
         self.st
             .lock()
@@ -3532,7 +3532,7 @@ impl WsService {
             if let Some(target) = target.filter(|t| *t > 0) {
                 stats.insert(
                     "target_mbps".into(),
-                    json!((target as f64 / 10.0).round() / 100.0),
+                    json!((f64::from(target) / 10.0).round() / 100.0),
                 );
             }
             let service = self.arc();
@@ -4701,7 +4701,7 @@ impl RelayHost for WsService {
         if !reach && !self.repair_taken(client, display_id, "keyframe") {
             return false;
         }
-        self.schedule_invalidation(display_id, frame_id as i64, true);
+        self.schedule_invalidation(display_id, i64::from(frame_id), true);
         true
     }
 
@@ -4739,7 +4739,7 @@ impl RelayHost for WsService {
         };
         if let Some(watch) = watch {
             watch.frame_sent(
-                item.frame_id as i32,
+                i32::from(item.frame_id),
                 item.capture_ns,
                 item.encode_end_ns,
                 item.data.len(),

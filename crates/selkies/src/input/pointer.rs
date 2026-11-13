@@ -63,7 +63,12 @@ pub fn display_at(layouts: &Layouts, x: f64, y: f64) -> DisplayPoint {
         if r.w <= 0 || r.h <= 0 {
             continue;
         }
-        let (rx, ry, rw, rh) = (r.x as f64, r.y as f64, r.w as f64, r.h as f64);
+        let (rx, ry, rw, rh) = (
+            f64::from(r.x),
+            f64::from(r.y),
+            f64::from(r.w),
+            f64::from(r.h),
+        );
         if rx <= x && x < rx + rw && ry <= y && y < ry + rh {
             return DisplayPoint {
                 display: did.clone(),

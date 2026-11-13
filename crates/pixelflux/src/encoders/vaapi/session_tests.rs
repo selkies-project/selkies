@@ -61,7 +61,7 @@ impl Reader<'_> {
         (0..count).fold(0, |acc, _| {
             let bit = (self.bytes[self.pos / 8] >> (7 - self.pos % 8)) & 1;
             self.pos += 1;
-            (acc << 1) | bit as u32
+            (acc << 1) | u32::from(bit)
         })
     }
 
@@ -173,7 +173,7 @@ fn every_codec_comes_up_and_asks_for_what_it_needs() {
 #[test]
 fn the_frame_rate_reaches_every_codec_as_its_fraction() {
     for (num, den) in [(60000u32, 1001u32), (120000, 1001), (144000, 1001), (60, 1)] {
-        let fps = num as f64 / den as f64;
+        let fps = f64::from(num) / f64::from(den);
         let fit = FrameRate { num, den }.within(0xffff);
         for codec in Codec::VIDEO {
             mock::reset(Driver::generous());
@@ -1455,7 +1455,10 @@ fn a_session_tracking_no_references_counts_its_frames() {
                     let slice: VAEncSliceParameterBufferH264 =
                         unsafe { ptr::read_unaligned(slices[0].as_ptr() as *const _) };
                     assert_eq!(
-                        (pic.frame_num as u64, pic.CurrPic.TopFieldOrderCnt as u64),
+                        (
+                            u64::from(pic.frame_num),
+                            pic.CurrPic.TopFieldOrderCnt as u64
+                        ),
                         (count, 2 * count),
                         "frame {t}: frame_num and order count"
                     );
@@ -1464,7 +1467,7 @@ fn a_session_tracking_no_references_counts_its_frames() {
                         (!key).then(|| {
                             (
                                 slice.RefPicList0[0].picture_id,
-                                slice.RefPicList0[0].frame_idx as u64,
+                                u64::from(slice.RefPicList0[0].frame_idx),
                             )
                         }),
                     )
@@ -1725,7 +1728,7 @@ fn a_rate_change_keeps_the_level_the_buffer_needs() {
         );
         let stream = &out[VIDEO_HEADER_LEN..];
         if codec == Codec::H264 {
-            let level = nal(stream, 7, false)[2] as u32;
+            let level = u32::from(nal(stream, 7, false)[2]);
             let refs = h264_max_num_ref_frames(stream).unwrap();
             assert!(
                 crate::encoders::codec::h264_dpb_frames(level, w as u32, h as u32) >= refs,
@@ -2070,7 +2073,7 @@ fn a_picture_is_coded_no_finer_than_the_floor() {
                 let slice: VAEncSliceParameterBufferH264 =
                     d.last_param(VAEncSliceParameterBufferType).unwrap();
                 assert_eq!(
-                    pic.pic_init_qp as i32 + slice.slice_qp_delta as i32,
+                    i32::from(pic.pic_init_qp) + i32::from(slice.slice_qp_delta),
                     wanted as i32,
                     "{codec:?}"
                 );
@@ -2080,7 +2083,7 @@ fn a_picture_is_coded_no_finer_than_the_floor() {
                 let pic: VAEncPictureParameterBufferHEVC =
                     d.last_param(VAEncPictureParameterBufferType).unwrap();
                 assert_eq!(
-                    pic.pic_init_qp as i32 + slice.slice_qp_delta as i32,
+                    i32::from(pic.pic_init_qp) + i32::from(slice.slice_qp_delta),
                     wanted as i32,
                     "{codec:?}"
                 );
@@ -2132,17 +2135,17 @@ fn intels_full_hevc_encoder_gets_the_headers_ffmpeg_codes_there() {
             let min_cb_minus3 = min_cb.trailing_zeros() - 3;
             assert_eq!(
                 (
-                    seq.log2_min_luma_coding_block_size_minus3 as u32,
-                    seq.log2_diff_max_min_luma_coding_block_size as u32,
-                    seq.pic_height_in_luma_samples as i32,
+                    u32::from(seq.log2_min_luma_coding_block_size_minus3),
+                    u32::from(seq.log2_diff_max_min_luma_coding_block_size),
+                    i32::from(seq.pic_height_in_luma_samples),
                 ),
                 (min_cb_minus3, 2 - min_cb_minus3, surface),
                 "blocks from {min_cb} to 32 on a surface of {surface} lines, {case}"
             );
             let pic: VAEncPictureParameterBufferHEVC =
                 d.last_param(VAEncPictureParameterBufferType).unwrap();
-            assert_eq!(pic.pic_init_qp as u32, init_qp, "{case}");
-            assert_eq!(pic.diff_cu_qp_delta_depth as u32, depth, "{case}");
+            assert_eq!(u32::from(pic.pic_init_qp), init_qp, "{case}");
+            assert_eq!(u32::from(pic.diff_cu_qp_delta_depth), depth, "{case}");
             unsafe {
                 assert_eq!(pic.pic_fields.bits.cu_qp_delta_enabled_flag(), 1, "{case}");
             }
@@ -2232,7 +2235,7 @@ fn the_hevc_sequence_declares_a_finite_intra_period() {
         );
         assert_eq!(seq.intra_idr_period, poc_lsb);
         assert!(
-            (seq.intra_period as u64).next_power_of_two() <= u32::MAX as u64,
+            u64::from(seq.intra_period).next_power_of_two() <= u64::from(u32::MAX),
             "its next power of two does not overflow"
         );
     });
@@ -2406,7 +2409,7 @@ fn hevc_predicts_in_the_direction_the_driver_takes() {
             for bytes in d.last_buffers(VAEncSliceParameterBufferType) {
                 let s: VAEncSliceParameterBufferHEVC =
                     unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const _) };
-                assert_eq!(s.slice_type as u32, slice_type, "{direction:?}");
+                assert_eq!(u32::from(s.slice_type), slice_type, "{direction:?}");
                 assert_ne!(s.ref_pic_list0[0].picture_id, VA_INVALID_ID);
                 assert_eq!(
                     s.ref_pic_list1[0].picture_id != VA_INVALID_ID,

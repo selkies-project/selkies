@@ -216,7 +216,12 @@ fn halve_plane(
         for (x, o) in out.iter_mut().enumerate() {
             let x0 = (2 * x).min(sw - 1);
             let x1 = (2 * x + 1).min(sw - 1);
-            *o = ((r0[x0] as u32 + r0[x1] as u32 + r1[x0] as u32 + r1[x1] as u32 + 2) / 4) as u8;
+            *o = ((u32::from(r0[x0])
+                + u32::from(r0[x1])
+                + u32::from(r1[x0])
+                + u32::from(r1[x1])
+                + 2)
+                / 4) as u8;
         }
     }
     (dw, dh)
@@ -261,8 +266,8 @@ fn bilinear_plane(
         let r1 = &src[y1 * sstride..y1 * sstride + sw];
         let out = &mut dst[y * dstride..y * dstride + dw];
         for (o, &(x0, x1, wx)) in out.iter_mut().zip(&xs) {
-            let top = r0[x0] as u32 * (65536 - wx) + r0[x1] as u32 * wx;
-            let bot = r1[x0] as u32 * (65536 - wx) + r1[x1] as u32 * wx;
+            let top = u32::from(r0[x0]) * (65536 - wx) + u32::from(r0[x1]) * wx;
+            let bot = u32::from(r1[x0]) * (65536 - wx) + u32::from(r1[x1]) * wx;
             let v = ((top >> 8) * (65536 - wy) + (bot >> 8) * wy + (1 << 23)) >> 24;
             *o = v.min(255) as u8;
         }

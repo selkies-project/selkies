@@ -293,8 +293,8 @@ impl X11Backend {
                 .and_then(|c| c.reply().ok())
                 .is_some();
 
-        let screen_w = root_screen.width_in_pixels as i32;
-        let screen_h = root_screen.height_in_pixels as i32;
+        let screen_w = i32::from(root_screen.width_in_pixels);
+        let screen_h = i32::from(root_screen.height_in_pixels);
 
         conn.change_window_attributes(
             root,
@@ -447,7 +447,11 @@ impl X11Backend {
         if let Ok(cookie) = self.conn.get_keyboard_mapping(first, count)
             && let Ok(reply) = cookie.reply()
         {
-            self.keymap = Keymap::from_x11(first as u32, reply.keysyms_per_keycode as usize, &reply.keysyms);
+            self.keymap = Keymap::from_x11(
+                u32::from(first),
+                reply.keysyms_per_keycode as usize,
+                &reply.keysyms,
+            );
         }
     }
 
@@ -467,7 +471,12 @@ impl X11Backend {
                     .map(|m| {
                         (
                             m.primary,
-                            Rect::new(m.x as i32, m.y as i32, m.width as i32, m.height as i32),
+                            Rect::new(
+                                i32::from(m.x),
+                                i32::from(m.y),
+                                i32::from(m.width),
+                                i32::from(m.height),
+                            ),
                         )
                     })
                     .collect()
@@ -1053,7 +1062,7 @@ impl X11Backend {
         let display = self
             .monitors
             .iter()
-            .position(|m| m.contains(center.0 as f64, center.1 as f64))
+            .position(|m| m.contains(f64::from(center.0), f64::from(center.1)))
             .unwrap_or(0) as u32;
         if self.toplevel_displays.insert(window, display) != Some(display) {
             self.events.push(Event::ToplevelDisplay {
@@ -1359,8 +1368,8 @@ impl X11Backend {
         if let Some(icon) = icon {
             let mut data: Vec<u32> = vec![icon.width(), icon.height()];
             for px in icon.data().as_chunks::<4>().0 {
-                let a = px[3] as u32;
-                let unmul = |c: u8| (c as u32 * 255).checked_div(a).unwrap_or(0).min(255);
+                let a = u32::from(px[3]);
+                let unmul = |c: u8| (u32::from(c) * 255).checked_div(a).unwrap_or(0).min(255);
                 data.push((a << 24) | (unmul(px[0]) << 16) | (unmul(px[1]) << 8) | unmul(px[2]));
             }
             let _ = self.conn.change_property32(
@@ -1464,7 +1473,7 @@ impl X11Backend {
     /// shell's windows.
     fn push_keysym(&mut self, surface: SurfaceId, keycode: u8, modifiers: Modifiers, pressed: bool) {
         if let SurfaceId::Window(_) = surface
-            && let Some(keysym) = self.keymap.base_keysym(keycode as u32)
+            && let Some(keysym) = self.keymap.base_keysym(u32::from(keycode))
         {
             self.events.push(Event::KeySym {
                 surface,
@@ -1509,7 +1518,7 @@ impl X11Backend {
             )
             .and_then(|r| r.value32().map(|v| v.collect()))
             .unwrap_or_default();
-        let s = self.scale as f64;
+        let s = f64::from(self.scale);
         for window in stacking.iter().rev() {
             if *window == self.desktop.window {
                 continue;
@@ -1535,12 +1544,12 @@ impl X11Backend {
                 continue;
             };
             let rect = Rect::new(
-                origin.dst_x as i32,
-                origin.dst_y as i32,
-                geometry.width as i32,
-                geometry.height as i32,
+                i32::from(origin.dst_x),
+                i32::from(origin.dst_y),
+                i32::from(geometry.width),
+                i32::from(geometry.height),
             );
-            if !rect.contains(root_x as f64, root_y as f64) {
+            if !rect.contains(f64::from(root_x), f64::from(root_y)) {
                 continue;
             }
             let bar = if *window == self.panel.window {
@@ -1552,7 +1561,7 @@ impl X11Backend {
                     .map(|(_, b)| b)
             };
             if let Some(bar) = bar {
-                let (px, py) = ((root_x - rect.x) as f64, (root_y - rect.y) as f64);
+                let (px, py) = (f64::from(root_x - rect.x), f64::from(root_y - rect.y));
                 if bar.visible.iter().any(|r| r.contains(px, py)) {
                     return None;
                 }
@@ -1561,13 +1570,17 @@ impl X11Backend {
             if let Some(ours) = self.windows.iter().find(|w| w.surface.window == *window) {
                 return Some((
                     SurfaceId::Window(ours.id),
-                    (root_x - rect.x) as f64 / s,
-                    (root_y - rect.y) as f64 / s,
+                    f64::from(root_x - rect.x) / s,
+                    f64::from(root_y - rect.y) / s,
                 ));
             }
             return None;
         }
-        Some((SurfaceId::Background(0), root_x as f64 / s, root_y as f64 / s))
+        Some((
+            SurfaceId::Background(0),
+            f64::from(root_x) / s,
+            f64::from(root_y) / s,
+        ))
     }
 
     /// Follows the pointer during a drag, reporting the surface it is over.
@@ -1943,7 +1956,12 @@ impl X11Backend {
                 if let Some(surface) = self.surface_ref(id)
                     && surface.image.is_none()
                 {
-                    let exposed = Rect::new(e.x as i32, e.y as i32, e.width as i32, e.height as i32);
+                    let exposed = Rect::new(
+                        i32::from(e.x),
+                        i32::from(e.y),
+                        i32::from(e.width),
+                        i32::from(e.height),
+                    );
                     self.upload(surface, surface.window, &[exposed]);
                 }
             }
@@ -1951,13 +1969,13 @@ impl X11Backend {
                 self.last_time = e.time;
                 let pressed = e.response_type & 0x7f == xproto::BUTTON_PRESS_EVENT;
                 if self.drag.is_some() && !pressed && e.detail == 1 {
-                    self.drag_release(e.root_x as i32, e.root_y as i32);
+                    self.drag_release(i32::from(e.root_x), i32::from(e.root_y));
                     return;
                 }
                 let surface = self.surface_of(e.event);
                 let (x, y) = (
-                    e.event_x as f64 / self.scale as f64,
-                    e.event_y as f64 / self.scale as f64,
+                    f64::from(e.event_x) / f64::from(self.scale),
+                    f64::from(e.event_y) / f64::from(self.scale),
                 );
                 match e.detail {
                     4 if pressed => self.events.push(Event::PointerAxis {
@@ -1994,13 +2012,13 @@ impl X11Backend {
             XEvent::MotionNotify(e) => {
                 self.last_time = e.time;
                 if self.drag.is_some() {
-                    self.drag_motion(e.root_x as i32, e.root_y as i32);
+                    self.drag_motion(i32::from(e.root_x), i32::from(e.root_y));
                     return;
                 }
                 let surface = self.surface_of(e.event);
                 let (x, y) = (
-                    e.event_x as f64 / self.scale as f64,
-                    e.event_y as f64 / self.scale as f64,
+                    f64::from(e.event_x) / f64::from(self.scale),
+                    f64::from(e.event_y) / f64::from(self.scale),
                 );
                 self.events.push(Event::PointerMotion { surface, x, y });
             }
@@ -2016,7 +2034,7 @@ impl X11Backend {
                 let modifiers = modifiers_of(e.state);
                 let caps = e.state.contains(xproto::KeyButMask::LOCK);
                 let surface = self.surface_of(e.event);
-                if let Some(key) = self.keymap.translate(e.detail as u32, modifiers.shift, caps) {
+                if let Some(key) = self.keymap.translate(u32::from(e.detail), modifiers.shift, caps) {
                     self.events.push(Event::Key {
                         surface,
                         key,
@@ -2065,22 +2083,25 @@ impl X11Backend {
             }
             XEvent::ConfigureNotify(e) => {
                 if e.window == self.root
-                    && (e.width as i32 != self.screen_w || e.height as i32 != self.screen_h)
+                    && (i32::from(e.width) != self.screen_w || i32::from(e.height) != self.screen_h)
                 {
-                    self.screen_w = e.width as i32;
-                    self.screen_h = e.height as i32;
+                    self.screen_w = i32::from(e.width);
+                    self.screen_h = i32::from(e.height);
                     self.monitors = self.read_monitors();
                     self.apply_geometry();
                 } else if let SurfaceId::Window(id) = self.surface_of(e.window)
                     && let Some(window) = self.windows.iter_mut().find(|w| w.id == id)
-                    && (window.surface.width != e.width as i32 || window.surface.height != e.height as i32)
+                    && (window.surface.width != i32::from(e.width)
+                        || window.surface.height != i32::from(e.height))
                 {
-                    window.surface.resize(&self.conn, e.width as i32, e.height as i32);
+                    window
+                        .surface
+                        .resize(&self.conn, i32::from(e.width), i32::from(e.height));
                     let s = self.scale;
                     self.events.push(Event::Configured {
                         surface: SurfaceId::Window(id),
-                        width: (e.width as i32 + s - 1) / s,
-                        height: (e.height as i32 + s - 1) / s,
+                        width: (i32::from(e.width) + s - 1) / s,
+                        height: (i32::from(e.height) + s - 1) / s,
                         scale: s,
                     });
                 } else if self.toplevels.contains_key(&e.window) {
@@ -2112,10 +2133,10 @@ fn push_rect(out: &mut Vec<xproto::Rectangle>, rect: Rect) {
         return;
     }
     out.push(xproto::Rectangle {
-        x: rect.x.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
-        y: rect.y.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
-        width: rect.w.min(u16::MAX as i32) as u16,
-        height: rect.h.min(u16::MAX as i32) as u16,
+        x: rect.x.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+        y: rect.y.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+        width: rect.w.min(i32::from(u16::MAX)) as u16,
+        height: rect.h.min(i32::from(u16::MAX)) as u16,
     });
 }
 
@@ -2133,8 +2154,8 @@ fn add_rounded_shape(out: &mut Vec<xproto::Rectangle>, r: Rect, radius: i32) {
     }
     let radius = radius.min(r.h / 2).min(r.w / 2).max(0);
     for i in 0..radius {
-        let dy = radius as f64 - i as f64 - 0.5;
-        let inset = (radius as f64 - ((radius * radius) as f64 - dy * dy).sqrt()).ceil() as i32;
+        let dy = f64::from(radius) - f64::from(i) - 0.5;
+        let inset = (f64::from(radius) - (f64::from(radius * radius) - dy * dy).sqrt()).ceil() as i32;
         push_rect(out, Rect::new(r.x + inset, r.y + i, r.w - 2 * inset, 1));
         push_rect(
             out,

@@ -174,7 +174,7 @@ fn monitor_info(
     take_output: bool,
 ) -> Result<MonitorInfo> {
     let (mx, my, w, h) = rect;
-    let dpi = applied_dpi().unwrap_or(96) as f64;
+    let dpi = f64::from(applied_dpi().unwrap_or(96));
     Ok(MonitorInfo {
         name: x.atom(name)?,
         primary: display_of(name) == PRIMARY_DISPLAY,
@@ -183,8 +183,8 @@ fn monitor_info(
         y: my as i16,
         width: w as u16,
         height: h as u16,
-        width_in_millimeters: ((w as f64 * 25.4 / dpi).round() as u32).max(1),
-        height_in_millimeters: ((h as f64 * 25.4 / dpi).round() as u32).max(1),
+        width_in_millimeters: ((f64::from(w) * 25.4 / dpi).round() as u32).max(1),
+        height_in_millimeters: ((f64::from(h) * 25.4 / dpi).round() as u32).max(1),
         outputs: match (take_output, out_id) {
             (true, Some(o)) => vec![o],
             _ => Vec::new(),
@@ -203,7 +203,12 @@ fn selkies_monitors(x: &X11) -> Result<BTreeMap<String, LiveMonitor>> {
             monitors.insert(
                 name,
                 LiveMonitor {
-                    rect: (m.x as i32, m.y as i32, m.width as i32, m.height as i32),
+                    rect: (
+                        i32::from(m.x),
+                        i32::from(m.y),
+                        i32::from(m.width),
+                        i32::from(m.height),
+                    ),
                     has_output: !m.outputs.is_empty(),
                     primary: m.primary,
                 },
@@ -221,7 +226,12 @@ fn verify_monitors(x: &X11, expected: &BTreeMap<String, Rect>) -> Result<()> {
         if let Ok(name) = x.monitor_name(&m) {
             actual.insert(
                 name,
-                (m.x as i32, m.y as i32, m.width as i32, m.height as i32),
+                (
+                    i32::from(m.x),
+                    i32::from(m.y),
+                    i32::from(m.width),
+                    i32::from(m.height),
+                ),
             );
         }
     }

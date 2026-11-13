@@ -71,7 +71,7 @@ impl<'a> Reader<'a> {
             .ok_or("the SPS ends mid-field")?;
         let value = (byte >> (7 - (self.pos & 7))) & 1;
         self.pos += 1;
-        Ok(value as u32)
+        Ok(u32::from(value))
     }
 
     fn bits(&mut self, count: usize) -> Result<u32, String> {
@@ -142,13 +142,13 @@ impl Writer {
     fn copy_from(&mut self, source: &[u8], from: usize, to: usize) {
         for index in from..to {
             let byte = source[index >> 3];
-            self.bit(((byte >> (7 - (index & 7))) & 1) as u32);
+            self.bit(u32::from((byte >> (7 - (index & 7))) & 1));
         }
     }
 
     /// Exp-Golomb, as `Reader::ue` reads it.
     fn ue(&mut self, value: u32) {
-        let coded = value as u64 + 1;
+        let coded = u64::from(value) + 1;
         let length = 64 - coded.leading_zeros() as usize;
         for _ in 1..length {
             self.bit(0);
@@ -466,9 +466,9 @@ fn write_signal(w: &mut Writer, signal: ColorSignal) {
     w.bits(5, 3);
     w.bit(u32::from(signal.full_range));
     w.bit(1);
-    w.bits(signal.primaries as u32, 8);
-    w.bits(signal.transfer as u32, 8);
-    w.bits(signal.matrix as u32, 8);
+    w.bits(u32::from(signal.primaries), 8);
+    w.bits(u32::from(signal.transfer), 8);
+    w.bits(u32::from(signal.matrix), 8);
 }
 
 /// The same SPS bounding reordering at zero, or None where it already does: a restriction
@@ -745,7 +745,7 @@ fn widen_slice(nal: &[u8], narrow: u32, idr: bool, last: u32) -> Option<(u32, Ve
         byte..=byte,
         [
             (kept & !(0xff >> bit)) | (high >> bit),
-            (((high as u16) << (8 - bit)) as u8) | (kept & (0xff >> bit)),
+            ((u16::from(high) << (8 - bit)) as u8) | (kept & (0xff >> bit)),
         ],
     );
     let mut out = Vec::with_capacity(nal.len() + 4);
@@ -770,7 +770,7 @@ mod dpb {
                     .get(self.pos / 8)
                     .map_or(0, |b| (b >> (7 - self.pos % 8)) & 1);
                 self.pos += 1;
-                (acc << 1) | bit as u32
+                (acc << 1) | u32::from(bit)
             })
         }
 
@@ -1353,7 +1353,7 @@ mod tests {
         w.ue(0);
         w.bits(low, narrow as usize);
         for &byte in tail {
-            w.bits(byte as u32, 8);
+            w.bits(u32::from(byte), 8);
         }
         w.trailing_bits();
         let idr = slice_type == 7;

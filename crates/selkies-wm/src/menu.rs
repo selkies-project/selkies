@@ -427,7 +427,7 @@ mod tests {
         assert_eq!(level.rows[1].h, SEPARATOR);
         let first = level.row_rect(0);
         assert_eq!(
-            level.entry_at(first.x as f64 + 5.0, first.y as f64 + 5.0),
+            level.entry_at(f64::from(first.x) + 5.0, f64::from(first.y) + 5.0),
             Some(0)
         );
         assert_eq!(level.entry_at(0.0, 0.0), None);

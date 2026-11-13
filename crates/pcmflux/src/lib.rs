@@ -1042,8 +1042,8 @@ impl PlayQueue {
         let frames = (fade / fb) as f32;
         for i in (0..fade).step_by(2) {
             let w = ((i / 2 / channels) as f32 + 1.0) / (frames + 1.0);
-            let a = i16::from_le_bytes([q[i], q[i + 1]]) as f32;
-            let b = i16::from_le_bytes([q[cut + i], q[cut + i + 1]]) as f32;
+            let a = f32::from(i16::from_le_bytes([q[i], q[i + 1]]));
+            let b = f32::from(i16::from_le_bytes([q[cut + i], q[cut + i + 1]]));
             let [lo, hi] = ((a + (b - a) * w).round() as i16).to_le_bytes();
             q[cut + i] = lo;
             q[cut + i + 1] = hi;
@@ -1331,15 +1331,17 @@ fn downmix_stereo(src: &[i16], channels: usize, dst: &mut [i16]) {
     const K: f32 = std::f32::consts::FRAC_1_SQRT_2;
     for (f, out) in dst.as_chunks_mut::<2>().0.iter_mut().enumerate() {
         let s = &src[f * channels..(f + 1) * channels];
-        let center = K * s[2] as f32;
-        let mut left = s[0] as f32 + center + K * s[4] as f32;
-        let mut right = s[1] as f32 + center + K * s[5] as f32;
+        let center = K * f32::from(s[2]);
+        let mut left = f32::from(s[0]) + center + K * f32::from(s[4]);
+        let mut right = f32::from(s[1]) + center + K * f32::from(s[5]);
         if channels >= 8 {
-            left += K * s[6] as f32;
-            right += K * s[7] as f32;
+            left += K * f32::from(s[6]);
+            right += K * f32::from(s[7]);
         }
-        out[0] = left.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
-        out[1] = right.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        out[0] = left.round().clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
+        out[1] = right
+            .round()
+            .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
     }
 }
 
@@ -1464,7 +1466,7 @@ impl PcmEncoder {
             if opusic_sys::opus_multistream_encoder_ctl(
                 st,
                 opusic_sys::OPUS_SET_VBR_REQUEST,
-                vbr as i32,
+                i32::from(vbr),
             ) != 0
             {
                 elog!("[pcmflux] WARNING: failed to apply surround VBR mode");
@@ -2203,7 +2205,7 @@ fn pa_capture_session_open(
         }
     }
 
-    let map = surround_channel_map(spec.channels as i32)
+    let map = surround_channel_map(i32::from(spec.channels))
         .and_then(|m| ChannelMap::new_from_string(m).ok());
     let mut stream = match Stream::new(&mut context, "Audio Capture", spec, map.as_ref()) {
         Some(s) => s,
@@ -2302,7 +2304,7 @@ fn capture_run(
     );
 
     let frame_size_per_channel =
-        (settings.sample_rate as f64 * settings.frame_duration_ms / 1000.0) as usize;
+        (f64::from(settings.sample_rate) * settings.frame_duration_ms / 1000.0) as usize;
     let channels = settings.channels as usize;
 
     let ring = Arc::new(DeliveryRing::new(8));
@@ -2351,7 +2353,7 @@ fn capture_run(
         }
     };
 
-    let ogg_scale = 48_000 / settings.sample_rate.max(1) as u64;
+    let ogg_scale = 48_000 / u64::from(settings.sample_rate.max(1));
     let mut encoder = encoder;
     let ogg = if settings.output_socket.is_empty() {
         None
@@ -2360,7 +2362,7 @@ fn capture_run(
             &settings.output_socket,
             &ogg_sink::OpusHead {
                 channels: channels as u8,
-                pre_skip: (encoder.lookahead().max(0) as u64 * ogg_scale).min(u16::MAX as u64)
+                pre_skip: (encoder.lookahead().max(0) as u64 * ogg_scale).min(u64::from(u16::MAX))
                     as u16,
                 input_sample_rate: settings.sample_rate,
                 mapping: multiopus_layout(channels as i32).map(|(streams, coupled, table)| {
@@ -3282,7 +3284,7 @@ mod tests {
         let mut dec = OpusPlaybackDecoder::new(24000, 1).unwrap();
         let q = PlayQueue::new();
         q.configure(1 << 20, 2);
-        let wrap = (u32::MAX as i64) - 100;
+        let wrap = i64::from(u32::MAX) - 100;
         dec.decode_red_into_queue(&build_red_payload(&[], &f[0]), wrap, &q);
         // One 20 ms step past the 32-bit rollover (mod 2^32): ts is numerically far
         // BELOW `wrap`, so a plain `ts > last` treats it as an already-played frame.
@@ -3565,7 +3567,7 @@ mod tests {
             let mut rms = vec![0f64; channels];
             for i in 0..frame {
                 for (c, r) in rms.iter_mut().enumerate() {
-                    let s = decoded[i * channels + c] as f64;
+                    let s = f64::from(decoded[i * channels + c]);
                     *r += s * s;
                 }
             }
@@ -3699,7 +3701,7 @@ mod tests {
                 .iter()
                 .skip(ch)
                 .step_by(2)
-                .map(|&v| (v as f64).powi(2))
+                .map(|&v| f64::from(v).powi(2))
                 .sum::<f64>()
                 / frame as f64)
                 .sqrt()
@@ -3720,7 +3722,7 @@ mod tests {
         for channels in [6, 8] {
             let map = ChannelMap::new_from_string(surround_channel_map(channels).unwrap())
                 .expect("parses");
-            assert_eq!(map.len() as i32, channels);
+            assert_eq!(i32::from(map.len()), channels);
             let pos = map.get();
             assert_eq!(
                 &pos[..4],
@@ -3814,9 +3816,9 @@ mod tests {
         let mut lens = Vec::new();
         for _ in 0..n_red {
             assert_eq!(body[idx] & 0x80, 0x80, "redundant header F bit must be set");
-            let word = ((body[idx + 1] as u32) << 16)
-                | ((body[idx + 2] as u32) << 8)
-                | (body[idx + 3] as u32);
+            let word = (u32::from(body[idx + 1]) << 16)
+                | (u32::from(body[idx + 2]) << 8)
+                | u32::from(body[idx + 3]);
             offsets.push((word >> 10) & 0x3FFF);
             lens.push((word & 0x3FF) as usize);
             idx += 4;
@@ -3944,7 +3946,7 @@ mod tests {
             primary_pts as u32
         );
 
-        let word = ((body[7] as u32) << 16) | ((body[8] as u32) << 8) | (body[9] as u32);
+        let word = (u32::from(body[7]) << 16) | (u32::from(body[8]) << 8) | u32::from(body[9]);
         assert_eq!((word >> 10) & 0x3FFF, 960);
         let len = (word & 0x3FF) as usize;
         assert_eq!(len, good.len());
@@ -4128,7 +4130,7 @@ mod tests {
             }
             let pcm: &[i16] =
                 bytemuck::cast_slice(decoder.decode_to_pcm(&data[2..]).expect("decode"));
-            peak = peak.max(pcm.iter().map(|&v| (v as i32).abs()).max().unwrap_or(0));
+            peak = peak.max(pcm.iter().map(|&v| i32::from(v).abs()).max().unwrap_or(0));
         }
         assert!(peak > 8000, "the sound's tail decodes at {peak}");
     }
@@ -4206,7 +4208,7 @@ mod tests {
             for (data, _, _) in frames {
                 let pcm: &[i16] =
                     bytemuck::cast_slice(decoder.decode_to_pcm(data).expect("decode"));
-                peak = peak.max(pcm.iter().map(|&v| (v as i32).abs()).max().unwrap_or(0));
+                peak = peak.max(pcm.iter().map(|&v| i32::from(v).abs()).max().unwrap_or(0));
             }
             assert!(peak > 8000, "the burst decodes at {peak}");
         }
@@ -4808,10 +4810,10 @@ mod tests {
             let mut out = vec![0u8; MAX_OPUS_PACKET];
             for i in 0..ITERS {
                 out[..PAYLOAD].copy_from_slice(&src);
-                let data = build_ws_body(&out[..PAYLOAD], 960 + i as u64, &hist, red, true);
+                let data = build_ws_body(&out[..PAYLOAD], 960 + u64::from(i), &hist, red, true);
                 black_box(&data);
             }
-            let old_ns = old.elapsed().as_nanos() / ITERS as u128;
+            let old_ns = old.elapsed().as_nanos() / u128::from(ITERS);
 
             let pool = Arc::new(BufferPool::new(RED_PREFIX_MAX + MAX_OPUS_PACKET));
             let mut taker = PoolTaker::new(Arc::clone(&pool));
@@ -4819,7 +4821,7 @@ mod tests {
             let new = Instant::now();
             for i in 0..ITERS {
                 let mut data = taker.take();
-                let prefix = write_ws_prefix_into(&mut data, 960 + i as u64, &hist, red, true);
+                let prefix = write_ws_prefix_into(&mut data, 960 + u64::from(i), &hist, red, true);
                 data[prefix..prefix + PAYLOAD].copy_from_slice(&src);
                 data.truncate(prefix + PAYLOAD);
                 black_box(&data);
@@ -4828,7 +4830,7 @@ mod tests {
                     pool.put(inflight.pop_front().unwrap());
                 }
             }
-            let new_ns = new.elapsed().as_nanos() / ITERS as u128;
+            let new_ns = new.elapsed().as_nanos() / u128::from(ITERS);
             println!("{label}: old {old_ns} ns/frame -> pooled in-place {new_ns} ns/frame");
         }
     }

@@ -514,7 +514,7 @@ fn audio_thread(
         } else {
             match reader.next_packet() {
                 Ok(Some((packet, granule))) => {
-                    let samples = mp4::opus_packet_samples(&packet) as u64;
+                    let samples = u64::from(mp4::opus_packet_samples(&packet));
                     page.push((packet, samples));
                     match granule {
                         Some(granule) => Some(granule),
@@ -541,7 +541,7 @@ fn audio_thread(
         position = granule.map_or(position, |g| page_start(position, g, samples));
         let (clock, base) = *anchor.get_or_insert_with(|| {
             (
-                shared.start.elapsed().as_micros() as u64 * (mp4::OPUS_TIMESCALE as u64)
+                shared.start.elapsed().as_micros() as u64 * u64::from(mp4::OPUS_TIMESCALE)
                     / 1_000_000,
                 position,
             )

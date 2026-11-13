@@ -383,13 +383,13 @@ async fn shift_navigation_x11() {
         move || {
             l.presses()
                 .iter()
-                .map(|(kc, d)| (*kc as u32, *d as u32))
+                .map(|(kc, d)| (u32::from(*kc), u32::from(*d)))
                 .collect()
         },
         move || c.clear(),
         50,
         37,
-        move |ks| k.keysym_to_keycode(ks) as u32,
+        move |ks| u32::from(k.keysym_to_keycode(ks)),
     )
     .await;
 }
@@ -789,7 +789,7 @@ where
 
     reset();
     let mut steps = vec![(0.0, kd.clone())];
-    steps.extend((1..=10).map(|i| (0.1 * i as f64, kh.clone())));
+    steps.extend((1..=10).map(|i| (0.1 * f64::from(i), kh.clone())));
     steps.push((1.05, ku.clone()));
     steps.sort_by(|a, b| a.0.total_cmp(&b.0));
     on_the_clock(h, &steps).await;
@@ -1579,7 +1579,7 @@ async fn finger_scroll() {
 async fn ime_binds_keep_the_runtime_free() {
     let modmap = vec![50, 62, 66, 37, 105, 64, 108, 77, 133, 134, 92];
     let bound: HashMap<u8, Vec<u32>> = (38u8..64)
-        .map(|kc| (kc, vec![0x61 + kc as u32 - 38]))
+        .map(|kc| (kc, vec![0x61 + u32::from(kc) - 38]))
         .collect();
     let link = Arc::new(FakeLink::new(bound, modmap));
     let (h, _) = x11(link.clone());

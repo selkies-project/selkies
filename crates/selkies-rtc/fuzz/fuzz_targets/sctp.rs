@@ -186,7 +186,7 @@ fuzz_target!(|data: &[u8]| {
         let Some((&advance, raw)) = datagram.split_first() else {
             continue;
         };
-        harness.now += Duration::from_millis(10 * advance as u64);
+        harness.now += Duration::from_millis(10 * u64::from(advance));
         harness.sctp.handle_timeout(harness.now);
         harness.drain();
         let mut raw = raw.to_vec();

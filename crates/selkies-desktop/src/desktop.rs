@@ -2885,7 +2885,7 @@ impl Desktop {
     /// * `delta` - Points to add, negative to lower.
     pub fn adjust_volume(&mut self, delta: i32) {
         if let Some(volume) = self.volume {
-            let target = (volume.percent as i32 + delta).clamp(0, 150) as u8;
+            let target = (i32::from(volume.percent) + delta).clamp(0, 150) as u8;
             self.requests.push(Request::SetVolume(target));
         }
     }
@@ -3390,14 +3390,14 @@ impl Desktop {
                     }
                     let d = (y as usize * pw as usize + x as usize) * 4;
                     let s = (by as usize * lw as usize + bx as usize) * 4;
-                    let a = data[d + 3] as u32;
+                    let a = u32::from(data[d + 3]);
                     if a == 255 {
                         continue;
                     }
                     let inv = 255 - a;
                     for c in 0..3 {
-                        data[d + c] =
-                            (data[d + c] as u32 + layer_data[s + c] as u32 * inv / 255).min(255) as u8;
+                        data[d + c] = (u32::from(data[d + c]) + u32::from(layer_data[s + c]) * inv / 255)
+                            .min(255) as u8;
                     }
                     data[d + 3] = 255;
                 }

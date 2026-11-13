@@ -408,7 +408,7 @@ mod tests {
     /// Presses and releases a button on an item's cell, with modifiers.
     fn click(d: &mut Desktop, index: usize, button: Button, modifiers: Modifiers, time: u32) {
         let cell = background::cells(d)[index];
-        let (x, y) = ((cell.x + cell.w / 2) as f64, (cell.y + 20) as f64);
+        let (x, y) = (f64::from(cell.x + cell.w / 2), f64::from(cell.y + 20));
         for pressed in [true, false] {
             d.handle(Event::PointerButton {
                 surface: SurfaceId::Background(1),
@@ -462,7 +462,7 @@ mod tests {
         let first = background::cells(d)[0];
         let x = first.x + cell.0 * crate::ui::DESKTOP_CELL_WIDTH + first.w / 2;
         let y = first.y + cell.1 * crate::ui::DESKTOP_CELL_HEIGHT + first.h / 2;
-        (x as f64, y as f64)
+        (f64::from(x), f64::from(y))
     }
 
     #[test]
@@ -483,12 +483,12 @@ mod tests {
             modifiers: NONE,
         });
         let first = background::cells(&d)[0];
-        motion(&mut d, (first.x + 10) as f64, (first.y + 10) as f64);
+        motion(&mut d, f64::from(first.x + 10), f64::from(first.y + 10));
         assert_eq!(selection(&d), [0, 1], "the box spans the first two rows");
         d.handle(Event::PointerButton {
             surface: SurfaceId::Background(1),
-            x: (first.x + 10) as f64,
-            y: (first.y + 10) as f64,
+            x: f64::from(first.x + 10),
+            y: f64::from(first.y + 10),
             button: Button::Left,
             pressed: false,
             time: 1100,

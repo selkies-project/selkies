@@ -456,7 +456,7 @@ impl TwccSender {
         }
         let base_seq = u16::from_be_bytes([fci[0], fci[1]]);
         let status_count = u16::from_be_bytes([fci[2], fci[3]]) as usize;
-        let mut reference = u32::from_be_bytes([0, fci[4], fci[5], fci[6]]) as i64;
+        let mut reference = i64::from(u32::from_be_bytes([0, fci[4], fci[5], fci[6]]));
         if let Some(previous) = self.reference {
             let step = (reference - previous) & 0xFFFFFF;
             reference = previous
@@ -499,14 +499,14 @@ impl TwccSender {
                     if pos >= fci.len() {
                         return None;
                     }
-                    at_us += fci[pos] as f64 * 250.0;
+                    at_us += f64::from(fci[pos]) * 250.0;
                     pos += 1;
                 }
                 2 => {
                     if pos + 2 > fci.len() {
                         return None;
                     }
-                    at_us += i16::from_be_bytes([fci[pos], fci[pos + 1]]) as f64 * 250.0;
+                    at_us += f64::from(i16::from_be_bytes([fci[pos], fci[pos + 1]])) * 250.0;
                     pos += 2;
                 }
                 _ => {
@@ -938,9 +938,9 @@ impl TwccReceiver {
     /// to report.
     pub fn received(&mut self, seq: u16, arrival_ms: f64, now: f64) -> Option<Vec<u8>> {
         let ext = match self.last_ext {
-            None => seq as i64,
+            None => i64::from(seq),
             Some(last) => {
-                let delta = (seq as i64 - last) & 0xFFFF;
+                let delta = (i64::from(seq) - last) & 0xFFFF;
                 last + delta - if delta >= 0x8000 { 0x10000 } else { 0 }
             }
         };
@@ -1267,13 +1267,15 @@ mod tests {
 
     fn batched() -> Vec<Option<f64>> {
         (0..400)
-            .map(|i| Some(1000.0 + (i / 20) as f64 * 25.0 + (i % 20) as f64 * 0.25))
+            .map(|i| Some(1000.0 + f64::from(i / 20) * 25.0 + f64::from(i % 20) * 0.25))
             .collect()
     }
 
     #[test]
     fn partitioning_cannot_change_aggregate_throughput() {
-        let times: Vec<Option<f64>> = (0..400).map(|i| Some(1000.0 + i as f64 * 1.25)).collect();
+        let times: Vec<Option<f64>> = (0..400)
+            .map(|i| Some(1000.0 + f64::from(i) * 1.25))
+            .collect();
         for n in [400, 20, 7] {
             assert_eq!(
                 measure(&times, n, &[], false, false, 0).goodput_bps,
@@ -1394,7 +1396,11 @@ mod tests {
         let mut links = Vec::new();
         for i in 0..4u16 {
             let steer = tr
-                .process_feedback(&pack_twcc_fci(i, &[t(1000.0 + i as f64)], 0), 0.0, 12_500.0)
+                .process_feedback(
+                    &pack_twcc_fci(i, &[t(1000.0 + f64::from(i))], 0),
+                    0.0,
+                    12_500.0,
+                )
                 .unwrap();
             assert_eq!(tr.estimate().unwrap().goodput_bps, 0);
             assert_eq!(steer.goodput_bps, None);
@@ -1499,7 +1505,7 @@ mod tests {
         let mut rates = std::collections::HashSet::new();
         for offset_ms in [0.0, 16.0, 32.0, 48.0, 63.0] {
             let times: Vec<Option<f64>> = (0..20)
-                .map(|i| Some(6400.0 + offset_ms + i as f64))
+                .map(|i| Some(6400.0 + offset_ms + f64::from(i)))
                 .collect();
             rates.insert(arrivals(&times).0.estimate().unwrap().goodput_bps);
         }
@@ -1518,7 +1524,7 @@ mod tests {
         let times: Vec<Option<f64>> = (0..20)
             .map(|i| {
                 if i % 5 != 0 {
-                    Some(100.0 + i as f64)
+                    Some(100.0 + f64::from(i))
                 } else {
                     None
                 }
@@ -1535,7 +1541,7 @@ mod tests {
         let times: Vec<Option<f64>> = (0..20)
             .map(|i| {
                 if !(4..12).contains(&i) {
-                    Some(100.0 + i as f64)
+                    Some(100.0 + f64::from(i))
                 } else {
                     None
                 }
@@ -1569,8 +1575,8 @@ mod tests {
         );
 
         let times: Vec<Option<f64>> = (0..10)
-            .map(|i| Some(100.0 + i as f64))
-            .chain((0..10).map(|i| Some(900.0 + i as f64)))
+            .map(|i| Some(100.0 + f64::from(i)))
+            .chain((0..10).map(|i| Some(900.0 + f64::from(i))))
             .collect();
         let estimate = arrivals(&times).0.estimate().cloned().unwrap();
         assert_eq!(
@@ -1590,7 +1596,7 @@ mod tests {
                 if [5, 6, 7, 12].contains(&i) {
                     None
                 } else {
-                    Some(100.0 + i as f64)
+                    Some(100.0 + f64::from(i))
                 }
             })
             .collect();
@@ -1615,7 +1621,7 @@ mod tests {
         for i in 0..20 {
             tr.seed_sent(i, PACKET_BYTES, 0.0);
         }
-        let times: Vec<Option<f64>> = (0..20).map(|i| Some(6400.0 + i as f64)).collect();
+        let times: Vec<Option<f64>> = (0..20).map(|i| Some(6400.0 + f64::from(i))).collect();
         let fci = pack_twcc_fci(0, &times, 0);
         tr.process_feedback(&fci[..fci.len() - 8], 0.0, 12_500.0);
         assert!(tr.history_len() == 20 && tr.estimate().is_none());
@@ -1666,7 +1672,7 @@ mod tests {
         let times: Vec<Option<f64>> = (0..20)
             .map(|i| {
                 if i != 15 {
-                    Some(100.0 + i as f64)
+                    Some(100.0 + f64::from(i))
                 } else {
                     None
                 }
@@ -1674,7 +1680,7 @@ mod tests {
             .collect();
         tr.process_feedback(&pack_twcc_fci(0, &times, 0), 0.0, 12_500.0);
         let mut again = vec![t(121.0)];
-        again.extend((0..14).map(|i| Some(116.0 + i as f64)));
+        again.extend((0..14).map(|i| Some(116.0 + f64::from(i))));
         tr.process_feedback(&pack_twcc_fci(15, &again, 1), 0.0, 12_500.0);
         let estimate = tr.estimate().unwrap();
         assert_eq!(
@@ -1700,12 +1706,12 @@ mod tests {
         offset_ms: f64,
     ) -> (Readings, Readings, Readings) {
         let (mut queues, mut depths, mut rising) = (vec![], vec![], vec![]);
-        let mut seq: u32 = tr.seq as u32;
+        let mut seq: u32 = u32::from(tr.seq);
         let mut fb: Vec<(u32, f64)> = vec![];
         let mut t = start;
         while t < start + seconds - 1e-9 {
             for i in 0..10 {
-                let sent = t + i as f64 * 0.0005;
+                let sent = t + f64::from(i) * 0.0005;
                 tr.seed_sent((seq & 0xFFFF) as u16, PACKET_BYTES, sent);
                 fb.push((seq, offset_ms + (sent + delay(t)) * 1000.0));
                 seq += 1;
@@ -1848,7 +1854,7 @@ mod tests {
         .collect();
         assert!(queues[0] < 25.0 && queues[2] > 50.0, "{queues:?}");
         let mut tr = TwccSender::new(0.0);
-        let offset = (0xFFFFFF - 20) as f64 * 64.0;
+        let offset = f64::from(0xFFFFFF - 20) * 64.0;
         run_delay(&|_| 0.020, 3.0, &mut tr, 0.0, offset);
         let (queues, _, _) = run_delay(&|_| 0.020, 3.0, &mut tr, 3.0, offset);
         assert!(tr.reference().unwrap() > 0xFFFFFF);
@@ -2017,7 +2023,7 @@ mod tests {
                 qm(tick(
                     &mut tr,
                     &mut clock,
-                    base + 0.1 * i as f64,
+                    base + 0.1 * f64::from(i),
                     8000.0,
                     8000.0,
                     0.0,
@@ -2031,7 +2037,7 @@ mod tests {
                 qm(tick(
                     &mut tr,
                     &mut clock,
-                    base + 60.0 - 0.1 * i as f64,
+                    base + 60.0 - 0.1 * f64::from(i),
                     8000.0,
                     8000.0,
                     0.0,

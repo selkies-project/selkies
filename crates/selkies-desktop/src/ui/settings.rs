@@ -2834,9 +2834,9 @@ fn slider_at(key: &str, rect: Rect, x: f64) -> i32 {
         return 0;
     };
     let track = slider_track(rect);
-    let ratio = ((x - track.x as f64) / track.w as f64).clamp(0.0, 1.0);
-    let raw = *min as f64 + ratio * (*max - *min) as f64;
-    let snapped = ((raw / *step as f64).round() as i32) * step;
+    let ratio = ((x - f64::from(track.x)) / f64::from(track.w)).clamp(0.0, 1.0);
+    let raw = f64::from(*min) + ratio * f64::from(*max - *min);
+    let snapped = ((raw / f64::from(*step)).round() as i32) * step;
     snapped.clamp(*min, *max)
 }
 
@@ -3022,8 +3022,8 @@ fn draw_slider(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hove
     let rect = control.rect;
     let value = slider_value(d, key);
     let track = slider_track(rect);
-    let ratio = (value - min) as f64 / (max - min).max(1) as f64;
-    let fill_w = (track.w as f64 * ratio) as i32;
+    let ratio = f64::from(value - min) / f64::from((max - min).max(1));
+    let fill_w = (f64::from(track.w) * ratio) as i32;
     canvas.fill_rounded(track, 2.0, ui::text_alpha(0x30));
     canvas.fill_rounded(Rect::new(track.x, track.y, fill_w, track.h), 2.0, ui::accent());
     let dragging = d.settings.drag.is_some_and(|(k, _)| k == key);
@@ -4057,8 +4057,8 @@ pub fn tick(d: &mut Desktop, now: Instant) {
 /// shortcuts read again are fewer.
 fn clamp_scroll(d: &mut Desktop) {
     let frame = frame(d);
-    let content = build(d, frame, 0.0, view(d)).content as f64;
-    let max = (content - scroll_rect_in(frame, view(d)).h as f64).max(0.0);
+    let content = f64::from(build(d, frame, 0.0, view(d)).content);
+    let max = (content - f64::from(scroll_rect_in(frame, view(d)).h)).max(0.0);
     if d.settings.scroll > max {
         d.settings.scroll = max;
         d.redraw_settings();
@@ -4076,7 +4076,7 @@ fn pick_hue(d: &mut Desktop, rect: Rect, x: f64, start: bool) {
     let Some(mut picker) = d.settings.picker else {
         return;
     };
-    let ratio = ((x - rect.x as f64) / rect.w.max(1) as f64).clamp(0.0, 1.0) as f32;
+    let ratio = ((x - f64::from(rect.x)) / f64::from(rect.w.max(1))).clamp(0.0, 1.0) as f32;
     picker.hsv.0 = ratio * 360.0;
     if start {
         picker.drag = Some(PickerPart::Hue);
@@ -4096,8 +4096,8 @@ fn pick_area(d: &mut Desktop, rect: Rect, x: f64, y: f64, start: bool) {
     let Some(mut picker) = d.settings.picker else {
         return;
     };
-    picker.hsv.1 = ((x - rect.x as f64) / rect.w.max(1) as f64).clamp(0.0, 1.0) as f32;
-    picker.hsv.2 = 1.0 - ((y - rect.y as f64) / rect.h.max(1) as f64).clamp(0.0, 1.0) as f32;
+    picker.hsv.1 = ((x - f64::from(rect.x)) / f64::from(rect.w.max(1))).clamp(0.0, 1.0) as f32;
+    picker.hsv.2 = 1.0 - ((y - f64::from(rect.y)) / f64::from(rect.h.max(1))).clamp(0.0, 1.0) as f32;
     if start {
         picker.drag = Some(PickerPart::Area);
     }
@@ -4286,11 +4286,11 @@ fn escape(d: &mut Desktop) -> bool {
 pub fn pointer_axis(d: &mut Desktop, x: f64, y: f64, delta: f64) {
     let frame = frame(d);
     let page = scroll_rect_in(frame, view(d));
-    if x < page.x as f64 {
+    if x < f64::from(page.x) {
         return;
     }
-    let content = build(d, frame, 0.0, view(d)).content as f64;
-    let max = (content - page.h as f64).max(0.0);
+    let content = f64::from(build(d, frame, 0.0, view(d)).content);
+    let max = (content - f64::from(page.h)).max(0.0);
     let next = (d.settings.scroll + delta.signum() * ui::SCROLL_STEP).clamp(0.0, max);
     if next != d.settings.scroll {
         d.settings.scroll = next;

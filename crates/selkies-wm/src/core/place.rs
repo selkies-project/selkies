@@ -90,7 +90,7 @@ fn smart(frame: Rect, area: Rect, others: &[Rect]) -> Rect {
         for &x in &xs {
             let candidate = frame.at(x, y);
             let overlap: i64 = others.iter().map(|o| candidate.intersection(o).area()).sum();
-            let distance = (y - area.y) as i64 * (area.w as i64 + 1) + (x - area.x) as i64;
+            let distance = i64::from(y - area.y) * (i64::from(area.w) + 1) + i64::from(x - area.x);
             let better = match &best {
                 None => true,
                 Some((o, d, _)) => overlap < *o || (overlap == *o && distance < *d),

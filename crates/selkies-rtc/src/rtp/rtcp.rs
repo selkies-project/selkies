@@ -124,7 +124,8 @@ pub fn unpack_remb_fci(data: &[u8]) -> Result<(u64, Vec<u32>), ParseError> {
         return Err(ParseError("Invalid REMB length"));
     }
     let exponent = (data[5] & 0xFC) >> 2;
-    let mantissa = (((data[5] & 0x03) as u64) << 16) | ((data[6] as u64) << 8) | data[7] as u64;
+    let mantissa =
+        (u64::from(data[5] & 0x03) << 16) | (u64::from(data[6]) << 8) | u64::from(data[7]);
     let ssrcs = (0..count)
         .map(|i| {
             let p = 8 + 4 * i;
@@ -170,7 +171,7 @@ pub fn pack_twcc_fci(base_seq: u16, arrivals: &[Option<f64>], fb_pkt_count: u8) 
     fci.extend_from_slice(&base_seq.to_be_bytes());
     fci.extend_from_slice(&(arrivals.len() as u16).to_be_bytes());
     fci.extend_from_slice(
-        &((((ref_units & 0xFFFFFF) as u32) << 8) | fb_pkt_count as u32).to_be_bytes(),
+        &((((ref_units & 0xFFFFFF) as u32) << 8) | u32::from(fb_pkt_count)).to_be_bytes(),
     );
     for group in symbols.chunks(7) {
         let mut value = 0xC000u16;
@@ -734,7 +735,10 @@ mod tests {
         let chunk = u16::from_be_bytes([fci[8], fci[9]]);
         let symbols: Vec<u16> = (0..4).map(|j| (chunk >> (12 - 2 * j)) & 3).collect();
         assert_eq!(symbols, vec![1, 1, 0, 1]);
-        assert_eq!(fci[10] as f64, ((t0 - units as f64 * 64.0) * 4.0).round());
+        assert_eq!(
+            f64::from(fci[10]),
+            ((t0 - units as f64 * 64.0) * 4.0).round()
+        );
         let fci = pack_twcc_fci(65535, &[Some(128.0), Some(60.0)], 5);
         let chunk = u16::from_be_bytes([fci[8], fci[9]]);
         assert_eq!((chunk >> 10) & 3, 2);

@@ -256,7 +256,7 @@ impl Stats for MonitorStats {
         let (gpu_id, dri_node) = {
             let s = settings();
             (
-                crate::settings::parse_gpu_id(s.gpu_id()).unwrap_or(0) as i64,
+                i64::from(crate::settings::parse_gpu_id(s.gpu_id()).unwrap_or(0)),
                 s.encode_dri().to_string(),
             )
         };

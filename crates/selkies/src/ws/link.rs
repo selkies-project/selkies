@@ -263,7 +263,7 @@ impl DisplayLink {
     /// longer than that send has been out, moves the gate's reference to that send, is dated,
     /// and yields a round trip less the hold. Whether the ack was a stale earlier frame's.
     pub fn note_ack(&mut self, frame_id: u16, held_ms: f64, now: f64) -> bool {
-        self.acknowledged_frame_id = frame_id as i64;
+        self.acknowledged_frame_id = i64::from(frame_id);
         self.unacked_since = None;
         let Some(index) = self.sent_timestamps.iter().position(|e| e.0 == frame_id) else {
             return false;
@@ -1098,7 +1098,7 @@ impl DisplayLink {
             self.set_backpressure_enabled(true, false, now, effects);
             return;
         }
-        let server_id = self.last_sent_frame_id as i64;
+        let server_id = i64::from(self.last_sent_frame_id);
         let client_id = self.acknowledged_frame_id;
         if client_id == -1 {
             if !self.backpressure_enabled {
@@ -1740,7 +1740,7 @@ mod tests {
             "closed {:.2} s",
             p.longest_closed
         );
-        let share = p.sent as f64 / p.produced as f64;
+        let share = f64::from(p.sent) / f64::from(p.produced);
         assert!(
             share < 0.5 && p.idrs_sent <= c.reprobed_desync + 2,
             "{share}, {} key frames, {c:?}",
@@ -2472,7 +2472,7 @@ mod tests {
             sent += 1250 + if big { 100_000 } else { 0 };
             s.state.sent_bytes = sent;
             s.state.note_round_trip(
-                20.0 + (i % 3) as f64 + if big { 16.0 } else { 0.0 },
+                20.0 + f64::from(i % 3) + if big { 16.0 } else { 0.0 },
                 sent,
                 t,
             );
@@ -2507,7 +2507,7 @@ mod tests {
             t = ((t + 0.05) * 1000.0).round() / 1000.0;
             sent += 1250;
             s.state.sent_bytes = sent;
-            s.state.note_round_trip(20.0 + (i % 3) as f64, sent, t);
+            s.state.note_round_trip(20.0 + f64::from(i % 3), sent, t);
             if i % 10 == 9 {
                 s.steer(t);
             }
@@ -2868,7 +2868,7 @@ mod tests {
             t = ((t + 0.1) * 1000.0).round() / 1000.0;
             sent += 2500;
             s.state.sent_bytes = sent;
-            s.state.note_round_trip(145.0 + (i % 2) as f64, sent, t);
+            s.state.note_round_trip(145.0 + f64::from(i % 2), sent, t);
             if i % 5 == 4 {
                 s.steer(t);
             }
@@ -2884,9 +2884,9 @@ mod tests {
         for k in 1..6 {
             sent += 60_000;
             s.state.note_round_trip(
-                145.0 + 48.0 * k as f64,
+                145.0 + 48.0 * f64::from(k),
                 sent,
-                ((burst_at + 0.048 * k as f64) * 1000.0).round() / 1000.0,
+                ((burst_at + 0.048 * f64::from(k)) * 1000.0).round() / 1000.0,
             );
         }
         s.steer(((burst_at + 0.25) * 1000.0).round() / 1000.0);
@@ -2913,9 +2913,9 @@ mod tests {
         state.link_acks = (1..=10)
             .map(|i| {
                 (
-                    0.8 + i as f64 * 0.05,
+                    0.8 + f64::from(i) * 0.05,
                     20.0,
-                    (i as f64 * 0.05 * 5_000_000.0 / 8.0) as u64,
+                    (f64::from(i) * 0.05 * 5_000_000.0 / 8.0) as u64,
                 )
             })
             .collect();
@@ -2951,9 +2951,9 @@ mod tests {
         state.link_acks = (1..=10)
             .map(|i| {
                 (
-                    31.5 + i as f64 * 0.05,
+                    31.5 + f64::from(i) * 0.05,
                     208.416_666_666_665_12,
-                    (i as f64 * 0.05 * 1_797_770.0 / 8.0) as u64,
+                    (f64::from(i) * 0.05 * 1_797_770.0 / 8.0) as u64,
                 )
             })
             .collect();

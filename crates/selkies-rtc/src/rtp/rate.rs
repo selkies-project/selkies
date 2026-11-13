@@ -320,7 +320,7 @@ impl InterArrival {
         arrival_time: i64,
     ) -> bool {
         let delta = timestamp.wrapping_sub(current.last_timestamp);
-        let delta_ms = (self.timestamp_to_ms * delta as f64).round() as i64;
+        let delta_ms = (self.timestamp_to_ms * f64::from(delta)).round() as i64;
         let arrival_delta = arrival_time - current.arrival_time;
         delta_ms == 0 || (arrival_delta - delta_ms < 0 && arrival_delta <= BURST_DELTA_THRESHOLD_MS)
     }
@@ -691,7 +691,7 @@ impl RemoteBitrateEstimator {
             self.inter_arrival
                 .compute_deltas(timestamp, arrival_time_ms, payload_size as i64)
         {
-            let timestamp_delta_ms = deltas.timestamp as f64 * TIMESTAMP_TO_MS;
+            let timestamp_delta_ms = f64::from(deltas.timestamp) * TIMESTAMP_TO_MS;
             self.estimator.update(
                 deltas.arrival_time,
                 timestamp_delta_ms,

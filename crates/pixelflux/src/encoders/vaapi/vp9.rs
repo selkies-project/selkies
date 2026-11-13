@@ -61,7 +61,7 @@ impl Arm {
         frame: &Frame,
         out: &mut Buffers,
     ) -> Result<(), String> {
-        let slot_of = |pts: u64| (pts % REFERENCE_FRAMES as u64) as u8;
+        let slot_of = |pts: u64| (pts % u64::from(REFERENCE_FRAMES)) as u8;
         let mut pic: VAEncPictureParameterBufferVP9 = unsafe { std::mem::zeroed() };
         pic.frame_width_src = n.width;
         pic.frame_height_src = n.height;
@@ -85,7 +85,7 @@ impl Arm {
                 let (ref_pts, _) = frame
                     .reference
                     .ok_or("a predicted VP9 picture without a reference")?;
-                let slot = slot_of(ref_pts) as u32;
+                let slot = u32::from(slot_of(ref_pts));
                 r.set_ref_frame_ctrl_l0(1);
                 r.set_ref_last_idx(slot);
                 r.set_ref_last_sign_bias(1);
@@ -94,7 +94,7 @@ impl Arm {
                 pic.refresh_frame_flags = 1 << slot_of(frame.pts);
             }
             let p = &mut pic.pic_flags.bits;
-            p.set_frame_type((!frame.key) as u32);
+            p.set_frame_type(u32::from(!frame.key));
             p.set_show_frame(1);
             p.set_error_resilient_mode(1);
         }
