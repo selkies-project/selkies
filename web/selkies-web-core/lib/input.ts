@@ -382,11 +382,11 @@ export interface RoleVerdict {
 /**
  * The one-based gamepad slots a server verdict's `slot` names, in the order the
  * client's pads take them: one number, a list of them (a token holding
- * several), or none.
+ * several), or none. A slot written as a numeric string names the same slot.
  * @param slot
  * @returns
  */
-export function slotList(slot: number | number[] | null | undefined): number[] | null {
+export function slotList(slot: number | string | Array<number | string> | null | undefined): number[] | null {
     const named = Array.isArray(slot) ? slot : (slot === null || slot === undefined ? [] : [slot]);
     const slots = named.map(Number).filter((s: number): boolean => Number.isInteger(s) && s >= 1);
     return slots.length ? slots : null;
