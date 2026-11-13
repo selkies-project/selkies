@@ -33,3 +33,6 @@ docs/reference/
 
 # Cargo build output of the Rust workspace
 /target/
+
+# Vite's dependency cache for the touch gamepad's test page
+web/universal-touch-gamepad/.vite/

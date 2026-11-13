@@ -77,9 +77,20 @@ export default [
     languageOptions: { globals: globals.node },
   },
   {
-    // Classic scripts: the gamepad's own page loads them with <script>.
-    files: ['universal-touch-gamepad/**/*.js'],
-    languageOptions: { ecmaVersion: 'latest', sourceType: 'script', globals: globals.browser },
-    rules,
+    // Typed throughout: a message payload is `unknown` until narrowed.
+    files: ['universal-touch-gamepad/**/*.ts'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      globals: globals.browser,
+      parser: tseslint.parser,
+      parserOptions: { sourceType: 'module' },
+    },
+    plugins: { '@typescript-eslint': tseslint.plugin },
+    rules: {
+      ...js.configs.recommended.rules,
+      ...tseslint.configs.recommended.reduce((acc, c) => ({ ...acc, ...c.rules }), {}),
+      'no-empty': ['error', { allowEmptyCatch: true }],
+      '@typescript-eslint/no-unused-vars': ['error', { caughtErrors: 'none' }],
+    },
   },
 ]

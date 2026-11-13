@@ -28,7 +28,7 @@ import PlayerGamepadButton from './panels/player-gamepad-button';
 import './index.css';
 import { getRoutePrefix } from './utils';
 import { urlFragmentKeyword } from '../../selkies-web-core/lib/page-url.ts';
-import "../../universal-touch-gamepad/universalTouchGamepad.js";
+import "../../universal-touch-gamepad/universalTouchGamepad.ts";
 
 declare global {
   interface Window {

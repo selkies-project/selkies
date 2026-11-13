@@ -34,7 +34,7 @@ echo "eslint: web/selkies-web-core web/universal-touch-gamepad"
 # tier's tester pages: eslint.config.mjs at the root, with the same ESLint.
 echo "eslint: tests/tools tests/browserstack website/scripts tests/image/site"
 web/selkies-dashboard/node_modules/.bin/eslint --max-warnings 0 \
-    'tests/tools/**/*.mjs' 'tests/browserstack/*.ts' 'website/scripts/**/*.mjs' 'tests/image/site/**/*.js'
+    'tests/tools/**/*.mjs' 'tests/tools/**/*.mts' 'tests/browserstack/*.ts' 'website/scripts/**/*.mjs' 'tests/image/site/**/*.js'
 
 # The dashboard's own build runs tsc as well, but that is downstream of this gate.
 echo "tsc: web/selkies-dashboard"

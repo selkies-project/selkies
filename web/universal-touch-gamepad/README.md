@@ -1,6 +1,6 @@
 # Universal Touch Gamepad
 
-A JavaScript library that adds a highly customizable on-screen touch gamepad overlay to web pages and web games. It simulates a standard browser Gamepad API device, making it universally compatible with applications expecting gamepad input.
+A TypeScript library that adds a highly customizable on-screen touch gamepad overlay to web pages and web games. It simulates a standard browser Gamepad API device, making it universally compatible with applications expecting gamepad input.
 
 ## Features
 
@@ -14,9 +14,15 @@ A JavaScript library that adds a highly customizable on-screen touch gamepad ove
 
 ## Quick Start / How to Use
 
-### 1. Include the Script
+### 1. Include the Module
 
-Add the `universalTouchGamepad.js` script to your HTML file.
+Import `universalTouchGamepad.ts` from an entry that a bundler compiling TypeScript builds, as the dashboard's `src/main.tsx` does, or load it as a module script from such a bundler's development server. The module starts on import and exports nothing.
+
+`index.html` here is a test page for it, with `app.ts` as its driver. Vite serves it from `web/selkies-dashboard` once that package's dependencies are installed:
+
+```bash
+npx vite ../universal-touch-gamepad
+```
 
 ### 2. Provide an Anchor Div
 
@@ -48,7 +54,7 @@ Use `window.postMessage` to communicate with the library.
     <button id="setupShowButton">Setup & Show Gamepad</button>
     <button id="hideButton">Hide Gamepad</button>
 
-    <script src="universalTouchGamepad.js"></script>
+    <script type="module" src="universalTouchGamepad.ts"></script>
     <script>
         const gamepadHostDivId = 'touch-gamepad-host';
         let isGamepadSetup = false;
@@ -109,7 +115,7 @@ Use `window.postMessage` to communicate with the library.
 *   **Showing/Hiding:** Use buttons in your application (like the example above) to send messages to show or hide the touch gamepad overlay.
 *   **Settings Icon (⚙️):** When the gamepad is visible, a settings icon typically appears at the top-right corner. Tapping this icon opens a profile selector.
 *   **Profile Selection:** Users can choose from available controller layouts (e.g., "8-bit", "Modern"). The selected profile is saved in their browser's `localStorage` and will be loaded automatically on subsequent visits.
-*   **Gamepad Simulation:** The `universalTouchGamepad.js` library overrides the standard `navigator.getGamepads()` browser function. When the touch overlay is active and interacted with, it populates one of the gamepad slots with a virtual "Universal Touch Gamepad". This virtual gamepad reports button presses, joystick movements, and trigger pressure derived from the touch interactions, adhering to the standard Gamepad API. This makes it **universally compatible** with web games and applications that expect standard gamepad input, without requiring any changes to the game's input handling code.
+*   **Gamepad Simulation:** The `universalTouchGamepad.ts` library overrides the standard `navigator.getGamepads()` browser function. When the touch overlay is active and interacted with, it populates one of the gamepad slots with a virtual "Universal Touch Gamepad". This virtual gamepad reports button presses, joystick movements, and trigger pressure derived from the touch interactions, adhering to the standard Gamepad API. This makes it **universally compatible** with web games and applications that expect standard gamepad input, without requiring any changes to the game's input handling code.
 *   **Vibration:** The virtual gamepad's `vibrationActuator` plays a `dual-rumble` effect on the device's own vibrator where the browser has `navigator.vibrate` (Android), with one motor and no strength: any level on either motor vibrates for the effect's duration. Elsewhere it is `null`, like a pad without motors.
 *   **Input Events:** The Gamepad API has no event for input, so a page reads the pad on a timer. The library also dispatches a `touchgamepadinput` event on `window` (its `gamepad` property is the virtual pad) after every touch that changes the pad, so a page that listens can read the change at once instead of on its next poll.
 
@@ -117,22 +123,22 @@ Use `window.postMessage` to communicate with the library.
 
 ### Controller Profiles
 
-The core of the gamepad's layout and functionality is defined by "profiles". A profile is a JavaScript object that describes the visual elements (buttons, joysticks, triggers) and their mapping to standard gamepad inputs.
+The core of the gamepad's layout and functionality is defined by "profiles". A profile is an object (the `Profile` interface) that describes the visual elements (buttons, joysticks, triggers) and their mapping to standard gamepad inputs.
 
 **How Profiles Work:**
 
-*   Profiles are defined within an object (e.g., `profiles`) in `universalTouchGamepad.js`.
+*   Profiles are defined within an object (e.g., `profiles`) in `universalTouchGamepad.ts`.
 *   Each key in this object is a profile ID (e.g., `eightBit`, `modern`), and its value is the profile configuration object.
 *   The library renders UI elements based on the currently active profile.
 *   Interactions with these UI elements update the state of the virtual gamepad.
 
 **Example: 8-bit Controller Profile**
 
-Here's a snippet of the `eightBit` profile from `universalTouchGamepad.js` to illustrate the structure:
+Here's a snippet of the `eightBit` profile from `universalTouchGamepad.ts` to illustrate the structure:
 
-```javascript
-// Inside universalTouchGamepad.js
-const profiles = {
+```typescript
+// Inside universalTouchGamepad.ts
+const profiles: Record<string, Profile> = {
     // ... other profiles ...
     eightBit: {
         name: "8-bit", // Display name for the profile selector UI
@@ -223,7 +229,7 @@ A profile object can contain the following top-level keys:
 
 ### Creating Your Own Profiles
 
-1.  **Edit `universalTouchGamepad.js`:** Locate the `profiles` object.
+1.  **Edit `universalTouchGamepad.ts`:** Locate the `profiles` object.
 2.  **Add a New Profile Entry:** Create a new key-value pair, where the key is your new profile's ID (e.g., `myCustomProfile`) and the value is its configuration object.
 3.  **Define Elements:**
     *   Specify `name` for the UI.
@@ -260,9 +266,9 @@ When defining `index` for buttons, `axes` for joysticks, or `buttonIndex` for an
 **Axes ( `axes: [xAxisIndex, yAxisIndex]` ):**
 
 *   `0`: Left Stick X-axis (-1.0 left, +1.0 right)
-*   `1`: Left Stick Y-axis (-1.0 up, +1.0 down) *Note: The library internally inverts the Y-axis for intuitive touch control, so positive touch Y maps to negative gamepad Y.*
+*   `1`: Left Stick Y-axis (-1.0 up, +1.0 down)
 *   `2`: Right Stick X-axis (-1.0 left, +1.0 right)
-*   `3`: Right Stick Y-axis (-1.0 up, +1.0 down) *Note: Same Y-axis inversion as above.*
+*   `3`: Right Stick Y-axis (-1.0 up, +1.0 down)
 
 By adhering to these standard mappings, your custom touch gamepad layouts will work seamlessly with most web games and applications that support the Gamepad API.
 

@@ -102,6 +102,15 @@ export interface PadState {
   deadzoned?: number[];
 }
 
+/**
+ * A pad's `vibrationActuator` as `GamepadManager.rumble` plays on it: the
+ * Gamepad API's dual-rumble effect, with `reset` where the engine has it.
+ */
+export interface RumbleActuator {
+  playEffect: (effect: string, params: Record<string, number>) => Promise<unknown>;
+  reset?: () => Promise<unknown>;
+}
+
 /** Called on every button change. */
 export type ButtonCallback = (index: number, button: number, value: number, pressed: boolean) => void;
 /** Called on every axis change. */
@@ -615,7 +624,7 @@ export class GamepadManager {
         for (const pad of pads) {
             if (!pad || !pad.connected) continue;
             if (index !== null && pad.index !== index) continue;
-            const actuator = (pad as Gamepad & { vibrationActuator?: { playEffect: (effect: string, params: Record<string, number>) => Promise<void>; reset?: () => Promise<void> } }).vibrationActuator;
+            const actuator = (pad as Gamepad & { vibrationActuator?: RumbleActuator }).vibrationActuator;
             if (actuator && typeof actuator.playEffect === 'function') {
                 const done = (off && typeof actuator.reset === 'function')
                     ? actuator.reset()

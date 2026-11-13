@@ -1,0 +1,124 @@
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+/**
+ * Test page driver for the universal touch gamepad: loads the library, sends
+ * it `TOUCH_GAMEPAD_SETUP`, toggles its visibility, and mirrors the synthetic
+ * pad from `navigator.getGamepads()` into the status panel.
+ * @module
+ */
+import './universalTouchGamepad.ts';
+
+/**
+ * An element of the test page.
+ * @param id
+ * @returns The element.
+ * @throws Error when the page has no such element.
+ */
+function pageElement(id: string): HTMLElement {
+    const element = document.getElementById(id);
+    if (!element) throw new Error(`#${id} is missing from the test page`);
+    return element;
+}
+
+const toggleButton = pageElement('toggle-gamepad-btn');
+const targetDivId = 'touch-gamepad-container';
+let isGamepadUIVisible = false;
+
+const gamepadInfoIdDiv = pageElement('gamepad-info-id');
+const gamepadInfoConnectedDiv = pageElement('gamepad-info-connected');
+const gamepadInfoIndexDiv = pageElement('gamepad-info-index');
+const gamepadInfoMappingDiv = pageElement('gamepad-info-mapping');
+const axesStatusDisplay = pageElement('axes-status-display');
+const buttonsStatusDisplay = pageElement('buttons-status-display');
+const MAX_BUTTONS_DISPLAY = 18;
+const MAX_AXES_DISPLAY = 4;
+
+for (let i = 0; i < MAX_AXES_DISPLAY; i++) {
+    const div = document.createElement('div');
+    div.id = `axis-stat-${i}`;
+    axesStatusDisplay.appendChild(div);
+}
+for (let i = 0; i < MAX_BUTTONS_DISPLAY; i++) {
+    const span = document.createElement('span');
+    span.id = `button-stat-${i}`;
+    span.className = 'button-state';
+    buttonsStatusDisplay.appendChild(span);
+    if ((i + 1) % 6 === 0 && i < MAX_BUTTONS_DISPLAY - 1) {
+        buttonsStatusDisplay.appendChild(document.createElement('br'));
+    }
+}
+
+window.postMessage({
+    type: 'TOUCH_GAMEPAD_SETUP',
+    payload: {
+        targetDivId: targetDivId,
+        visible: false
+    }
+}, window.location.origin);
+
+
+toggleButton.addEventListener('click', () => {
+    isGamepadUIVisible = !isGamepadUIVisible;
+    window.postMessage({
+        type: 'TOUCH_GAMEPAD_VISIBILITY',
+        payload: {
+            visible: isGamepadUIVisible,
+            targetDivId: targetDivId // lets the library resolve the host if SETUP was missed
+        }
+    }, window.location.origin);
+    toggleButton.textContent = isGamepadUIVisible ? 'Hide Touch Gamepad' : 'Show Touch Gamepad';
+});
+
+/** Copies the synthetic pad's axes and buttons into the panel every animation frame. */
+function updateStatusDisplay() {
+    const activeGamepad = navigator.getGamepads().find((pad) => pad && pad.id === "Universal Touch Gamepad") ?? null;
+
+    if (activeGamepad && activeGamepad.connected) {
+        gamepadInfoIdDiv.textContent = `ID: ${activeGamepad.id}`;
+        gamepadInfoConnectedDiv.textContent = `Connected: ${activeGamepad.connected}`;
+        gamepadInfoIndexDiv.textContent = `Index: ${activeGamepad.index}`;
+        gamepadInfoMappingDiv.textContent = `Mapping: ${activeGamepad.mapping}`;
+
+        for (let i = 0; i < MAX_AXES_DISPLAY; i++) {
+            const axisDiv = document.getElementById(`axis-stat-${i}`);
+            if (axisDiv) {
+                axisDiv.textContent = `Axis ${i}: ${(activeGamepad.axes[i] || 0).toFixed(2)}`;
+            }
+        }
+        for (let i = 0; i < MAX_BUTTONS_DISPLAY; i++) {
+            const btnSpan = document.getElementById(`button-stat-${i}`);
+            if (btnSpan) {
+                const button = activeGamepad.buttons[i] || { value: 0, pressed: false };
+                btnSpan.textContent = `B${i}: ${button.value.toFixed(1)} (${button.pressed ? 'T' : 'F'})`;
+                btnSpan.classList.toggle('pressed', button.pressed);
+            }
+        }
+    } else {
+        gamepadInfoIdDiv.textContent = `ID: N/A`;
+        gamepadInfoConnectedDiv.textContent = `Connected: false`;
+        gamepadInfoIndexDiv.textContent = `Index: N/A`;
+        gamepadInfoMappingDiv.textContent = `Mapping: N/A`;
+
+        for (let i = 0; i < MAX_AXES_DISPLAY; i++) {
+            const axisDiv = document.getElementById(`axis-stat-${i}`);
+            if (axisDiv) {
+                axisDiv.textContent = `Axis ${i}: 0.00`;
+            }
+        }
+        for (let i = 0; i < MAX_BUTTONS_DISPLAY; i++) {
+            const btnSpan = document.getElementById(`button-stat-${i}`);
+            if (btnSpan) {
+                btnSpan.textContent = `B${i}: 0.0 (F)`;
+                btnSpan.classList.remove('pressed');
+            }
+        }
+    }
+    requestAnimationFrame(updateStatusDisplay);
+}
+
+requestAnimationFrame(updateStatusDisplay);
+console.log("Test App Initialized. Sent SETUP to UniversalTouchGamepad.");

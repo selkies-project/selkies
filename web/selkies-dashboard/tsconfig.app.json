@@ -21,6 +21,6 @@
   "include": [
     "src",
     "../selkies-web-core/lib/**/*.ts",
-    "../universal-touch-gamepad/universalTouchGamepad.js"
+    "../universal-touch-gamepad/*.ts"
   ]
 }

@@ -25,6 +25,111 @@
  * without lifting; a short, still tap on a stick clicks L3/R3.
  * @module
  */
+import type { RumbleActuator } from '../selkies-web-core/lib/gamepad.ts';
+
+/** Placement and look of a control as CSS properties; a length is px or a `calc()`. */
+type ControlStyle = Record<string, string>;
+
+/** A digital button of a profile. */
+interface ButtonConfig {
+    /** Unique within the profile; a cluster names it in `buttonIds`. */
+    id: string;
+    /** Standard-layout button index it presses. */
+    index: number;
+    /** Text, or the markup of an inline `<svg>`. */
+    label?: string;
+    shape?: 'squircle';
+    type?: 'digitalShoulder';
+    style: ControlStyle;
+}
+
+/** A stick of a profile; `style.size` is the diameter of its base. */
+interface JoystickConfig {
+    id: string;
+    /** Standard-layout axis indices of its X and Y. */
+    axes: [number, number];
+    /** Standard-layout button a short, still tap clicks. */
+    clickButtonIndex?: number;
+    style: ControlStyle;
+}
+
+/** An analog trigger of a profile. */
+interface TriggerConfig {
+    id: string;
+    /** Standard-layout button index whose value it sets. */
+    buttonIndex: number;
+    label?: string;
+    style: ControlStyle;
+}
+
+/** One touch surface hit testing the buttons it names. */
+interface ClusterConfig {
+    id: string;
+    style: ControlStyle;
+    buttonIds: string[];
+}
+
+/** A layout the picker offers. */
+interface Profile {
+    /** Title in the picker. */
+    name: string;
+    buttons?: ButtonConfig[];
+    joysticks?: JoystickConfig[];
+    analogTriggers?: TriggerConfig[];
+    clusters?: ClusterConfig[];
+}
+
+/** A rendered button and the touches holding it. */
+interface ButtonTrack {
+    element: HTMLElement;
+    config: ButtonConfig;
+    activeTouchIds: Set<number>;
+}
+
+/** A rendered trigger, its fill bar, and the touch holding it. */
+interface TriggerTrack {
+    element: HTMLElement;
+    fillElement: HTMLElement;
+    config: TriggerConfig;
+    activeTouchId: number | null;
+}
+
+/** A rendered stick or trigger of the live overlay. */
+interface TouchControl {
+    element: HTMLElement;
+    type: 'joystick' | 'analogTrigger';
+    config: JoystickConfig | TriggerConfig;
+}
+
+/** One button of the virtual pad, as `GamepadButton` reports it. */
+interface TouchGamepadButton {
+    pressed: boolean;
+    touched: boolean;
+    value: number;
+}
+
+/**
+ * The virtual pad's actuator: what the core's `GamepadManager.rumble` plays
+ * on, with the fields a page reads the effect's support from.
+ */
+interface TouchRumbleActuator extends RumbleActuator {
+    type: 'dual-rumble';
+    effects: string[];
+}
+
+/** The virtual pad, a `Gamepad` whose state this module writes. */
+interface TouchGamepad {
+    id: string;
+    index: number;
+    connected: boolean;
+    mapping: GamepadMappingType;
+    axes: number[];
+    buttons: TouchGamepadButton[];
+    timestamp: number;
+    /** Null where the device has no vibrator, like a pad without motors. */
+    vibrationActuator: TouchRumbleActuator | null;
+}
+
 (function() {
     'use strict';
 
@@ -88,20 +193,20 @@
     window.addEventListener('orientationchange', setRealViewportHeight);
     setRealViewportHeight();
 
-    let hostAnchorElement = null;
+    let hostAnchorElement: HTMLElement | null = null;
     let currentProfileName = 'modern';
     let isGamepadVisible = false;
-    let activeTouchControls = [];
-    let buttonElementsToTrack = {};
-    let analogTriggersToTrack = {};
+    let activeTouchControls: TouchControl[] = [];
+    let buttonElementsToTrack: Record<string, ButtonTrack> = {};
+    let analogTriggersToTrack: Record<number, TriggerTrack> = {};
 
-    let gamepadControlsOverlayElement = null;
-    let settingsIconElement = null;
-    let profileSelectorOverlayElement = null;
+    let gamepadControlsOverlayElement: HTMLDivElement | null = null;
+    let settingsIconElement: HTMLDivElement | null = null;
+    let profileSelectorOverlayElement: HTMLDivElement | null = null;
     let isProfileSelectorVisible = false;
-    let styleSheet = null;
+    let styleSheet: HTMLStyleElement | null = null;
 
-    let gamepadState = {
+    const gamepadState: TouchGamepad = {
         id: GAMEPAD_ID,
         index: 0,
         connected: false,
@@ -117,14 +222,14 @@
      * through `navigator.vibrate` where the browser has it (Android): it has
      * one motor and no strength, so any level on either motor vibrates for
      * the effect's duration. Null elsewhere, like a pad without motors.
-     * @returns {object|null}
+     * @returns The actuator, or null.
      */
-    function makeVibrationActuator() {
+    function makeVibrationActuator(): TouchRumbleActuator | null {
         if (typeof navigator === 'undefined' || typeof navigator.vibrate !== 'function') return null;
         return {
             type: 'dual-rumble',
             effects: ['dual-rumble'],
-            playEffect(type, params = {}) {
+            playEffect(type: string, params: Record<string, number> = {}) {
                 const on = (params.strongMagnitude || 0) > 0 || (params.weakMagnitude || 0) > 0;
                 navigator.vibrate(on ? Math.max(0, params.duration || 0) : 0);
                 return Promise.resolve('complete');
@@ -136,7 +241,7 @@
         };
     }
 
-    const originalGetGamepads = navigator.getGamepads ? navigator.getGamepads.bind(navigator) : () => [];
+    const originalGetGamepads: () => (Gamepad | null)[] = navigator.getGamepads ? navigator.getGamepads.bind(navigator) : () => [];
 
     /**
      * Wraps `navigator.getGamepads` to splice the synthetic pad, while
@@ -145,15 +250,17 @@
     function overrideGamepadAPI() {
         navigator.getGamepads = function() {
             const nativeGamepads = originalGetGamepads();
-            const allGamepads = [null, null, null, null];
+            const allGamepads: (Gamepad | null)[] = [null, null, null, null];
             for (let i = 0; i < nativeGamepads.length && i < 4; i++) {
-                if (nativeGamepads[i] && nativeGamepads[i].id !== GAMEPAD_ID) {
-                    allGamepads[i] = nativeGamepads[i];
+                const pad = nativeGamepads[i];
+                if (pad && pad.id !== GAMEPAD_ID) {
+                    allGamepads[i] = pad;
                 }
             }
             if (gamepadState.connected) {
                 let targetIndex = gamepadState.index;
-                if (allGamepads[targetIndex] && allGamepads[targetIndex].id !== GAMEPAD_ID) {
+                const occupant = allGamepads[targetIndex];
+                if (occupant && occupant.id !== GAMEPAD_ID) {
                     targetIndex = allGamepads.findIndex(p => p === null || (p && p.id === GAMEPAD_ID));
                     if (targetIndex === -1 && allGamepads.length < 4) {
                         targetIndex = allGamepads.length;
@@ -162,7 +269,7 @@
                     }
                 }
                 if(targetIndex >=0 && targetIndex < 4){
-                    allGamepads[targetIndex] = gamepadState;
+                    allGamepads[targetIndex] = gamepadState as Gamepad;
                     gamepadState.index = targetIndex;
                 }
             }
@@ -170,10 +277,8 @@
         };
     }
 
-    function dispatchGamepadEvent(type) {
-        const event = new Event(type);
-        event.gamepad = gamepadState;
-        window.dispatchEvent(event);
+    function dispatchGamepadEvent(type: string) {
+        window.dispatchEvent(Object.assign(new Event(type), { gamepad: gamepadState }));
     }
 
     let inputChangePending = false;
@@ -195,16 +300,16 @@
     /**
      * Sets a button's state; an analog trigger's `pressed` follows its value
      * past 0.05. The first change while visible connects the pad.
-     * @param {number} buttonIndex
-     * @param {boolean} pressed
-     * @param {number|null} [analogValue] 0 to 1 for analog triggers.
+     * @param buttonIndex
+     * @param pressed
+     * @param analogValue 0 to 1 for analog triggers.
      */
-    function updateGamepadButton(buttonIndex, pressed, analogValue = null) {
+    function updateGamepadButton(buttonIndex: number, pressed: boolean, analogValue: number | null = null) {
         if (buttonIndex < 0 || buttonIndex >= MAX_BUTTONS) return;
         const buttonState = gamepadState.buttons[buttonIndex];
         
         let newPressedState = pressed;
-        let newValue = analogValue !== null ? Math.max(0, Math.min(1, analogValue)) : (pressed ? 1.0 : 0.0);
+        const newValue = analogValue !== null ? Math.max(0, Math.min(1, analogValue)) : (pressed ? 1.0 : 0.0);
 
         const currentProfile = profiles[currentProfileName];
         const isAnalogButtonConfig = currentProfile?.analogTriggers?.find(t => t.buttonIndex === buttonIndex);
@@ -224,7 +329,7 @@
     }
 
     /** Sets an axis, clamped to -1 to 1; the first change while visible connects the pad. */
-    function updateGamepadAxis(index, value) {
+    function updateGamepadAxis(index: number, value: number) {
         if (index < 0 || index >= MAX_AXES) return;
         const clampedValue = Math.max(-1, Math.min(1, value));
         if (gamepadState.axes[index] !== clampedValue) {
@@ -270,7 +375,7 @@
      * optional `joysticks` (axis pair and click button) and `analogTriggers`,
      * and `clusters` grouping buttons into one touch-hit-tested surface.
      */
-    const profiles = {
+    const profiles: Record<string, Profile> = {
         eightBit: {
             name: "8-bit",
             buttons: [
@@ -411,17 +516,17 @@
     /**
      * Scales a profile style value for the preview: numbers and px lengths
      * multiply, and a `calc()` scales its px terms unless it mixes in `%`.
-     * @param {string|number} valueStr
-     * @param {number} scale
-     * @returns {string}
+     * @param valueStr
+     * @param scale
+     * @returns The scaled CSS value.
      */
-    function parseStyleValue(valueStr, scale) {
+    function parseStyleValue(valueStr: string | number, scale: number): string {
         if (typeof valueStr !== 'string') {
             return (valueStr * scale) + 'px';
         }
         if (valueStr.toLowerCase().startsWith('calc(')) {
             if (scale !== 1.0 && !valueStr.includes('%')) {
-                 return valueStr.replace(/(\d+(\.\d+)?)px/g, (match, p1) => (parseFloat(p1) * scale) + 'px');
+                 return valueStr.replace(/(\d+(\.\d+)?)px/g, (match: string, p1: string) => (parseFloat(p1) * scale) + 'px');
             }
             return valueStr;
         }
@@ -434,12 +539,12 @@
      * Builds a profile's controls into `parentEl`. The live overlay adds the
      * safe-area padding and the touch handlers and resets the tracking tables;
      * a preview is scaled, inert, and omits triggers and clusters.
-     * @param {object} profile An entry of `profiles`.
-     * @param {HTMLElement} parentEl
-     * @param {number} [scale=1.0]
-     * @param {boolean} [isPreview=false]
+     * @param profile An entry of `profiles`.
+     * @param parentEl
+     * @param scale
+     * @param isPreview
      */
-    function renderControlElements(profile, parentEl, scale = 1.0, isPreview = false) {
+    function renderControlElements(profile: Profile, parentEl: HTMLElement, scale = 1.0, isPreview = false) {
         if (!isPreview) {
             buttonElementsToTrack = {};
             analogTriggersToTrack = {};
@@ -456,7 +561,7 @@
                 const base = document.createElement('div');
                 base.className = 'touch-gamepad-control touch-joystick-base';
                 
-                const baseStyles = { width: `${baseSize}px`, height: `${baseSize}px` };
+                const baseStyles: ControlStyle = { width: `${baseSize}px`, height: `${baseSize}px` };
                 for (const key in joyConfig.style) {
                     if (key === 'size') continue;
                     let finalValue = parseStyleValue(joyConfig.style[key], scale);
@@ -478,25 +583,25 @@
                 
                 if (!isPreview) {
                     activeTouchControls.push({ element: base, type: 'joystick', config: joyConfig });
-                    let activeTouchId = null;
+                    let activeTouchId: number | null = null;
                     
-                    const onJoystickTouchStart = (e) => { 
+                    const onJoystickTouchStart = (e: TouchEvent) => { 
                         e.preventDefault(); e.stopPropagation(); base.classList.add('pressed');
                         if (activeTouchId !== null && e.changedTouches[0].identifier !== activeTouchId) return;
                         activeTouchId = e.changedTouches[0].identifier;
-                        base.dataset.touchStartTime = Date.now();
-                        base.dataset.touchInitialClientX = e.changedTouches[0].clientX;
-                        base.dataset.touchInitialClientY = e.changedTouches[0].clientY;
+                        base.dataset.touchStartTime = String(Date.now());
+                        base.dataset.touchInitialClientX = String(e.changedTouches[0].clientX);
+                        base.dataset.touchInitialClientY = String(e.changedTouches[0].clientY);
                         base.dataset.movedSignificant = "false";
                         updateStick(e.changedTouches[0], base, handle, baseSizeUnscaled, handleRelSizeFactor);
                     };
-                    const onJoystickTouchMove = (e) => { 
+                    const onJoystickTouchMove = (e: TouchEvent) => { 
                         e.preventDefault(); e.stopPropagation(); if (activeTouchId === null) return;
                         for (let i = 0; i < e.changedTouches.length; i++) {
                             if (e.changedTouches[i].identifier === activeTouchId) {
                                 updateStick(e.changedTouches[i], base, handle, baseSizeUnscaled, handleRelSizeFactor);
-                                const initialX = parseFloat(base.dataset.touchInitialClientX);
-                                const initialY = parseFloat(base.dataset.touchInitialClientY);
+                                const initialX = parseFloat(base.dataset.touchInitialClientX ?? '');
+                                const initialY = parseFloat(base.dataset.touchInitialClientY ?? '');
                                 const currentX = e.changedTouches[i].clientX;
                                 const currentY = e.changedTouches[i].clientY;
                                 const deltaX = Math.abs(currentX - initialX);
@@ -509,7 +614,7 @@
                             }
                         }
                     };
-                    const onJoystickTouchEnd = (e) => { 
+                    const onJoystickTouchEnd = (e: TouchEvent) => { 
                         e.preventDefault(); e.stopPropagation(); base.classList.remove('pressed');
                         if (activeTouchId === null) return;
                         for (let i = 0; i < e.changedTouches.length; i++) {
@@ -534,7 +639,7 @@
                         }
                     };
                     /** Moves the handle to the touch, clamped to the base, and sets the axes. */
-                    function updateStick(touch, stickBaseElement, handleElement, unscaledBaseSize, handleRelFactor) {
+                    function updateStick(touch: Touch, stickBaseElement: HTMLElement, handleElement: HTMLElement, unscaledBaseSize: number, handleRelFactor: number) {
                         const rect = stickBaseElement.getBoundingClientRect();
                         const touchX = touch.clientX - rect.left; const touchY = touch.clientY - rect.top;
                         const currentBaseSize = rect.width; const currentHandleSize = currentBaseSize * handleRelFactor;
@@ -566,7 +671,7 @@
                 const fillElement = document.createElement('div');
                 fillElement.className = 'touch-analog-trigger-fill';
                 trigger.appendChild(fillElement);
-                const triggerStyles = {};
+                const triggerStyles: ControlStyle = {};
                 for (const key in triggerConfig.style) {
                     let finalValue = parseStyleValue(triggerConfig.style[key], 1.0);
                     if (key === 'left') finalValue = `calc(${finalValue} + ${SAFE_AREA_PADDING.left}px)`;
@@ -579,14 +684,14 @@
                 parentEl.appendChild(trigger);
                 activeTouchControls.push({ element: trigger, type: 'analogTrigger', config: triggerConfig });
                 analogTriggersToTrack[triggerConfig.buttonIndex] = { element: trigger, fillElement: fillElement, config: triggerConfig, activeTouchId: null };
-                let activeId = null;
-                trigger.addEventListener('touchstart', (e) => { 
+                let activeId: number | null = null;
+                trigger.addEventListener('touchstart', (e: TouchEvent) => { 
                     e.preventDefault(); e.stopPropagation(); if (activeId !== null && e.changedTouches[0].identifier !== activeId) return;
                     activeId = e.changedTouches[0].identifier; trigger.classList.add('pressed');
                     analogTriggersToTrack[triggerConfig.buttonIndex].activeTouchId = activeId;
                     updateAnalogTriggerVisuals(triggerConfig.buttonIndex, e.changedTouches[0].clientY, true);
                 }, { passive: false });
-                trigger.addEventListener('touchmove', (e) => { 
+                trigger.addEventListener('touchmove', (e: TouchEvent) => { 
                     e.preventDefault(); e.stopPropagation(); if (activeId === null) return;
                     for (let i = 0; i < e.changedTouches.length; i++) {
                         if (e.changedTouches[i].identifier === activeId) {
@@ -594,7 +699,7 @@
                         }
                     }
                 }, { passive: false });
-                const onTriggerEnd = (e) => {
+                const onTriggerEnd = (e: TouchEvent) => {
                     e.preventDefault(); e.stopPropagation(); if (activeId === null) return;
                     for (let i = 0; i < e.changedTouches.length; i++) {
                         if (e.changedTouches[i].identifier === activeId) {
@@ -622,7 +727,7 @@
                     button.textContent = isPreview ? (btnConfig.label && btnConfig.label.length > 2 && btnConfig.shape !== 'squircle' ? btnConfig.label[0] : btnConfig.label || '') : btnConfig.label || '';
                 }
                 
-                const btnStyles = {};
+                const btnStyles: ControlStyle = {};
                 for (const key in btnConfig.style) {
                     let finalValue = parseStyleValue(btnConfig.style[key], scale);
                     if (!isPreview) {
@@ -660,7 +765,7 @@
                 clusterDiv.className = 'touch-gamepad-cluster';
                 clusterDiv.id = `cluster-${clusterConfig.id}`;
 
-                const clusterStyles = {};
+                const clusterStyles: ControlStyle = {};
                 for (const key in clusterConfig.style) {
                     let finalValue = parseStyleValue(clusterConfig.style[key], 1.0);
                     if (key === 'left') finalValue = `calc(${finalValue} + ${SAFE_AREA_PADDING.left}px)`;
@@ -678,7 +783,7 @@
                  * buttons, so a finger sliding between them re-targets without
                  * lifting, and a button stays pressed while any touch holds it.
                  */
-                const handleClusterTouch = (event) => {
+                const handleClusterTouch = (event: TouchEvent) => {
                     let interactionOccurred = false;
                     const touches = event.touches;
                     const changedTouches = event.changedTouches;
@@ -744,7 +849,7 @@
     }
     
     /** Maps the touch's depth into a trigger (top to bottom) onto its 0 to 1 value and fill. */
-    function updateAnalogTriggerVisuals(buttonIndex, currentClientY, isActive) {
+    function updateAnalogTriggerVisuals(buttonIndex: number, currentClientY: number, isActive: boolean) {
         const triggerTrack = analogTriggersToTrack[buttonIndex];
         if (!triggerTrack || !triggerTrack.element) return;
 
@@ -887,7 +992,7 @@
         if (!gamepadState.connected && isGamepadVisible) connectGamepad();
     }
 
-    function createGamepadControlsOverlay() {
+    function createGamepadControlsOverlay(): HTMLDivElement {
         if (!gamepadControlsOverlayElement) {
             gamepadControlsOverlayElement = document.createElement('div');
             gamepadControlsOverlayElement.id = 'universal-touch-gamepad-controls-overlay';
@@ -903,6 +1008,7 @@
             });
             document.body.appendChild(gamepadControlsOverlayElement);
         }
+        return gamepadControlsOverlayElement;
     }
 
     /** Shows the overlay with the persisted profile; requires a prior SETUP. */
@@ -911,8 +1017,7 @@
             console.error(GAMEPAD_ID + ": Host anchor element not set. Call SETUP first.");
             return;
         }
-        createGamepadControlsOverlay();
-        gamepadControlsOverlayElement.style.display = 'block'; 
+        createGamepadControlsOverlay().style.display = 'block'; 
         isGamepadVisible = true;
         const savedProfile = localStorage.getItem('universalTouchGamepad_currentProfile');
         if (savedProfile && profiles[savedProfile]) {
@@ -932,48 +1037,55 @@
         disconnectGamepad();
     }
 
+    /** Whether a message value is an object whose fields can be read. */
+    function isRecord(value: unknown): value is Record<string, unknown> {
+        return typeof value === 'object' && value !== null;
+    }
+
     // The dashboards post from the page's own origin; a frame of another may not drive the pad.
-    function onPadMessage(event) {
+    function onPadMessage(event: MessageEvent) {
         if (event.origin !== window.location.origin) return;
-        const { data } = event;
-        if (!data || typeof data !== 'object') return;
+        const data: unknown = event.data;
+        if (!isRecord(data)) return;
+        const payload = isRecord(data.payload) ? data.payload : null;
+        const targetDivId = payload && typeof payload.targetDivId === 'string' ? payload.targetDivId : '';
 
         switch (data.type) {
             case 'TOUCH_GAMEPAD_SETUP':
-                if (data.payload && data.payload.targetDivId) {
-                    const div = document.getElementById(data.payload.targetDivId);
+                if (payload && targetDivId) {
+                    const div = document.getElementById(targetDivId);
                     if (div) {
                         hostAnchorElement = div;
-                        console.log(GAMEPAD_ID + ": Host anchor element set to #" + data.payload.targetDivId);
+                        console.log(GAMEPAD_ID + ": Host anchor element set to #" + targetDivId);
                         const savedProfile = localStorage.getItem('universalTouchGamepad_currentProfile');
                         if (savedProfile && profiles[savedProfile]) {
                              currentProfileName = savedProfile;
-                        } else if (data.payload.initialProfileName && profiles[data.payload.initialProfileName]) {
-                            currentProfileName = data.payload.initialProfileName;
+                        } else if (typeof payload.initialProfileName === 'string' && profiles[payload.initialProfileName]) {
+                            currentProfileName = payload.initialProfileName;
                         } else if (!profiles[currentProfileName]) {
                             currentProfileName = Object.keys(profiles)[0];
                         }
 
-                        if (data.payload.visible === true) {
+                        if (payload.visible === true) {
                             showGamepad();
                         }
                     } else {
-                        console.error(GAMEPAD_ID + ": Host anchor DIV #" + data.payload.targetDivId + " not found.");
+                        console.error(GAMEPAD_ID + ": Host anchor DIV #" + targetDivId + " not found.");
                         hostAnchorElement = null;
                     }
                 }
                 break;
             case 'TOUCH_GAMEPAD_VISIBILITY':
-                 if (!hostAnchorElement && data.payload && data.payload.targetDivId) {
-                     const div = document.getElementById(data.payload.targetDivId);
+                 if (!hostAnchorElement && targetDivId) {
+                     const div = document.getElementById(targetDivId);
                      if(div) hostAnchorElement = div;
                 }
                 if (!hostAnchorElement) {
                     console.error(GAMEPAD_ID + ": Host anchor not set. Call SETUP or provide targetDivId in visibility message.");
                     return;
                 }
-                if (data.payload && typeof data.payload.visible === 'boolean') {
-                    if (data.payload.visible) {
+                if (payload && typeof payload.visible === 'boolean') {
+                    if (payload.visible) {
                         showGamepad();
                     } else {
                         hideGamepad();

@@ -55,6 +55,7 @@ SUITES: list = [
     {"path": "unit/test_key_palette.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_pointer_cadence.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_gamepad_poll.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_touch_gamepad.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_wayland_gpu_fallback.py", "tier": "unit", "timeout": 180},
     {"path": "unit/test_turn_address.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_desktop_session_scripts.py", "tier": "unit", "timeout": 600},

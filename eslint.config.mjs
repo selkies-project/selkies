@@ -30,6 +30,23 @@ export default [
     rules,
   },
   {
+    // An audit written in TypeScript, which Node runs with the types stripped.
+    files: ['tests/tools/**/*.mts'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      globals: { ...globals.node, ...globals.browser },
+      parser: tseslint.parser,
+    },
+    plugins: { '@typescript-eslint': tseslint.plugin },
+    rules: {
+      ...rules,
+      ...tseslint.configs.recommended.reduce((acc, c) => ({ ...acc, ...c.rules }), {}),
+      'no-unused-vars': 'off',
+      '@typescript-eslint/no-unused-vars': ['error', { caughtErrors: 'none' }],
+    },
+  },
+  {
     // Node programs; the browser-side checks they run are strings.
     files: ['tests/browserstack/**/*.ts'],
     ignores: ['tests/browserstack/node_modules/'],

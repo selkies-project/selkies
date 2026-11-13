@@ -29,4 +29,4 @@ The apps panel is backed by [proot-apps](https://github.com/linuxserver/proot-ap
 
 ## Universal Touch Gamepad
 
-The [Universal Touch Gamepad](https://github.com/selkies-project/selkies/tree/main/web/universal-touch-gamepad) is a JavaScript library that adds a customizable on-screen touch gamepad overlay to the web interface, toggled with `Control + Shift + G`. It intercepts `navigator.getGamepads()` to inject a virtual gamepad, making touch devices compatible with applications and games that expect the browser Gamepad API.
+The [Universal Touch Gamepad](https://github.com/selkies-project/selkies/tree/main/web/universal-touch-gamepad) is a TypeScript library that adds a customizable on-screen touch gamepad overlay to the web interface, toggled with `Control + Shift + G`. It intercepts `navigator.getGamepads()` to inject a virtual gamepad, making touch devices compatible with applications and games that expect the browser Gamepad API.
