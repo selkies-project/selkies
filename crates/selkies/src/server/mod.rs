@@ -7,11 +7,11 @@
 //! The stream server: the one HTTP application every deployment fronts and the supervisor of the
 //! active streaming service (websockets or webrtc), so only one owns capture at a time.
 //!
-//! `run` publishes the socket directories the interposers read, starts the Computer-Use
-//! server where configured, waits for the app's ready file, settles the desktop's density
-//! on X11 before any page can compare against it, probes the encoders this host serves once
-//! (off the runtime, since the probe opens the GPU), logs the one startup line, switches to
-//! the configured mode, and serves until SIGTERM, SIGHUP, or Ctrl-C, when the first signal
+//! `run` publishes the socket directories the interposers read, waits for the app's ready
+//! file, settles the desktop's density on X11 before any page can compare against it, probes
+//! the encoders this host serves once (off the runtime, since the probe opens the GPU), logs
+//! the one startup line, switches to the configured mode, opens the Computer Use listener
+//! where a bind names one, and serves until SIGTERM, SIGHUP, or Ctrl-C, when the first signal
 //! wins and the teardown runs once.
 
 pub mod stack;
@@ -131,6 +131,32 @@ fn bring_up_wayland() {
     }
 }
 
+/// Say where Computer Use is served and open the listener a bind names
+/// (`http::computer_use`); a listener that cannot come up is a warning, and the session goes
+/// on without it.
+async fn serve_computer_use(
+    config: &crate::http::HttpConfig,
+) -> Option<crate::http::listen::Listener> {
+    use crate::http::computer_use::{self, Serving};
+    let serving = Serving::from_settings(&settings());
+    if serving.bind.is_empty() {
+        if !serving.token.is_empty() {
+            info!(target: "server", "Computer Use served at {}/computer-use on the server's listeners", config.subfolder);
+        }
+        return None;
+    }
+    match computer_use::listen(&serving).await {
+        Ok(listener) => {
+            info!(target: "server", "Computer Use served on {}", listener.endpoint());
+            Some(listener)
+        }
+        Err(e) => {
+            warn!(target: "server", "Computer Use not served on '{}': {e}", serving.bind);
+            None
+        }
+    }
+}
+
 /// Build the stream server, register its services, and run until a signal.
 pub async fn run() -> Result<(), String> {
     use crate::clipboard::{Clipboard, CompositorClipboard, Policy};
@@ -162,15 +188,6 @@ pub async fn run() -> Result<(), String> {
                 "SELKIES_WEBCAM_SOCKET_PATH",
                 socket_dir(s.webcam_socket_path()),
             );
-        }
-        if !s.computer_use_bind().is_empty() {
-            let token = s.computer_use_token();
-            if let Err(e) = pixelflux::start_computer_use(
-                s.computer_use_bind(),
-                (!token.is_empty()).then_some(token),
-            ) {
-                warn!(target: "main", "Computer-Use server not started: {e}");
-            }
         }
     }
     wait_for_app_ready().await;
@@ -405,6 +422,7 @@ pub async fn run() -> Result<(), String> {
     let server = Server::start(&state, router)
         .await
         .map_err(|e| e.to_string())?;
+    let computer_use = serve_computer_use(&state.config).await;
 
     let mut print_watcher = None;
     let mut print_queue = None;
@@ -441,6 +459,9 @@ pub async fn run() -> Result<(), String> {
         watcher.stop();
     }
     modes.stop().await;
+    if let Some(listener) = computer_use {
+        listener.stop().await;
+    }
     server.stop().await;
     gamepads.close().await;
     crate::webcam::stop_shared_webcam().await;

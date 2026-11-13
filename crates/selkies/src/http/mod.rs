@@ -13,7 +13,8 @@
 //! on every response, and the web client as its fallback. [`router`] builds the supervisor's
 //! own routes; [`build`] merges the routers other modules register (the data WebSocket
 //! `/api/websockets`, the signaling `/api/ws`, the file API, recording, screenshot, printing,
-//! apps) under the same prefix and middleware, so a route needs no knowledge of either: it is
+//! apps) and, where their token is configured, the [`computer_use`] routes under the same
+//! prefix and middleware, so a route needs no knowledge of either: it is
 //! written as `/api/<name>` and reads the verdict the gate left through [`auth::Ceiling`] or
 //! `files::RequestAuth`. The gate compares the path as sent, prefix included, and the prefix
 //! is stripped only behind it; `OriginalUri` keeps the whole path for a route that redirects.
@@ -37,6 +38,7 @@
 
 pub mod audit;
 pub mod auth;
+pub mod computer_use;
 pub mod embedded;
 pub mod listen;
 pub mod routes;
@@ -112,6 +114,9 @@ pub struct HttpConfig {
     pub pelorus: bool,
     /// Whether a viewer-role token may hold input under an mk token (`enable_collab`).
     pub enable_collab: bool,
+    /// The token the Computer Use routes take on these listeners; empty leaves them unserved
+    /// ([`computer_use::Serving::listener_token`]).
+    pub computer_use_token: String,
     pub web_root: String,
     pub tokens_file: String,
     pub listen: listen::ListenConfig,
@@ -143,6 +148,9 @@ impl HttpConfig {
             enable_metrics_http: s.enable_metrics_http().on,
             pelorus: s.pelorus().on,
             enable_collab: s.enable_collab().on,
+            computer_use_token: computer_use::Serving::from_settings(s)
+                .listener_token()
+                .to_string(),
             web_root: s.web_root().to_string(),
             tokens_file: s.tokens_file().to_string(),
             listen: listen::ListenConfig {
@@ -193,6 +201,7 @@ impl Default for HttpConfig {
             enable_metrics_http: false,
             pelorus: false,
             enable_collab: true,
+            computer_use_token: String::new(),
             web_root: String::new(),
             tokens_file: String::new(),
             listen: listen::ListenConfig::default(),
@@ -383,6 +392,9 @@ pub fn build(state: AppState, extra: Vec<Router>) -> Router {
         .with_state(state.clone());
     for other in extra {
         app = app.merge(other);
+    }
+    if !state.config.computer_use_token.is_empty() {
+        app = app.merge(computer_use::router());
     }
     if !state.config.subfolder.is_empty() {
         app = under_prefix(state.config.subfolder.clone(), app);

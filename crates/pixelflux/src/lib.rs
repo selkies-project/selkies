@@ -34,7 +34,7 @@
 //! | [`recorder`] | Built-in MP4 recorder (fMP4 muxer + API/env/REST control surfaces) |
 //! | [`sink`] | What a capture hands its consumer, and the traits a consumer implements to receive it |
 //! | `python` | The Python bridge, with the `python` feature: the classes and functions `import pixelflux` sees |
-//! | [`computer_use`] | HTTP API for AI-agent desktop control (screenshots, input injection) |
+//! | [`computer_use`] | AI-agent desktop control (screenshots, input injection, the recorder's commands) |
 //! | [`nvgpufilter`] | Multi-GPU NVENC device filtering via ioctl |
 //! | [`webcam`] | Virtual camera: client webcam uplink decoded into a V4L2 device (interposer ring, v4l2loopback, PipeWire node) |
 //!
@@ -149,7 +149,7 @@ pub mod log;
 #[cfg(feature = "python")]
 mod python;
 
-/// HTTP server implementing the Anthropic Computer Use spec for AI agent desktop control.
+/// The Anthropic Computer Use actions for AI agent desktop control.
 pub mod computer_use;
 /// Per-block stillness and cleanliness of a region, for refining blocks while others move.
 pub mod ledger;
@@ -8289,7 +8289,8 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         .unwrap();
 
     crate::computer_use::register_wayland_backend(command_tx.clone(), wake_tx);
-    crate::computer_use::spawn_cu_from_env();
+    #[cfg(feature = "computer-use-server")]
+    crate::computer_use::server::spawn_cu_from_env();
     crate::wayland::ficlient::arm(crate::computer_use::app_wayland_socket_path());
 
     let ran = event_loop.run(None, &mut state, |state| {
@@ -10862,10 +10863,11 @@ pub fn wayland_display_name() -> Option<String> {
     wait_socket_name(Duration::from_secs(2))
 }
 
-/// Start the Computer-Use HTTP server on `bind`, every request carrying `token` where one is
-/// given (`computer_use` module).
+/// Start the standalone Computer-Use HTTP server on `bind`, every request carrying `token`
+/// where one is given (`computer_use::server`).
+#[cfg(feature = "computer-use-server")]
 pub fn start_computer_use(bind: &str, token: Option<&str>) -> Result<(), Error> {
-    crate::computer_use::start_cu_server(bind, token).map_err(Error::Capture)
+    crate::computer_use::server::start_cu_server(bind, token).map_err(Error::Capture)
 }
 
 /// A PNG of display `display` as the capture backend sees it now.

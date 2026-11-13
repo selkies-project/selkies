@@ -182,9 +182,14 @@ impl TestServer {
             cfg.port = free_port();
         }
         let listener = listen::start(router, &cfg, None).await.expect("listener");
-        let addr = listener.local_addrs().first().copied().unwrap_or_else(|| {
-            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, cfg.port))
-        });
+        let fallback = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, cfg.port));
+        TestServer::over(listener, fallback)
+    }
+
+    /// A client for a `listener` already serving, reached on the address it bound first, or
+    /// on `fallback` where it reports none.
+    pub(crate) fn over(listener: Listener, fallback: std::net::SocketAddr) -> TestServer {
+        let addr = listener.local_addrs().first().copied().unwrap_or(fallback);
         let client = Client::builder(TokioExecutor::new()).build_http();
         TestServer {
             listener: Some(listener),

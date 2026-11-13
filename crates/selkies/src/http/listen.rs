@@ -421,6 +421,47 @@ pub struct Listener {
 }
 
 impl Listener {
+    /// A listener accepting nothing yet.
+    fn idle() -> Listener {
+        Listener {
+            endpoint: String::new(),
+            kind: "TCP listener",
+            cancel: CancellationToken::new(),
+            accepts: Vec::new(),
+            unix_socket: None,
+            local_addrs: Vec::new(),
+        }
+    }
+
+    /// Start accepting on bound TCP `sockets`, each serving `router`: the URLs they are
+    /// reached by, in order.
+    fn accept_on(
+        &mut self,
+        sockets: Vec<std::net::TcpListener>,
+        router: Router,
+        idle_timeout: Duration,
+        tls: Option<Arc<rustls::ServerConfig>>,
+    ) -> Result<Vec<String>, ListenError> {
+        let mut tcp = Vec::with_capacity(sockets.len());
+        for socket in sockets {
+            tcp.push(tokio::net::TcpListener::from_std(socket)?);
+        }
+        let mut names = Vec::with_capacity(tcp.len());
+        for socket in tcp {
+            let local = socket.local_addr()?;
+            names.push(site_name(&local, tls.is_some()));
+            self.local_addrs.push(local);
+            self.accepts.push(tokio::spawn(accept_tcp(
+                socket,
+                router.clone(),
+                idle_timeout,
+                tls.clone(),
+                self.cancel.clone(),
+            )));
+        }
+        Ok(names)
+    }
+
     /// Where the server is reached: every bound address as `http(s)://host:port` or
     /// `unix://<path>`, joined by `, `.
     pub fn endpoint(&self) -> &str {
@@ -500,14 +541,7 @@ pub async fn start_each(
     router: Router,
     sides: &[(ListenConfig, Option<Arc<rustls::ServerConfig>>)],
 ) -> Result<Listener, ListenError> {
-    let mut listener = Listener {
-        endpoint: String::new(),
-        kind: "TCP listener",
-        cancel: CancellationToken::new(),
-        accepts: Vec::new(),
-        unix_socket: None,
-        local_addrs: Vec::new(),
-    };
+    let mut listener = Listener::idle();
     for (cfg, tls) in sides {
         if let Err(exc) = serve_prepared(&mut listener, router.clone(), cfg, tls.clone()).await {
             let place = if cfg.unix_socket.is_empty() {
@@ -537,7 +571,6 @@ async fn serve_prepared(
             .await
             .map_err(std::io::Error::other)??
     };
-    let secure = tls.is_some();
     let mut names = Vec::new();
     match prepared {
         Prepared::Unix(path) => {
@@ -554,22 +587,7 @@ async fn serve_prepared(
             listener.unix_socket = Some(path);
         }
         Prepared::Tcp(sockets) => {
-            let mut tcp = Vec::with_capacity(sockets.len());
-            for socket in sockets {
-                tcp.push(tokio::net::TcpListener::from_std(socket)?);
-            }
-            for socket in tcp {
-                let local = socket.local_addr()?;
-                names.push(site_name(&local, secure));
-                listener.local_addrs.push(local);
-                listener.accepts.push(tokio::spawn(accept_tcp(
-                    socket,
-                    router.clone(),
-                    cfg.idle_timeout,
-                    tls.clone(),
-                    listener.cancel.clone(),
-                )));
-            }
+            names = listener.accept_on(sockets, router, cfg.idle_timeout, tls)?;
         }
     }
     if !listener.endpoint.is_empty() {
@@ -577,6 +595,20 @@ async fn serve_prepared(
     }
     listener.endpoint = names.join(", ");
     Ok(())
+}
+
+/// Serve `router` over plain HTTP on TCP sockets already bound, as a [`Listener`] apart from
+/// the server's own: no contract line names it. Called on the runtime.
+pub fn serve_sockets(
+    router: Router,
+    sockets: Vec<std::net::TcpListener>,
+    idle_timeout: Duration,
+) -> Result<Listener, ListenError> {
+    let mut listener = Listener::idle();
+    listener.endpoint = listener
+        .accept_on(sockets, router, idle_timeout, None)?
+        .join(", ");
+    Ok(listener)
 }
 
 async fn accept_tcp(

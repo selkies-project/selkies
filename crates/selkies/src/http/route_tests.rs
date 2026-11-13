@@ -2784,3 +2784,455 @@ async fn the_pelorus_page_is_closed_with_pelorus_off_however_its_path_is_encoded
     }
     app.stop().await;
 }
+
+/// The Computer Use token the gate is configured with.
+const CU: &str = "unit-computer-use-token";
+const CU_REFUSAL: &str = r#"{"error":"unauthorized"}"#;
+
+/// A credential a request may present: what it is, its headers, and its query.
+type Credential = (&'static str, Vec<(&'static str, String)>, &'static str);
+
+/// Write `request` on a connection of its own and read the answer until the server closes it.
+async fn raw_exchange(app: &TestServer, request: &[u8]) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = app.connect().await;
+    let _ = stream.write_all(request).await;
+    let mut answer = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut answer)).await;
+    String::from_utf8_lossy(&answer).into_owned()
+}
+
+/// Every credential of the server's own, in each mode it runs in, is refused on the Computer
+/// Use routes, which take their token alone; that token opens no other route and is no
+/// session token.
+#[tokio::test]
+async fn computer_use_takes_its_token_and_no_other_credential() {
+    use super::auth::{SOCKET_COOKIE, socket_cookie_value};
+    use super::computer_use::ROUTES;
+    use crate::core::Role;
+
+    let with_token = |config: HttpConfig| HttpConfig {
+        computer_use_token: CU.into(),
+        basic_auth_viewonly_password: VIEW_PASSWORD.clone(),
+        ..config
+    };
+    let modes = [
+        (
+            "open",
+            HttpConfig {
+                master_token: String::new(),
+                ..secure_config()
+            },
+        ),
+        (
+            "basic",
+            HttpConfig {
+                master_token: String::new(),
+                enable_basic_auth: true,
+                ..secure_config()
+            },
+        ),
+        ("secure", secure_config()),
+        (
+            "secure+basic",
+            HttpConfig {
+                enable_basic_auth: true,
+                ..secure_config()
+            },
+        ),
+    ];
+    let socket_cookie = format!(
+        "{SOCKET_COOKIE}={}",
+        socket_cookie_value(Role::Controller, u64::MAX / 2)
+    );
+    let credentials: Vec<Credential> = vec![
+        ("no credential", vec![], ""),
+        (
+            "the master token",
+            vec![("authorization", bearer(MASTER))],
+            "",
+        ),
+        (
+            "the master token in its fallback header",
+            vec![(MASTER_TOKEN_HEADER, bearer(MASTER))],
+            "",
+        ),
+        (
+            "a controller token",
+            vec![("authorization", bearer(CTRL))],
+            "",
+        ),
+        ("a viewer token", vec![("authorization", bearer(VIEW))], ""),
+        (
+            "the Basic login",
+            vec![("authorization", basic("user", &PASSWORD))],
+            "",
+        ),
+        (
+            "the view-only Basic login",
+            vec![("authorization", basic("user", &VIEW_PASSWORD))],
+            "",
+        ),
+        ("a session cookie", vec![("cookie", cookie(CTRL))], ""),
+        ("a socket cookie", vec![("cookie", socket_cookie)], ""),
+        ("a query token", vec![], "?token=unit-ctrl-token"),
+        (
+            "its own token in the query",
+            vec![],
+            "?token=unit-computer-use-token",
+        ),
+        (
+            "its own token in a cookie",
+            vec![("cookie", cookie(CU))],
+            "",
+        ),
+        (
+            "its own token in the master token's fallback header",
+            vec![(MASTER_TOKEN_HEADER, bearer(CU))],
+            "",
+        ),
+        (
+            "its own token as a Basic password",
+            vec![("authorization", basic("user", CU))],
+            "",
+        ),
+        (
+            "a token it is a prefix of",
+            vec![("authorization", format!("Bearer {CU}x"))],
+            "",
+        ),
+        (
+            "its token and more",
+            vec![("authorization", format!("Bearer {CU} x"))],
+            "",
+        ),
+        (
+            "its token under another scheme's case",
+            vec![("authorization", format!("bearer {CU}"))],
+            "",
+        ),
+    ];
+    for (mode, config) in modes {
+        let (app, state) = stub_server(with_token(config)).await;
+        for route in ROUTES {
+            for (what, headers, query) in &credentials {
+                let path = format!("{route}{query}");
+                for method in ["POST", "GET"] {
+                    let r = app.call(method, &path, &hdrs_of(headers)).await;
+                    assert_eq!(
+                        (
+                            r.status,
+                            r.header("www-authenticate"),
+                            r.header("content-type"),
+                            r.body.as_str()
+                        ),
+                        (401, Some("Bearer"), Some("application/json"), CU_REFUSAL),
+                        "{mode}: {method} {route} with {what}"
+                    );
+                }
+            }
+        }
+        let r = app
+            .call("GET", "/record_status", &[("authorization", &bearer(CU))])
+            .await;
+        assert_eq!(
+            (r.status, r.header("content-type"), r.body.as_str()),
+            (200, Some("application/json"), r#"{"active":false}"#),
+            "{mode}: the token is served"
+        );
+
+        assert!(
+            state.tokens.lookup(CU).is_none(),
+            "{mode}: the token is no session token, so no handshake takes it"
+        );
+        let elsewhere = GATED.iter().chain(&[
+            ("POST", "/switch-stub"),
+            ("GET", "/"),
+            ("POST", "/api/tokens"),
+            ("POST", "/api/switch"),
+        ]);
+        for (method, path) in elsewhere {
+            let anonymous = app.call(method, path, &[]).await;
+            for carrier in ["authorization", MASTER_TOKEN_HEADER] {
+                let r = app.call(method, path, &[(carrier, &bearer(CU))]).await;
+                assert_eq!(
+                    (r.status, &r.body),
+                    (anonymous.status, &anonymous.body),
+                    "{mode}: {method} {path} answers the token in {carrier} as it answers no credential"
+                );
+            }
+            if mode != "open" && path.starts_with("/api/") {
+                assert_eq!(anonymous.status, 401, "{mode}: {method} {path}");
+            }
+        }
+        app.stop().await;
+    }
+}
+
+/// With no Computer Use token the four paths are 404 for every caller, in every mode, with
+/// or without a web client behind them.
+#[tokio::test]
+async fn computer_use_is_absent_without_a_token() {
+    use super::computer_use::ROUTES;
+    let configs = [
+        HttpConfig::default(),
+        secure_config(),
+        HttpConfig {
+            enable_basic_auth: true,
+            ..secure_config()
+        },
+        HttpConfig {
+            master_token: String::new(),
+            enable_basic_auth: true,
+            ..secure_config()
+        },
+    ];
+    for config in configs {
+        for client in [None, embedded_client()] {
+            let state = AppState::new(config.clone(), FixedSupervisor::new(None, &[]))
+                .with_web_client(client);
+            let app = TestServer::start(build(state, Vec::new())).await;
+            for route in ROUTES {
+                for authorization in [
+                    None,
+                    Some(bearer(MASTER)),
+                    Some(bearer(CU)),
+                    Some(bearer("")),
+                    Some(basic("user", &PASSWORD)),
+                ] {
+                    let headers: Vec<(&str, &str)> = authorization
+                        .iter()
+                        .map(|a| ("authorization", a.as_str()))
+                        .collect();
+                    for method in ["POST", "GET"] {
+                        let r = app.call(method, route, &headers).await;
+                        assert_eq!(r.status, 404, "{method} {route} {authorization:?}");
+                    }
+                }
+            }
+            app.stop().await;
+        }
+    }
+}
+
+/// The routes answer in the standalone server's formats and status codes: JSON throughout,
+/// 400 only for a body that is no action, a recorder command's failure in a 200, and a
+/// request refused by its declared size or its framing before its body is read.
+#[tokio::test]
+async fn computer_use_answers_in_json_and_bounds_its_requests() {
+    use super::computer_use::MAX_BODY;
+    let config = HttpConfig {
+        computer_use_token: CU.into(),
+        subfolder: "/desk".into(),
+        ..secure_config()
+    };
+    let state = AppState::new(config, FixedSupervisor::new(None, &[]));
+    let app = TestServer::start(build(state, Vec::new())).await;
+    let auth = bearer(CU);
+    let authed = [("authorization", auth.as_str())];
+    let json_of = |r: &super::testing::Reply| {
+        assert_eq!(r.header("content-type"), Some("application/json"));
+        r.json()
+    };
+
+    let r = app.call("POST", "/computer-use", &authed).await;
+    assert_eq!(r.status, 404, "outside the prefix nothing is served");
+
+    let r = app
+        .call_body("POST", "/desk/computer-use", &authed, b"{\"action\":7}")
+        .await;
+    let error = json_of(&r)["error"].as_str().unwrap_or("").to_string();
+    assert!(
+        r.status == 400 && error.starts_with("Invalid JSON: "),
+        "a body that is no action is a bad request: {} {error}",
+        r.status
+    );
+    let r = app
+        .call_body("GET", "/desk/computer-use", &authed, b"")
+        .await;
+    assert_eq!(r.status, 400, "an empty body is no action either");
+    let r = app
+        .call_body("POST", "/desk/computer-use", &authed, b"\xff\xfe")
+        .await;
+    assert_eq!(
+        (r.status, r.body.as_str()),
+        (400, r#"{"error":"body is not UTF-8"}"#)
+    );
+
+    let r = app
+        .call_body(
+            "POST",
+            "/desk/computer-use",
+            &authed,
+            b"{\"action\":\"no_such_action\"}",
+        )
+        .await;
+    assert!(
+        r.status == 200 && json_of(&r)["error"].is_string(),
+        "an action that cannot run says so in a 200: {} {}",
+        r.status,
+        r.body
+    );
+
+    let r = app
+        .call_body("POST", "/desk/record_start", &authed, b"{")
+        .await;
+    let error = json_of(&r)["error"].as_str().unwrap_or("").to_string();
+    assert!(
+        r.status == 200 && error.starts_with("Invalid JSON: "),
+        "the recorder reports a bad start in a 200: {} {error}",
+        r.status
+    );
+    let r = app
+        .call_body("POST", "/desk/record_stop", &authed, b"")
+        .await;
+    assert_eq!(
+        (r.status, json_of(&r)["error"].as_str()),
+        (200, Some("no recording is active"))
+    );
+    let r = app
+        .call_body("GET", "/desk/record_status", &authed, b"")
+        .await;
+    assert_eq!((r.status, r.body.as_str()), (200, r#"{"active":false}"#));
+
+    let mut large = b"{\"action\":\"no_such_action\",\"text\":\"".to_vec();
+    large.resize(3 * 1024 * 1024, b'a');
+    large.extend_from_slice(b"\"}");
+    let r = app
+        .call_body("POST", "/desk/computer-use", &authed, &large)
+        .await;
+    assert_eq!(r.status, 200, "a body under the bound is read whole");
+    let declared = format!(
+        "POST /desk/computer-use HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {CU}\r\nContent-Length: {}\r\n\r\n",
+        MAX_BODY + 1
+    );
+    let answer = raw_exchange(&app, declared.as_bytes()).await;
+    assert!(
+        answer.starts_with("HTTP/1.1 413")
+            && answer.to_ascii_lowercase().contains("connection: close")
+            && answer.ends_with(r#"{"error":"request body too large"}"#),
+        "refused on the size it declares, none of it sent: {answer}"
+    );
+    let chunked = format!(
+        "POST /desk/computer-use HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {CU}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n"
+    );
+    let answer = raw_exchange(&app, chunked.as_bytes()).await;
+    assert!(
+        answer.starts_with("HTTP/1.1 411")
+            && answer.ends_with(r#"{"error":"a Content-Length is required"}"#),
+        "{answer}"
+    );
+    let unread = format!(
+        "POST /desk/computer-use HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n",
+        MAX_BODY
+    );
+    let answer = raw_exchange(&app, unread.as_bytes()).await;
+    assert!(
+        answer.starts_with("HTTP/1.1 401")
+            && answer.to_ascii_lowercase().contains("connection: close")
+            && answer.ends_with(CU_REFUSAL),
+        "refused without the token before any of its body is sent: {answer}"
+    );
+    let mut huge = b"POST /desk/computer-use HTTP/1.1\r\nHost: x\r\nX-Pad: ".to_vec();
+    huge.resize(huge.len() + (1 << 20), b'a');
+    let answer = raw_exchange(&app, &huge).await;
+    assert!(
+        answer.starts_with("HTTP/1.1 431"),
+        "a head past the server's bound is refused unread: {}",
+        &answer[..answer.len().min(80)]
+    );
+    app.stop().await;
+}
+
+/// A bind's listener serves the four routes at the root behind the token and nothing else,
+/// whatever route prefix the server has, and does not come up without a token or on a bind
+/// it cannot take.
+#[tokio::test]
+async fn a_computer_use_bind_serves_only_its_routes() {
+    use super::computer_use::{ROUTES, Serving, listen};
+    let serving = |bind: &str, token: &str| Serving {
+        bind: bind.into(),
+        token: token.into(),
+    };
+    assert!(
+        listen(&serving("127.0.0.1:0", "")).await.is_err(),
+        "no token, no listener"
+    );
+    for bind in ["abc", "70000", ",", "127.0.0.1:0,abc"] {
+        assert!(listen(&serving(bind, CU)).await.is_err(), "{bind:?}");
+    }
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = taken.local_addr().unwrap().port();
+    assert!(
+        listen(&serving(&port.to_string(), CU)).await.is_err(),
+        "a taken port is an error"
+    );
+    drop(taken);
+
+    let port = super::testing::free_port();
+    let listener = listen(&serving(&format!("{port}, 127.0.0.1:{port}"), CU))
+        .await
+        .expect("a bare port binds");
+    assert!(
+        !listener.local_addrs().is_empty()
+            && listener.local_addrs().len() <= 2
+            && listener
+                .local_addrs()
+                .iter()
+                .all(|a| a.ip().is_loopback() && a.port() == port),
+        "a bare port is the loopback addresses alone, each once: {:?}",
+        listener.local_addrs()
+    );
+    assert!(listener.endpoint().starts_with("http://127.0.0.1:"));
+    let fallback = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    let app = TestServer::over(listener, fallback);
+    let auth = bearer(CU);
+    let authed = [("authorization", auth.as_str())];
+    let master = bearer(MASTER);
+    for path in
+        ROUTES
+            .iter()
+            .copied()
+            .chain(["/", "/api/health", "/api/status", "/desk/computer-use"])
+    {
+        for headers in [&[][..], &[("authorization", master.as_str())][..]] {
+            let r = app.call("POST", path, headers).await;
+            assert_eq!(
+                (
+                    r.status,
+                    r.header("www-authenticate"),
+                    r.header("connection"),
+                    r.body.as_str()
+                ),
+                (401, Some("Bearer"), Some("close"), CU_REFUSAL),
+                "{path} without the token"
+            );
+        }
+    }
+    for path in ["/", "/api/health", "/api/status", "/desk/computer-use"] {
+        let r = app.call("GET", path, &authed).await;
+        assert_eq!(r.status, 404, "{path} is not served here");
+    }
+    let r = app.call_body("GET", "/record_status", &authed, b"").await;
+    assert_eq!((r.status, r.body.as_str()), (200, r#"{"active":false}"#));
+    let r = app
+        .call_body("POST", "/computer-use", &authed, b"not json")
+        .await;
+    assert_eq!(r.status, 400);
+    app.stop().await;
+}
+
+/// The routes mounted behind no check at all refuse every request: a handler runs only on
+/// the grant the token check makes.
+#[tokio::test]
+async fn computer_use_handlers_refuse_a_request_nothing_granted() {
+    use super::computer_use::{ROUTES, router};
+    let app = TestServer::start(router()).await;
+    for route in ROUTES {
+        let r = app
+            .call("POST", route, &[("authorization", &bearer(CU))])
+            .await;
+        assert_eq!((r.status, r.body.as_str()), (401, CU_REFUSAL), "{route}");
+    }
+    app.stop().await;
+}

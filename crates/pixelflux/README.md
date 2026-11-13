@@ -552,7 +552,7 @@ and, for inter-coded codecs, waits for the next keyframe rather than decoding ag
 
 ## Computer Use Interface (X11 and Wayland)
 
-Both backends implement the [Anthropic Computer Use specification](https://github.com/anthropics/claude-quickstarts/tree/main/computer-use-demo), providing an HTTP API for AI agents to control the desktop. On Wayland the compositor injects input natively; on X11 the existing display is driven through XTEST with root-window screenshots. Enable it by setting the `PIXELFLUX_CU` environment variable to the port the server should listen on:
+Both backends implement the [Anthropic Computer Use specification](https://github.com/anthropics/claude-quickstarts/tree/main/computer-use-demo), providing an API for AI agents to control the desktop. On Wayland the compositor injects input natively; on X11 the existing display is driven through XTEST with root-window screenshots. The actions and the recorder's commands are library functions with no transport in them (`computer_use::action`, `record_start`, `record_stop`, `record_status`), which a Rust host serves from its own HTTP server, as Selkies does on its routes. The Python package carries a small HTTP server over the same functions (the `computer-use-server` cargo feature, part of `python`). Enable it by setting the `PIXELFLUX_CU` environment variable to the port the server should listen on:
 
 ```bash
 export PIXELFLUX_CU=5000

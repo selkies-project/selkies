@@ -78,7 +78,11 @@ features = ["cuda"]
 default = ["gpl"]
 ## The Python bridge: `import pixelflux` over the Rust API. Off, the crate is a Rust library
 ## with no interpreter in its build.
-python = ["dep:pyo3"]
+python = ["dep:pyo3", "computer-use-server"]
+## The standalone Computer Use HTTP server (`computer_use::server`, `PIXELFLUX_CU`) of the
+## Python package. A host with an HTTP server of its own serves `computer_use`'s entry points
+## from it and leaves this off.
+computer-use-server = []
 ## A full-CPython-API extension: `python` with pyo3 linking against the importing
 ## interpreter rather than a libpython of its own. Tests of `python` run without it.
 extension-module = ["python", "pyo3/extension-module"]

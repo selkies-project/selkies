@@ -10,7 +10,7 @@
 //! One implementation serves three control surfaces — the Python module functions
 //! (`start_recording` / `stop_recording` / `recording_status`), the `PIXELFLUX_RECORD*`
 //! environment variables (record from process start), and the `record_start` /
-//! `record_stop` / `record_status` endpoints on the Computer Use HTTP server — so their
+//! `record_stop` / `record_status` commands of [`crate::computer_use`] — so their
 //! behavior cannot drift.
 //!
 //! The recorder is a consumer of the existing capture machinery, never a hook inside an

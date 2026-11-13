@@ -47,6 +47,7 @@ The static web client (`/`, its scripts and assets) is served without credential
 | `GET /api/recording` | session or master token |
 | `/api/turn` (WebRTC ICE/TURN configuration) | session or master token |
 | `/api/metrics` (when `--enable-metrics-http`) | session or master token |
+| `/computer-use`, `/record_start`, `/record_stop`, and `/record_status` (when `--computer-use-token` is set and no `--computer-use-bind` moves them to a listener of their own; `404` otherwise) | the Computer Use token only, as `Authorization: Bearer`; the master token, session tokens, and the Basic login are refused (401), with or without a master token |
 
 An API request can present its session token in three ways, tried in this order: the `Authorization: Bearer <token>` header, a `?token=` query parameter, or the `selkies_token` cookie. Without a valid token the answer is `401` with `WWW-Authenticate: Bearer realm="Selkies Restricted"`; a valid token with insufficient rights (a viewer uploading) is `403`. Tokens are compared in constant time against the provisioned table; a revoked token stops working immediately.
 

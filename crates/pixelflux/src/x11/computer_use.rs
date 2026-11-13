@@ -4,7 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! X11 backend for the Computer Use HTTP API: XTEST injection and one-shot root screenshots
+//! X11 backend for the Computer Use actions: XTEST injection and one-shot root screenshots
 //! over a private x11rb connection, so the agent can drive an X session with no active capture
 //! and no shared state with any streaming capture thread (the X server itself serializes).
 //!
@@ -62,7 +62,7 @@ pub struct CuX11Backend {
     root: u32,
     has_xfixes: bool,
     /// Reverse map of the SERVER keymap, built lazily from `GetKeyboardMapping` and kept
-    /// for this backend's lifetime — one HTTP request (the backend is per-request), so a
+    /// for this backend's lifetime — one request (the backend is per-request), so a
     /// `setxkbmap` switch is seen by the next request.
     reverse_keymap: RefCell<Option<ServerKeymap>>,
 }

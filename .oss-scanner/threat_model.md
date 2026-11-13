@@ -13,7 +13,18 @@
   `unix_socket`, whichever are set, all serving the same router behind the same gate; HTTP, the data WebSocket, WebRTC
   signaling, ICE/STUN/TURN, DTLS, SCTP, RTP/RTCP); a viewer token (watch only); a gamepad slot token; a read-write
   collaborator; the controller (full token or Basic auth user); the orchestrator holding the master token
-  (`POST /api/tokens`, the signaling server peer).
+  (`POST /api/tokens`, the signaling server peer). Apart from that ladder, the holder of the Computer Use token
+  (`computer_use_token`): it reaches `/computer-use`, `/record_start`, `/record_stop`, and `/record_status` and
+  nothing else, and there holds the session user's reach (the screen, keyboard and pointer input, and a recording
+  written inside `PIXELFLUX_RECORD_DIR`). No principal of the ladder reaches those routes, the master token
+  included, and that token is no session token: it opens no other route and no WebSocket or signaling handshake.
+- Computer Use (`http/computer_use.rs`, the actions in `crates/pixelflux/src/computer_use.rs`): the four routes
+  are 404 unless the token is set (`SELKIES_COMPUTER_USE_TOKEN`, or `PIXELFLUX_CU_TOKEN` alone). With it they are served under the route prefix on the listeners above, behind
+  the gate's own branch for them, or, where `computer_use_bind` names one, on a plain-HTTP listener of its own
+  that serves only them (a bare port on the loopback addresses, which every local account reaches, so the token
+  is what keeps those out) and not on the others. A request is refused before its body is read, a body is at
+  most 4 MiB, and a handler runs only on the grant the token check makes, so the routes mounted behind no check
+  refuse everything.
 - Entry points, under `crates/selkies/src` unless named otherwise: `http` (the auth gate in `auth.rs`, the token
   endpoint and table in `tokens.rs`, the operator routes in `routes.rs`, the web client in `static_files.rs`: a
   `web_root` directory no path or link leaves, or the table `embedded.rs` serves, which a request names by key),
@@ -22,8 +33,11 @@
   stack (`crates/selkies-rtc`: `ice`, `dtls`, `srtp`, `rtp`, `sctp`, `sdp`, and the vendored `rtc-dtls`, `rtc-sctp`, and `rtc-srtp` under `vendor/`, edited in tree and in scope),
   `input` (`Dispatcher::receive`, the input authority in `authority.rs`), `core` (`Role`). Native media entry
   points include browser webcam bitstreams and H.264 SPS input in `crates/pixelflux/src/{webcam,encoders/sps.rs}`,
-  microphone Opus and RED in `crates/pcmflux/src/red.rs`, the token-gated Computer-Use HTTP server in
-  `crates/pixelflux/src/computer_use.rs`, and untrusted Wayland buffers and local recording, webcam, and Ogg sockets.
+  microphone Opus and RED in `crates/pcmflux/src/red.rs`, the Computer Use action and recorder requests in
+  `crates/pixelflux/src/computer_use.rs` (JSON a token holder sends), and untrusted Wayland buffers and local
+  recording, webcam, and Ogg sockets. pixelflux's own token-gated HTTP server for those requests
+  (`crates/pixelflux/src/computer_use/server.rs`, the `computer-use-server` feature) is built into its Python
+  wheel alone (`PIXELFLUX_CU`); the `selkies` executable does not carry it.
 - Under `--wm` (`crates/selkies-wm`, installed in the compositor through `crates/pixelflux/src/wm.rs`): the
   openbox-format `rc.xml` and `menu.xml` the session user's configuration directory or `/etc/xdg` carries are
   parsed (`selkies-wm/src/config`), as is the user's key bind override file the desktop shell's shortcut editor

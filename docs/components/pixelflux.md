@@ -21,7 +21,7 @@ Frames reach the encoder without a host copy wherever the hardware allows it. On
 
 The X11 backend captures the display `DISPLAY` names and injects input through XTEST. The Wayland backend is a headless compositor `pixelflux` owns, which the session's applications connect to directly or through a nested compositor, and which hands the encoder its buffers as they are; an external compositor can be captured instead through `ext-image-copy-capture`, `wlr-screencopy` or the desktop portal, with input through the virtual keyboard and pointer protocols or the portal's remote desktop session. [Desktop Container](desktop-image.md) describes how the images choose between them.
 
-`pixelflux` also serves the [virtual webcam](v4l2-interposer.md) the browser's camera is published as, the out-of-band recording tap (`--recording-socket`), the uinput devices of the [kernel gamepads](input-interposer.md#kernel-gamepads), and the Computer-Use HTTP server (`--computer-use-bind`) an agent drives a session through.
+`pixelflux` also serves the [virtual webcam](v4l2-interposer.md) the browser's camera is published as, the out-of-band recording tap (`--recording-socket`), the uinput devices of the [kernel gamepads](input-interposer.md#kernel-gamepads), and the [Computer Use](../usage.md#computer-use) actions an agent drives a session through, which the server answers on its own HTTP routes (`--computer-use-token`).
 
 ## Licensing
 

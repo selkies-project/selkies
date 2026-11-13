@@ -6,8 +6,9 @@
 
 //! The auth gate every route sits behind, and the credentials it reads.
 //!
-//! [`gate`] authorizes one request and hands it on or refuses it, in layered gates: a
-//! cross-site WebSocket upgrade is refused by Origin; the liveness routes pass without
+//! [`gate`] authorizes one request and hands it on or refuses it, in layered gates: the
+//! Computer Use routes take their own token and nothing else, and are 404 where none is
+//! configured ([`computer_use`]); a cross-site WebSocket upgrade is refused by Origin; the liveness routes pass without
 //! credentials; the token endpoint and the control endpoints (the mode switch, a session
 //! disconnect, a recording start or stop) take the Bearer master token, in `Authorization`
 //! first and in [`MASTER_TOKEN_HEADER`] second for a caller whose `Authorization` a Basic login
@@ -46,8 +47,8 @@ use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 
-use super::AppState;
 use super::listen::ConnInfo;
+use super::{AppState, computer_use};
 use crate::core::Role;
 use crate::files::RequestAuth;
 
@@ -414,7 +415,7 @@ fn remote_ip(request: &Request) -> Option<std::net::IpAddr> {
 }
 
 /// Whether the request declares a body the handler may leave unread.
-fn declares_body(headers: &HeaderMap) -> bool {
+pub(super) fn declares_body(headers: &HeaderMap) -> bool {
     let length = headers
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
@@ -432,6 +433,11 @@ pub async fn gate(State(state): State<AppState>, request: Request, next: Next) -
     let has_body = declares_body(request.headers());
     let mut response = match authorize(&state, &request) {
         Verdict::Refused(response) => response,
+        Verdict::ComputerUse(granted) => {
+            let mut request = request;
+            request.extensions_mut().insert(granted);
+            pass(&state, request, next, None).await
+        }
         Verdict::Pass(ceiling) => pass(&state, request, next, ceiling).await,
         Verdict::Basic(role) => {
             let renewal = (!is_websocket_upgrade(request.headers())
@@ -496,6 +502,8 @@ enum Verdict {
     Pass(Option<Role>),
     /// On to the route as a Basic login of this role, whose answer renews the socket cookie.
     Basic(Role),
+    /// On to a Computer Use route, tagged with the grant its handler requires.
+    ComputerUse(computer_use::Granted),
     Refused(Response),
 }
 
@@ -514,6 +522,14 @@ fn authorize(state: &AppState, request: &Request) -> Verdict {
     let is_ws_handshake =
         is_ws_upgrade && route.is_some_and(|r| WEBSOCKET_ROUTES.contains(&r.trim_end_matches('/')));
 
+    if route.is_some_and(|r| computer_use::ROUTES.contains(&r)) {
+        let token = config.computer_use_token.as_str();
+        return match computer_use::grant(headers, token) {
+            Some(granted) => Verdict::ComputerUse(granted),
+            None if token.is_empty() => Verdict::Refused(StatusCode::NOT_FOUND.into_response()),
+            None => Verdict::Refused(computer_use::unauthorized()),
+        };
+    }
     if is_ws_upgrade && !is_origin_allowed(headers, allowed_origins) {
         log::warn!(target: "server", "Rejected WebSocket upgrade from disallowed Origin: {:?}", origin_text(headers));
         return Verdict::Refused(forbidden_origin());

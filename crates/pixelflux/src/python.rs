@@ -2371,7 +2371,7 @@ fn pixelflux(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     // Standalone CU entry point: with PIXELFLUX_CU set the server binds at import, serving
     // X11 (via DISPLAY) until a Wayland compositor registers itself as the backend.
-    crate::computer_use::spawn_cu_from_env();
+    crate::computer_use::server::spawn_cu_from_env();
     // PIXELFLUX_RECORD=<path>: start recording from process start (X11 immediately, or as
     // soon as the in-process Wayland compositor comes up).
     crate::recorder::autostart_from_env();
