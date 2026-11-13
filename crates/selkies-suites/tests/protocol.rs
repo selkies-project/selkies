@@ -15,6 +15,7 @@
 //! rather than the index its message names.
 
 use std::path::PathBuf;
+use std::sync::Once;
 use std::time::Duration;
 
 use selkies_suites::{Checks, Client, Server, path_with, script, server, workdir};
@@ -49,14 +50,19 @@ fn sentinel() -> PathBuf {
 /// The server probes the wrapper with `check` before it publishes the apps panel and `list` for
 /// what is installed; only a real command is recorded.
 async fn session(label: &str) -> (Server, Client) {
+    // Written once: the tests of this target start together, and a server of one may be running
+    // the stand-in while another sets up.
+    static STUB: Once = Once::new();
     let stub = workdir().join("cmd-stub-bin");
-    script(
-        &stub.join("selkies-proot"),
-        &format!(
-            "#!/bin/sh\ncase \"$1\" in check|list) exit 0 ;; esac\necho \"$@\" > \"{}\"\n",
-            sentinel().display()
-        ),
-    );
+    STUB.call_once(|| {
+        script(
+            &stub.join("selkies-proot"),
+            &format!(
+                "#!/bin/sh\ncase \"$1\" in check|list) exit 0 ;; esac\necho \"$@\" > \"{}\"\n",
+                sentinel().display()
+            ),
+        );
+    });
     let server = server::launch(label)
         .env("SELKIES_COMMAND_ENABLED", "true")
         .env("PATH", &path_with(&stub))
