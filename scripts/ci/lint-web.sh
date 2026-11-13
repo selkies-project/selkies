@@ -13,7 +13,11 @@ set -eu
 
 test -f Cargo.toml
 
-# The dashboard carries its own ESLint and eslint.config.js.
+# The configs are TypeScript, which ESLint loads through Node's own type
+# stripping under this flag.
+flag=unstable_native_nodejs_ts_config
+
+# The dashboard carries its own ESLint and eslint.config.ts.
 pkg=web/selkies-dashboard
 if [ ! -d "${pkg}/node_modules" ]; then
     # Retried like build-web.sh's install: npm gives a failed registry
@@ -34,15 +38,15 @@ echo "eslint: ${pkg}"
 (cd "${pkg}" && npm run --silent lint)
 
 # The web core and the touch gamepad are linted by the dashboard's ESLint, whose
-# web/eslint.config.mjs covers both; the web core's TypeScript is checked below.
+# web/eslint.config.mts covers both; the web core's TypeScript is checked below.
 echo "eslint: web/selkies-web-core web/universal-touch-gamepad"
-(cd web && selkies-dashboard/node_modules/.bin/eslint --max-warnings 0 \
+(cd web && selkies-dashboard/node_modules/.bin/eslint --flag "${flag}" --max-warnings 0 \
     selkies-web-core universal-touch-gamepad)
 
 # The Node audits, the BrowserStack smoke, the site's scripts and the image
-# tier's tester pages: eslint.config.mjs at the root, with the same ESLint.
+# tier's tester pages: eslint.config.mts at the root, with the same ESLint.
 echo "eslint: tests/tools tests/browserstack website/scripts tests/image/site"
-web/selkies-dashboard/node_modules/.bin/eslint --max-warnings 0 \
+web/selkies-dashboard/node_modules/.bin/eslint --flag "${flag}" --max-warnings 0 \
     'tests/tools/**/*.mjs' 'tests/tools/**/*.mts' 'tests/browserstack/*.ts' 'website/scripts/**/*.mjs' 'tests/image/site/**/*.js'
 
 # The dashboard's own build runs tsc as well, but that is downstream of this gate.

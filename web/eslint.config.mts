@@ -10,9 +10,9 @@
 import { createRequire } from 'node:module'
 
 const require = createRequire(new URL('selkies-dashboard/', import.meta.url))
-const js = require('@eslint/js')
-const globals = require('globals')
-const tseslint = require('typescript-eslint')
+const js = require('@eslint/js') as typeof import('@eslint/js')
+const globals = require('globals') as typeof import('globals')
+const tseslint = require('typescript-eslint') as typeof import('typescript-eslint')
 
 const rules = {
   ...js.configs.recommended.rules,

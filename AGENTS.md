@@ -48,7 +48,7 @@ so keep anything shaped like `<name>` or containing braces inside backticks.
   module) and are named for the behavior they hold, as a sentence.
 - TypeScript (`.ts`/`.tsx`): JSDoc blocks with `@param name description`, `@returns`, `@throws`, and no types in
   the tags — the signature is the type. Props are an `interface` or `type` with a line per field.
-- JavaScript (`.js`/`.mjs`), left only in the ESLint configs, the site's scripts (`website/scripts`), the Node
+- JavaScript (`.js`/`.mjs`), left only in the site's scripts (`website/scripts`), the Node
   audits under `tests/tools`, and the image tier's tester pages: the same JSDoc blocks, but the tags carry the types
   (`@param {Type} name`, `@returns {Type}`, `@typedef`/`@callback` for option bags and callbacks). The web core is
   TypeScript, checked strictly by its own `tsc -b` (`web/selkies-web-core/tsconfig.json`), and the dashboard's `tsc`

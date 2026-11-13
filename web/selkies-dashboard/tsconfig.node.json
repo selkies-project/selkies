@@ -13,12 +13,19 @@
     "verbatimModuleSyntax": true,
     "noEmit": true,
     "strict": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "paths": {
+      "@eslint/js": ["./node_modules/@eslint/js"],
+      "globals": ["./node_modules/globals"],
+      "typescript-eslint": ["./node_modules/typescript-eslint"]
+    }
   },
   "include": [
     "*.ts",
     "../selkies-web-core/gendb.ts",
     "../selkies-web-core/vite.config.ts",
+    "../eslint.config.mts",
+    "../../eslint.config.mts",
     "../../tests/tools/*.mts",
     "../selkies-web-core/lib/gamepad.ts",
     "../universal-touch-gamepad/universalTouchGamepad.ts"

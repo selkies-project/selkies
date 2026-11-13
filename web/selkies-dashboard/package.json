@@ -10,7 +10,7 @@
     "build": "tsc -b && vite build",
     "postbuild": "node copy-assets.ts",
     "accent": "node selkies-accent.ts",
-    "lint": "eslint .",
+    "lint": "eslint --flag unstable_native_nodejs_ts_config .",
     "preview": "vite preview",
     "typecheck": "tsc -b"
   },

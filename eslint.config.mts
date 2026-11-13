@@ -7,13 +7,13 @@
 // The scripts outside the web packages: the Node audits and probes under
 // tests/tools, the BrowserStack smoke, the site's build scripts and the image
 // tier's tester pages. They lint with the dashboard's ESLint and
-// typescript-eslint, as web/eslint.config.mjs does.
+// typescript-eslint, as web/eslint.config.mts does.
 import { createRequire } from 'node:module'
 
 const require = createRequire(new URL('web/selkies-dashboard/', import.meta.url))
-const js = require('@eslint/js')
-const globals = require('globals')
-const tseslint = require('typescript-eslint')
+const js = require('@eslint/js') as typeof import('@eslint/js')
+const globals = require('globals') as typeof import('globals')
+const tseslint = require('typescript-eslint') as typeof import('typescript-eslint')
 
 const rules = {
   ...js.configs.recommended.rules,
