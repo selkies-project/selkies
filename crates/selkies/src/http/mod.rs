@@ -394,7 +394,9 @@ pub fn build(state: AppState, extra: Vec<Router>) -> Router {
         app = app.merge(other);
     }
     if !state.config.computer_use_token.is_empty() {
-        app = app.merge(computer_use::router());
+        app = app
+            .merge(computer_use::api_router())
+            .merge(computer_use::router());
     }
     if !state.config.subfolder.is_empty() {
         app = under_prefix(state.config.subfolder.clone(), app);

@@ -14,10 +14,12 @@
   signaling, ICE/STUN/TURN, DTLS, SCTP, RTP/RTCP); a viewer token (watch only); a gamepad slot token; a read-write
   collaborator; the controller (full token or Basic auth user); the orchestrator holding the master token
   (`POST /api/tokens`, the signaling server peer). Apart from that ladder, the holder of the Computer Use token
-  (`computer_use_token`): it reaches `/computer-use`, `/record_start`, `/record_stop`, and `/record_status` and
-  nothing else, and there holds the session user's reach (the screen, keyboard and pointer input, and a recording
-  written inside `PIXELFLUX_RECORD_DIR`). No principal of the ladder reaches those routes, the master token
-  included, and that token is no session token: it opens no other route and no WebSocket or signaling handshake.
+  (`computer_use_token`): it reaches `/api/computer-use`, `/api/recording`, and the paths kept from pixelflux's own
+  server (`/computer-use`, `/record_start`, `/record_stop`, `/record_status`) and nothing else, and there holds the
+  session user's reach (the screen, keyboard and pointer input, and a recording written inside
+  `PIXELFLUX_RECORD_DIR` or the file manager's directory). No principal of the ladder reaches the Computer Use
+  routes, the master token included, and that token is no session token: it opens no other route and no WebSocket or
+  signaling handshake.
 - Computer Use (`http/computer_use.rs`, the actions in `crates/pixelflux/src/computer_use.rs`): the four routes
   are 404 unless the token is set (`SELKIES_COMPUTER_USE_TOKEN`, or `PIXELFLUX_CU_TOKEN` alone). With it they are served under the route prefix on the listeners above, behind
   the gate's own branch for them, or, where `computer_use_bind` names one, on a plain-HTTP listener of its own

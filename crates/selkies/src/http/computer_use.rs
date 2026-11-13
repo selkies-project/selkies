@@ -4,21 +4,25 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! Computer Use and the recorder over HTTP: `/computer-use` runs one action of the
+//! Computer Use over HTTP: `/api/computer-use` ([`API_ROUTE`]) runs one action of the
 //! [Anthropic Computer Use](https://github.com/anthropics/claude-quickstarts/tree/main/computer-use-demo)
-//! vocabulary on the session (`pixelflux::computer_use::action`), and `/record_start`,
-//! `/record_stop`, and `/record_status` drive pixelflux's MP4 recorder. Every answer is JSON.
+//! vocabulary on the session (`pixelflux::computer_use::action`). Its recorder is the server's
+//! one recorder, `/api/recording`, which takes this token beside the master token
+//! ([`super::auth::gate`]). The paths a caller of pixelflux's own server knows ([`ROUTES`]:
+//! `/computer-use`, and `/record_start`, `/record_stop`, and `/record_status` over the same
+//! recorder) stay served for it. Every answer is JSON.
 //!
 //! A caller drives the desktop with the session user's full authority, so the routes take one
 //! credential and no other: `Authorization: Bearer <computer_use_token>`, compared whole and in
 //! constant time ([`grant`]). The master token, a session token, a Basic login, a cookie, and
-//! `?token=` are each answered 401, and the token opens nothing but these routes. A handler
+//! `?token=` are each answered 401, and the token opens nothing but these routes and
+//! `/api/recording`. A handler
 //! runs only on a request carrying the [`Granted`] that check alone makes, so a router mounted
 //! behind no check refuses everything.
 //!
 //! Where they are served follows `computer_use_bind` ([`Serving`]): empty, the server's own
 //! listeners carry them under the route prefix, behind [`super::auth::gate`], with their TLS;
-//! a bind opens a plain-HTTP listener of its own that serves these four routes at the root
+//! a bind opens a plain-HTTP listener of its own that serves the four [`ROUTES`] at the root
 //! and nothing else ([`listen`]), a bare port on the loopback addresses only, and leaves them
 //! off the server's listeners, so naming a loopback port never publishes them where the
 //! server listens. With no token nothing is served and the paths are 404.
@@ -43,8 +47,10 @@ use super::auth::{ct_eq, declares_body};
 use super::listen::{self, Listener};
 use crate::settings::Settings;
 
-/// The paths served, under the route prefix on the server's listeners and at the root on a
-/// bind's.
+/// The action route among the server's own, under the route prefix.
+pub const API_ROUTE: &str = "/api/computer-use";
+/// The paths of pixelflux's own server, kept for its callers: under the route prefix on the
+/// server's listeners and at the root on a bind's.
 pub const ROUTES: &[&str] = &[
     "/computer-use",
     "/record_start",
@@ -148,7 +154,15 @@ impl Endpoint {
     }
 }
 
-/// The four routes, each taking any method. They answer only behind [`super::auth::gate`] with
+/// [`API_ROUTE`], taking any method, behind [`super::auth::gate`] with a token configured.
+pub fn api_router() -> Router {
+    Router::new().route(
+        API_ROUTE,
+        any(|request: Request| answer(Endpoint::Action, request)),
+    )
+}
+
+/// The four [`ROUTES`], each taking any method. They answer only behind [`super::auth::gate`] with
 /// a token configured, or behind [`listen`]'s own check.
 pub fn router() -> Router {
     Router::new()

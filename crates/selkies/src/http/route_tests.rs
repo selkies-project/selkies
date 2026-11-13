@@ -116,6 +116,7 @@ async fn stub_server(config: HttpConfig) -> (TestServer, AppState) {
         .route("/api/files/", get(controller_only))
         .route("/api/turn-stub", get(ok))
         .route("/api/metrics-stub", get(ok))
+        .route("/api/recording", get(ok).post(ok).delete(ok))
         .route("/api/websockets", get(ok))
         .route("/api/webrtc/signaling", get(ok))
         .route("/", get(ok))
@@ -2803,8 +2804,8 @@ async fn raw_exchange(app: &TestServer, request: &[u8]) -> String {
 }
 
 /// Every credential of the server's own, in each mode it runs in, is refused on the Computer
-/// Use routes, which take their token alone; that token opens no other route and is no
-/// session token.
+/// Use routes, which take their token alone; that token opens the recorder beside them and no
+/// other route, and is no session token.
 #[tokio::test]
 async fn computer_use_takes_its_token_and_no_other_credential() {
     use super::auth::{SOCKET_COOKIE, socket_cookie_value};
@@ -2940,6 +2941,38 @@ async fn computer_use_takes_its_token_and_no_other_credential() {
             (200, Some("application/json"), r#"{"active":false}"#),
             "{mode}: the token is served"
         );
+        let cu = bearer(CU);
+        let r = app
+            .call_body(
+                "POST",
+                "/api/computer-use",
+                &[("authorization", &cu)],
+                b"not json",
+            )
+            .await;
+        assert_eq!(
+            r.status, 400,
+            "{mode}: the action route among the server's own"
+        );
+        let r = app.call("POST", "/api/computer-use", &[]).await;
+        assert_eq!((r.status, r.body.as_str()), (401, CU_REFUSAL), "{mode}");
+        for method in ["GET", "POST", "DELETE"] {
+            let r = app
+                .call(method, "/api/recording", &[("authorization", &cu)])
+                .await;
+            assert_eq!(
+                r.status, 200,
+                "{mode}: {method} the recorder takes the token"
+            );
+            let r = app
+                .call(method, "/api/recording", &[(MASTER_TOKEN_HEADER, &cu)])
+                .await;
+            let anonymous = app.call(method, "/api/recording", &[]).await;
+            assert_eq!(
+                r.status, anonymous.status,
+                "{mode}: {method} the recorder takes it in Authorization alone"
+            );
+        }
 
         assert!(
             state.tokens.lookup(CU).is_none(),

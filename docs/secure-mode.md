@@ -43,11 +43,11 @@ The static web client (`/`, its scripts and assets) is served without credential
 | `POST /api/file-manager/mkdir` (a new folder) | session or master token; viewer tokens and another site's page are refused (403) |
 | `/api/print/<name>` (a printed document) | session or master token; viewer tokens and another site's page are refused (403) |
 | `/api/sessions` and `/api/screenshot` | session or master token |
-| `DELETE /api/sessions/<id>`, `POST`, and `DELETE /api/recording` | session or master token (either header); viewer tokens are refused (403) |
-| `GET /api/recording` | session or master token |
+| `DELETE /api/sessions/<id>`, `POST`, and `DELETE /api/recording` | session or master token (either header); viewer tokens are refused (403). The recording routes also take the Computer Use token (`Authorization: Bearer`) where one is set |
+| `GET /api/recording` | session or master token, or the Computer Use token |
 | `/api/turn` (WebRTC ICE/TURN configuration) | session or master token |
 | `/api/metrics` (when `--enable-metrics-http`) | session or master token |
-| `/computer-use`, `/record_start`, `/record_stop`, and `/record_status` (when `--computer-use-token` is set and no `--computer-use-bind` moves them to a listener of their own; `404` otherwise) | the Computer Use token only, as `Authorization: Bearer`; the master token, session tokens, and the Basic login are refused (401), with or without a master token |
+| `/api/computer-use`, and the paths kept from pixelflux's own server, `/computer-use`, `/record_start`, `/record_stop`, and `/record_status` (when `--computer-use-token` is set and no `--computer-use-bind` moves them to a listener of their own; `404` otherwise) | the Computer Use token only, as `Authorization: Bearer`; the master token, session tokens, and the Basic login are refused (401), with or without a master token |
 
 An API request can present its session token in three ways, tried in this order: the `Authorization: Bearer <token>` header, a `?token=` query parameter, or the `selkies_token` cookie. Without a valid token the answer is `401` with `WWW-Authenticate: Bearer realm="Selkies Restricted"`; a valid token with insufficient rights (a viewer uploading) is `403`. Tokens are compared in constant time against the provisioned table; a revoked token stops working immediately.
 

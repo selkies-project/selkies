@@ -138,20 +138,22 @@ With `--computer-use-token` (`SELKIES_COMPUTER_USE_TOKEN`) set, the server answe
 
 | Endpoint | What it does |
 | --- | --- |
-| `POST /computer-use` | Runs one action, its JSON body naming it: `screenshot`, `zoom`, `cursor_position`, `mouse_move`, the clicks and drags, `scroll`, `key`, `hold_key`, `type`, and `wait`. The [pixelflux reference](https://github.com/selkies-project/selkies/blob/main/crates/pixelflux/README.md#computer-use-interface-x11-and-wayland) lists each action's fields and replies |
-| `POST /record_start` | Starts pixelflux's MP4 recorder. A JSON body may name a file inside `PIXELFLUX_RECORD_DIR` (`path`), a `display`, `fps`, `bitrate_kbps`, and an `audio_socket` |
-| `POST /record_stop` | Stops it and reports the finished file |
-| `GET /record_status` | The recording under way or the last one finished, `{"active":false}` before any |
+| `POST /api/computer-use` | Runs one action, its JSON body naming it: `screenshot`, `zoom`, `cursor_position`, `mouse_move`, the clicks and drags, `scroll`, `key`, `hold_key`, `type`, and `wait`. The [pixelflux reference](https://github.com/selkies-project/selkies/blob/main/crates/pixelflux/README.md#computer-use-interface-x11-and-wayland) lists each action's fields and replies |
+| `POST /api/recording` | Starts the recording described above; the Computer Use token is accepted here as the master token is |
+| `DELETE /api/recording` | Stops it and reports the finished file |
+| `GET /api/recording` | The recording under way or the last one finished |
+
+The paths pixelflux's own server answered stay served for callers written against it: `/computer-use` is `/api/computer-use`, and `/record_start`, `/record_stop`, and `/record_status` drive the same recorder with pixelflux's request format (a file inside `PIXELFLUX_RECORD_DIR`).
 
 ```bash
-curl -s -X POST "https://${HOST}/computer-use" \
+curl -s -X POST "https://${HOST}/api/computer-use" \
   -H "Authorization: Bearer ${SELKIES_COMPUTER_USE_TOKEN}" -H 'Content-Type: application/json' \
   -d '{"action":"screenshot"}'
 ```
 
-A caller drives the desktop with the session user's full authority, so these routes take that token as `Authorization: Bearer <token>` and nothing else: the master token, a session token, and the Basic login are each answered `401`, and the token opens no other route. Without it the four paths are `404`. Every answer is JSON: `200` with the action's result, or with an `error` for an action or a recording that could not run; `400` for a body that is no action; `411` for a chunked body; `413` for one over 4 MiB; and `503` while sixteen requests already wait, since actions run one at a time.
+A caller drives the desktop with the session user's full authority, so these routes take that token as `Authorization: Bearer <token>` and nothing else: the master token, a session token, and the Basic login are each answered `401`, and the token opens nothing but them and `/api/recording`. Without it the Computer Use paths are `404`. Every answer is JSON: `200` with the action's result, or with an `error` for an action or a recording that could not run; `400` for a body that is no action; `411` for a chunked body; `413` for one over 4 MiB; and `503` while sixteen requests already wait, since actions run one at a time.
 
-`--computer-use-bind` (`SELKIES_COMPUTER_USE_BIND`) serves them on a plain-HTTP listener of their own instead, at the root and with nothing else on it: a bare port listens on the loopback addresses only, `host:port` on the address it names. The server's own listeners then do not carry them, so an agent on the same host reaches the session without the routes being published wherever the server listens.
+`--computer-use-bind` (`SELKIES_COMPUTER_USE_BIND`) serves the four paths kept from pixelflux's own server on a plain-HTTP listener of their own instead, at the root and with nothing else on it: a bare port listens on the loopback addresses only, `host:port` on the address it names. The server's own listeners then do not carry them, so an agent on the same host reaches the session without the routes being published wherever the server listens.
 
 ## Microphone and Webcam
 

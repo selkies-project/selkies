@@ -8,7 +8,8 @@
 //!
 //! [`gate`] authorizes one request and hands it on or refuses it, in layered gates: the
 //! Computer Use routes take their own token and nothing else, and are 404 where none is
-//! configured ([`computer_use`]); a cross-site WebSocket upgrade is refused by Origin; the liveness routes pass without
+//! configured ([`computer_use`]), and that token records through `/api/recording` as the
+//! master token does; a cross-site WebSocket upgrade is refused by Origin; the liveness routes pass without
 //! credentials; the token endpoint and the control endpoints (the mode switch, a session
 //! disconnect, a recording start or stop) take the Bearer master token, in `Authorization`
 //! first and in [`MASTER_TOKEN_HEADER`] second for a caller whose `Authorization` a Basic login
@@ -522,7 +523,7 @@ fn authorize(state: &AppState, request: &Request) -> Verdict {
     let is_ws_handshake =
         is_ws_upgrade && route.is_some_and(|r| WEBSOCKET_ROUTES.contains(&r.trim_end_matches('/')));
 
-    if route.is_some_and(|r| computer_use::ROUTES.contains(&r)) {
+    if route.is_some_and(|r| r == computer_use::API_ROUTE || computer_use::ROUTES.contains(&r)) {
         let token = config.computer_use_token.as_str();
         return match computer_use::grant(headers, token) {
             Some(granted) => Verdict::ComputerUse(granted),
@@ -542,6 +543,12 @@ fn authorize(state: &AppState, request: &Request) -> Verdict {
         if !carries_master_token(headers, &config.master_token) {
             return Verdict::Refused(bearer_challenge("Unauthorized"));
         }
+        return Verdict::Pass(None);
+    }
+
+    if is_route("/api/recording")
+        && computer_use::grant(headers, &config.computer_use_token).is_some()
+    {
         return Verdict::Pass(None);
     }
 

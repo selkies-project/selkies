@@ -141,7 +141,7 @@ async fn serve_computer_use(
     let serving = Serving::from_settings(&settings());
     if serving.bind.is_empty() {
         if !serving.token.is_empty() {
-            info!(target: "server", "Computer Use served at {}/computer-use on the server's listeners", config.subfolder);
+            info!(target: "server", "Computer Use served at {}{} on the server's listeners", config.subfolder, computer_use::API_ROUTE);
         }
         return None;
     }
