@@ -230,6 +230,10 @@ pub(crate) fn extract_settings(settings: &Bound<'_, PyAny>) -> PyResult<CaptureS
 /// where a path does not stamp them.
 #[pyclass]
 struct StripeFrame {
+    #[expect(
+        clippy::rc_buffer,
+        reason = "the encoder's buffer as it hands it over; an `Arc<[u8]>` would copy every frame"
+    )]
     data: Arc<Vec<u8>>,
     #[pyo3(get, set)]
     data_type: i32,
@@ -255,6 +259,10 @@ impl StripeFrame {
     /// Hot-path constructor: shares the encoder's buffer by `Arc` (no copy) and carries stripe
     /// metadata as attributes, so the consumer can read it without parsing a header
     /// (required for omit_stripe_headers).
+    #[expect(
+        clippy::rc_buffer,
+        reason = "the encoder's buffer as it hands it over; an `Arc<[u8]>` would copy every frame"
+    )]
     fn new_owned_meta(
         data: Arc<Vec<u8>>,
         data_type: i32,

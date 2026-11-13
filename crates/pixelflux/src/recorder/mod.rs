@@ -60,6 +60,10 @@ const QUEUE_CAP: usize = 256;
 /// offset where the Annex-B stream starts (past the wire header when present), and the
 /// wall-clock capture time; or an audio packet with its decode time on the 48 kHz clock.
 enum Tap {
+    #[expect(
+        clippy::rc_buffer,
+        reason = "the encoder's buffer as it hands it over; an `Arc<[u8]>` would copy every frame"
+    )]
     Video(Arc<Vec<u8>>, usize, u64),
     Audio(Vec<u8>, u64),
 }

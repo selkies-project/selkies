@@ -58,6 +58,10 @@ fn peer_is_session_user(stream: &std::os::unix::net::UnixStream) -> bool {
 }
 
 struct Client {
+    #[expect(
+        clippy::rc_buffer,
+        reason = "a page is built as a `Vec`; an `Arc<[u8]>` would copy each one"
+    )]
     tx: SyncSender<Arc<Vec<u8>>>,
     stop: Arc<AtomicBool>,
 }

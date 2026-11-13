@@ -43,6 +43,10 @@ const CLIENT_QUEUE_CAP: usize = 256;
 /// payload is bare).
 struct QueuedFrame {
     prefix: Vec<u8>,
+    #[expect(
+        clippy::rc_buffer,
+        reason = "the encoder's buffer as it hands it over; an `Arc<[u8]>` would copy every frame"
+    )]
     data: Arc<Vec<u8>>,
     offset: usize,
 }

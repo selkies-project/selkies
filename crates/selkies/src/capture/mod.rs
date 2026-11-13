@@ -48,6 +48,10 @@ impl FrameBatch {
 }
 
 /// The encoder's buffer behind a stripe, as the owner a `Bytes` borrows from.
+#[expect(
+    clippy::rc_buffer,
+    reason = "the encoder's buffer as it hands it over; an `Arc<[u8]>` would copy every frame"
+)]
 struct SharedBuffer(Arc<Vec<u8>>);
 
 impl AsRef<[u8]> for SharedBuffer {
