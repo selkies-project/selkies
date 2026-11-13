@@ -3030,10 +3030,17 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			// WebKit can refuse the track's play() and start the video by itself
 			// moments later; the button its refusal showed then has nothing to start.
 			videoElement.addEventListener('playing', (): any => {
-				if (!showStart) return;
+				if (!showStart || videoElement.paused) return;
 				showStart = false;
 				if (playButtonElement) playButtonElement.classList.add('hidden');
 				armResumeWatchdog();
+			});
+			// Safari pauses a video it let start once the stream's audio arrives, with
+			// no play() left to refuse; a hidden tab's pause is replayed when it shows.
+			videoElement.addEventListener('pause', (): any => {
+				if (document.hidden || !webrtc || !(videoElement.srcObject instanceof MediaStream)) return;
+				showStart = true;
+				updateStatusDisplay();
 			});
 			videoElement.addEventListener('resize', (): any => {
 				// The track's intrinsic size is the realized resolution; a divergence from the
