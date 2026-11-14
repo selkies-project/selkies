@@ -25,7 +25,7 @@
 //! promotes the oldest page beside it that holds full control.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering, fence};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -979,7 +979,7 @@ impl WsService {
     async fn refresh_in_turn(&self, guard: tokio::sync::MutexGuard<'_, ()>) {
         self.refresh_display_mode_locked().await;
         drop(guard);
-        if self.reconfigure_pending.load(Ordering::Relaxed) {
+        if self.layout_requested() {
             self.reconfigure_displays().await;
         }
     }
@@ -1145,7 +1145,7 @@ impl WsService {
         if !restart_ok {
             warn!(target: "ws", "Rate-control restart failed for '{display_id}'; falling back to full reconfiguration.");
             self.reconfigure_displays().await;
-        } else if self.reconfigure_pending.load(Ordering::Relaxed) {
+        } else if self.layout_requested() {
             self.reconfigure_displays().await;
         }
     }
@@ -1354,7 +1354,7 @@ impl WsService {
                 self.realize_wayland_display_dpi(&display_id, target).await;
             }
         }
-        if self.reconfigure_pending.load(Ordering::Relaxed) {
+        if self.layout_requested() {
             self.reconfigure_displays().await;
         }
     }
@@ -1452,7 +1452,7 @@ impl WsService {
         if lone_wayland && let Some(guard) = self.layout_turn() {
             self.resize_lone_wayland(display_id, w, h).await;
             drop(guard);
-            if !self.reconfigure_pending.load(Ordering::Relaxed) {
+            if !self.layout_requested() {
                 return;
             }
         }
@@ -2337,7 +2337,7 @@ impl WsService {
         if initial || dimensional_change {
             debug!(target: "ws", "Initial setup or dimensional change detected for '{did}'. Performing full display reconfiguration.");
             self.reconfigure_displays().await;
-        } else if needs_fallback_reconfigure || self.reconfigure_pending.load(Ordering::Relaxed) {
+        } else if needs_fallback_reconfigure || self.layout_requested() {
             self.reconfigure_displays().await;
         } else if client_scale_changed {
             // No reconfigure ran to carry the new scale; announce it alone.
@@ -2937,7 +2937,7 @@ impl WsService {
         self.reconcile_reference_frames_locked(display_id).await;
         drop(capture);
         drop(reconfigure);
-        if self.reconfigure_pending.load(Ordering::Relaxed) {
+        if self.layout_requested() {
             self.reconfigure_displays().await;
         }
     }
@@ -3801,7 +3801,7 @@ impl WsService {
             self.reconfigure_pending.store(false, Ordering::Relaxed);
             self.reconfigure_locked().await;
             drop(guard);
-            if !self.reconfigure_pending.load(Ordering::Relaxed) {
+            if !self.layout_requested() {
                 return;
             }
             guard = match self.reconfigure_lock.try_lock() {
@@ -3812,15 +3812,25 @@ impl WsService {
     }
 
     /// The reconfigure lock, or `None` with the request left to whoever holds it: every holder
-    /// runs a pass once it lets go of a lock something asked for meanwhile. The request is
-    /// flagged before the second try, so a holder letting go between the two is either seen
-    /// gone or has seen the flag.
+    /// runs a pass once it lets go of a lock something asked for meanwhile
+    /// (`layout_requested`). The request is flagged before the second try, so a holder letting
+    /// go between the two is either seen gone or sees the flag.
     fn layout_turn(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
         if let Ok(guard) = self.reconfigure_lock.try_lock() {
             return Some(guard);
         }
         self.reconfigure_pending.store(true, Ordering::Relaxed);
+        fence(Ordering::SeqCst);
         self.reconfigure_lock.try_lock().ok()
+    }
+
+    /// Whether a pass was asked for while the reconfigure lock was held, read by its holder once
+    /// it let go. A failed try for the lock is a plain load, so without this fence and
+    /// `layout_turn`'s the asker and the holder could each read the other's state from before
+    /// its write, and the request would wait for a pass nothing runs.
+    fn layout_requested(&self) -> bool {
+        fence(Ordering::SeqCst);
+        self.reconfigure_pending.load(Ordering::Relaxed)
     }
 
     /// Tell every display's client the pipeline stopped on a reconfigure abort, keeping
