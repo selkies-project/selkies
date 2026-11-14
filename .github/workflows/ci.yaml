@@ -180,6 +180,10 @@ jobs:
           cargo test --locked -p pixelflux --lib --features python
           cargo test --locked -p pcmflux --lib
           cargo test --locked -p pcmflux --lib --features python
+      - name: Screenshots of the in-process Wayland compositor
+        # A test binary of its own, the compositor being one per process; ignored where
+        # cargo runs every test at once
+        run: cargo test --locked -p pixelflux --test screenshots -- --include-ignored
       - name: Test the non-GPL pixelflux configuration
         run: cargo test --locked -p pixelflux --lib --no-default-features --features openh264
 
