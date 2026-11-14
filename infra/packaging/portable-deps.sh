@@ -47,10 +47,15 @@ elif command -v yum > /dev/null; then
     # manylinux2014: CentOS 7, glibc 2.17. Its nasm is older than x264, dav1d,
     # and SVT-AV1 take, and its clang older than bindgen's, so nasm is built
     # from its release, checked against the hash pinned here, and libclang
-    # comes from PyPI into the interpreter below.
-    retry_install yum install -y --disablerepo='epel*' bison xz pixman-devel libxcb-devel \
-        libdrm-devel libinput-devel mesa-libgbm-devel mesa-libEGL-devel wayland-devel \
-        systemd-devel
+    # comes from PyPI into the interpreter below. vault.centos.org, which the
+    # image's repositories name, refuses requests for spells (403), so
+    # kernel.org's copy of it serves them too, and the Software Collections,
+    # which nothing here takes, are left out.
+    sed -i "s|^baseurl=https://vault.centos.org/centos/\\\$releasever/\\(.*\\)\$|&\\n        https://archive.kernel.org/centos-vault/7.9.2009/\\1|" \
+        /etc/yum.repos.d/CentOS-Base.repo
+    retry_install yum install -y --disablerepo='epel*' --disablerepo='centos-sclo*' bison xz \
+        pixman-devel libxcb-devel libdrm-devel libinput-devel mesa-libgbm-devel \
+        mesa-libEGL-devel wayland-devel systemd-devel
     nasm_version=3.02
     nasm_sha256=87336eba53b4acfe917424ab5d500d2b0054d9f5148d35c2273ccf2cfb712f0d
     curl -fsSL --retry 5 -o /tmp/nasm.tar.xz \

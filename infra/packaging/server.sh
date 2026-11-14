@@ -5,8 +5,8 @@
 #
 # Build the Selkies server and the desktop shell and stage them under a root at
 # usr/bin/selkies and usr/bin/selkies-desktop, with the web client compiled into
-# the server: the bundle's (infra/bundle), built in the manylinux_2_28 or
-# musllinux_1_2 image whose C library is the bundle's floor. Both come from one
+# the server: the bundle's (infra/bundle), built in the builder image whose C
+# library is the bundle's floor (infra/bundle/Dockerfile). Both come from one
 # cargo invocation, so the crates they share are compiled once, with the
 # features the two unify on. The codec libraries are the static archives built
 # for the architecture and C library (codecs.sh), whose prefix SELKIES_CODECS
@@ -47,6 +47,12 @@ if ldd --version 2>&1 | grep -qi musl; then
     export RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }-C target-feature=-crt-static"
 fi
 sh "${REPO}/infra/packaging/rust.sh"
+# manylinux2014's libclang comes from PyPI without the compiler's builtin
+# headers (it looks for them relative to the working directory): GCC's serve.
+if command -v yum > /dev/null && ! command -v dnf > /dev/null; then
+    BINDGEN_EXTRA_CLANG_ARGS="-isystem $(gcc -print-file-name=include)"
+    export BINDGEN_EXTRA_CLANG_ARGS
+fi
 
 # shellcheck source=infra/packaging/version.sh
 . "${REPO}/infra/packaging/version.sh"
