@@ -122,16 +122,16 @@ side must keep seeing real device nodes.
 
 ## Testing without the full stack
 
-`test-server.py` starts a `pixelflux.VirtualCamera` on the webcam socket and
-feeds it synthetic MJPEG frames, standing in for a browser. Run it, then run a
-consumer under the interposer:
+pixelflux's `virtual_camera` example starts a `VirtualCamera` on the webcam
+socket and feeds it synthetic MJPEG frames, standing in for a browser. Run it,
+then run a consumer under the interposer:
 
 ```bash
-python3 test-server.py --width 640 --height 480 &
+cargo run --release -p pixelflux --example virtual_camera -- --width 640 --height 480 &
 WEBCAM_LOG=1 LD_PRELOAD="$PWD/selkies_v4l2_interposer.so" \
     ffmpeg -f v4l2 -i /dev/video0 -frames:v 10 out.mkv
 # or the libc-level probe from tests/tools (MMAP and read() modes):
 LD_PRELOAD="$PWD/selkies_v4l2_interposer.so" ../../tests/tools/v4l2probe /dev/video0 30
-# the same through the PipeWire node the test server publishes:
+# the same through the PipeWire node the example publishes:
 SELKIES_WEBCAM_SOURCE=pipewire LD_PRELOAD="$PWD/selkies_v4l2_interposer.so" ../../tests/tools/v4l2probe /dev/video0 30
 ```
