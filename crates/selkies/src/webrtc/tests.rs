@@ -657,6 +657,41 @@ async fn a_rate_change_during_a_layout_pass_is_the_refresh_the_display_keeps() {
     );
 }
 
+/// The X outputs run at the fastest display of the layout, as WebSockets keeps them: a
+/// secondary faster than the primary raises their refresh, and a primary set below it leaves
+/// the refresh at the secondary's rate.
+#[tokio::test]
+async fn the_outputs_refresh_at_the_fastest_display_of_the_layout() {
+    let rig = Rig::new((1920, 1080), quick());
+    rig.set_primary(FakePipeline::new(&rig.log, "primary", 1920, 1080, None).capturing());
+    rig.set_display(
+        "display2",
+        FakePipeline::new(&rig.log, "display2", 1280, 720, Some((1920, 0))).capturing(),
+    );
+    {
+        let mut st = rig.service.st.lock();
+        let seeds = st.seeds.clone();
+        let entry = crate::ws::state::DisplayState::new(&seeds, None, true, None);
+        st.displays.insert("display2".into(), entry);
+        st.layouts
+            .insert("primary".into(), Layout::new(0, 0, 1920, 1080));
+        st.layouts
+            .insert("display2".into(), Layout::new(1920, 0, 1280, 720));
+    }
+    rig.service.handle_fps_change(90.0, "display2").await;
+    assert_eq!(
+        *rig.plane.refresh.lock(),
+        Some(90.0),
+        "a secondary faster than the primary raises the outputs' refresh"
+    );
+    rig.service.handle_fps_change(30.0, "primary").await;
+    assert_eq!(
+        *rig.plane.refresh.lock(),
+        Some(90.0),
+        "a primary set below it leaves the refresh at the secondary's rate"
+    );
+}
+
 #[tokio::test]
 async fn a_resize_during_a_layout_pass_is_the_size_the_display_keeps() {
     let rig = Rig::new((1920, 1080), quick());

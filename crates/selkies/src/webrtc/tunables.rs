@@ -315,16 +315,18 @@ impl WebRtcService {
             self.hold_to_ceiling(display).await;
         }
         if key == "framerate"
-            && display == "primary"
             && !self.wayland()
             && let Some(pipeline) = &pipeline
         {
-            // In the layout's turn: a pass sets its modes at the rate it read when it began.
+            // In the layout's turn: a pass sets its modes at the rate it read when it began. The
+            // outputs run at the fastest display of the layout, this stream's rate before one.
             let _guard = self.display_lock.lock().await;
-            self.deps
-                .display
-                .refresh_output_mode(pipeline.framerate())
-                .await;
+            let fps = {
+                let st = self.st.lock();
+                WebRtcService::fastest_framerate(&st, st.layouts.keys())
+            }
+            .max(pipeline.framerate());
+            self.deps.display.refresh_output_mode(fps).await;
         }
         if key == "encoder" && display == "primary" {
             let mut s = settings_mut();

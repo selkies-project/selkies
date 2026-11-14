@@ -305,6 +305,22 @@ impl WebRtcService {
         self.st.lock().pipelines.get(display).cloned()
     }
 
+    /// The rate the X outputs run at for the displays `ids` lay out: the fastest of their
+    /// streams, as WebSockets keeps them, so a secondary faster than the primary is not held to
+    /// the primary's refresh.
+    pub(crate) fn fastest_framerate<'a>(
+        st: &State,
+        ids: impl IntoIterator<Item = &'a String>,
+    ) -> f64 {
+        ids.into_iter()
+            .map(|d| {
+                st.displays
+                    .get(d)
+                    .map_or(st.seeds.framerate, |c| c.framerate)
+            })
+            .fold(0.0, f64::max)
+    }
+
     pub(crate) fn pipeline_config(
         st: &State,
         display: &str,

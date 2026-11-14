@@ -420,7 +420,8 @@ impl WebRtcService {
                 .map(|(d, l)| (d.clone(), (l.x, l.y, l.w, l.h)))
                 .collect();
             self.retarget_ahead_of_root(&rects, total_w, total_h).await;
-            let fps = primary_pipeline.framerate();
+            let fps = WebRtcService::fastest_framerate(&self.st.lock(), layouts.keys())
+                .max(primary_pipeline.framerate());
             if !self
                 .deps
                 .display
