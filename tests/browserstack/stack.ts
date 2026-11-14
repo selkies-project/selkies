@@ -97,7 +97,8 @@ export async function server(binary: string, mode: string, port: number, display
   };
   const log = join(logDir, `server-${mode}.log`);
   const out = openSync(log, 'w');
-  const proc = spawn(binary, [], { env, stdio: ['ignore', out, out], detached: true });
+  // Any argument runs the server alone; a bare selkies is the standalone desktop
+  const proc = spawn(binary, [`--mode=${mode}`], { env, stdio: ['ignore', out, out], detached: true });
   const ca = readFileSync(tls.cert, 'utf8');
   const deadline = Date.now() + 75_000;
   while (Date.now() < deadline) {
