@@ -46,8 +46,8 @@
 # DRI directories (DRI_DIRS) that holds it, where the builder's dri.pc names
 # its own alone.
 #
-# Runs inside the manylinux_2_28 or musllinux_1_2 image, whose C library is the
-# bundle's floor, once into the bundle's toolchain image (infra/bundle/Dockerfile)
+# Runs inside the target's builder image, whose C library is the bundle's
+# floor, once into the bundle's toolchain image (infra/bundle/Dockerfile)
 # under SELKIES_TOOLCHAIN, where every later build takes the servers it left.
 # Each source is fetched once into SELKIES_SOURCE_CACHE (default <build>/sources)
 # and checked against the digest pinned here.
@@ -262,6 +262,54 @@ fi
 # The servers' libEGL.so.1 beside the rest of the bundle's libraries
 RUNPATH_FLAGS="-Wl,--enable-new-dtags -Wl,-rpath,\$ORIGIN/../../lib/selkies"
 
+# memfd_create where the C library has none (glibc before 2.27): the servers'
+# configuration probes for it, and without it they put the MIT-SHM segments a
+# client asks the server for (Qt's backing stores) in files under /run/shm,
+# /var/tmp, or /tmp, and Xwayland its buffers in the runtime directory, rather
+# than in memory. The system call stands in for the wrapper, linked into every
+# program the two configurations link, probes included, and headers that add
+# to the system's sys/mman.h and fcntl.h what glibc 2.27's add. A kernel
+# without memfd (before 3.17) fails the call, which the servers fall back from.
+MEMFD_CFLAGS="" MEMFD_LDFLAGS=""
+if ! printf '#define _GNU_SOURCE\n#include <sys/mman.h>\nint main(void) { return memfd_create("", 0); }\n' \
+        | cc -x c -o /dev/null - 2> /dev/null; then
+    mkdir -p "${DEPS}/memfd/include/sys"
+    cat > "${DEPS}/memfd/include/sys/mman.h" <<'EOF'
+#include_next <sys/mman.h>
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#define MFD_ALLOW_SEALING 0x0002U
+#endif
+#ifdef __USE_GNU
+extern int memfd_create(const char *__name, unsigned int __flags);
+#endif
+EOF
+    cat > "${DEPS}/memfd/include/fcntl.h" <<'EOF'
+#include_next <fcntl.h>
+#ifndef F_ADD_SEALS
+#define F_ADD_SEALS 1033
+#define F_GET_SEALS 1034
+#define F_SEAL_SEAL 0x0001
+#define F_SEAL_SHRINK 0x0002
+#define F_SEAL_GROW 0x0004
+#define F_SEAL_WRITE 0x0008
+#endif
+EOF
+    cat > "${BUILD}/memfd.c" <<'EOF'
+#include <sys/syscall.h>
+#include <unistd.h>
+#if !defined(SYS_memfd_create) && defined(__x86_64__)
+#define SYS_memfd_create 319
+#endif
+int memfd_create(const char *name, unsigned int flags)
+{
+    return syscall(SYS_memfd_create, name, flags);
+}
+EOF
+    cc -O2 -fPIC -c "${BUILD}/memfd.c" -o "${DEPS}/memfd/memfd.o"
+    MEMFD_CFLAGS=" -I${DEPS}/memfd/include" MEMFD_LDFLAGS=" ${DEPS}/memfd/memfd.o"
+fi
+
 # Paths the servers resolve against their own directory, libexec/selkies
 XKB_ARGS="-Dxkb_dir=../../share/selkies/xkb -Dxkb_bin_dir=. -Dxkb_output_dir=/var/lib/xkb \
     -Ddefault_font_path=built-ins -Dsha1=libnettle -Dxdmcp=false -Dxdm-auth-1=false \
@@ -278,8 +326,9 @@ d="$(fetch https://xorg.freedesktop.org/archive/individual/xserver/xwayland-24.1
     7311b4bcda22cfc19cb99680eb1c35cfc1ea885981310639f0429fe2948c122e)"
 patch -d "${d}" -p1 < "${REPO}/infra/bundle/patches/xwayland-relative-xkb.patch"
 # shellcheck disable=SC2086  # XKB_ARGS is a list of options
-LDFLAGS="${RUNPATH_FLAGS}" meson setup "${d}/build" "${d}" --buildtype=release -Dprefer_static=true \
-    --wrap-mode=nodownload ${XKB_ARGS} -Dxvfb=false -Dglamor=true -Ddri3=true -Dglx=true -Dxwayland_ei=false \
+CFLAGS="${CFLAGS}${MEMFD_CFLAGS}" LDFLAGS="${RUNPATH_FLAGS}${MEMFD_LDFLAGS}" meson setup "${d}/build" "${d}" \
+    --buildtype=release -Dprefer_static=true --wrap-mode=nodownload ${XKB_ARGS} -Dxvfb=false \
+    -Dglamor=true -Ddri3=true -Dglx=true -Dxwayland_ei=false \
     -Dlibdecor=false -Dsecure-rpc=false -Dsystemd_notify=false -Ddocs-pdf=false -Dxcsecurity=true
 ninja -C "${d}/build" hw/xwayland/Xwayland
 install -Dm755 "${d}/build/hw/xwayland/Xwayland" "${TREE}/libexec/selkies/Xwayland"
@@ -291,8 +340,9 @@ for p in "${REPO}"/addons/base/patches/xvfb-*.patch "${REPO}"/infra/bundle/patch
     patch -d "${d}" -p1 < "${p}"
 done
 # shellcheck disable=SC2086  # XKB_ARGS is a list of options
-LDFLAGS="${RUNPATH_FLAGS}" meson setup "${d}/build" "${d}" --buildtype=release -Dprefer_static=true \
-    --wrap-mode=nodownload ${XKB_ARGS} -Dxvfb=true -Dglamor=true -Dgbm=true -Ddri3=true -Dglx=true -Dxcsecurity=true \
+CFLAGS="${CFLAGS}${MEMFD_CFLAGS}" LDFLAGS="${RUNPATH_FLAGS}${MEMFD_LDFLAGS}" meson setup "${d}/build" "${d}" \
+    --buildtype=release -Dprefer_static=true --wrap-mode=nodownload ${XKB_ARGS} -Dxvfb=true \
+    -Dglamor=true -Dgbm=true -Ddri3=true -Dglx=true -Dxcsecurity=true \
     -Dxorg=false -Dxnest=false -Dxephyr=false -Dxwin=false -Dxquartz=false -Dxfbdev=false \
     -Dudev=false -Dudev_kms=false -Dsystemd_logind=false -Dseatd_libseat=false -Dpciaccess=false \
     -Dtests=false
