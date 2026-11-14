@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """The GPU report the container reads before choosing a backend.
 
-pixelflux owns hardware detection, so the example container asks it whether a
-Wayland session here would be hardware accelerated and starts X11 instead when
-the answer is no but a GPU is present. That decision is only as good as this
-report: a renamed key or a changed type makes the probe raise, the container
-keeps whatever backend was asked for, and a session silently loses the GPU it
-was provisioned with. So the shape is pinned here, along with the answers that
-do not depend on what hardware the test machine has.
+pixelflux owns hardware detection, and `selkies gpu-probe` reports what it
+finds: whether a Wayland session here would be hardware accelerated, on which
+node, and whether a GPU is present at all, as KEY=VALUE lines the container's
+entrypoint exports and one summary line on stderr. The container starts X11
+instead of Wayland when the answer is no but a GPU is present, so that decision
+is only as good as this report: a renamed key or a changed vocabulary leaves the
+container on whatever backend was asked for, and a session silently loses the
+GPU it was provisioned with. So the report's shape is pinned here, along with
+the answers that do not depend on what hardware the test machine has.
 """
 import os
 import subprocess
@@ -17,49 +19,53 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H  # noqa: E402
 
-KEYS: dict[str, type] = {"node": str, "accelerated": bool, "gpu": bool, "renderer": str, "error": str}
+SERVER_SIDE = ("SELKIES_GPU_RENDER_NODE", "SELKIES_GPU_DRIVER", "SELKIES_GPU_PRESENT", "SELKIES_GPU_ACCELERATED")
+
+
+def probe(**env: str) -> tuple:
+    """The report `selkies gpu-probe` prints with `env` added: its facts and its summary line."""
+    done = subprocess.run([H.SERVER, "gpu-probe"], capture_output=True, text=True, timeout=180,
+                          env=dict(os.environ, **env))
+    facts = dict(line.split("=", 1) for line in done.stdout.splitlines() if "=" in line)
+    summary = next((line for line in done.stderr.splitlines() if line.startswith("GPU: ")), "")
+    return facts, summary
 
 
 def main() -> bool:
-    """Pin the probe_wayland_gpu report shape and its hardware-independent answers."""
+    """Pin the gpu-probe report's shape and its hardware-independent answers."""
     res = H.Results("gpu-probe")
-    try:
-        import pixelflux
-    except ImportError:
-        print("SKIP pixelflux is not installed, so the GPU report cannot be read",
-              flush=True)
-        sys.exit(H.SKIP_EXIT)
-
-    report = pixelflux.probe_wayland_gpu("", "true")
-    res.check("the report has every field the container reads",
-              set(report) >= set(KEYS), sorted(report))
-    res.check("each field has the type the container expects",
-              all(isinstance(report.get(k), t) for k, t in KEYS.items()),
-              {k: type(report.get(k)).__name__ for k in KEYS})
+    facts, summary = probe()
+    res.check("the report has every fact the container reads",
+              all(k in facts for k in SERVER_SIDE), sorted(facts))
+    res.check("presence and acceleration are answered true or false",
+              facts.get("SELKIES_GPU_PRESENT") in ("true", "false")
+              and facts.get("SELKIES_GPU_ACCELERATED") in ("true", "false"), facts)
 
     # Acceleration and its explanation cannot disagree, whichever way this
-    # machine answers: the container prints the error and acts on the flag.
-    res.check("an accelerated report carries no error and names a node",
-              not report["accelerated"] or (not report["error"] and report["node"]),
-              report)
+    # machine answers: the container prints the summary and acts on the flag.
+    accelerated = facts.get("SELKIES_GPU_ACCELERATED") == "true"
+    res.check("an accelerated report names a node and gives no reason against it",
+              not accelerated or (bool(facts.get("SELKIES_GPU_RENDER_NODE")) and "unusable" not in summary),
+              (facts, summary))
     res.check("an unaccelerated report says why",
-              report["accelerated"] or bool(report["error"]), report)
+              accelerated or "unusable: " in summary or summary == "GPU: none here", summary)
 
     # A node that cannot back a renderer is unaccelerated however it fails, and
     # saying so is the whole point: /dev/null opens and makes a GBM device on
-    # some drivers, so only carrying the bring-up through tells them apart.
+    # some drivers, so only carrying the bring-up through tells them apart. Nor
+    # does the probe fall back to another node when it is given one.
     for path in ("/dev/dri/renderD999", "/dev/null"):
-        bogus = pixelflux.probe_wayland_gpu(path, "")
-        res.check(f"{path} is reported unaccelerated",
-                  not bogus["accelerated"] and bool(bogus["error"]),
-                  bogus.get("error"))
-        res.check(f"{path} is echoed back as the node tried",
-                  bogus["node"] == path, bogus.get("node"))
+        bogus, said = probe(DRINODE=path)
+        res.check(f"{path} is reported unaccelerated, with why",
+                  bogus.get("SELKIES_GPU_ACCELERATED") == "false"
+                  and ("unusable: " in said or said == "GPU: none here"), said)
+        res.check(f"{path} names no other node",
+                  bogus.get("SELKIES_GPU_RENDER_NODE") in ("", path), bogus.get("SELKIES_GPU_RENDER_NODE"))
 
     # GPU presence is independent of whether the compositor can use one, which
     # is what lets the container tell "no GPU here" from "GPU it cannot reach".
     res.check("GPU presence is reported separately from acceleration",
-              report["gpu"] or not report["accelerated"], report)
+              facts.get("SELKIES_GPU_PRESENT") == "true" or not accelerated, facts)
 
     # The recorded environment is the exec shell's to source, not the probe's
     # to read: the probe answers for exactly what it is given, so a variable
@@ -82,10 +88,6 @@ def main() -> bool:
     # The client-path facts, measured on whatever this machine has: every one
     # reported, each from its own small vocabulary, and consistent with each
     # other, since the entrypoint maps them without looking further.
-    probed = subprocess.run([H.SERVER, "gpu-probe"],
-                            capture_output=True, text=True, timeout=180,
-                            env=dict(os.environ))
-    facts = dict(line.split("=", 1) for line in probed.stdout.splitlines() if "=" in line)
     client = ("SELKIES_GPU_GL_VENDOR", "SELKIES_GPU_EGL_X11",
               "SELKIES_GPU_MESA_DRIVER", "SELKIES_GPU_VULKAN_PRESENTS")
     res.check("every client-path fact is reported", all(k in facts for k in client), sorted(facts))
