@@ -238,13 +238,15 @@ impl CipherAeadAesGcm {
     ///
     /// https://tools.ietf.org/html/rfc7714#section-8.1
     pub(crate) fn rtp_initialization_vector(&self, header: &rtp::Header, roc: u32) -> [u8; 12] {
-        let mut iv = [0u8; 12];
-        BigEndian::write_u32(&mut iv[2..], header.ssrc);
-        BigEndian::write_u32(&mut iv[6..], roc);
-        BigEndian::write_u16(&mut iv[10..], header.sequence_number);
-
-        for (i, v) in iv.iter_mut().enumerate() {
-            *v ^= self.srtp_session_salt[i];
+        let mut iv: [u8; 12] = std::array::from_fn(|i| self.srtp_session_salt[i]);
+        let fields = header
+            .ssrc
+            .to_be_bytes()
+            .into_iter()
+            .chain(roc.to_be_bytes())
+            .chain(header.sequence_number.to_be_bytes());
+        for (v, field) in iv[2..].iter_mut().zip(fields) {
+            *v ^= field;
         }
 
         iv
@@ -258,13 +260,12 @@ impl CipherAeadAesGcm {
     ///
     /// https://tools.ietf.org/html/rfc7714#section-9.1
     pub(crate) fn rtcp_initialization_vector(&self, srtcp_index: usize, ssrc: u32) -> [u8; 12] {
-        let mut iv = [0u8; 12];
-
-        BigEndian::write_u32(&mut iv[2..], ssrc);
-        BigEndian::write_u32(&mut iv[8..], srtcp_index as u32);
-
-        for (i, v) in iv.iter_mut().enumerate() {
-            *v ^= self.srtcp_session_salt[i];
+        let mut iv: [u8; 12] = std::array::from_fn(|i| self.srtcp_session_salt[i]);
+        for (v, field) in iv[2..6].iter_mut().zip(ssrc.to_be_bytes()) {
+            *v ^= field;
+        }
+        for (v, field) in iv[8..].iter_mut().zip((srtcp_index as u32).to_be_bytes()) {
+            *v ^= field;
         }
 
         iv

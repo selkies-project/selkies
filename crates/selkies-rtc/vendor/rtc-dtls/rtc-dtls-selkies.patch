@@ -1,3 +1,120 @@
+diff --git a/src/crypto/crypto_cbc.rs b/src/crypto/crypto_cbc.rs
+index 02695f8..27a63e1 100644
+--- a/src/crypto/crypto_cbc.rs
++++ b/src/crypto/crypto_cbc.rs
+@@ -18,6 +18,8 @@ use shared::error::*;
+ 
+ /// AES-CBC encryption with a separate HMAC for DTLS records, holding the per-direction keys.
+ pub struct CryptoCbc {
++    /// Draws the records' IVs where AWS-LC does not ([`Self::record_iv`]).
++    #[cfg(not(feature = "crypto-aws-lc-rs"))]
+     provider: Arc<dyn RTCCryptoProvider>,
+     local_cipher: Box<dyn CbcCipher>,
+     remote_cipher: Box<dyn CbcCipher>,
+@@ -57,6 +59,7 @@ impl CryptoCbc {
+             .new_hmac(HmacAlgorithm::Sha1, remote_mac)
+             .map_err(crypto_error)?;
+         Ok(CryptoCbc {
++            #[cfg(not(feature = "crypto-aws-lc-rs"))]
+             provider,
+             local_cipher,
+             write_mac,
+@@ -65,6 +68,24 @@ impl CryptoCbc {
+         })
+     }
+ 
++    /// A record's IV, unpredictable as CBC under TLS 1.2 requires (RFC 5246 section 6.2.3.2):
++    /// drawn from AWS-LC as a value where the crate is built on it, else from the provider.
++    #[cfg(feature = "crypto-aws-lc-rs")]
++    fn record_iv(&self) -> Result<[u8; Self::BLOCK_SIZE]> {
++        aws_lc_rs::rand::generate(&aws_lc_rs::rand::SystemRandom::new())
++            .map(aws_lc_rs::rand::Random::expose)
++            .map_err(|_| Error::Crypto("no random IV".to_owned()))
++    }
++
++    /// A record's IV, unpredictable as CBC under TLS 1.2 requires (RFC 5246 section 6.2.3.2):
++    /// drawn from AWS-LC as a value where the crate is built on it, else from the provider.
++    #[cfg(not(feature = "crypto-aws-lc-rs"))]
++    fn record_iv(&self) -> Result<[u8; Self::BLOCK_SIZE]> {
++        let mut iv = [0; Self::BLOCK_SIZE];
++        self.provider.random().fill(&mut iv).map_err(crypto_error)?;
++        Ok(iv)
++    }
++
+     /// Protects one record, returning header plus ciphertext.
+     ///
+     /// # Errors
+@@ -90,8 +111,7 @@ impl CryptoCbc {
+         let padding_len = Self::BLOCK_SIZE - (payload.len() % Self::BLOCK_SIZE);
+         payload.resize(payload.len() + padding_len, (padding_len - 1) as u8);
+ 
+-        let mut iv = [0; Self::BLOCK_SIZE];
+-        self.provider.random().fill(&mut iv).map_err(crypto_error)?;
++        let iv = self.record_iv()?;
+         self.local_cipher
+             .encrypt_blocks(&iv, &mut payload)
+             .map_err(crypto_error)?;
+diff --git a/src/crypto/crypto_ccm.rs b/src/crypto/crypto_ccm.rs
+index 3e9ee16..ee21e7d 100644
+--- a/src/crypto/crypto_ccm.rs
++++ b/src/crypto/crypto_ccm.rs
+@@ -31,7 +31,6 @@ pub enum CryptoCcmTagLen {
+ 
+ /// AES-CCM authenticated encryption for DTLS records, holding the per-direction keys.
+ pub struct CryptoCcm {
+-    provider: Arc<dyn RTCCryptoProvider>,
+     local_ccm: Box<dyn AeadCipher>,
+     remote_ccm: Box<dyn AeadCipher>,
+     local_write_iv: Vec<u8>,
+@@ -61,7 +60,6 @@ impl CryptoCcm {
+             .new_aead(algorithm, remote_key)
+             .map_err(crypto_error)?;
+         Ok(CryptoCcm {
+-            provider,
+             local_ccm,
+             local_write_iv: local_write_iv.to_vec(),
+             remote_ccm,
+@@ -78,12 +76,16 @@ impl CryptoCcm {
+         let payload = &raw[RECORD_LAYER_HEADER_SIZE..];
+         let raw = &raw[..RECORD_LAYER_HEADER_SIZE];
+ 
+-        let mut nonce = [0u8; CRYPTO_CCM_NONCE_LENGTH];
+-        nonce[..4].copy_from_slice(&self.local_write_iv[..4]);
+-        self.provider
+-            .random()
+-            .fill(&mut nonce[4..])
+-            .map_err(crypto_error)?;
++        // The explicit part of the nonce is the record's epoch and sequence number, which no
++        // other record under this key carries (RFC 5288 section 3, RFC 6655 section 3).
++        let explicit = explicit_nonce(pkt_rlh);
++        let nonce: [u8; CRYPTO_CCM_NONCE_LENGTH] = std::array::from_fn(|i| {
++            if i < 4 {
++                self.local_write_iv[i]
++            } else {
++                explicit[i - 4]
++            }
++        });
+ 
+         let additional_data = generate_aead_additional_data(pkt_rlh, payload.len());
+ 
+@@ -125,9 +127,14 @@ impl CryptoCcm {
+             return Err(Error::ErrNotEnoughRoomForNonce);
+         }
+ 
+-        let mut nonce = [0; CRYPTO_CCM_NONCE_LENGTH];
+-        nonce[..4].copy_from_slice(&self.remote_write_iv[..4]);
+-        nonce[4..].copy_from_slice(&r[RECORD_LAYER_HEADER_SIZE..RECORD_LAYER_HEADER_SIZE + 8]);
++        let explicit = &r[RECORD_LAYER_HEADER_SIZE..RECORD_LAYER_HEADER_SIZE + 8];
++        let nonce: [u8; CRYPTO_CCM_NONCE_LENGTH] = std::array::from_fn(|i| {
++            if i < 4 {
++                self.remote_write_iv[i]
++            } else {
++                explicit[i - 4]
++            }
++        });
+ 
+         let out = &r[RECORD_LAYER_HEADER_SIZE + 8..];
+ 
 diff --git a/src/crypto/crypto_chacha20.rs b/src/crypto/crypto_chacha20.rs
 index f00f455..4e5bd1e 100644
 --- a/src/crypto/crypto_chacha20.rs
@@ -72,6 +189,84 @@ index f00f455..4e5bd1e 100644
          noncegen(&mut nonce[..], h.epoch, h.sequence_number);
          let out = &r[RECORD_LAYER_HEADER_SIZE..];
          if out.len() < CRYPTO_CHACHA20_TAG_LENGTH {
+diff --git a/src/crypto/crypto_gcm.rs b/src/crypto/crypto_gcm.rs
+index 8f5828a..a23e84f 100644
+--- a/src/crypto/crypto_gcm.rs
++++ b/src/crypto/crypto_gcm.rs
+@@ -18,7 +18,6 @@ const CRYPTO_GCM_NONCE_LENGTH: usize = 12;
+ 
+ /// AES-GCM authenticated encryption for DTLS records, holding the per-direction keys.
+ pub struct CryptoGcm {
+-    provider: Arc<dyn RTCCryptoProvider>,
+     local_gcm: Box<dyn AeadCipher>,
+     remote_gcm: Box<dyn AeadCipher>,
+     local_write_iv: Vec<u8>,
+@@ -43,7 +42,6 @@ impl CryptoGcm {
+             .new_aead(AeadAlgorithm::Aes128Gcm, remote_key)
+             .map_err(crypto_error)?;
+         Ok(CryptoGcm {
+-            provider,
+             local_gcm,
+             local_write_iv: local_write_iv.to_vec(),
+             remote_gcm,
+@@ -60,12 +58,16 @@ impl CryptoGcm {
+         let payload = &raw[RECORD_LAYER_HEADER_SIZE..];
+         let raw = &raw[..RECORD_LAYER_HEADER_SIZE];
+ 
+-        let mut nonce = [0u8; CRYPTO_GCM_NONCE_LENGTH];
+-        nonce[..4].copy_from_slice(&self.local_write_iv[..4]);
+-        self.provider
+-            .random()
+-            .fill(&mut nonce[4..])
+-            .map_err(crypto_error)?;
++        // The explicit part of the nonce is the record's epoch and sequence number, which no
++        // other record under this key carries (RFC 5288 section 3, RFC 6655 section 3).
++        let explicit = explicit_nonce(pkt_rlh);
++        let nonce: [u8; CRYPTO_GCM_NONCE_LENGTH] = std::array::from_fn(|i| {
++            if i < 4 {
++                self.local_write_iv[i]
++            } else {
++                explicit[i - 4]
++            }
++        });
+ 
+         let additional_data = generate_aead_additional_data(pkt_rlh, payload.len());
+ 
+@@ -115,9 +117,14 @@ impl CryptoGcm {
+             return Err(Error::ErrNotEnoughRoomForNonce);
+         }
+ 
+-        let mut nonce = [0u8; CRYPTO_GCM_NONCE_LENGTH];
+-        nonce[..4].copy_from_slice(&self.remote_write_iv[..4]);
+-        nonce[4..].copy_from_slice(&r[RECORD_LAYER_HEADER_SIZE..RECORD_LAYER_HEADER_SIZE + 8]);
++        let explicit = &r[RECORD_LAYER_HEADER_SIZE..RECORD_LAYER_HEADER_SIZE + 8];
++        let nonce: [u8; CRYPTO_GCM_NONCE_LENGTH] = std::array::from_fn(|i| {
++            if i < 4 {
++                self.remote_write_iv[i]
++            } else {
++                explicit[i - 4]
++            }
++        });
+ 
+         let out = &r[RECORD_LAYER_HEADER_SIZE + 8..];
+         if out.len() < CRYPTO_GCM_TAG_LENGTH {
+diff --git a/src/crypto/mod.rs b/src/crypto/mod.rs
+index e36323b..42e3821 100644
+--- a/src/crypto/mod.rs
++++ b/src/crypto/mod.rs
+@@ -456,6 +456,12 @@ pub(crate) fn verify_server_cert(
+     Ok(chains)
+ }
+ 
++/// The explicit nonce of an AEAD record: its epoch and 48-bit sequence number, as the additional
++/// data carries them, unique to the record under one key.
++pub(crate) fn explicit_nonce(h: &RecordLayerHeader) -> [u8; 8] {
++    ((u64::from(h.epoch) << 48) | (h.sequence_number & 0xFFFF_FFFF_FFFF)).to_be_bytes()
++}
++
+ pub(crate) fn generate_aead_additional_data(h: &RecordLayerHeader, payload_len: usize) -> [u8; 13] {
+     let mut additional_data = [0u8; 13];
+     // SequenceNumber MUST be set first
 diff --git a/src/extension/extension_use_extended_master_secret/extension_use_extended_master_secret_test.rs b/src/extension/extension_use_extended_master_secret/extension_use_extended_master_secret_test.rs
 index 8ea2379..a59f536 100644
 --- a/src/extension/extension_use_extended_master_secret/extension_use_extended_master_secret_test.rs

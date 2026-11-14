@@ -456,6 +456,12 @@ pub(crate) fn verify_server_cert(
     Ok(chains)
 }
 
+/// The explicit nonce of an AEAD record: its epoch and 48-bit sequence number, as the additional
+/// data carries them, unique to the record under one key.
+pub(crate) fn explicit_nonce(h: &RecordLayerHeader) -> [u8; 8] {
+    ((u64::from(h.epoch) << 48) | (h.sequence_number & 0xFFFF_FFFF_FFFF)).to_be_bytes()
+}
+
 pub(crate) fn generate_aead_additional_data(h: &RecordLayerHeader, payload_len: usize) -> [u8; 13] {
     let mut additional_data = [0u8; 13];
     // SequenceNumber MUST be set first

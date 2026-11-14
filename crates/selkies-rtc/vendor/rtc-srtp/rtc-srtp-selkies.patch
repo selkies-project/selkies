@@ -1,5 +1,5 @@
 diff --git a/src/cipher/cipher_aead_aes_gcm.rs b/src/cipher/cipher_aead_aes_gcm.rs
-index b0d87c3..d50fe5d 100644
+index b0d87c3..a764264 100644
 --- a/src/cipher/cipher_aead_aes_gcm.rs
 +++ b/src/cipher/cipher_aead_aes_gcm.rs
 @@ -38,23 +38,25 @@ impl Cipher for CipherAeadAesGcm {
@@ -37,6 +37,49 @@ index b0d87c3..d50fe5d 100644
      }
  
      fn decrypt_rtp(
+@@ -236,13 +238,15 @@ impl CipherAeadAesGcm {
+     ///
+     /// https://tools.ietf.org/html/rfc7714#section-8.1
+     pub(crate) fn rtp_initialization_vector(&self, header: &rtp::Header, roc: u32) -> [u8; 12] {
+-        let mut iv = [0u8; 12];
+-        BigEndian::write_u32(&mut iv[2..], header.ssrc);
+-        BigEndian::write_u32(&mut iv[6..], roc);
+-        BigEndian::write_u16(&mut iv[10..], header.sequence_number);
+-
+-        for (i, v) in iv.iter_mut().enumerate() {
+-            *v ^= self.srtp_session_salt[i];
++        let mut iv: [u8; 12] = std::array::from_fn(|i| self.srtp_session_salt[i]);
++        let fields = header
++            .ssrc
++            .to_be_bytes()
++            .into_iter()
++            .chain(roc.to_be_bytes())
++            .chain(header.sequence_number.to_be_bytes());
++        for (v, field) in iv[2..].iter_mut().zip(fields) {
++            *v ^= field;
+         }
+ 
+         iv
+@@ -256,13 +260,12 @@ impl CipherAeadAesGcm {
+     ///
+     /// https://tools.ietf.org/html/rfc7714#section-9.1
+     pub(crate) fn rtcp_initialization_vector(&self, srtcp_index: usize, ssrc: u32) -> [u8; 12] {
+-        let mut iv = [0u8; 12];
+-
+-        BigEndian::write_u32(&mut iv[2..], ssrc);
+-        BigEndian::write_u32(&mut iv[8..], srtcp_index as u32);
+-
+-        for (i, v) in iv.iter_mut().enumerate() {
+-            *v ^= self.srtcp_session_salt[i];
++        let mut iv: [u8; 12] = std::array::from_fn(|i| self.srtcp_session_salt[i]);
++        for (v, field) in iv[2..6].iter_mut().zip(ssrc.to_be_bytes()) {
++            *v ^= field;
++        }
++        for (v, field) in iv[8..].iter_mut().zip((srtcp_index as u32).to_be_bytes()) {
++            *v ^= field;
+         }
+ 
+         iv
 diff --git a/src/cipher/cipher_aes_cm_hmac_sha1.rs b/src/cipher/cipher_aes_cm_hmac_sha1.rs
 index 96db595..356fb54 100644
 --- a/src/cipher/cipher_aes_cm_hmac_sha1.rs
@@ -142,10 +185,37 @@ index 80f4c39..d5b1fd7 100644
      /// If the dst buffer does not have the capacity to hold `len(plaintext) + 10` bytes, a new one will be allocated and returned.
      pub fn encrypt_rtp(&mut self, plaintext: &[u8]) -> Result<BytesMut> {
 diff --git a/src/key_derivation.rs b/src/key_derivation.rs
-index ac01257..2cf43a9 100644
+index ac01257..6269203 100644
 --- a/src/key_derivation.rs
 +++ b/src/key_derivation.rs
-@@ -184,9 +184,9 @@ mod test {
+@@ -130,21 +130,11 @@ pub(crate) fn generate_counter(
+ ) -> [u8; 16] {
+     assert!(session_salt.len() <= 16);
+ 
+-    let mut counter = [0; 16];
+-
+-    let ssrc_be = ssrc.to_be_bytes();
+-    let rollover_be = rollover_counter.to_be_bytes();
+-    let seq_be = ((sequence_number as u32) << 16).to_be_bytes();
+-
+-    counter[4..8].copy_from_slice(&ssrc_be);
+-    counter[8..12].copy_from_slice(&rollover_be);
+-    counter[12..16].copy_from_slice(&seq_be);
+-
+-    for i in 0..session_salt.len() {
+-        counter[i] ^= session_salt[i];
+-    }
+-
+-    counter
++    let fields = ((u128::from(ssrc) << 64)
++        | (u128::from(rollover_counter) << 32)
++        | (u128::from(sequence_number) << 16))
++        .to_be_bytes();
++    std::array::from_fn(|i| session_salt.get(i).copied().unwrap_or_default() ^ fields[i])
+ }
+ 
+ #[cfg(test)]
+@@ -184,9 +174,9 @@ mod test {
              0,
              master_key.len(),
          )?;
@@ -158,7 +228,7 @@ index ac01257..2cf43a9 100644
          );
  
          let session_salt = aes_cm_key_derivation(
-@@ -272,9 +272,9 @@ mod test {
+@@ -272,9 +262,9 @@ mod test {
              0,
              master_key.len(),
          )?;

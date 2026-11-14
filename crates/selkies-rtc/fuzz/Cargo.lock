@@ -980,6 +980,7 @@ dependencies = [
 name = "rtc-dtls"
 version = "0.21.1"
 dependencies = [
+ "aws-lc-rs",
  "bytecheck",
  "byteorder",
  "bytes",

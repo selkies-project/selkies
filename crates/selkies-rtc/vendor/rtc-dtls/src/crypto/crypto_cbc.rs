@@ -18,6 +18,8 @@ use shared::error::*;
 
 /// AES-CBC encryption with a separate HMAC for DTLS records, holding the per-direction keys.
 pub struct CryptoCbc {
+    /// Draws the records' IVs where AWS-LC does not ([`Self::record_iv`]).
+    #[cfg(not(feature = "crypto-aws-lc-rs"))]
     provider: Arc<dyn RTCCryptoProvider>,
     local_cipher: Box<dyn CbcCipher>,
     remote_cipher: Box<dyn CbcCipher>,
@@ -57,12 +59,31 @@ impl CryptoCbc {
             .new_hmac(HmacAlgorithm::Sha1, remote_mac)
             .map_err(crypto_error)?;
         Ok(CryptoCbc {
+            #[cfg(not(feature = "crypto-aws-lc-rs"))]
             provider,
             local_cipher,
             write_mac,
             remote_cipher,
             read_mac,
         })
+    }
+
+    /// A record's IV, unpredictable as CBC under TLS 1.2 requires (RFC 5246 section 6.2.3.2):
+    /// drawn from AWS-LC as a value where the crate is built on it, else from the provider.
+    #[cfg(feature = "crypto-aws-lc-rs")]
+    fn record_iv(&self) -> Result<[u8; Self::BLOCK_SIZE]> {
+        aws_lc_rs::rand::generate(&aws_lc_rs::rand::SystemRandom::new())
+            .map(aws_lc_rs::rand::Random::expose)
+            .map_err(|_| Error::Crypto("no random IV".to_owned()))
+    }
+
+    /// A record's IV, unpredictable as CBC under TLS 1.2 requires (RFC 5246 section 6.2.3.2):
+    /// drawn from AWS-LC as a value where the crate is built on it, else from the provider.
+    #[cfg(not(feature = "crypto-aws-lc-rs"))]
+    fn record_iv(&self) -> Result<[u8; Self::BLOCK_SIZE]> {
+        let mut iv = [0; Self::BLOCK_SIZE];
+        self.provider.random().fill(&mut iv).map_err(crypto_error)?;
+        Ok(iv)
     }
 
     /// Protects one record, returning header plus ciphertext.
@@ -90,8 +111,7 @@ impl CryptoCbc {
         let padding_len = Self::BLOCK_SIZE - (payload.len() % Self::BLOCK_SIZE);
         payload.resize(payload.len() + padding_len, (padding_len - 1) as u8);
 
-        let mut iv = [0; Self::BLOCK_SIZE];
-        self.provider.random().fill(&mut iv).map_err(crypto_error)?;
+        let iv = self.record_iv()?;
         self.local_cipher
             .encrypt_blocks(&iv, &mut payload)
             .map_err(crypto_error)?;

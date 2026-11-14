@@ -31,7 +31,6 @@ pub enum CryptoCcmTagLen {
 
 /// AES-CCM authenticated encryption for DTLS records, holding the per-direction keys.
 pub struct CryptoCcm {
-    provider: Arc<dyn RTCCryptoProvider>,
     local_ccm: Box<dyn AeadCipher>,
     remote_ccm: Box<dyn AeadCipher>,
     local_write_iv: Vec<u8>,
@@ -61,7 +60,6 @@ impl CryptoCcm {
             .new_aead(algorithm, remote_key)
             .map_err(crypto_error)?;
         Ok(CryptoCcm {
-            provider,
             local_ccm,
             local_write_iv: local_write_iv.to_vec(),
             remote_ccm,
@@ -78,12 +76,16 @@ impl CryptoCcm {
         let payload = &raw[RECORD_LAYER_HEADER_SIZE..];
         let raw = &raw[..RECORD_LAYER_HEADER_SIZE];
 
-        let mut nonce = [0u8; CRYPTO_CCM_NONCE_LENGTH];
-        nonce[..4].copy_from_slice(&self.local_write_iv[..4]);
-        self.provider
-            .random()
-            .fill(&mut nonce[4..])
-            .map_err(crypto_error)?;
+        // The explicit part of the nonce is the record's epoch and sequence number, which no
+        // other record under this key carries (RFC 5288 section 3, RFC 6655 section 3).
+        let explicit = explicit_nonce(pkt_rlh);
+        let nonce: [u8; CRYPTO_CCM_NONCE_LENGTH] = std::array::from_fn(|i| {
+            if i < 4 {
+                self.local_write_iv[i]
+            } else {
+                explicit[i - 4]
+            }
+        });
 
         let additional_data = generate_aead_additional_data(pkt_rlh, payload.len());
 
@@ -125,9 +127,14 @@ impl CryptoCcm {
             return Err(Error::ErrNotEnoughRoomForNonce);
         }
 
-        let mut nonce = [0; CRYPTO_CCM_NONCE_LENGTH];
-        nonce[..4].copy_from_slice(&self.remote_write_iv[..4]);
-        nonce[4..].copy_from_slice(&r[RECORD_LAYER_HEADER_SIZE..RECORD_LAYER_HEADER_SIZE + 8]);
+        let explicit = &r[RECORD_LAYER_HEADER_SIZE..RECORD_LAYER_HEADER_SIZE + 8];
+        let nonce: [u8; CRYPTO_CCM_NONCE_LENGTH] = std::array::from_fn(|i| {
+            if i < 4 {
+                self.remote_write_iv[i]
+            } else {
+                explicit[i - 4]
+            }
+        });
 
         let out = &r[RECORD_LAYER_HEADER_SIZE + 8..];
 

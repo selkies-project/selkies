@@ -130,21 +130,11 @@ pub(crate) fn generate_counter(
 ) -> [u8; 16] {
     assert!(session_salt.len() <= 16);
 
-    let mut counter = [0; 16];
-
-    let ssrc_be = ssrc.to_be_bytes();
-    let rollover_be = rollover_counter.to_be_bytes();
-    let seq_be = ((sequence_number as u32) << 16).to_be_bytes();
-
-    counter[4..8].copy_from_slice(&ssrc_be);
-    counter[8..12].copy_from_slice(&rollover_be);
-    counter[12..16].copy_from_slice(&seq_be);
-
-    for i in 0..session_salt.len() {
-        counter[i] ^= session_salt[i];
-    }
-
-    counter
+    let fields = ((u128::from(ssrc) << 64)
+        | (u128::from(rollover_counter) << 32)
+        | (u128::from(sequence_number) << 16))
+        .to_be_bytes();
+    std::array::from_fn(|i| session_salt.get(i).copied().unwrap_or_default() ^ fields[i])
 }
 
 #[cfg(test)]
