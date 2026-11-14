@@ -8,15 +8,16 @@ sessions torn down and rebuilt back to back on one GPU is what has wedged an NVE
 before (a GPU page fault in the kernel log, then a capture thread blocked in the driver for
 good), so this suite churns those passes on both transports: two Chromium pages toggle
 their viewports between a windowed and a fullscreen-like size, one at a time and both at
-once, with a nested labwc session composited too when one is installed, and both streams
-have to decode new frames after every pass, each resized page's at the size it asked for.
+once, with a nested labwc session composited too when one is installed, and every stream a
+pass changes has to decode new frames after it, each resized page's at the size it asked for:
+the resized displays, and the secondary when the primary's resize moves it along the row. A
+display a pass leaves alone shows a still screen, which owes its page no frame.
 A stream that stays frozen, or short of that size, is reported with py-spy and gdb stack
 traces of the server, when those tools are present, so a lockup that only shows on some
 hardware leaves its evidence behind.
 
 Usage: python3 tests/e2e/test_wayland_layout_churn.py [websockets|webrtc]
 """
-import importlib.util
 import os
 import random
 import shutil
@@ -188,7 +189,11 @@ def drive(res: "H.Results", mode: str) -> None:
                         si ^= 1
                         sizes["secondary"] = SECONDARY_SIZES[si]
                         dpage.set_viewport_size({"width": SECONDARY_SIZES[si][0], "height": SECONDARY_SIZES[si][1]})
-                    stalled = streams_settle(pages, before, sizes, mode, STALL_SECONDS)
+                    # The streams this pass changed: the resized displays, and the secondary, whose
+                    # output the primary's resize moves along the row
+                    changed = {name: pg for name, pg in pages.items()
+                               if name in sizes or (name == "secondary" and "primary" in sizes)}
+                    stalled = streams_settle(changed, before, sizes, mode, STALL_SECONDS)
                     if stalled:
                         # Which page, the size it streams, and the size it asked for this pass.
                         frozen = f"pass {i} ({kind}) left " + "; ".join(
@@ -198,7 +203,7 @@ def drive(res: "H.Results", mode: str) -> None:
                         print("===== server log tail =====\n" + H.server_log(tail=80), flush=True)
                         break
                     time.sleep(rng.random() * MAX_GAP_SECONDS)
-                res.check(f"every one of {PASSES} layout passes kept both streams decoding",
+                res.check(f"every one of {PASSES} layout passes kept the streams it changed decoding",
                           frozen is None, frozen or "")
                 trouble = [line for line in H.server_log()[mark:].splitlines() if log_trouble(line)]
                 res.check("the server refused or failed nothing during the passes",
@@ -215,8 +220,6 @@ def drive(res: "H.Results", mode: str) -> None:
 def main() -> "H.Results":
     mode = sys.argv[1] if len(sys.argv) > 1 else "websockets"
     res = H.Results(f"wl-layout-churn-{mode}")
-    if importlib.util.find_spec("pixelflux") is None:
-        H.skip_suite("pixelflux is not installed")
     H.server_start(mode=mode, wayland=True)
     try:
         drive(res, mode)
