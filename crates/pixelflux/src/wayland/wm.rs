@@ -12,7 +12,8 @@
 //! point through the functions below instead of forcing a window fullscreen, and this module
 //! carries the answers out: a configure becomes an xdg configure and a Space mapping, a
 //! stacking order a sequence of raises, a frame a set of memory render buffers drawn with the
-//! window, an overlay one drawn over every output, an effect a transform the render tick
+//! window, an overlay one drawn over every output (cut once into the pieces its slice names,
+//! so moving or resizing it uploads nothing), an effect a transform the render tick
 //! applies, a hidden window a Space unmapping that keeps the window for its return.
 //!
 //! The policy runs inside the compositor's handlers, so a panic in it would end the stream;
@@ -66,10 +67,122 @@ pub struct FrameBuffers {
     pub parts: Vec<(Rect, MemoryRenderBuffer)>,
 }
 
-/// An overlay as a render buffer at a layout rectangle.
+/// An overlay as render buffers at a layout rectangle: the whole picture, or the pieces its
+/// slice cuts it into.
 pub struct Overlay {
     pub rect: Rect,
+    pub slice: Extents,
+    pub pieces: Vec<OverlayPiece>,
+}
+
+/// Where a piece of a sliced overlay lies along one axis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Band {
+    /// The leading border, kept at its size.
+    Start,
+    /// Between the borders, stretched.
+    Middle,
+    /// The trailing border, kept at its size.
+    End,
+}
+
+/// One piece of an overlay, its own buffer so each piece is its own element to the damage
+/// tracker.
+pub struct OverlayPiece {
     pub buffer: MemoryRenderBuffer,
+    pub column: Band,
+    pub row: Band,
+    /// The part of the buffer presented, in its logical pixels.
+    pub src: Rectangle<f64, Logical>,
+}
+
+/// The extent and source span of each band of one axis: a border at its size, and the
+/// middle read from a logical pixel inside each border it lies against, so a bilinear
+/// stretch never reaches past the middle's own pixels.
+fn bands(length: i32, start: i32, end: i32) -> Vec<(Band, i32, i32, f64, f64)> {
+    if start <= 0 && end <= 0 {
+        return vec![(Band::Middle, 0, length, 0.0, f64::from(length))];
+    }
+    let (start, end) = (
+        start.clamp(0, length),
+        end.clamp(0, length - start.clamp(0, length)),
+    );
+    let middle = length - start - end;
+    let mut out = Vec::new();
+    if start > 0 {
+        out.push((Band::Start, 0, start, 0.0, f64::from(start)));
+    }
+    if middle > 0 {
+        let lead = if start > 0 && middle > 2 { 1.0 } else { 0.0 };
+        let trail = if end > 0 && middle > 2 { 1.0 } else { 0.0 };
+        out.push((
+            Band::Middle,
+            start,
+            middle,
+            lead,
+            f64::from(middle) - lead - trail,
+        ));
+    }
+    if end > 0 {
+        out.push((Band::End, start + middle, end, 0.0, f64::from(end)));
+    }
+    out
+}
+
+/// Cut a policy's picture into the pieces its slice names, each copied into a buffer of its
+/// own once, so presenting it at any rectangle uploads nothing.
+fn overlay_pieces(image: &Image, slice: Extents) -> Vec<OverlayPiece> {
+    let scale = image.scale.max(1);
+    let (logical_w, logical_h) = (image.width as i32 / scale, image.height as i32 / scale);
+    if slice == Extents::default() || logical_w <= 0 || logical_h <= 0 {
+        return vec![OverlayPiece {
+            buffer: buffer_of(image),
+            column: Band::Middle,
+            row: Band::Middle,
+            src: Rectangle::new(
+                (0.0, 0.0).into(),
+                (f64::from(logical_w.max(1)), f64::from(logical_h.max(1))).into(),
+            ),
+        }];
+    }
+    let stride = image.width as usize * 4;
+    let mut pieces = Vec::new();
+    for (row, y, h, src_y, src_h) in bands(logical_h, slice.top, slice.bottom) {
+        for (column, x, w, src_x, src_w) in bands(logical_w, slice.left, slice.right) {
+            let (px, py) = ((x * scale) as usize, (y * scale) as usize);
+            let (pw, ph) = ((w * scale) as usize, (h * scale) as usize);
+            let mut rgba = Vec::with_capacity(pw * ph * 4);
+            for line in image.rgba[py * stride..(py + ph) * stride].chunks_exact(stride) {
+                rgba.extend_from_slice(&line[px * 4..(px + pw) * 4]);
+            }
+            pieces.push(OverlayPiece {
+                buffer: MemoryRenderBuffer::from_slice(
+                    &rgba,
+                    Fourcc::Abgr8888,
+                    (pw as i32, ph as i32),
+                    scale,
+                    OutputTransform::Normal,
+                    None,
+                ),
+                column,
+                row,
+                src: Rectangle::new((src_x, src_y).into(), (src_w, src_h).into()),
+            });
+        }
+    }
+    pieces
+}
+
+/// Where a band of one axis lands in a rectangle's span of `length` from `origin`, for an
+/// overlay whose borders are `start` and `end` long.
+fn band_span(band: Band, origin: i32, length: i32, start: i32, end: i32) -> (i32, i32) {
+    let start = start.clamp(0, length);
+    let end = end.clamp(0, length - start);
+    match band {
+        Band::Start => (origin, start),
+        Band::Middle => (origin + start, length - start - end),
+        Band::End => (origin + length - end, end),
+    }
 }
 
 /// The last picture of a window that is going away, kept so the policy's close effect has
@@ -1399,12 +1512,32 @@ fn apply(state: &mut AppState, command: Command) {
             set_frame(state, id, frame);
             mark_dirty(state);
         }
-        Command::Overlay { key, rect, image } => {
-            let buffer = buffer_of(&image);
+        Command::Overlay {
+            key,
+            rect,
+            image,
+            slice,
+        } => {
+            let pieces = overlay_pieces(&image, slice);
             if let Some(wm) = state.wm.as_mut() {
-                wm.overlays.insert(key, Overlay { rect, buffer });
+                wm.overlays.insert(
+                    key,
+                    Overlay {
+                        rect,
+                        slice,
+                        pieces,
+                    },
+                );
             }
             mark_dirty(state);
+        }
+        Command::PlaceOverlay { key, rect } => {
+            if let Some(overlay) = state.wm.as_mut().and_then(|wm| wm.overlays.get_mut(&key))
+                && overlay.rect != rect
+            {
+                overlay.rect = rect;
+                mark_dirty(state);
+            }
         }
         Command::ClearOverlay(key) => {
             if let Some(wm) = state.wm.as_mut()
@@ -1764,19 +1897,38 @@ where
         if !rect.overlaps(output) {
             continue;
         }
-        let loc =
-            Point::<i32, Logical>::from((overlay.rect.x - origin.x, overlay.rect.y - origin.y));
-        let location: Point<f64, Physical> = loc.to_f64().to_physical(Scale::from(scale));
-        if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
-            renderer,
-            location,
-            &overlay.buffer,
-            Some(1.0),
-            None,
-            Some((overlay.rect.w, overlay.rect.h).into()),
-            Kind::Unspecified,
-        ) {
-            elements.push(element);
+        let slice = overlay.slice;
+        for piece in overlay.pieces.iter().rev() {
+            let (x, w) = band_span(
+                piece.column,
+                overlay.rect.x,
+                overlay.rect.w,
+                slice.left,
+                slice.right,
+            );
+            let (y, h) = band_span(
+                piece.row,
+                overlay.rect.y,
+                overlay.rect.h,
+                slice.top,
+                slice.bottom,
+            );
+            if w <= 0 || h <= 0 {
+                continue;
+            }
+            let loc = Point::<i32, Logical>::from((x - origin.x, y - origin.y));
+            let location: Point<f64, Physical> = loc.to_f64().to_physical(Scale::from(scale));
+            if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                renderer,
+                location,
+                &piece.buffer,
+                Some(1.0),
+                Some(piece.src),
+                Some((w, h).into()),
+                Kind::Unspecified,
+            ) {
+                elements.push(element);
+            }
         }
     }
     elements
@@ -1790,4 +1942,51 @@ pub fn frame_extents(state: &AppState, id: WindowId) -> Extents {
         .and_then(|wm| wm.frames.get(&id))
         .map(|f| f.extents)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// A sliced picture is cut into nine pieces whose bands tile any rectangle with the borders
+    /// at their size, the middle read a logical pixel inside each border; an unsliced one is
+    /// one piece stretched whole.
+    #[test]
+    fn a_sliced_overlay_keeps_its_borders_and_stretches_its_middle_from_within() {
+        let image = Image {
+            width: 40,
+            height: 24,
+            scale: 2,
+            rgba: Arc::from(vec![0u8; 40 * 24 * 4]),
+        };
+        let slice = Extents {
+            top: 4,
+            left: 6,
+            right: 8,
+            bottom: 4,
+        };
+        let pieces = overlay_pieces(&image, slice);
+        assert_eq!(pieces.len(), 9);
+        let middle = pieces
+            .iter()
+            .find(|p| p.column == Band::Middle && p.row == Band::Middle)
+            .unwrap();
+        assert_eq!(
+            middle.src,
+            Rectangle::new((1.0, 1.0).into(), (4.0, 2.0).into())
+        );
+        let rect = Rect::new(100, 50, 300, 200);
+        let columns: Vec<(i32, i32)> = [Band::Start, Band::Middle, Band::End]
+            .iter()
+            .map(|b| band_span(*b, rect.x, rect.w, slice.left, slice.right))
+            .collect();
+        assert_eq!(columns, vec![(100, 6), (106, 286), (392, 8)]);
+        let whole = overlay_pieces(&image, Extents::default());
+        assert_eq!(whole.len(), 1);
+        assert_eq!(
+            band_span(Band::Middle, rect.y, rect.h, 0, 0),
+            (rect.y, rect.h)
+        );
+    }
 }

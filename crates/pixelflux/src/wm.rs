@@ -586,8 +586,22 @@ pub enum Command {
     /// and keeps its layout (`Rect::grown` by the extents) for the window list's geometry.
     Frame { id: WindowId, frame: Option<Frame> },
     /// A raster over everything on the layout (a menu, an on-screen display), replacing the
-    /// one of the same key.
-    Overlay { key: u32, rect: Rect, image: Image },
+    /// one of the same key. `slice` names the picture's borders, in logical pixels, that keep
+    /// their size at the rectangle's edges while its middle is stretched between them, read
+    /// from a logical pixel inside each border so the stretch samples the middle alone: a
+    /// picture uniform across its middle is presented exactly at any rectangle, which
+    /// [`Command::PlaceOverlay`] can then resize without a new picture. With no slice the whole
+    /// picture is stretched to the rectangle.
+    Overlay {
+        key: u32,
+        rect: Rect,
+        image: Image,
+        slice: Extents,
+    },
+    /// Present an overlay at another rectangle without a new picture, stretched as its slice
+    /// says. The X11 manager composites nothing and only moves it, so the policy sends a size
+    /// change there as a new [`Command::Overlay`].
+    PlaceOverlay { key: u32, rect: Rect },
     /// Take an overlay down.
     ClearOverlay(u32),
     /// The pointer image while the policy holds the pointer, by CSS cursor name; `default`

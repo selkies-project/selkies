@@ -502,6 +502,14 @@ impl OverlayWindow {
         let _ = conn.clear_area(true, self.window, 0, 0, 0, 0);
     }
 
+    /// Move the overlay, keeping its picture.
+    pub fn move_to(&mut self, conn: &RustConnection, x: i32, y: i32) {
+        if (x, y) != (self.rect.x, self.rect.y) {
+            self.rect = Rect::new(x, y, self.rect.w, self.rect.h);
+            let _ = conn.configure_window(self.window, &ConfigureWindowAux::new().x(x).y(y));
+        }
+    }
+
     /// Take the overlay down.
     pub fn destroy(&mut self, conn: &RustConnection) {
         if let Some(pixmap) = self.pixmap.take() {

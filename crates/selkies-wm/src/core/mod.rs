@@ -114,10 +114,11 @@ const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 const BTN_MIDDLE: u32 = 0x112;
 
-/// Overlay keys: the Alt-Tab list, the quick-tile zone a drag will land in, and the menu levels
-/// from `MENU_KEY` up.
+/// Overlay keys: the Alt-Tab list, the quick-tile zone a drag will land in and the title it
+/// carries over its glide, and the menu levels from `MENU_KEY` up.
 const CYCLE_KEY: u32 = 1;
 const TILE_KEY: u32 = 2;
+const TILE_TITLE_KEY: u32 = 3;
 const MENU_KEY: u32 = 100;
 
 /// The menu id the engine fills with the installed applications by category, whatever a menu
@@ -1728,6 +1729,8 @@ impl Engine {
                         start: self.now,
                         returning: false,
                         settled: true,
+                        sliced: false,
+                        title: None,
                     });
                     self.draw_tile_ghost();
                 }
@@ -1743,6 +1746,7 @@ impl Engine {
         match preview {
             Some((zone, output)) => {
                 let to = grab::zone_rect(zone, self.workarea(output));
+                let title = self.tile_ghost.as_ref().and_then(|g| g.title);
                 self.tile_ghost = Some(TileGhost {
                     window: id,
                     output,
@@ -1751,6 +1755,8 @@ impl Engine {
                     start: self.now,
                     returning: false,
                     settled: false,
+                    sliced: false,
+                    title,
                 });
             }
             None => {
@@ -1763,6 +1769,7 @@ impl Engine {
                 ghost.start = self.now;
                 ghost.returning = true;
                 ghost.settled = false;
+                ghost.sliced = false;
             }
         }
         self.draw_tile_ghost();
@@ -1909,13 +1916,22 @@ impl Engine {
 
     /// Take the tile ghost down at once, as a drag's end does.
     fn clear_tile_ghost(&mut self) {
-        if self.tile_ghost.take().is_some() {
+        if let Some(ghost) = self.tile_ghost.take() {
             self.out.push(Command::ClearOverlay(TILE_KEY));
+            if ghost.title.is_some() {
+                self.out.push(Command::ClearOverlay(TILE_TITLE_KEY));
+            }
         }
     }
 
     /// Draw the tile ghost where it stands now; a ghost that has returned to its window is
     /// taken down.
+    ///
+    /// A ghost gliding on Wayland is drawn once a glide, as [`tile_ghost_slices`] lays it out:
+    /// its frame and rim at the smallest size that holds their corners, sliced so the
+    /// compositor stretches the uniform middle, and its title as a picture of its own. Every
+    /// tick after only places the two, so a glide rasterizes and uploads nothing; the ghost is
+    /// drawn exactly at its size once it arrives, with the title elided for that width.
     fn draw_tile_ghost(&mut self) {
         let Some(ghost) = self.tile_ghost.as_ref() else {
             return;
@@ -1925,44 +1941,77 @@ impl Engine {
             self.clear_tile_ghost();
             return;
         }
-        let (window, output) = (ghost.window, ghost.output);
-        let scale = self.scale_of(output);
-        let look = self.theme.look;
+        let window = ghost.window;
         let Some(win) = self.win(window) else {
             self.clear_tile_ghost();
             return;
         };
         let decorated = win.decorated;
+        let style = self.theme.look.style;
+        let gliding = self.backend == Backend::Wayland && !done;
+        if gliding && let Some(ghost) = self.tile_ghost.as_ref().filter(|g| g.sliced) {
+            let title = ghost.title;
+            self.out.push(Command::PlaceOverlay { key: TILE_KEY, rect });
+            if let Some(drawn) = title {
+                self.out.push(Command::PlaceOverlay {
+                    key: TILE_TITLE_KEY,
+                    rect: tile_title_rect(style, rect, self.config.policy.buttons, drawn),
+                });
+            }
+            return;
+        }
+        let output = ghost.output;
+        let (from, to) = (ghost.from, ghost.to);
+        let had_title = ghost.title.is_some();
+        let scale = self.scale_of(output);
+        let look = self.theme.look;
         let title = win.info.title.clone();
         let app_id = win.info.app_id.clone();
         let icon_name = apps::icon_for_app_id(&self.apps().entries, &app_id).unwrap_or(app_id);
-        let frame = decorated.then(|| {
-            let extents = frame::extents(&look.style, false, false);
-            let client = Size {
-                w: (rect.w - extents.left - extents.right).max(1),
-                h: (rect.h - extents.top - extents.bottom).max(1),
-            };
-            let appearance = Appearance {
-                title: &title,
-                icon: None,
-                app_id: &icon_name,
-                active: true,
-                maximized: false,
-                shaded: false,
-                hover: None,
-                pressed: None,
-                scale,
-                shadow: false,
-                buttons: self.config.policy.buttons,
-            };
-            self.renderer.render(&look, client, &appearance)
+        let buttons = self.config.policy.buttons;
+        let slices = gliding.then(|| tile_ghost_slices(&look, decorated, buttons));
+        let size = slices.map_or(Size { w: rect.w, h: rect.h }, |(size, _)| size);
+        let shows = TileGhostLook {
+            look: &look,
+            decorated,
+            title: if gliding { "" } else { &title },
+            icon_name: &icon_name,
+            buttons,
+            scale,
+        };
+        let Some(image) = shows.picture(&mut self.renderer, size) else {
+            return;
+        };
+        self.out.push(Command::Overlay {
+            key: TILE_KEY,
+            rect,
+            image,
+            slice: slices.map(|(_, slice)| slice).unwrap_or_default(),
         });
-        if let Some(image) = tile_ghost_image(rect, scale, &look, frame.as_ref()) {
-            self.out.push(Command::Overlay {
-                key: TILE_KEY,
-                rect,
-                image,
-            });
+        let mut shown = None;
+        if gliding && decorated {
+            let narrowest = [from, to]
+                .iter()
+                .map(|r| tile_title_slot(style, *r, buttons))
+                .min_by_key(|slot| slot.w)
+                .unwrap_or_default();
+            let drawn = narrowest.w;
+            if let Some(picture) = self.renderer.render_title(&look, &title, drawn, true, scale) {
+                self.out.push(Command::Overlay {
+                    key: TILE_TITLE_KEY,
+                    rect: tile_title_rect(style, rect, buttons, drawn),
+                    image: picture,
+                    slice: Extents::default(),
+                });
+                shown = Some(drawn);
+            }
+        }
+        if had_title && shown.is_none() {
+            self.out.push(Command::ClearOverlay(TILE_TITLE_KEY));
+        }
+        if let Some(ghost) = self.tile_ghost.as_mut() {
+            ghost.sliced = gliding;
+            ghost.title = shown;
         }
     }
 
@@ -3740,6 +3789,7 @@ impl Engine {
                 key: CYCLE_KEY,
                 rect: level.rect,
                 image,
+                slice: Extents::default(),
             });
         }
     }
@@ -4175,6 +4225,7 @@ impl Engine {
                 key: level.key,
                 rect: level.rect,
                 image,
+                slice: Extents::default(),
             });
         }
         self.menu = Some(MenuState {
@@ -4213,6 +4264,7 @@ impl Engine {
                 key: level.key,
                 rect: level.rect,
                 image,
+                slice: Extents::default(),
             });
         }
     }
@@ -4270,6 +4322,7 @@ impl Engine {
                 key,
                 rect: level.rect,
                 image,
+                slice: Extents::default(),
             });
         }
         if let Some(menu) = self.menu.as_mut() {
@@ -4488,6 +4541,7 @@ impl Engine {
                         key,
                         rect: level.rect,
                         image,
+                        slice: Extents::default(),
                     });
                 }
                 if let Some(menu) = self.menu.as_mut() {
@@ -4656,6 +4710,10 @@ struct TileGhost {
     returning: bool,
     /// Whether the ghost has been drawn where it arrived, so no tick redraws it.
     settled: bool,
+    /// Whether the glide's sliced pictures are up, so a tick only places them.
+    sliced: bool,
+    /// The width the title picture was drawn at while the glide carries it over the frame.
+    title: Option<i32>,
 }
 
 /// How long the ghost takes to reach a zone.
@@ -4699,6 +4757,50 @@ impl TileGhost {
         (
             effects::between(self.from, self.to, effects::ease_out(t)),
             t >= 1.0,
+        )
+    }
+}
+
+/// What a tile ghost shows of its window.
+struct TileGhostLook<'a> {
+    look: &'a crate::theme::Look,
+    decorated: bool,
+    /// The title the frame carries; empty for a glide, which presents it as its own picture.
+    title: &'a str,
+    icon_name: &'a str,
+    buttons: frame::Buttons,
+    scale: i32,
+}
+
+impl TileGhostLook<'_> {
+    /// The ghost drawn at a frame size: the window's frame, when it has one, around the rim.
+    fn picture(&self, renderer: &mut Renderer, size: Size) -> Option<pixelflux::wm::Image> {
+        let frame = self.decorated.then(|| {
+            let extents = frame::extents(&self.look.style, false, false);
+            let client = Size {
+                w: (size.w - extents.left - extents.right).max(1),
+                h: (size.h - extents.top - extents.bottom).max(1),
+            };
+            let appearance = Appearance {
+                title: self.title,
+                icon: None,
+                app_id: self.icon_name,
+                active: true,
+                maximized: false,
+                shaded: false,
+                hover: None,
+                pressed: None,
+                scale: self.scale,
+                shadow: false,
+                buttons: self.buttons,
+            };
+            renderer.render(self.look, client, &appearance)
+        });
+        tile_ghost_image(
+            Rect::new(0, 0, size.w, size.h),
+            self.scale,
+            self.look,
+            frame.as_ref(),
         )
     }
 }
@@ -4750,6 +4852,71 @@ fn tile_ghost_image(
         }
     }
     Some(frame::image_of(pixmap, scale))
+}
+
+/// How far the tile ghost's rim and its rounded corners reach in from the client area's edge:
+/// the rim's inset and its 4 px stroke, and a pixel to spare.
+const TILE_RIM_REACH: i32 = 7;
+
+/// The smallest tile ghost picture that holds every corner of its frame and rim, and the slice
+/// that stretches it to any size: the title bar's ends (the icon, the buttons, and its rounded
+/// corners), the borders, and the rim keep their size, while everything between them is
+/// uniform across the middle, so the stretched picture is the ghost drawn at that size, its
+/// title left for a picture of its own.
+fn tile_ghost_slices(look: &crate::theme::Look, decorated: bool, buttons: frame::Buttons) -> (Size, Extents) {
+    const MIDDLE: i32 = 4;
+    let corner = look.style.corners.max(0) + TILE_RIM_REACH;
+    let slice = if decorated {
+        let e = frame::extents(&look.style, false, false);
+        let probe = Size { w: 400, h: 100 };
+        let layout = frame::layout(&look.style, probe, false, false, buttons);
+        let (title_left, title_right) = (layout.title.x, layout.size.w - layout.title.right());
+        Extents {
+            top: e.top + TILE_RIM_REACH,
+            left: (e.left + TILE_RIM_REACH).max(title_left).max(corner),
+            right: (e.right + TILE_RIM_REACH).max(title_right).max(corner),
+            bottom: e.bottom + TILE_RIM_REACH,
+        }
+    } else {
+        Extents {
+            top: corner,
+            left: corner,
+            right: corner,
+            bottom: corner,
+        }
+    };
+    let size = Size {
+        w: slice.left + MIDDLE + slice.right,
+        h: slice.top + MIDDLE + slice.bottom,
+    };
+    (size, slice)
+}
+
+/// The title's slot in the frame of a tile ghost standing at `rect`, in layout coordinates.
+fn tile_title_slot(style: selkies_draw::style::WindowStyle, rect: Rect, buttons: frame::Buttons) -> Rect {
+    let e = frame::extents(&style, false, false);
+    let client = Size {
+        w: (rect.w - e.left - e.right).max(1),
+        h: (rect.h - e.top - e.bottom).max(1),
+    };
+    let slot = frame::layout(&style, client, false, false, buttons).title;
+    Rect::new(rect.x + slot.x, rect.y + slot.y, slot.w, slot.h)
+}
+
+/// Where a title picture drawn `drawn` wide lies over a tile ghost standing at `rect`.
+fn tile_title_rect(
+    style: selkies_draw::style::WindowStyle,
+    rect: Rect,
+    buttons: frame::Buttons,
+    drawn: i32,
+) -> Rect {
+    let slot = tile_title_slot(style, rect, buttons);
+    Rect::new(
+        slot.x + frame::title_offset(style, slot.w, drawn),
+        slot.y,
+        drawn,
+        slot.h,
+    )
 }
 
 /// The icon name an app id resolves to in an icon theme: the id itself, else its last segment.
@@ -5671,7 +5838,11 @@ mod tests {
         let zone = Rect::new(640, 0, 640, 768);
         let ghost_rect = |out: &[Command]| {
             out.iter().rev().find_map(|c| match c {
-                Command::Overlay { key, rect, .. } if *key == TILE_KEY => Some(*rect),
+                Command::Overlay { key, rect, .. } | Command::PlaceOverlay { key, rect }
+                    if *key == TILE_KEY =>
+                {
+                    Some(*rect)
+                }
                 _ => None,
             })
         };
@@ -5700,11 +5871,48 @@ mod tests {
             "the ghost starts at the window and glides into the zone"
         );
         assert!(out.iter().any(|c| matches!(c, Command::WakeAt(_))));
+        let drawn = |out: &[Command], wanted: u32| {
+            out.iter().rev().find_map(|c| match c {
+                Command::Overlay { key, slice, .. } if *key == wanted => Some(*slice),
+                _ => None,
+            })
+        };
+        assert!(
+            drawn(&out, TILE_KEY).is_some_and(|slice| slice != Extents::default()),
+            "the glide's picture is sliced for the compositor to stretch"
+        );
+        assert!(
+            drawn(&out, TILE_TITLE_KEY).is_some(),
+            "the title glides as a picture of its own"
+        );
+        out.clear();
+        engine.now += Duration::from_millis(40);
+        engine.tick(engine.now);
+        out.append(&mut engine.out);
+        let placed = ghost_rect(&out).expect("a tick of the glide places the ghost");
+        assert!(placed != first && placed != zone);
+        assert!(
+            drawn(&out, TILE_KEY).is_none() && drawn(&out, TILE_TITLE_KEY).is_none(),
+            "a tick of the glide draws no picture"
+        );
+        assert!(
+            out.iter()
+                .any(|c| matches!(c, Command::PlaceOverlay { key, .. } if *key == TILE_TITLE_KEY))
+        );
         out.clear();
         engine.now += Duration::from_millis(500);
         engine.tick(engine.now);
         out.append(&mut engine.out);
         assert_eq!(ghost_rect(&out), Some(zone));
+        assert_eq!(
+            drawn(&out, TILE_KEY),
+            Some(Extents::default()),
+            "the ghost that arrived is drawn exactly at its size"
+        );
+        assert!(
+            out.iter()
+                .any(|c| matches!(c, Command::ClearOverlay(k) if *k == TILE_TITLE_KEY))
+        );
         out.clear();
         engine.handle(press(1279.0, 400.0, false), &mut out);
         assert!(
@@ -5715,6 +5923,85 @@ mod tests {
         assert_eq!(engine.windows[&1].rect, grab::client_of(zone, e));
         assert_eq!(engine.effects.kind(1), Some(EffectKind::Resize));
         assert_eq!(engine.windows[&1].saved.map(|r| (r.w, r.h)), Some((600, 400)));
+    }
+
+    /// The picture a glide slices, stretched as the compositor stretches it (each border at
+    /// its size, the middle from its own pixels), is the tile ghost drawn at that size without
+    /// its title, framed or not, at either scale, but for an anti-aliased pixel of a corner,
+    /// which the rasterizer covers a little differently along a longer edge.
+    #[test]
+    fn a_sliced_tile_ghost_stretches_into_the_ghost_drawn_at_its_size() {
+        let (mut engine, _) = engine();
+        let look = engine.theme.look;
+        let buttons = engine.config.policy.buttons;
+        let stretch = |image: &pixelflux::wm::Image, slice: Extents, w: i32, h: i32| {
+            let s = image.scale;
+            let (iw, ih) = (image.width as i32, image.height as i32);
+            let source = |p: i32, out: i32, len: i32, start: i32, end: i32| {
+                if p < start * s {
+                    p
+                } else if p >= out - end * s {
+                    p - (out - len)
+                } else {
+                    start * s + (len - (start + end) * s) / 2
+                }
+            };
+            let (ow, oh) = (w * s, h * s);
+            let mut rgba = Vec::with_capacity((ow * oh * 4) as usize);
+            for y in 0..oh {
+                let sy = source(y, oh, ih, slice.top, slice.bottom);
+                for x in 0..ow {
+                    let sx = source(x, ow, iw, slice.left, slice.right);
+                    let at = ((sy * iw + sx) * 4) as usize;
+                    rgba.extend_from_slice(&image.rgba[at..at + 4]);
+                }
+            }
+            rgba
+        };
+        for decorated in [true, false] {
+            for scale in [1, 2] {
+                let shows = TileGhostLook {
+                    look: &look,
+                    decorated,
+                    title: "",
+                    icon_name: "foot",
+                    buttons,
+                    scale,
+                };
+                let (size, slice) = tile_ghost_slices(&look, decorated, buttons);
+                let sliced = shows.picture(&mut engine.renderer, size).unwrap();
+                for (w, h) in [(640, 768), (333, 211), (size.w + 1, size.h + 3)] {
+                    let exact = shows.picture(&mut engine.renderer, Size { w, h }).unwrap();
+                    let stretched = stretch(&sliced, slice, w, h);
+                    let (pw, ph) = (w * scale, h * scale);
+                    let in_corner = |x: i32, y: i32| {
+                        (x < slice.left * scale || x >= pw - slice.right * scale)
+                            && (y < slice.top * scale || y >= ph - slice.bottom * scale)
+                    };
+                    let differs: Vec<(i32, i32)> = stretched
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .zip(exact.rgba.as_chunks::<4>().0)
+                        .enumerate()
+                        .filter(|(_, (a, b))| a != b)
+                        .map(|(i, (a, b))| {
+                            let (x, y) = (i as i32 % pw, i as i32 / pw);
+                            let off = a.iter().zip(b.iter()).map(|(p, q)| p.abs_diff(*q)).max();
+                            assert!(
+                                in_corner(x, y) && off <= Some(16),
+                                "decorated {decorated}, scale {scale}, {w}x{h}: ({x}, {y}) off by {off:?}"
+                            );
+                            (x, y)
+                        })
+                        .collect();
+                    assert!(
+                        differs.len() <= 4,
+                        "decorated {decorated}, scale {scale}, {w}x{h}: {differs:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// A floating bar attaches while a window reaches the workarea's reserved edge: a

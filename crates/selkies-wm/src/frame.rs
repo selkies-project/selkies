@@ -104,6 +104,25 @@ pub fn extents(style: &WindowStyle, maximized: bool, shaded: bool) -> Extents {
     }
 }
 
+/// How the style aligns a title in its slot: wide flat buttons read it from the left, the
+/// others center it.
+fn title_align(style: WindowStyle) -> Align {
+    if style.glyphs == Glyphs::Wide {
+        Align::Left
+    } else {
+        Align::Center
+    }
+}
+
+/// Where a title drawn into a slot `drawn` wide lies in a slot `slot` wide, from the slot's
+/// left edge.
+pub fn title_offset(style: WindowStyle, slot: i32, drawn: i32) -> i32 {
+    match title_align(style) {
+        Align::Center => (slot - drawn) / 2,
+        _ => 0,
+    }
+}
+
 /// Which buttons a title bar shows, the image's choice over the theme's three.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Buttons {
@@ -462,34 +481,84 @@ impl Renderer {
             {
                 canvas.draw_image_fit(&icon, draw_rect(icon_rect));
             }
-            let title_rect = draw_rect(layout.title);
-            if !appearance.title.is_empty() && title_rect.w > 0 {
-                let shaped = shape_fit(
-                    &mut self.fonts,
-                    appearance.title,
-                    TITLE_FONT * scale as f32,
-                    title_rect.w as f32 * scale as f32,
-                );
-                let align = if style.glyphs == Glyphs::Wide {
-                    Align::Left
-                } else {
-                    Align::Center
-                };
-                canvas.draw_text(
-                    &mut self.fonts,
-                    &shaped,
-                    title_rect.x,
-                    title_rect.y + title_rect.h / 2,
-                    title_rect.w,
-                    align,
-                    label,
-                );
-            }
+            self.draw_title(
+                &mut canvas,
+                *style,
+                draw_rect(layout.title),
+                appearance.title,
+                label,
+                scale,
+            );
             for (context, rect) in &layout.buttons {
                 self.draw_button(&mut canvas, look, *context, draw_rect(*rect), appearance);
             }
         }
         Some(image_of(pixmap, scale))
+    }
+
+    /// The title alone, as the title bar draws it into a slot `width` wide, on a transparent
+    /// picture of the slot's size: what a caller that moves the title over a bar drawn without
+    /// one presents, at the offset [`title_offset`] gives it in a slot of another width.
+    pub fn render_title(
+        &mut self,
+        look: &Look,
+        title: &str,
+        width: i32,
+        active: bool,
+        scale: i32,
+    ) -> Option<Image> {
+        if title.is_empty() || width <= 0 {
+            return None;
+        }
+        let scale = scale.max(1);
+        let mut pixmap = Pixmap::new((width * scale) as u32, (TITLE_HEIGHT * scale) as u32)?;
+        let label = if active {
+            look.palette.label_active
+        } else {
+            look.palette.label_inactive
+        };
+        {
+            let mut canvas = Canvas::new(pixmap.as_mut(), scale);
+            self.draw_title(
+                &mut canvas,
+                look.style,
+                DrawRect::new(0, 0, width, TITLE_HEIGHT),
+                title,
+                label,
+                scale,
+            );
+        }
+        Some(image_of(pixmap, scale))
+    }
+
+    /// Draw a title fitted into its slot, aligned as the style places it.
+    fn draw_title(
+        &mut self,
+        canvas: &mut Canvas<'_>,
+        style: WindowStyle,
+        slot: DrawRect,
+        title: &str,
+        label: Color,
+        scale: i32,
+    ) {
+        if title.is_empty() || slot.w <= 0 {
+            return;
+        }
+        let shaped = shape_fit(
+            &mut self.fonts,
+            title,
+            TITLE_FONT * scale as f32,
+            slot.w as f32 * scale as f32,
+        );
+        canvas.draw_text(
+            &mut self.fonts,
+            &shaped,
+            slot.x,
+            slot.y + slot.h / 2,
+            slot.w,
+            title_align(style),
+            label,
+        );
     }
 
     fn draw_button(

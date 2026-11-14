@@ -1600,7 +1600,7 @@ impl Manager {
                 }
                 self.publish_states(window);
             }
-            Command::Overlay { key, rect, image } => {
+            Command::Overlay { key, rect, image, .. } => {
                 let rect = self.to_pixels(rect);
                 match self.overlays.get_mut(&key) {
                     Some(overlay) => overlay.update(&self.conn, &self.visual, rect, &image),
@@ -1611,6 +1611,12 @@ impl Manager {
                     }
                 }
                 self.set_grabbed(true);
+            }
+            Command::PlaceOverlay { key, rect } => {
+                let rect = self.to_pixels(rect);
+                if let Some(overlay) = self.overlays.get_mut(&key) {
+                    overlay.move_to(&self.conn, rect.x, rect.y);
+                }
             }
             Command::ClearOverlay(key) => {
                 if let Some(mut overlay) = self.overlays.remove(&key) {
