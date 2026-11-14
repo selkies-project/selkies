@@ -29,7 +29,7 @@ on:
         type: string
         default: integration
       wheels_ready:
-        description: The caller already built the selkies wheel and the pixelflux and pcmflux wheels in this run
+        description: The caller already built the selkies wheel in this run, and the pixelflux and pcmflux wheels where the soak tier runs
         type: boolean
         default: false
       suites:
@@ -222,10 +222,11 @@ jobs:
             exit 1
           fi
 
-  # The server the suites drive is the one this run's selkies wheel carries,
-  # and the pixelflux and pcmflux they drive beside it ride wheels this run has in
-  # hand rather than an index. The caller passes them in as artifacts when it
-  # has already built them; a standalone run builds all three here.
+  # The server the suites drive is the one this run's selkies wheel carries.
+  # The soak tier drives pixelflux's and pcmflux's Python APIs as well, through
+  # wheels this run has in hand rather than an index, which only it installs.
+  # The caller passes them in as artifacts when it has already built them; a
+  # standalone run builds them here.
   wheel:
     name: Build wheel
     if: ${{ !inputs.wheels_ready && (github.event_name != 'schedule' || github.repository == 'selkies-project/selkies') }}
@@ -235,7 +236,7 @@ jobs:
 
   wheels:
     name: pixelflux and pcmflux wheels
-    if: ${{ !inputs.wheels_ready && (github.event_name != 'schedule' || github.repository == 'selkies-project/selkies') }}
+    if: ${{ !inputs.wheels_ready && contains(inputs.tiers || '', 'soak') && (github.event_name != 'schedule' || github.repository == 'selkies-project/selkies') }}
     permissions:
       contents: read
     uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
@@ -427,8 +428,8 @@ jobs:
       # server and browser the suites start.
       - name: Verify the patched labwc
         run: labwc --version
-      # Whichever jobs built them left the Selkies wheel and both native wheels
-      # from this checkout here.
+      # Whichever jobs built them left the Selkies wheel, and for the soak tier
+      # both native wheels, from this checkout here.
       - name: Download the selkies wheel
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -446,6 +447,7 @@ jobs:
           "${RUNNER_TEMP}/camera/bin/virtual_camera" --bogus 2>&1 | grep -q "unknown option"
           echo "SELKIES_TEST_CAMERA=${RUNNER_TEMP}/camera/bin/virtual_camera" >> "$GITHUB_ENV"
       - name: Download the pixelflux wheels (local crates)
+        if: contains(inputs.tiers || '', 'soak')
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with:
@@ -453,6 +455,7 @@ jobs:
           path: pixelflux-pcmflux-wheels/
           merge-multiple: true
       - name: Download the pcmflux wheels (local crates)
+        if: contains(inputs.tiers || '', 'soak')
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with:
@@ -469,7 +472,10 @@ jobs:
           "${server}" --version
           echo "SELKIES_TEST_SERVER=${server}" >> "$GITHUB_ENV"
           scripts/ci/retry.sh 5 60 python -m pip install -r tests/requirements.txt
-          # Install the exact local native wheels downloaded above.
+      - name: Install the pixelflux and pcmflux wheels the soak tier drives
+        if: contains(inputs.tiers || '', 'soak')
+        run: |
+          # The exact local native wheels downloaded above
           mkdir -p pixelflux-pcmflux-wheels
           SELECTOR="${GITHUB_WORKSPACE}/.devcontainer/features/desktop-selkies/src/select-compatible-wheels.py"
           # Fatal rather than a note: a run that quietly took an index's copy

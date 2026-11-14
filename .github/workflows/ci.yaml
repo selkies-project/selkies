@@ -312,10 +312,9 @@ jobs:
 
   tests:
     name: Test suites
-    # The wheels are a dependency, not just an ordering constraint: the suites
-    # run the server this run's wheel carries, and drive the pixelflux and pcmflux it
-    # links through that stack's own wheels
-    needs: [python-compat, wheel, pixelflux-pcmflux]
+    # The wheel is a dependency, not just an ordering constraint: the suites
+    # run the server this run's wheel carries
+    needs: [python-compat, wheel]
     # The browser tier runs nightly from tests.yaml; this keeps the push and
     # pull-request path at the suites that need no browser install
     permissions:
@@ -332,7 +331,7 @@ jobs:
   # runs nightly from tests.yaml
   e2e-smoke:
     name: E2E smoke
-    needs: [python-compat, wheel, pixelflux-pcmflux]
+    needs: [python-compat, wheel]
     permissions:
       contents: read
     uses: ./.github/workflows/tests.yaml
@@ -437,9 +436,8 @@ jobs:
   pixelflux-pcmflux:
     name: pixelflux and pcmflux wheels
     # Both optional Python bridges build from the crates the server links.
-    # Their wheels land in this run's artifacts, where the suites read them,
-    # and in main's pre-release, at the development version the server's
-    # wheel carries.
+    # Their wheels land in main's pre-release, at the development version the
+    # server's wheel carries.
     permissions:
       contents: read
     uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
