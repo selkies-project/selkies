@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """Software H.264 streams with whichever encoder the server's pixelflux was built
 with: libx264 (the default build) or Cisco OpenH264 (a PIXELFLUX_ENABLE_GPL=0
-build). Selkies never chooses between them — it reads pixelflux.SOFTWARE_ENCODERS["h264"]
-— so the same session has to come up, name that encoder in the server log, and
-decode in a real browser on either build: `h264enc` forced onto the CPU, on X11
-and on Wayland.
+build). Selkies never chooses between them — it takes the one its pixelflux was
+built with — so the same session has to come up, name that encoder in the server
+log, and decode in a real browser on either build: `h264enc` forced onto the CPU,
+on X11 and on Wayland.
 
 Run with SELKIES_TEST_SERVER pointing at the server whose pixelflux build is under
-test, and the suites' interpreter carrying the matching pixelflux wheel, whose
-SOFTWARE_ENCODERS names the encoder to expect.
+test; its `--version` line names the encoder to expect.
 
 Usage: python3 tests/e2e/test_software_h264.py [x11|wl|all]
 """
 import os
+import re
 import subprocess
 import sys
 import time
@@ -53,13 +53,12 @@ INSTRUMENT_JS = """
 
 
 def server_software_encoder() -> Optional[str]:
-    """The software H.264 encoder of the pixelflux build the server interpreter
-    imports ("x264" | "openh264"), or None when it does not say."""
-    out = subprocess.run(
-        [H.PYTHON, "-c", "import pixelflux; print(pixelflux.SOFTWARE_ENCODERS['h264'])"],
-        capture_output=True, text=True, timeout=60)
-    name = out.stdout.strip()
-    return name or None
+    """The software H.264 encoder of the server's pixelflux build ("x264" |
+    "openh264"), as its `--version` line names it ("software h264=x264,..."), or
+    None when it does not say."""
+    out = subprocess.run([H.SERVER, "--version"], capture_output=True, text=True, timeout=60)
+    found = re.search(r"\bsoftware [^)]*\bh264=([A-Za-z0-9_-]+)", out.stdout)
+    return found.group(1) if found else None
 
 
 SINK_IDS = ("videoCanvas", "videoWorkerCanvas", "videoStream")
