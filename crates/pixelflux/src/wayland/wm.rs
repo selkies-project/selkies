@@ -548,6 +548,14 @@ pub fn window_added(state: &mut AppState, window: &Window) {
     dispatch(state, Event::Added(info));
 }
 
+/// Whether the policy has been told of the window and not yet of its end.
+pub fn knows(state: &AppState, id: WindowId) -> bool {
+    state
+        .wm
+        .as_ref()
+        .is_some_and(|wm| wm.known.contains_key(&id))
+}
+
 /// Tell the policy a window's details changed.
 pub fn window_changed(state: &mut AppState, window: &Window) {
     let Some(id) = window_id(window) else {
@@ -573,11 +581,7 @@ pub fn window_mapped(state: &mut AppState, window: &Window, size: Size) {
     if !active(state) {
         return;
     }
-    if !state
-        .wm
-        .as_ref()
-        .is_some_and(|wm| wm.known.contains_key(&id))
-    {
+    if !knows(state, id) {
         window_added(state, window);
     }
     if let Some(wm) = state.wm.as_mut() {

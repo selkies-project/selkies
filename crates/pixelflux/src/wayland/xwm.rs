@@ -783,21 +783,30 @@ impl XwmHandler for AppState {
         }
     }
 
+    /// A client maps a top-level window: manage it and place it where the policy says.
+    ///
+    /// A window withdrawn and mapped again, as an application hiding to its tray icon does,
+    /// keeps the entry and id it had, as a Wayland toplevel keeps its own across a null-buffer
+    /// unmap: a second entry for the same surface would leave [`window_of`] answering with
+    /// the unmapped one, whose moves, maximizes, and fullscreen requests the policy ignores.
     fn map_window_request(&mut self, _xwm: XwmId, surface: X11Surface) {
-        let output = self.pointer_display();
-        let window = Window::new_x11_window(surface.clone());
-        let id = NEXT_WINDOW_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        window
-            .user_data()
-            .insert_if_missing_threadsafe(|| WindowMeta {
-                id,
-                output: std::sync::atomic::AtomicU32::new(output),
-                placed: std::sync::atomic::AtomicBool::new(true),
-                parked: std::sync::atomic::AtomicBool::new(false),
-            });
-        self.xwm.windows.insert(id, window.clone());
+        let (id, window) = window_of(self, &surface).unwrap_or_else(|| {
+            let window = Window::new_x11_window(surface.clone());
+            let id = NEXT_WINDOW_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let output = self.pointer_display();
+            window
+                .user_data()
+                .insert_if_missing_threadsafe(|| WindowMeta {
+                    id,
+                    output: std::sync::atomic::AtomicU32::new(output),
+                    placed: std::sync::atomic::AtomicBool::new(true),
+                    parked: std::sync::atomic::AtomicBool::new(false),
+                });
+            self.xwm.windows.insert(id, window.clone());
+            (id, window)
+        });
         let _ = surface.set_mapped(true);
-        if wm::active(self) {
+        if wm::active(self) && !wm::knows(self, id) {
             wm::window_added(self, &window);
         }
         let rect = wm::rect_of(self, id)
