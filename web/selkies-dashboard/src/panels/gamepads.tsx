@@ -149,9 +149,9 @@ const subscribeCoarsePointer = (onChange: () => void) => {
 const isCoarsePointer = () => coarsePointer?.matches ?? false;
 
 /**
- * The button that asks the core to show the virtual keyboard while the primary
- * pointer is coarse (a phone, a tablet, a convertible in its tablet posture)
- * and no keyboard is attached, unless the keyboard toggle has hidden it.
+ * The button that raises the virtual keyboard, in its own click, while the
+ * primary pointer is coarse (a phone, a tablet, a convertible in its tablet
+ * posture) and no keyboard is attached, unless the keyboard toggle has hidden it.
  */
 export function VirtualKeyboardButton() {
   const d = useDashboard();

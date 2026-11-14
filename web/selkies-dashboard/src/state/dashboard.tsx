@@ -28,6 +28,7 @@
  */
 import * as React from "react";
 import { fragmentWithSessionToken } from "../../../selkies-web-core/lib/page-url.ts";
+import { showVirtualKeyboard as raiseVirtualKeyboard } from "../../../selkies-web-core/lib/virtual-keyboard.ts";
 import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY, USER_CHORDS_KEY, chordEvents,
   formatChord, parseChord, readUserChords, writeUserChords, type ChordEvent } from "../../../selkies-web-core/lib/touch-controls.ts";
 import { computeRenderableSettings, getLastServerSettings, getPrefixedKey, getPrintJobs, hardwareKeyboard,
@@ -114,7 +115,7 @@ export interface DashboardState {
   /** The floating on-screen keyboard button is shown. */
   keyboardButton: boolean;
   toggleKeyboardButton: () => void;
-  /** Pops the system's on-screen keyboard through the core's assist input. */
+  /** Pops the system's on-screen keyboard through the core's assist input; called from the tap's own handler. */
   showVirtualKeyboard: () => void;
   /** The stats overlay is on screen, kept across reloads. */
   statsOpen: boolean;
@@ -350,16 +351,21 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
   }, [keyboardAttached]);
 
   /**
-   * Pops the on-screen keyboard by focusing the core's keyboard-assist input,
-   * releasing it again on the next touch of the interaction overlay. An
-   * attached keyboard is no longer assumed, so the floating button comes back.
+   * Pops the on-screen keyboard by focusing the core's keyboard-assist input
+   * (lib/virtual-keyboard.ts), which the next touch of the stream releases.
+   * The focus is made here, within the button's own click: iOS WebKit raises
+   * the keyboard only for a focus made while the page handles the user's tap,
+   * which the task of a message to the core is not. A viewer types nothing,
+   * as the core has it. Asking clears the attached-keyboard verdict, so the
+   * floating button comes back.
    */
-  // Asked for, the on-screen keyboard is the core's to raise (lib/virtual-keyboard.ts), in the same tap: an attached
-  // keyboard is no longer assumed, so the floating button comes back.
   const showVirtualKeyboard = React.useCallback(() => {
+    if (isViewer) return;
     keyboardWatch.reset();
-    window.postMessage({ type: "showVirtualKeyboard" }, window.location.origin);
-  }, []);
+    if (!raiseVirtualKeyboard(document.getElementById("overlayInput"))) {
+      console.error("Could not find #keyboard-input-assist element to focus.");
+    }
+  }, [isViewer]);
 
   /** Toggles a held modifier soft key; the core's synthetic-key mode is raised while any is held. */
   const holdKey = React.useCallback((key: keyof HeldKeys, code: string) => {

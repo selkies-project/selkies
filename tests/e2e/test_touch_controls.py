@@ -220,9 +220,22 @@ VK_LABEL = "Virtual Keyboard"
 # navigator.virtualKeyboard's show and hide, counted (the engine's own keyboard is the OS's, not the page's).
 VK_SPY = """() => { const vk = navigator.virtualKeyboard; window.__vk = { shown: 0, hidden: 0 };
   if (vk) { vk.show = () => { window.__vk.shown++; }; vk.hide = () => { window.__vk.hidden++; }; } }"""
+# The event each focus of the hidden field ran within (`window.event`): iOS WebKit raises its keyboard only
+# for a focus made while the page handles the user's own tap, so a later task's focus leaves it down.
+FOCUS_SPY = """() => { window.__assistFocus = [];
+  if (window.__assistFocusSpied) return;
+  window.__assistFocusSpied = true;
+  const real = HTMLElement.prototype.focus;
+  HTMLElement.prototype.focus = function (...args) {
+    if (this.id === 'keyboard-input-assist') {
+      const e = window.event;
+      window.__assistFocus.push(e ? (e.isTrusted ? 'trusted ' : '') + e.type : 'no event');
+    }
+    return real.apply(this, args);
+  }; }"""
 VK_READ = """() => { const f = document.getElementById('keyboard-input-assist');
   return { ...window.__vk, api: !!navigator.virtualKeyboard, focused: document.activeElement === f,
-           policy: f && f.getAttribute('virtualkeyboardpolicy') }; }"""
+           policy: f && f.getAttribute('virtualkeyboardpolicy'), within: window.__assistFocus }; }"""
 
 
 def keyboard_button_block(res: "H.Results", dashboard: str, engine: str) -> None:
@@ -271,20 +284,24 @@ def keyboard_button_block(res: "H.Results", dashboard: str, engine: str) -> None
                           button.count() > 0 and button.first.is_visible())
                 # Each button that raises the keyboard asks the engine for it outright where it has the
                 # VirtualKeyboard API (Chromium on Windows leaves it down for a field focused by script, and
-                # always with a keyboard attached), with the hidden field focused under the manual policy.
-                raisers = [("the floating keyboard button", "[data-virtual-keyboard-button]")]
+                # always with a keyboard attached), with the hidden field focused under the manual policy, and
+                # focuses the field within the tap's own click, which iOS WebKit needs to raise its keyboard.
+                raisers =[("the floating keyboard button", "[data-virtual-keyboard-button]")]
                 if dashboard != "default":
                     raisers.append(("the soft keys' keyboard button", f'[data-soft-keys] button[aria-label="{VK_LABEL}"]'))
                 for name, selector in raisers:
                     if "soft keys" in name and not page.locator(selector).count():
                         open_soft_keys(page, dashboard)
                     page.evaluate(VK_SPY)
-                    page.locator(selector).first.click()
+                    page.evaluate(FOCUS_SPY)
+                    page.locator(selector).first.tap()
                     time.sleep(0.5)
                     got = page.evaluate(VK_READ)
                     # An engine without the API raises it on the focus alone.
                     asked = got["shown"] >= 1 and got["policy"] == "manual" if got["api"] else True
                     res.check(f"{tag}: {name} raises the on-screen keyboard", got["focused"] and asked, got)
+                    res.check(f"{tag}: {name} focuses the field within the tap's own click",
+                              bool(got["within"]) and all(w == "trusted click" for w in got["within"]), got["within"])
                     page.evaluate("document.activeElement && document.activeElement.blur()")
                     time.sleep(0.3)
                     if got["api"]:

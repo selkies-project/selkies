@@ -88,7 +88,7 @@ All messages sent to the client must be JavaScript objects with a `type` propert
     *   **Description:** Enables or disables gamepad input polling.
 *   **`showVirtualKeyboard`**
     *   **Payload:** `{ type: 'showVirtualKeyboard' }`
-    *   **Description:** Focuses a hidden input element to force mobile devices to display their OS virtual keyboard. *(Ignored in shared mode).*
+    *   **Description:** Focuses a hidden input element to force mobile devices to display their OS virtual keyboard. *(Ignored in shared mode).* iOS raises its keyboard only for a focus made within the user's tap, which a message's own task is not: a button on the page calls `showVirtualKeyboard` from `lib/virtual-keyboard.ts` in its own click handler.
 *   **`setUseBrowserCursors`**
     *   **Payload:** `{ type: 'setUseBrowserCursors', value: <boolean> }`
     *   **Description:** Toggles between using local browser cursors vs. server-rendered video cursors.

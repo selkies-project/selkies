@@ -7,8 +7,11 @@
 /**
  * The system's on-screen keyboard, raised for the session: a hidden text
  * field (`#keyboard-input-assist`) takes the focus, and the input handler
- * relays what is typed into it. Both cores keep one such field and answer the
- * dashboard's `showVirtualKeyboard` with `showVirtualKeyboard` below.
+ * relays what is typed into it. Both cores keep one such field and answer a
+ * `showVirtualKeyboard` message with `showVirtualKeyboard` below; the
+ * dashboard calls it from its button's own click, since iOS WebKit
+ * raises the keyboard only for a focus made while the page handles the
+ * user's tap, and a message is handled in a task of its own after it.
  *
  * Focus alone raises the keyboard on a phone, but not everywhere: Chromium on
  * Windows leaves the touch keyboard down for a field focused by script from a
