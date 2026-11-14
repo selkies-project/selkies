@@ -372,6 +372,12 @@ impl NotificationState {
         self.dirty = true;
     }
 
+    /// Drops a pending redraw that no surface can take, so it is not left
+    /// due on every wake.
+    pub fn drop_redraw(&mut self) {
+        self.dirty = false;
+    }
+
     /// Drops every layout and body, after a theme, font, or scale change.
     pub fn invalidate(&mut self) {
         for card in &mut self.cards {

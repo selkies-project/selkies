@@ -1495,7 +1495,9 @@ impl Desktop {
     ///
     /// # Returns
     /// The frame to present, or `None` when nothing changed or the surface
-    /// is not configured yet.
+    /// is not configured yet.  A stack with nothing to draw owes no frame, so
+    /// its pending redraw is dropped rather than left due on every wake; the
+    /// surface's configure marks it again.
     pub fn render_notifications(&mut self) -> Option<Frame<'_>> {
         let (width, height) = self.notifications.surface_size();
         let top = notifications::EDGE
@@ -1515,6 +1517,7 @@ impl Desktop {
         }
         let geometry = self.notify_geometry;
         if height == 0 || !geometry.configured {
+            self.notifications.drop_redraw();
             return None;
         }
         let (w, h) = (
@@ -3754,7 +3757,16 @@ fn seed_favorites(config: &mut Config, apps: &Apps) {
 
 #[cfg(test)]
 mod tests {
-    use super::edge_display;
+    use super::{Desktop, edge_display};
+    use std::time::Instant;
+
+    #[test]
+    fn a_restyle_with_no_notification_on_screen_leaves_nothing_due() {
+        let mut d = Desktop::load(false);
+        d.notifications.invalidate();
+        assert!(d.render_notifications().is_none());
+        assert_eq!(d.notifications.next_deadline(Instant::now()), None);
+    }
 
     #[test]
     fn a_display_that_went_away_no_longer_claims_its_corner() {
