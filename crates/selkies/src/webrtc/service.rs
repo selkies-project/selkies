@@ -424,7 +424,13 @@ impl WebRtcService {
     /// # Errors
     /// A mux port could not be bound.
     pub async fn begin(&self) -> Result<(), String> {
-        self.st.lock().shutdown = false;
+        {
+            let mut st = self.st.lock();
+            st.shutdown = false;
+            // A page of an earlier run that held a pointer lock left without `p,0`; this run's
+            // pages ask again under their own.
+            st.pointer_visible = false;
+        }
         self.stopped.send_replace(false);
         self.ensure_primary_pipeline();
         self.engine.open_ice_muxes().await?;
@@ -1753,6 +1759,12 @@ impl EngineHost for WebRtcService {
             st.tab_used_at.retain(|_, at| *at >= stale);
             st.peer_tabs.remove(peer).flatten()
         };
+        // A page that left under a pointer lock sent no `p,0`: with no page left, none asks for
+        // the cursor in the video, and the next draws its own.
+        let none_left = self.engine.peers.lock().is_empty();
+        if none_left && self.st.lock().pointer_visible {
+            self.handle_pointer_visible(false).await;
+        }
         let display = entry.display_id.clone();
         let owned = tab
             .as_ref()

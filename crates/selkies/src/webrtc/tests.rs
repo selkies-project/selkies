@@ -1291,6 +1291,46 @@ async fn a_capture_composites_the_cursor_only_while_a_page_asks_for_it() {
     rig.service.shutdown().await;
 }
 
+/// A run of the service, as a switch from WebSockets starts one, leaves the cursor to its pages
+/// though a page of the run before held a pointer lock when it went.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_starts_with_the_cursor_left_to_the_page() {
+    let rig = Rig::new((1920, 1080), quick());
+    rig.service.st.lock().pointer_visible = true;
+    rig.service.begin().await.unwrap();
+    let composited = {
+        let st = rig.service.st.lock();
+        WebRtcService::pipeline_config(&st, "primary", 1280, 720, None).capture_cursor
+    };
+    assert!(!composited, "the page draws the cursor");
+    rig.service.shutdown().await;
+}
+
+/// A page that leaves under a pointer lock sends no `p,0`: the cursor stays in the video while
+/// another page is left, which may hold the lock, and goes back to the pages once none is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_last_page_leaving_under_a_lock_leaves_the_cursor_to_the_next() {
+    let rig = Rig::new((1920, 1080), quick());
+    rig.service.begin().await.unwrap();
+    let composited = || {
+        let st = rig.service.st.lock();
+        WebRtcService::pipeline_config(&st, "primary", 1280, 720, None).capture_cursor
+    };
+    rig.peer("c1", ClientType::Controller, "primary").await;
+    rig.peer("v1", ClientType::Viewer, "primary").await;
+    rig.service.handle_pointer_visible(true).await;
+    rig.service
+        .engine
+        .stop_rtc_connection("c1", "controller")
+        .await;
+    assert!(composited(), "a page is left");
+    rig.service.engine.stop_rtc_connection("v1", "viewer").await;
+    assert!(!composited(), "no page is left");
+    rig.peer("c2", ClientType::Controller, "primary").await;
+    assert!(!composited(), "the next page draws its own");
+    rig.service.shutdown().await;
+}
+
 /// A CRF pipeline under congestion control opens capped at the steer's start, never at the range's
 /// high end; a CBR one at the bitrate its client chose.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
