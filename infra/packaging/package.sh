@@ -38,6 +38,13 @@ ARCH="${ARCH##*-}"
 VERSION="${NAME#selkies-}"
 VERSION="${VERSION%-"${ARCH}"-linux-*}"
 [ "${ARCH}" = "$(uname -m)" ] || { echo "package.sh: a ${ARCH} bundle on $(uname -m)" >&2; exit 2; }
+# The glibc a glibc bundle needs, its builder image's (infra/bundle/toolchain.sh)
+case "${NAME}" in
+    *-linux-gnu)
+        platform="$(sh "${REPO}/infra/bundle/toolchain.sh" platform glibc "${ARCH}")"
+        GLIBC="$(echo "${platform#manylinux_}" | tr _ .)"
+        ;;
+esac
 WORK="${SELKIES_BUILD_DIR:-/build}/package"
 ROOT="${WORK}/root"
 SUMMARY="Low-latency HTML5 remote desktop streaming (WebSocket and WebRTC)"
@@ -97,7 +104,7 @@ Version: $(tilde_version "${VERSION}")-1
 Architecture: ${DEB_ARCH}
 Maintainer: Selkies Project <pypi@linuxserver.io>
 Installed-Size: $(du -sk "${ROOT}" | cut -f1)
-Depends: libc6 (>= 2.28), libstdc++6, libgcc-s1
+Depends: libc6 (>= ${GLIBC}), libstdc++6, libgcc-s1
 Recommends: libgbm1, libegl1
 Section: net
 Priority: optional
@@ -116,7 +123,7 @@ Release: 1
 Summary: ${SUMMARY}
 License: MPL-2.0
 URL: ${URL}
-Requires: glibc >= 2.28, libstdc++, libgcc
+Requires: glibc >= ${GLIBC}, libstdc++, libgcc
 Recommends: mesa-libgbm, mesa-libEGL
 AutoReqProv: no
 %global __os_install_post %{nil}

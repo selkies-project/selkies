@@ -14,10 +14,12 @@ libraries exactly as it does unpacked from the bundle, in a virtualenv, a
 entry point, comes from infra/wheel/selkies, and the metadata from
 pyproject.toml.
 
-The platform tag is the bundle's C library floor: manylinux_2_28 for a glibc
-bundle, musllinux_1_2 for a musl one; the wheel is py3-none, since no part of
-it is bound to an interpreter. Symbolic links, which a wheel cannot carry, are
-stored as the files they name.
+The platform tag is the bundle's C library floor, the platform of the image
+it is built in, which infra/bundle/toolchain.sh reads from where
+infra/bundle/Dockerfile pins it: manylinux_2_17 for a glibc bundle on x86_64,
+manylinux_2_28 on aarch64, and musllinux_1_2 for a musl one; the wheel is
+py3-none, since no part of it is bound to an interpreter. Symbolic links,
+which a wheel cannot carry, are stored as the files they name.
 
 Usage: build.py <bundle.tar.gz> <out-dir>
 """
@@ -26,6 +28,7 @@ import base64
 import hashlib
 import re
 import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -40,13 +43,17 @@ else:
 
 REPO = Path(__file__).resolve().parents[2]
 BUNDLE_NAME = re.compile(r"^selkies-(?P<version>.+)-(?P<arch>x86_64|aarch64)-linux-(?P<libc>gnu|musl)$")
-PLATFORMS = {"gnu": "manylinux_2_28", "musl": "musllinux_1_2"}
 DATA_DIRS = ("lib", "libexec", "share")
 
 
 def platform_tag(libc: str, arch: str) -> str:
     """The wheel platform tag of a bundle built for `libc` on `arch`."""
-    return f"{PLATFORMS[libc]}_{arch}"
+    toolchain = REPO / "infra/bundle/toolchain.sh"
+    toolchain_libc = {"gnu": "glibc", "musl": "musl"}[libc]
+    platform = subprocess.run(
+        ["sh", str(toolchain), "platform", toolchain_libc, arch], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    return f"{platform}_{arch}"
 
 
 def metadata(version: str) -> str:

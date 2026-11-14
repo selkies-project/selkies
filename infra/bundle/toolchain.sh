@@ -21,11 +21,25 @@
 # Of pixelflux's wheel recipe only the codec sources it pins count
 # (codecs.sh reads nothing else of it), so an edit elsewhere in it moves no tag.
 #
-# Usage: toolchain.sh files            the inputs, one path per line
-#        toolchain.sh key              the digest of the inputs
-#        toolchain.sh image <libc>     the image for <libc> on this architecture
-#        toolchain.sh ensure <libc>    that image, present locally, pulled, or
-#                                      built, printed once it is here
+# The Dockerfile's stage for a target, `<libc>-<arch>`, is the one place its
+# builder image is chosen, and that image's C library is the floor of the
+# target's bundle and of everything repackaged from it: `base` and `platform`
+# read it from there for the wheel's tag (infra/wheel/build.py), the packages'
+# C library dependency (infra/packaging/package.sh), and the hosts CI checks
+# the floor on.
+#
+# Usage: toolchain.sh files                    the inputs, one path per line
+#        toolchain.sh key                      the digest of the inputs
+#        toolchain.sh image <libc>             the image for <libc> on this
+#                                              architecture
+#        toolchain.sh ensure <libc>            that image, present locally,
+#                                              pulled, or built, printed once
+#                                              it is here
+#        toolchain.sh base <libc> [arch]       the builder image of <libc> on
+#                                              <arch> (this one by default)
+#        toolchain.sh platform <libc> [arch]   the platform its bundle runs on:
+#                                              manylinux_2_17, manylinux_2_28,
+#                                              or musllinux_1_2
 #   SELKIES_TOOLCHAIN_REPOSITORY overrides the repository the images are named in.
 set -eu
 cd "$(dirname "$(readlink -f "$0")")/../.."
@@ -74,10 +88,31 @@ ensure() {
     echo "${name}"
 }
 
+base() {
+    stage="$1-$2"
+    from="$(sed -n "s/^FROM \([^ ]*\) AS ${stage}\$/\1/p" infra/bundle/Dockerfile)"
+    [ -n "${from}" ] || { echo "toolchain: no builder image for ${stage}" >&2; exit 2; }
+    echo "${from}"
+}
+
+# The builder image's name without its architecture, which manylinux names its
+# glibc by: manylinux2014 is manylinux_2_17 (PEP 599)
+platform() {
+    name="$(base "$1" "$2")"
+    name="${name##*/}"
+    name="${name%%[:@]*}"
+    name="${name%_"$2"}"
+    if [ "${name}" = manylinux2014 ]; then name=manylinux_2_17; fi
+    echo "${name}"
+}
+
 case "${1:-}" in
     files) files ;;
     key) key ;;
     image) image "${2:-}" ;;
     ensure) ensure "${2:-}" ;;
-    *) echo "usage: toolchain.sh files|key|image <libc>|ensure <libc>" >&2; exit 2 ;;
+    base) base "${2:?usage: toolchain.sh base <libc> [arch]}" "${3:-$(uname -m)}" ;;
+    platform) platform "${2:?usage: toolchain.sh platform <libc> [arch]}" "${3:-$(uname -m)}" ;;
+    *) echo "usage: toolchain.sh files|key|image <libc>|ensure <libc>|base <libc> [arch]|platform <libc> [arch]" >&2
+        exit 2 ;;
 esac
