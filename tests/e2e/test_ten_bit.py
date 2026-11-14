@@ -80,12 +80,31 @@ window.__SELKIES_STREAMING_MODE__ = '%s';
 """ % (mode, encoder, "localStorage.setItem(k + '_video_10bit', 'true');" if stored else "")
 
 
-def host_carries(codec: str, software: bool = False) -> bool:
-    """Whether this host encodes `codec` at 10 bits, 4:2:0: on its encode node, or failing
-    that in the build's software encoder, which is where such a session then runs."""
-    import pixelflux
-    return ((not software and "420-10" in dict(pixelflux.hardware_formats()).get(codec, []))
-            or "420-10" in dict(pixelflux.SOFTWARE_FORMATS).get(codec, []))
+# The server's settings payload, as the dashboard is handed it: `encoder_backends`
+# says, for each codec and side, whether a session there runs at 10 bits.
+SETTINGS_JS = """
+window.__serverSettings = null;
+window.addEventListener('message', (e) => {
+  if (e.data && e.data.type === 'serverSettings') window.__serverSettings = e.data.payload;
+});
+"""
+BACKENDS_JS = "(codec) => ((((window.__serverSettings || {}).encoder_backends || {}).value) || {})[codec] || null"
+
+
+def host_carries(page: Any, codec: str, software: bool = False) -> bool:
+    """Whether the server encodes `codec` at 10 bits, 4:2:0, by what it tells the page: on
+    its encode node, or failing that in the build's software encoder, which is where such
+    a session then runs."""
+    deadline = time.time() + 20
+    backends = None
+    while backends is None and time.time() < deadline:
+        backends = page.evaluate(BACKENDS_JS, codec)
+        if backends is None:
+            time.sleep(0.5)
+    sides = (backends or {}).get("ten_bit") or {}
+    hardware = bool((sides.get("hardware") or {}).get("420"))
+    soft = bool((sides.get("software") or {}).get("420"))
+    return (not software and hardware) or soft
 
 
 def encoder_lines() -> List[str]:
@@ -115,17 +134,17 @@ def drive(res: "H.Results", p: Any, engine: str, mode: str, codec: str, picture:
     client settled on and the host encodes."""
     encoder, mode_name = CODECS[codec]
     tag = f"{engine}-{mode}-{codec}{'-cpu' if cpu else ''}{'-refused' if refused else ''}{'' if stored else '-default'}"
-    carried = host_carries(codec, software=cpu)
     browser = C.launch_browser(p, engine)
     try:
         ctx = browser.new_context(viewport={"width": 1280, "height": 720}, device_scale_factor=1)
-        ctx.add_init_script(init_script(mode, encoder, stored) + (REFUSE_TEN_BIT_JS if refused else ""))
+        ctx.add_init_script(SETTINGS_JS + init_script(mode, encoder, stored) + (REFUSE_TEN_BIT_JS if refused else ""))
         page = ctx.new_page()
         said: List[str] = []
         page.on("console", lambda m: said.append(m.text))
         page.goto(H.BASE_URL + ("/?offscreen_worker=false" if refused and mode == "websockets" else "/"),
                   wait_until="load")
         res.check(f"[{tag}] the stream plays with 10-bit asked for", bool(wait_video(page, mode)), said[-3:])
+        carried = host_carries(page, codec, software=cpu)
         encoder_now, since = None, time.time()
         while time.time() - since < 4:
             now = page.evaluate("window.encoder")
