@@ -24,14 +24,14 @@
 //! per process, so the test is a binary of its own and ignored where cargo runs every test at
 //! once: `cargo test -p pixelflux --test wire_header -- --include-ignored`.
 
-use std::os::unix::fs::DirBuilderExt;
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+mod common;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use common::Results;
 use pixelflux::encoders::Codec;
 use pixelflux::sink::Frame;
 use pixelflux::{CaptureSettings, ScreenCapture};
@@ -60,65 +60,6 @@ struct Stripe {
     picture: u8,
     codec: u8,
     head: Vec<u8>,
-}
-
-/// A directory removed when the test ends.
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// A throwaway X server, stopped when the test ends.
-struct Xvfb(Child);
-
-impl Drop for Xvfb {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-/// A free display number's X server at the capture's size.
-fn xvfb() -> (Xvfb, String) {
-    let number = (140..200)
-        .find(|n| {
-            !PathBuf::from(format!("/tmp/.X11-unix/X{n}")).exists()
-                && !PathBuf::from(format!("/tmp/.X{n}-lock")).exists()
-        })
-        .expect("a free display number");
-    let display = format!(":{number}");
-    let child = Command::new("Xvfb")
-        .args([
-            display.as_str(),
-            "-screen",
-            "0",
-            &format!("{WIDTH}x{HEIGHT}x24"),
-            "-nolisten",
-            "tcp",
-        ])
-        .args([
-            "+extension",
-            "DAMAGE",
-            "+extension",
-            "XFIXES",
-            "+extension",
-            "MIT-SHM",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("Xvfb on PATH");
-    let server = Xvfb(child);
-    let socket = PathBuf::from(format!("/tmp/.X11-unix/X{number}"));
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while !socket.exists() {
-        assert!(Instant::now() < deadline, "Xvfb {display} never listened");
-        thread::sleep(Duration::from_millis(100));
-    }
-    (server, display)
 }
 
 /// Keeps the root window changing until `stop`: a striped capture sends only what damage covers.
@@ -227,19 +168,6 @@ fn annexb_nal(payload: &[u8]) -> Option<u8> {
         })
 }
 
-/// Every check's outcome, printed as it is made, so one failure does not hide the rest.
-#[derive(Default)]
-struct Results(Vec<String>);
-
-impl Results {
-    fn check(&mut self, label: &str, ok: bool, detail: impl std::fmt::Debug) {
-        println!("{}  {label}  {detail:?}", if ok { "PASS" } else { "FAIL" });
-        if !ok {
-            self.0.push(label.to_string());
-        }
-    }
-}
-
 fn check(res: &mut Results, tag: &str, before: &[Stripe], after: &[Stripe], jpeg: bool) {
     res.check(
         &format!("{tag}: frames flow"),
@@ -308,21 +236,10 @@ fn check(res: &mut Results, tag: &str, before: &[Stripe], after: &[Stripe], jpeg
 #[test]
 #[ignore = "starts an X server and the in-process Wayland compositor"]
 fn the_wire_header_names_each_picture_where_a_consumer_reads_it() {
-    let runtime =
-        Scratch(std::env::temp_dir().join(format!("pixelflux-wire-{}", std::process::id())));
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&runtime.0)
-        .expect("a private runtime directory");
-    let (_server, display) = xvfb();
+    let runtime = common::runtime_dir("wire");
+    let (_server, display) = common::xvfb(WIDTH, HEIGHT);
     // SAFETY: the only test of this binary, before any capture or compositor thread starts.
-    unsafe {
-        std::env::set_var("XDG_RUNTIME_DIR", &runtime.0);
-        std::env::set_var("DISPLAY", &display);
-        for name in ["WAYLAND_DISPLAY", "PIXELFLUX_CU", "PIXELFLUX_RECORD"] {
-            std::env::remove_var(name);
-        }
-    }
+    unsafe { common::isolate(&runtime, Some(&display)) };
     let mut res = Results::default();
     for (codec, cpu) in [
         (Codec::H264, false),
@@ -347,5 +264,5 @@ fn the_wire_header_names_each_picture_where_a_consumer_reads_it() {
             Err(e) => res.check(&format!("{tag}: capture"), false, e),
         }
     }
-    assert!(res.0.is_empty(), "failed: {:?}", res.0);
+    res.finish();
 }

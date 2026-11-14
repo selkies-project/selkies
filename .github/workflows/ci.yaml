@@ -187,6 +187,12 @@ jobs:
       - name: The wire header of each picture, on X11 and the in-process compositor
         # Its own binary for the same reason; it starts an Xvfb of its own
         run: cargo test --locked -p pixelflux --test wire_header -- --include-ignored
+      - name: A withdrawn cursor sink hands the cursor back, on X11 and the compositor
+        run: cargo test --locked -p pixelflux --test cursor_handoff -- --include-ignored
+      - name: Each frame's capture and encode instants, on X11 and the compositor
+        # Optimized: the bound on a 720p frame's host leg is a real build's, and an
+        # unoptimized X11 conversion alone exceeds it
+        run: cargo test --locked --profile iterate -p pixelflux --test frame_timing -- --include-ignored
       - name: Test the non-GPL pixelflux configuration
         run: cargo test --locked -p pixelflux --lib --no-default-features --features openh264
 

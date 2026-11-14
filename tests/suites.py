@@ -97,8 +97,6 @@ SUITES: list = [
     {"path": "unit/test_cursor_scaling.py", "tier": "unit", "timeout": 120},
 
     # integration
-    {"path": "integration/test_cursor_callback_handoff.py", "tier": "integration", "timeout": 300,
-     "selectors": ["x11", "wayland"]},
     {"path": "integration/test_stall_recovery.py", "tier": "integration", "timeout": 900,
      "selectors": ["h264enc", "jpeg"]},
     # The kernel block needs a writable /dev/uinput, which CI does not have:
@@ -127,7 +125,6 @@ SUITES: list = [
     {"path": RUST + "switch_stress.rs", "tier": "integration", "timeout": 600},
     {"path": "integration/test_webrtc_unix_socket.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_wayland_multi_output.py", "tier": "integration", "timeout": 600},
-    {"path": "integration/test_frame_timing.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_wayland_seam.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_gpu_probe.py", "tier": "integration", "timeout": 180},
     {"path": RUST + "missing_libraries.rs", "tier": "integration", "timeout": 900},
