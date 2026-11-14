@@ -3,9 +3,8 @@
 transports: nothing periodic arrives before a dashboard says so, what the server
 then publishes as `stream_stats` is what the sampler reads on this host, the
 memory total being the cgroup's limit where one is set, it keeps arriving, and
-it stops when the stats shut. Where the installed pixelflux reports its capture
-(`ScreenCapture.stream_info`), the page is also told what the stream runs on
-without asking.
+it stops when the stats shut. The page is also told what the stream runs on
+(`stream_info`, from the capture's own report) without asking.
 Usage: python3 tests/e2e/test_system_usage.py [websockets|webrtc|all]
 """
 import os
@@ -84,15 +83,6 @@ OPEN_JS = "(open) => window.postMessage({ type: 'statsOpen', open }, window.loca
 INFO_JS = "() => window.stream_info"
 
 
-def reports_capture() -> bool:
-    """Whether the pixelflux the server runs describes its capture."""
-    try:
-        import pixelflux
-    except ImportError:
-        return False
-    return hasattr(pixelflux.ScreenCapture, "stream_info")
-
-
 def wait_for(page: Any, script: str, timeout: float = 20) -> Any:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -119,11 +109,10 @@ def block(mode: str) -> "H.Results":
             res.check("nothing periodic arrives while the stats are shut",
                       page.evaluate(STATS_JS) is None and page.evaluate(HISTORY_JS) == 0,
                       page.evaluate(HISTORY_JS))
-            if reports_capture():
-                info = wait_for(page, INFO_JS)
-                res.check("the page is told what the stream runs on without asking",
-                          bool(info) and info.get("backend") == "x11" and bool(info.get("encoder"))
-                          and bool(info.get("capture")), info)
+            info = wait_for(page, INFO_JS)
+            res.check("the page is told what the stream runs on without asking",
+                      bool(info) and info.get("backend") == "x11" and bool(info.get("encoder"))
+                      and bool(info.get("capture")), info)
             page.evaluate(OPEN_JS, True)
             first = wait_for(page, STATS_JS)
             total, used = memory_reference()
