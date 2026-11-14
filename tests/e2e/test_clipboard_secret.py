@@ -18,6 +18,7 @@ Usage: python3 tests/e2e/test_clipboard_secret.py [websockets|webrtc|wayland|eng
 import base64
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -107,25 +108,31 @@ def wait_until(fn, timeout: float, step: float = 0.25):
 
 class Owner:
     """The session's clipboard owner: an X client, or a data-control source on
-    the capture compositor, offering the text and the hint beside it."""
+    the capture compositor (crates/selkies-suites' wl-clipboard-owner), offering
+    the text and the hint beside it."""
 
     def __init__(self, wayland: bool, text: str, hint: str = HINTS[0], secret: bool = True) -> None:
         self.wayland = wayland
         entries = {hint: b"secret"} if secret else {}
         if wayland:
-            import pixelflux
-            os.environ["XDG_RUNTIME_DIR"] = H.RUNTIME_DIR
-            self.source = pixelflux.ScreenCapture()
-            self.source.clipboard_write_app(WL_SOCKET, [("text/plain;charset=utf-8", text.encode()),
-                                                        ("text/plain", text.encode()),
-                                                        *entries.items()])
+            offers = [("text/plain;charset=utf-8", text), ("text/plain", text),
+                      *((mime, value.decode()) for mime, value in entries.items())]
+            argv = [H.suites_bin("wl-clipboard-owner"), WL_SOCKET]
+            for mime, value in offers:
+                argv += ["--offer", mime, value]
+            self.app = subprocess.Popen(argv, env=dict(os.environ, XDG_RUNTIME_DIR=H.RUNTIME_DIR),
+                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            said = self.app.stdout.readline().strip()
+            if said != "owned":
+                raise RuntimeError(f"wl-clipboard-owner did not take the selection: {said!r}")
         else:
             _, self.stop = H.x_own_clipboard(text.encode(), entries)
 
     def release(self) -> None:
         """Let the selection go, as a password manager clearing its copy does."""
         if self.wayland:
-            self.source.clipboard_clear_app(WL_SOCKET)
+            self.app.stdin.close()
+            self.app.wait(timeout=10)
         else:
             self.stop["flag"] = True
 

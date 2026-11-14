@@ -31,3 +31,7 @@ libc = "0.2"
 # What a suite reads back from the X display and puts on it: the root's size, the outputs, a
 # selection owner, damage.
 x11rb = { version = "0.14", features = ["randr", "xf86vidmode"] }
+# A Wayland app owning a session's clipboard (src/bin/wl-clipboard-owner.rs), through the
+# data-control protocol, at pixelflux's versions; pure Rust, no libwayland.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }

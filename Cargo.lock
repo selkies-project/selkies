@@ -3679,6 +3679,8 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-websockets",
+ "wayland-client",
+ "wayland-protocols",
  "x11rb 0.14.0",
 ]
 

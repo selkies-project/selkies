@@ -26,6 +26,19 @@ REPO = os.environ.get(
     "SELKIES_REPO",
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TOOLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools")
+
+
+def suites_bin(name: str) -> str:
+    """A helper program of crates/selkies-suites (its src/bin), built first where cargo is at
+    hand, from the target directory cargo uses (CARGO_TARGET_DIR, else the tree's target/)."""
+    target = os.environ.get("CARGO_TARGET_DIR") or os.path.join(REPO, "target")
+    path = os.path.join(target, "debug", name)
+    if shutil.which("cargo"):
+        subprocess.run(["cargo", "build", "--quiet", "--locked", "-p", "selkies-suites", "--bin", name],
+                       cwd=REPO, check=True)
+    if not os.path.exists(path):
+        raise RuntimeError(f"{path} is not built and cargo is not on PATH to build it")
+    return path
 # The interpreter that runs the suites' helper tools: the one running the tests.
 PYTHON = sys.executable
 
