@@ -172,6 +172,49 @@ jobs:
             sudo sh crates/pixelflux/scripts/build-kvazaar.sh /usr/local
           fi
           sudo ldconfig
+      # The nested-session tests run the suites' patched labwc (its control
+      # socket and screen-count patches), built from the pins in
+      # scripts/ci/build-labwc.sh and cached per architecture
+      - name: Resolve the patched labwc pins
+        id: labwc
+        run: |
+          eval "$(grep -E '^(WLROOTS|LABWC)_VERSION=' scripts/ci/build-labwc.sh)"
+          {
+            echo "wlroots=${WLROOTS_VERSION}"
+            echo "labwc=${LABWC_VERSION}"
+            echo "image=$(. /etc/os-release && echo "${ID}${VERSION_ID}")"
+          } >> "$GITHUB_OUTPUT"
+      - name: Cache the patched labwc
+        id: labwc-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.local/labwc
+          key: labwc-${{ steps.labwc.outputs.image }}-${{ runner.arch }}-${{ steps.labwc.outputs.wlroots }}-${{ steps.labwc.outputs.labwc }}-${{ hashFiles('scripts/ci/patches/labwc-*.patch', 'scripts/ci/build-labwc.sh', 'scripts/ci/runtime-packages.sh') }}
+      - name: Build the patched labwc
+        if: steps.labwc-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install --no-install-recommends -y \
+            build-essential gettext git glslang-tools hwdata meson ninja-build pkg-config \
+            libcairo2-dev libdisplay-info-dev libdrm-dev libgbm-dev libglib2.0-dev \
+            libglvnd-dev libinput-dev liblcms2-dev libliftoff-dev libpango1.0-dev \
+            libpixman-1-dev libpng-dev librsvg2-dev libseat-dev libudev-dev libvulkan-dev \
+            libffi-dev libexpat1-dev libxml2-dev \
+            libwayland-dev libxcb1-dev libxcb-composite0-dev libxcb-dri3-dev libxcb-ewmh-dev \
+            libxcb-icccm4-dev libxcb-present-dev libxcb-randr0-dev libxcb-render0-dev \
+            libxcb-render-util0-dev libxcb-res0-dev libxcb-shape0-dev libxcb-shm0-dev \
+            libxcb-sync-dev libxcb-xfixes0-dev libxcb-xinput-dev libxkbcommon-dev \
+            wayland-protocols
+          WLROOTS_VERSION="${{ steps.labwc.outputs.wlroots }}" \
+            LABWC_VERSION="${{ steps.labwc.outputs.labwc }}" \
+            PREFIX="$HOME/.local/labwc" scripts/ci/build-labwc.sh
+          scripts/ci/runtime-packages.sh record "$HOME/.local/labwc"
+      - name: Install the patched labwc's runtime libraries
+        if: steps.labwc-cache.outputs.cache-hit == 'true'
+        run: scripts/ci/runtime-packages.sh install "$HOME/.local/labwc"
+      - name: Put the patched labwc on the path
+        run: |
+          echo "$HOME/.local/labwc/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/labwc/bin/labwc" --version
       - name: Test the Rust and Python bridge configurations
         # GPU, render-node, encoder-device, and sound-server tests remain
         # explicitly ignored on runners without those devices.
@@ -193,6 +236,8 @@ jobs:
         # Optimized: the bound on a 720p frame's host leg is a real build's, and an
         # unoptimized X11 conversion alone exceeds it
         run: cargo test --locked --profile iterate -p pixelflux --test frame_timing -- --include-ignored
+      - name: A nested session's screens on their own outputs
+        run: cargo test --locked -p pixelflux --test wayland_multi_output -- --include-ignored
       - name: Test the non-GPL pixelflux configuration
         run: cargo test --locked -p pixelflux --lib --no-default-features --features openh264
 

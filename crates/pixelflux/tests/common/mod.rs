@@ -134,3 +134,61 @@ pub fn wait_until(timeout: Duration, mut ready: impl FnMut() -> bool) -> bool {
     }
     true
 }
+
+/// A nested labwc on the compositor's socket, stopped when the test ends.
+pub struct Labwc(Child);
+
+impl Drop for Labwc {
+    fn drop(&mut self) {
+        // SAFETY: a signal to a child this test spawned and has not reaped.
+        unsafe { libc::kill(self.0.id() as libc::pid_t, libc::SIGTERM) };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if matches!(self.0.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// `labwc` on PATH, nested on `socket` under `runtime` with wlroots' Wayland backend and the
+/// pixman renderer, `env` added, its output in `runtime`/labwc.log.
+pub fn labwc(runtime: &Scratch, socket: &str, env: &[(&str, &str)], args: &[&str]) -> Labwc {
+    let log = std::fs::File::create(runtime.0.join("labwc.log")).expect("labwc's log");
+    let mut command = Command::new("labwc");
+    command
+        .args(args)
+        .env("WAYLAND_DISPLAY", socket)
+        .env("WLR_BACKENDS", "wayland")
+        .env("XDG_RUNTIME_DIR", &runtime.0)
+        .env("WLR_RENDERER", "pixman")
+        .env("LIBGL_ALWAYS_SOFTWARE", "1")
+        .env_remove("DISPLAY")
+        .stdout(log.try_clone().expect("labwc's log"))
+        .stderr(log);
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    Labwc(command.spawn().expect("labwc on PATH"))
+}
+
+/// The nested compositor's own socket under `runtime`: the one that is not `capture`.
+pub fn inner_socket(runtime: &Scratch, capture: &str) -> Option<String> {
+    let mut names: Vec<String> = std::fs::read_dir(&runtime.0)
+        .ok()?
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.starts_with("wayland-") && !name.ends_with(".lock") && name != capture)
+        .collect();
+    names.sort();
+    names.into_iter().next()
+}
+
+/// The last lines of `runtime`/labwc.log, for a failure's detail.
+pub fn labwc_log(runtime: &Scratch) -> String {
+    let text = std::fs::read_to_string(runtime.0.join("labwc.log")).unwrap_or_default();
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(15)..].join("\n")
+}
