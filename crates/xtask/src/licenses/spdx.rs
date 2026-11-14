@@ -60,9 +60,20 @@ const PERMISSIVE_IDS: &[&str] = &[
     "X11",
     "OpenSSL",
     "Linux-syscall-note",
+    "Artistic-2.0",
+    "CDLA-Permissive-2.0",
+    "SSLeay-standalone",
+    "FTL",
+    "libpng-2.0",
+    "bzip2-1.0.6",
+    "curl",
+    "HPND",
+    "ICU",
+    "Beerware",
+    "Fair",
 ];
 const FILE_LEVEL_IDS: &[&str] = &[
-    "MPL-2.0", "MPL-1.1", "CDDL-1.0", "CDDL-1.1", "EPL-1.0", "EPL-2.0",
+    "MPL-2.0", "MPL-1.1", "CDDL-1.0", "CDDL-1.1", "EPL-1.0", "EPL-2.0", "CPL-1.0",
 ];
 const WEAK_PREFIXES: &[&str] = &["LGPL-"];
 const COPYLEFT_PREFIXES: &[&str] = &[
@@ -76,8 +87,13 @@ const COPYLEFT_PREFIXES: &[&str] = &[
     "CECILL",
     "RPL-",
     "CPAL-",
+    "QPL-",
+    "Sleepycat",
 ];
 /// Exceptions that lift the copyleft of their base license for the linked work.
+///
+/// An exception for what a tool generates (Bison's parser skeleton, Autoconf's configure
+/// script) or for a document embedding a font lifts nothing for linked code, so it is not one.
 const LINKING_EXCEPTIONS: &[&str] = &[
     "GCC-exception-3.1",
     "GCC-exception-2.0",
@@ -86,6 +102,7 @@ const LINKING_EXCEPTIONS: &[&str] = &[
     "Linux-syscall-note",
     "GPL-3.0-linking-exception",
     "LGPL-3.0-linking-exception",
+    "mif-exception",
 ];
 /// The terms most crates offer; an expression with one of them as a complete choice is
 /// listed on the page without naming its crates.
@@ -375,7 +392,14 @@ mod tests {
             rank("GPL-3.0-or-later WITH Bison-exception-2.2"),
             Rank::Copyleft
         );
-        assert_eq!(rank("Sleepycat"), Rank::Unknown);
+        assert_eq!(
+            rank("GPL-2.0-or-later WITH mif-exception"),
+            Rank::Permissive
+        );
+        assert_eq!(rank("Sleepycat"), Rank::Copyleft);
+        assert_eq!(rank("CPL-1.0"), Rank::FileLevel);
+        assert_eq!(rank("ICU"), Rank::Permissive);
+        assert_eq!(rank("Unknown-1.0"), Rank::Unknown);
     }
 
     #[test]

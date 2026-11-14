@@ -4,15 +4,16 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! The license gate for what the Selkies server links and the web client ships.
+//! The license gate for what the Selkies server and pixelflux's wheels link and the web client
+//! ships.
 //!
 //! It resolves the crate graph of each build configuration with `cargo metadata` (normal
-//! dependencies only, the ones compiled into the executable, over the four Linux targets the
-//! releases build), ranks every crate's SPDX license expression ([`spdx`]), and overlays the
-//! native libraries the bindings link, load, or vendor, which crate metadata cannot see
-//! (`codec-sys` is an MIT binding whose `x264` and `x265` features link the GPL-2.0-or-later
-//! libx264 and x265). The npm side reads the license each package of the web packages'
-//! lockfiles records, so it needs no `npm ci`. It fails on a copyleft component in a
+//! dependencies only, the ones compiled into the executable or the extension, over the four
+//! Linux targets the releases build), ranks every crate's SPDX license expression ([`spdx`]), and
+//! overlays the native libraries the bindings link, load, or vendor, which crate metadata cannot
+//! see ([`native`]: `codec-sys` is an MIT binding whose `x264` and `x265` features link the
+//! GPL-2.0-or-later libx264 and x265). The npm side reads the license each package of the web
+//! packages' lockfiles records, so it needs no `npm ci`. It fails on a copyleft component in a
 //! configuration not allowed to carry it, on a crate or package without usable license
 //! metadata, on a native binding, a direct dependency, or a vendored crate this file does not
 //! describe, and on a `docs/licensing.md` whose generated sections differ from what the
@@ -24,12 +25,29 @@
 //! cargo xtask licenses --markdown       # print the sections
 //! cargo xtask licenses --set non-gpl    # audit one configuration alone
 //! cargo xtask licenses --metadata m.json --set gpl
+//! cargo xtask licenses --target aarch64-unknown-linux-gnu   # one target's graph alone
+//! cargo xtask licenses --crate crates/pixelflux [--set non-gpl] [--markdown] [--quiet]
 //! ```
 //!
-//! The `gpl` configuration is the workspace as committed, pixelflux with its `gpl` feature,
-//! which every release ships. `non-gpl` is the build an operator gets by naming pixelflux's
-//! `openh264` feature in its place: Selkies has no feature of its own for the switch, so the
-//! gate resolves a copy of the workspace manifest with that one feature swapped, beside a
+//! The ranking, the native overlay, and the copyleft policy ([`ALLOWED_COPYLEFT`], [`audit`])
+//! are one for two graphs, which differ in what [`Scope`] decides alone:
+//!
+//! - The workspace's roots are the executables Selkies ships ([`SHIPPED`]); pixelflux's
+//!   (`--crate DIR`) is the crate, resolved as its wheels build it ([`standalone`]): outside any
+//!   workspace, on its own `Cargo.lock`, `gpl` its default features and `non-gpl`
+//!   `--no-default-features --features openh264`, as `setup.py` selects them.
+//! - The native libraries are described as they reach the server or the wheels
+//!   ([`native::Native`]), and a binding the table lacks is described in the inventory each
+//!   keeps: the workspace's in the generated sections of `docs/licensing.md`, which the gate
+//!   holds to the graphs, pixelflux's in its `LICENSES.md`, written by hand from what `--markdown`
+//!   prints.
+//! - pixelflux's listing keeps the columns and categories its `LICENSES.md` uses, MPL-2.0 among
+//!   them as permissive (file-level copyleft).
+//!
+//! The workspace's `gpl` configuration is the workspace as committed, pixelflux with its `gpl`
+//! feature, which every release ships. `non-gpl` is the build an operator gets by naming
+//! pixelflux's `openh264` feature in its place: Selkies has no feature of its own for the switch,
+//! so the gate resolves a copy of the workspace manifest with that one feature swapped, beside a
 //! copy of the committed `Cargo.lock` and the real `crates/` directory. Cargo drops packages
 //! the copied configuration does not select; any package or version the copy gains beyond
 //! the committed lockfile fails the check.
@@ -39,8 +57,8 @@
 //! name a crate of the wider graph only where MIT or Apache-2.0 alone is not among its
 //! choices, so a lockfile bump changes the page only where a license changes, or a direct
 //! dependency, a native binding, or a crate under other terms comes or goes. A page check
-//! needs both configurations resolved by cargo, so `--set` and `--metadata` audit the graph
-//! alone.
+//! needs both configurations resolved by cargo over every release target, so `--set`,
+//! `--metadata`, and `--target` audit the graph alone.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -52,10 +70,13 @@ use regex::{NoExpand, Regex};
 use serde_json::Value;
 
 use crate::{Scratch, repo};
+use native::{NATIVE, Native, Text};
 use spdx::{Expr, Rank};
 
+mod native;
 mod npm;
 mod spdx;
+mod standalone;
 
 const PAGE: &str = "docs/licensing.md";
 
@@ -74,19 +95,53 @@ const SHIPPED: [&str; 2] = ["selkies", "selkies-turn-rest"];
 
 /// Copyleft components and the configurations allowed to contain them. Anything copyleft (or
 /// LGPL, which a statically linked crate cannot honor) that is not listed here fails in every
-/// configuration, so a GPL dependency is added here and in `docs/licensing.md` on purpose.
+/// configuration of either graph, so a GPL dependency is added here and in the inventories on
+/// purpose.
 const ALLOWED_COPYLEFT: &[(&str, &[&str])] = &[("codec-sys", &["gpl"])];
 
-/// A native library behind a crate that binds, vendors, or loads it.
-struct Native {
-    krate: &'static str,
-    library: &'static str,
-    license: &'static str,
-    /// The category of the native code.
-    rank: Rank,
-    how: &'static str,
-    /// The crate features that link a copyleft library in its place.
-    copyleft_features: &'static [&'static str],
+/// The graph the gate audits; everything that differs between the two is decided here.
+#[derive(Clone, Copy)]
+enum Scope {
+    /// The executables Selkies ships, held to `docs/licensing.md`.
+    Workspace,
+    /// pixelflux on its own, as its wheels build it, inventoried by its `LICENSES.md`.
+    Crate,
+}
+
+impl Scope {
+    /// The packages whose normal dependencies make up the graph.
+    fn roots<'a>(self, graph: &Graph<'a>) -> Result<Vec<&'a str>, String> {
+        match self {
+            Self::Workspace => Ok(graph
+                .members
+                .iter()
+                .copied()
+                .filter(|id| SHIPPED.contains(&graph.name(id)))
+                .collect()),
+            Self::Crate => graph
+                .root
+                .map(|root| vec![root])
+                .ok_or_else(|| "cargo metadata has no root package; give --crate a crate".into()),
+        }
+    }
+
+    /// The native library behind `krate`, as this graph's inventory describes it.
+    fn native(self, krate: &str) -> Option<(&'static Native, &'static Text)> {
+        let native = native::find(krate)?;
+        let text = match self {
+            Self::Workspace => native.server.as_ref(),
+            Self::Crate => native.wheel.as_ref(),
+        };
+        Some((native, text?))
+    }
+
+    /// What describing a new native binding takes besides an entry in the table.
+    fn inventory(self) -> &'static str {
+        match self {
+            Self::Workspace => ", then --write",
+            Self::Crate => " and to LICENSES.md",
+        }
+    }
 }
 
 /// What a group of the workspace's direct dependencies does in the server.
@@ -96,189 +151,9 @@ struct Role {
     notes: &'static str,
 }
 
-// NATIVE: every crate named like a native binding (-sys, _sys, -ffi) has to be described, and
-// every entry has to be in a graph, so a new binding fails the check until it is inventoried
-// and a dropped one until it is taken off the page.
 // ROLES: every direct dependency of the server crates, in the order the page lists them; a new
 // one fails the check until it is placed.
 // VENDORED: the crates vendored under crates/*/vendor and what Selkies does with each.
-const NATIVE: &[Native] = &[
-    Native {
-        krate: "codec-sys",
-        library: "libvpx, SVT-AV1, dav1d, and libde265 in every build; libx264 and x265 in the GPL \
-                  build, kvazaar in the non-GPL one",
-        license: "BSD-3-Clause (libvpx, kvazaar; SVT-AV1 with the Alliance for Open Media patent \
-                  license), BSD-2-Clause (dav1d), LGPL-3.0-or-later (libde265), GPL-2.0-or-later \
-                  (libx264, x265)",
-        rank: Rank::Weak,
-        how: "linked shared libraries, through pixelflux; the software H.264 (GPL build), HEVC, \
-              VP8, VP9, and AV1 encoders and the virtual camera's decoders",
-        copyleft_features: &["x264", "x265"],
-    },
-    Native {
-        krate: "openh264-sys2",
-        library: "Cisco OpenH264, and libstdc++ for its C++",
-        license: "BSD-2-Clause (OpenH264), GPL-3.0-or-later WITH GCC-exception-3.1 (libstdc++)",
-        rank: Rank::Permissive,
-        how: "compiled from the source vendored in the crate and linked statically, through \
-              pixelflux, libstdc++ as a shared library; full-frame software H.264 of the non-GPL \
-              build and the virtual camera's H.264 decoder",
-        copyleft_features: &[],
-    },
-    Native {
-        krate: "turbojpeg-sys",
-        library: "libjpeg-turbo",
-        license: "IJG AND BSD-3-Clause AND Zlib",
-        rank: Rank::Permissive,
-        how: "compiled from the source vendored in the crate and linked statically, through \
-              pixelflux; JPEG",
-        copyleft_features: &[],
-    },
-    Native {
-        krate: "va-sys",
-        library: "libva, libva-drm",
-        license: "MIT",
-        rank: Rank::Permissive,
-        how: "`dlopen` at run time through pixelflux, never linked; VA-API encoding",
-        copyleft_features: &[],
-    },
-    Native {
-        krate: "nvcodec-sys",
-        library: "NVENC, NvFBC, and the CUDA driver (`libnvidia-encode.so.1`, \
-                  `libnvidia-fbc.so.1`, `libcuda.so.1`)",
-        license: "proprietary (NVIDIA driver); the vendored headers MIT",
-        rank: Rank::Permissive,
-        how: "`dlopen` at run time through pixelflux, never linked or shipped",
-        copyleft_features: &[],
-    },
-    Native {
-        krate: "gbm-sys",
-        library: "libgbm (Mesa)",
-        license: "MIT",
-        rank: Rank::Permissive,
-        how: "linked shared library, through pixelflux",
-        copyleft_features: &[],
-    },
-    Native {
-        krate: "pixman-sys",
-        library: "libpixman-1",
-        license: "MIT",
-        rank: Rank::Permissive,
-        how: "linked shared library, through pixelflux's capture compositor",
-        copyleft_features: &[],
-    },
-    Native {
-        krate: "drm-sys",
-        library: "libdrm headers",
-        license: "MIT",
-        rank: Rank::Permissive,
-        how: "bindings generated from the headers, through pixelflux; no libdrm symbol is linked",
-        copyleft_features: &[],
-    },
-    Native {
-        krate: "drm-ffi",
-        library: "Linux DRM ioctls (no library)",
-        license: "MIT",
-        rank: Rank::Permissive,
-        how: "pure Rust ioctl wrappers, through pixelflux",
-        copyleft_features: &[],
-    },
-    Native {
-        krate: "wayland-sys",
-        library: "libwayland-server",
-        license: "MIT",
-        rank: Rank::Permissive,
-        how: "`dlopen` at run time through pixelflux's capture compositor, never linked",
-        copyleft_features: &[],
-    },
-    Native {
-        krate: "input-sys",
-        library: "libinput",
-        license: "MIT",
-        rank: Rank::Permissive,
-        how: "in the graph through smithay's libinput backend, which pixelflux does not use; \
-              nothing is linked",
-        copyleft_features: &[],
-    },
-    Native {
-        krate: "libudev-sys",
-        library: "libudev (systemd)",
-        license: "LGPL-2.1-or-later",
-        rank: Rank::Weak,
-        how: "in the graph through smithay's udev backend, which pixelflux does not use; nothing \
-              is linked",
-        copyleft_features: &[],
-    },
-    Native {
-        krate: "xkbcommon",
-        library: "libxkbcommon",
-        license: "MIT",
-        rank: Rank::Permissive,
-        how: "linked shared library; keymaps, in the server and in pixelflux",
-        copyleft_features: &[],
-    },
-    Native {
-        krate: "libpulse-sys",
-        library: "libpulse",
-        license: "LGPL-2.1-or-later",
-        rank: Rank::Weak,
-        how: "linked shared library, replaceable; the sound-server control plane \
-              (`libpulse-binding`) and pcmflux's capture",
-        copyleft_features: &[],
-    },
-    Native {
-        krate: "opusic-sys",
-        library: "libopus",
-        license: "BSD-3-Clause",
-        rank: Rank::Permissive,
-        how: "compiled from the source bundled in the crate and linked statically, through \
-              pcmflux; Opus",
-        copyleft_features: &[],
-    },
-    Native {
-        krate: "aws-lc-sys",
-        library: "AWS-LC",
-        license: "ISC AND Apache-2.0 AND MIT AND BSD-3-Clause",
-        rank: Rank::Permissive,
-        how: "compiled from the source vendored in the crate and linked statically; the HTTPS \
-              server's, the WebRTC stack's, and outgoing requests' cryptography (`aws-lc-rs`)",
-        copyleft_features: &[],
-    },
-    Native {
-        krate: "nvml-wrapper-sys",
-        library: "NVML (`libnvidia-ml.so.1`)",
-        license: "proprietary (NVIDIA driver)",
-        rank: Rank::Permissive,
-        how: "`dlopen` at run time when present, never linked or shipped; GPU statistics",
-        copyleft_features: &[],
-    },
-    Native {
-        krate: "linux-raw-sys",
-        library: "Linux kernel ABI (no library)",
-        license: "GPL-2.0-only WITH Linux-syscall-note (the kernel's UAPI headers)",
-        rank: Rank::Permissive,
-        how: "syscall numbers and structures as Rust constants (rustix)",
-        copyleft_features: &[],
-    },
-    Native {
-        krate: "libc",
-        library: "C runtime: glibc and libgcc_s, or musl in the musl builds",
-        license: "LGPL-2.1-or-later (glibc), GPL-3.0-or-later WITH GCC-exception-3.1 (libgcc_s), \
-                  MIT (musl)",
-        rank: Rank::Weak,
-        how: "linked shared libraries (glibc, libgcc_s) or statically (musl), as for every program",
-        copyleft_features: &[],
-    },
-    Native {
-        krate: "libloading",
-        library: "the driver and desktop libraries above that are opened at run time",
-        license: "MIT and proprietary",
-        rank: Rank::Permissive,
-        how: "`dlopen`, never linked",
-        copyleft_features: &[],
-    },
-];
-
 const ROLES: &[Role] = &[
     Role {
         crates: &["pixelflux"],
@@ -472,10 +347,6 @@ const VENDORED: &[(&str, &str)] = &[
 static NATIVE_NAME: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(-|_)sys\d*$|-ffi$").expect("a valid pattern"));
 
-fn native(name: &str) -> Option<&'static Native> {
-    NATIVE.iter().find(|native| native.krate == name)
-}
-
 fn copyleft_allowed(name: &str, set: &str) -> bool {
     ALLOWED_COPYLEFT
         .iter()
@@ -500,23 +371,15 @@ struct Crate {
 /// The graphs audited, by configuration in the order they were asked for.
 type Graphs = Vec<(&'static str, Vec<Crate>)>;
 
-/// Resolve the graph of `manifest` over the release targets from the lockfile beside it.
-fn cargo_metadata(
-    manifest: &Path,
-    locked: bool,
-    no_default_features: bool,
-) -> Result<Value, String> {
+/// Resolve the graph of `manifest` over `targets` from the lockfile beside it, with cargo's
+/// other `args` (`--locked`, the features).
+fn cargo_metadata(manifest: &Path, args: &[&str], targets: &[&str]) -> Result<Value, String> {
     let mut cargo = Command::new("cargo");
     cargo
         .args(["metadata", "--format-version", "1", "--manifest-path"])
-        .arg(manifest);
-    if locked {
-        cargo.arg("--locked");
-    }
-    if no_default_features {
-        cargo.arg("--no-default-features");
-    }
-    for target in TARGETS {
+        .arg(manifest)
+        .args(args);
+    for target in targets {
         cargo.args(["--filter-platform", target]);
     }
     let output = cargo.output().map_err(|e| format!("cargo: {e}"))?;
@@ -569,11 +432,11 @@ fn lock_packages(path: &Path) -> Result<BTreeSet<(String, String, String)>, Stri
         .collect())
 }
 
-/// Resolve one configuration's graph with cargo.
-fn resolve(set: &str) -> Result<Value, String> {
+/// Resolve one configuration of the workspace's graph with cargo.
+fn resolve(set: &str, targets: &[&str]) -> Result<Value, String> {
     let repo = repo();
     if set == "gpl" {
-        return cargo_metadata(&repo.join("Cargo.toml"), true, false);
+        return cargo_metadata(&repo.join("Cargo.toml"), &["--locked"], targets);
     }
     let manifest =
         fs::read_to_string(repo.join("Cargo.toml")).map_err(|e| format!("Cargo.toml: {e}"))?;
@@ -583,7 +446,11 @@ fn resolve(set: &str) -> Result<Value, String> {
     fs::write(scratch.0.join("Cargo.toml"), swapped).map_err(io)?;
     fs::copy(repo.join("Cargo.lock"), scratch.0.join("Cargo.lock")).map_err(io)?;
     std::os::unix::fs::symlink(repo.join("crates"), scratch.0.join("crates")).map_err(io)?;
-    let meta = cargo_metadata(&scratch.0.join("Cargo.toml"), false, true)?;
+    let meta = cargo_metadata(
+        &scratch.0.join("Cargo.toml"),
+        &["--no-default-features"],
+        targets,
+    )?;
     let unpinned: Vec<String> = lock_packages(&scratch.0.join("Cargo.lock"))?
         .difference(&lock_packages(&repo.join("Cargo.lock"))?)
         .map(|(name, version, _)| format!("{name} {version}"))
@@ -606,6 +473,8 @@ struct Graph<'a> {
     packages: HashMap<&'a str, &'a Value>,
     nodes: HashMap<&'a str, &'a Value>,
     members: Vec<&'a str>,
+    /// The package cargo resolved for, where it was given one rather than a virtual workspace.
+    root: Option<&'a str>,
 }
 
 impl<'a> Graph<'a> {
@@ -626,6 +495,7 @@ impl<'a> Graph<'a> {
                 .flatten()
                 .filter_map(Value::as_str)
                 .collect(),
+            root: meta["resolve"]["root"].as_str(),
         }
     }
 
@@ -652,16 +522,10 @@ impl<'a> Graph<'a> {
             .collect()
     }
 
-    /// The packages the shipped executables link, without feature-unifying other workspace
-    /// members.
-    fn normal_closure(&self) -> Vec<&'a Value> {
-        let mut seen: HashSet<&str> = self
-            .members
-            .iter()
-            .copied()
-            .filter(|id| SHIPPED.contains(&self.name(id)))
-            .collect();
-        let mut stack: Vec<&str> = seen.iter().copied().collect();
+    /// The packages `roots` link, without feature-unifying other workspace members.
+    fn normal_closure(&self, roots: Vec<&'a str>) -> Vec<&'a Value> {
+        let mut seen: HashSet<&str> = roots.iter().copied().collect();
+        let mut stack = roots;
         while let Some(id) = stack.pop() {
             for dep in self.normal_deps(id) {
                 if seen.insert(dep) {
@@ -688,12 +552,12 @@ impl<'a> Graph<'a> {
     }
 }
 
-/// Rank every crate of one configuration and collect the violations.
-fn audit(meta: &Value, set: &str) -> (Vec<Crate>, Vec<String>) {
+/// Rank every crate of one configuration of `scope`'s graph and collect the violations.
+fn audit(meta: &Value, set: &str, scope: Scope) -> Result<(Vec<Crate>, Vec<String>), String> {
     let graph = Graph::new(meta);
     let mut crates = Vec::new();
     let mut problems = Vec::new();
-    for package in graph.normal_closure() {
+    for package in graph.normal_closure(scope.roots(&graph)?) {
         let text = |key: &str| package[key].as_str().unwrap_or_default();
         let (name, version) = (text("name"), text("version"));
         let mut published = text("license").to_string();
@@ -727,7 +591,7 @@ fn audit(meta: &Value, set: &str) -> (Vec<Crate>, Vec<String>) {
             }
         }
         let mut native_rank = Rank::Permissive;
-        if let Some(native) = native(name) {
+        if let Some((native, described)) = scope.native(name) {
             native_rank = native.rank;
             let features = graph
                 .nodes
@@ -744,12 +608,13 @@ fn audit(meta: &Value, set: &str) -> (Vec<Crate>, Vec<String>) {
             if native_rank == Rank::Copyleft && !copyleft_allowed(name, set) {
                 problems.push(format!(
                     "{name} {version}: links {} ({}) in the {set} set",
-                    native.library, native.license
+                    described.library, described.license
                 ));
             }
         } else if NATIVE_NAME.is_match(name) {
             problems.push(format!(
-                "{name} {version}: native binding not described in NATIVE (add it there, then --write)"
+                "{name} {version}: native binding not described in NATIVE (add it there{})",
+                scope.inventory()
             ));
         }
         crates.push(Crate {
@@ -762,7 +627,7 @@ fn audit(meta: &Value, set: &str) -> (Vec<Crate>, Vec<String>) {
             manifest: text("manifest_path").into(),
         });
     }
-    (crates, problems)
+    Ok((crates, problems))
 }
 
 /// The aligned per-crate listing printed for one configuration.
@@ -785,8 +650,12 @@ fn listing(crates: &[Crate], set: &str) -> String {
             c.license,
             c.rank.label()
         );
-        if let Some(native) = native(&c.name) {
-            line += &format!("  [native: {}, {}]", native.library, c.native_rank.label());
+        if let Some((_, described)) = Scope::Workspace.native(&c.name) {
+            line += &format!(
+                "  [native: {}, {}]",
+                described.library,
+                c.native_rank.label()
+            );
         }
         lines.push(line);
     }
@@ -905,7 +774,10 @@ fn render_rust_direct(
 /// The table of the native libraries behind the graph's bindings.
 fn render_native(graphs: &Graphs, problems: &mut Vec<String>) -> String {
     let mut rows = Vec::new();
-    for native in NATIVE {
+    for (native, described) in NATIVE
+        .iter()
+        .filter_map(|native| Some((native, native.server.as_ref()?)))
+    {
         let present: BTreeSet<&str> = graphs
             .iter()
             .filter(|(_, crates)| crates.iter().any(|c| c.name == native.krate))
@@ -923,12 +795,12 @@ fn render_native(graphs: &Graphs, problems: &mut Vec<String>) -> String {
             category += " (copyleft in the GPL build)";
         }
         rows.push(vec![
-            native.library.into(),
+            described.library.into(),
             format!("`{}`", native.krate),
-            native.license.into(),
+            described.license.into(),
             category,
             build_label(&present),
-            native.how.into(),
+            described.how.into(),
         ]);
     }
     table(
@@ -1118,10 +990,14 @@ fn first_difference(current: &str, rendered: &str) -> String {
     }
 }
 
-/// The command line: the configurations to audit and what to do with the page.
+/// The command line: the graph and configurations to audit and what to do with the page.
 struct Options {
+    /// The directory of the pixelflux crate whose own graph is audited, as given.
+    krate: Option<String>,
     sets: Vec<&'static str>,
     metadata: Option<String>,
+    /// The targets to resolve for where they are not every release target.
+    targets: Vec<String>,
     /// The page to check or write where it is not `docs/licensing.md`, as given.
     page: Option<String>,
     markdown: bool,
@@ -1132,8 +1008,10 @@ struct Options {
 impl Options {
     fn parse(args: &[String]) -> Result<Self, String> {
         let mut options = Self {
+            krate: None,
             sets: Vec::new(),
             metadata: None,
+            targets: Vec::new(),
             page: None,
             markdown: false,
             write: false,
@@ -1154,7 +1032,9 @@ impl Options {
                         .sets
                         .push(known.ok_or_else(|| format!("--set {set}: gpl or non-gpl"))?);
                 }
+                "--crate" => options.krate = Some(value("--crate")?),
                 "--metadata" => options.metadata = Some(value("--metadata")?),
+                "--target" => options.targets.push(value("--target")?),
                 "--page" => options.page = Some(value("--page")?),
                 "--markdown" => options.markdown = true,
                 "--write" => options.write = true,
@@ -1168,36 +1048,64 @@ impl Options {
         if options.metadata.is_some() && options.sets.len() != 1 {
             return Err("--metadata needs exactly one --set".into());
         }
-        if (options.markdown || options.write) && !options.whole() {
-            return Err("--markdown and --write need both configurations resolved by cargo".into());
+        if options.krate.is_some() {
+            if options.write || options.page.is_some() {
+                return Err(
+                    "--write and --page are the workspace page's; --crate audits the graph alone"
+                        .into(),
+                );
+            }
+        } else if (options.markdown || options.write) && !options.whole() {
+            return Err(
+                "--markdown and --write need both configurations resolved by cargo for every release target"
+                    .into(),
+            );
         }
         Ok(options)
     }
 
-    /// Whether both configurations are resolved by cargo, which a page check needs.
+    /// Whether both configurations are resolved by cargo for every release target, which a
+    /// page check needs.
     fn whole(&self) -> bool {
-        self.sets == SETS && self.metadata.is_none()
+        self.sets == SETS && self.metadata.is_none() && self.targets.is_empty()
+    }
+
+    /// The targets to resolve for: those given, else every release target.
+    fn targets(&self) -> Vec<&str> {
+        if self.targets.is_empty() {
+            return TARGETS.to_vec();
+        }
+        self.targets.iter().map(String::as_str).collect()
+    }
+
+    /// The `cargo metadata` document `--metadata` names, where it names one.
+    fn metadata(&self) -> Result<Option<Value>, String> {
+        let Some(path) = &self.metadata else {
+            return Ok(None);
+        };
+        let fail = |e: &dyn std::fmt::Display| format!("--metadata {path}: {e}");
+        let text = fs::canonicalize(path)
+            .and_then(fs::read_to_string)
+            .map_err(|e| fail(&e))?;
+        serde_json::from_str(&text).map_err(|e| fail(&e))
     }
 }
 
 /// Run the gate; `Ok(false)` when it found a violation or a stale page.
 pub fn run(args: &[String]) -> Result<bool, String> {
     let options = Options::parse(args)?;
+    if let Some(dir) = &options.krate {
+        return standalone::run(Path::new(dir), &options);
+    }
     let mut failed = false;
     let mut graphs: Graphs = Vec::new();
     let mut direct = BTreeSet::new();
     for set in &options.sets {
-        let meta = match &options.metadata {
-            Some(path) => {
-                let fail = |e: &dyn std::fmt::Display| format!("--metadata {path}: {e}");
-                let text = fs::canonicalize(path)
-                    .and_then(fs::read_to_string)
-                    .map_err(|e| fail(&e))?;
-                serde_json::from_str(&text).map_err(|e| fail(&e))?
-            }
-            None => resolve(set)?,
+        let meta = match options.metadata()? {
+            Some(meta) => meta,
+            None => resolve(set, &options.targets())?,
         };
-        let (crates, problems) = audit(&meta, set);
+        let (crates, problems) = audit(&meta, set, Scope::Workspace)?;
         if *set == "gpl" {
             direct = Graph::new(&meta).direct_dependencies();
         }
@@ -1343,7 +1251,7 @@ mod tests {
                 {"id": "d", "features": [], "deps": []}]}}"#,
         )
         .unwrap();
-        let (crates, problems) = audit(&meta, "non-gpl");
+        let (crates, problems) = audit(&meta, "non-gpl", Scope::Workspace).unwrap();
         let names: Vec<&str> = crates.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["codec-sys", "gnu", "selkies"]);
         assert_eq!(problems.len(), 2, "{problems:?}");
@@ -1352,7 +1260,7 @@ mod tests {
             problems[1],
             "gnu 2.0.0: copyleft crate license 'GPL-3.0-only' in the non-gpl set"
         );
-        let (_, problems) = audit(&meta, "gpl");
+        let (_, problems) = audit(&meta, "gpl", Scope::Workspace).unwrap();
         assert_eq!(
             problems,
             ["gnu 2.0.0: copyleft crate license 'GPL-3.0-only' in the gpl set"]
@@ -1361,5 +1269,58 @@ mod tests {
             Graph::new(&meta).direct_dependencies(),
             BTreeSet::from(["codec-sys".to_string(), "gnu".to_string()])
         );
+    }
+
+    #[test]
+    fn a_crate_graph_starts_at_its_root_and_reads_the_wheels_descriptions() {
+        let meta: Value = serde_json::from_str(
+            r#"{"workspace_members": ["p", "o"], "packages": [
+                {"id": "p", "name": "pixelflux", "version": "1.0.0", "license": "MPL-2.0", "manifest_path": "/p"},
+                {"id": "o", "name": "other", "version": "1.0.0", "license": "GPL-3.0-only", "manifest_path": "/o"},
+                {"id": "l", "name": "lesser", "version": "1.0.0", "license": "LGPL-2.1-only", "manifest_path": "/l"},
+                {"id": "c", "name": "codec-sys", "version": "0.1.0", "license": "MIT OR Apache-2.0", "manifest_path": "/c"},
+                {"id": "y", "name": "pyo3-ffi", "version": "0.1.0", "license": "MIT", "manifest_path": "/y"},
+                {"id": "u", "name": "libpulse-sys", "version": "1.0.0", "license": "MIT", "manifest_path": "/u"}],
+              "resolve": {"root": "p", "nodes": [
+                {"id": "p", "features": [], "deps": [
+                    {"pkg": "l", "dep_kinds": [{"kind": null}]},
+                    {"pkg": "c", "dep_kinds": [{"kind": null}]},
+                    {"pkg": "y", "dep_kinds": [{"kind": null}]},
+                    {"pkg": "u", "dep_kinds": [{"kind": null}]}]},
+                {"id": "o", "features": [], "deps": []},
+                {"id": "l", "features": [], "deps": []},
+                {"id": "c", "features": ["kvazaar", "x265"], "deps": []},
+                {"id": "y", "features": [], "deps": []},
+                {"id": "u", "features": [], "deps": []}]}}"#,
+        )
+        .unwrap();
+        let (crates, problems) = audit(&meta, "non-gpl", Scope::Crate).unwrap();
+        let names: Vec<&str> = crates.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "codec-sys",
+                "lesser",
+                "libpulse-sys",
+                "pixelflux",
+                "pyo3-ffi"
+            ]
+        );
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert!(problems[0].starts_with(
+            "codec-sys 0.1.0: links libvpx, SVT-AV1, dav1d, and libde265 on every wheel"
+        ));
+        assert_eq!(
+            problems[1],
+            "lesser 1.0.0: weak copyleft crate license 'LGPL-2.1-only' in the non-gpl set"
+        );
+        assert_eq!(
+            problems[2],
+            "libpulse-sys 1.0.0: native binding not described in NATIVE (add it there and to LICENSES.md)"
+        );
+        assert!(Scope::Workspace.native("pyo3-ffi").is_none());
+        let unrooted =
+            serde_json::json!({"workspace_members": [], "packages": [], "resolve": {"nodes": []}});
+        assert!(audit(&unrooted, "gpl", Scope::Crate).is_err());
     }
 }

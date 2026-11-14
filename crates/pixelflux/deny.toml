@@ -13,11 +13,11 @@
 #
 # The GPL libraries of that build, libx264 and x265, are bound by codec-sys,
 # whose own license is permissive, under the `x264` and `x265` features `gpl`
-# turns on; scripts/check-licenses.py is the non-GPL gate on them. The advisories
-# check (`check advisories`) needs the network to fetch the RustSec database and
-# is gated by the [advisories] policy below. scripts/check-licenses.py covers
-# both build configurations offline, plus the native libraries crate metadata
-# cannot see.
+# turns on; Selkies' `cargo xtask licenses --crate` is the non-GPL gate on them.
+# The advisories check (`check advisories`) needs the network to fetch the
+# RustSec database and is gated by the [advisories] policy below. That gate
+# covers both build configurations offline, plus the native libraries crate
+# metadata cannot see.
 
 [graph]
 no-default-features = true

@@ -6,7 +6,7 @@
 # pixelflux's and pcmflux's own license gates, each on a copy of its crate as
 # its wheels build it: outside the workspace, its features are its own rather
 # than unified with the server's, and its own Cargo.lock resolves the graph.
-# pixelflux's scripts/check-licenses.py audits both of its builds, and each
+# `cargo xtask licenses --crate` audits both of pixelflux's builds, and each
 # crate's deny.toml is checked with cargo-deny: pixelflux's non-GPL build to
 # permissive licenses, its GPL build's licenses and sources, pcmflux to
 # permissive licenses, and the advisories of both.
@@ -19,9 +19,9 @@ HERE="$(dirname "$(readlink -f "$0")")"
 work="$(mktemp -d)"
 trap 'rm -rf "${work}"' EXIT
 git archive HEAD crates/pixelflux crates/pcmflux | tar -x -C "${work}"
+cargo xtask licenses --crate "${work}/crates/pixelflux"
 
 cd "${work}/crates/pixelflux"
-python3 scripts/check-licenses.py
 CARGO_DENY_ARGS=--exclude-dev "${HERE}/cargo-deny.sh" licenses bans sources
 CARGO_DENY_ARGS="--exclude-dev --features gpl" "${HERE}/cargo-deny.sh" licenses sources advisories
 

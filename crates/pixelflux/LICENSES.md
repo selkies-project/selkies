@@ -3,7 +3,8 @@
 pixelflux itself is licensed under the [Mozilla Public License 2.0](LICENSE).
 This file inventories what a built `pixelflux` extension contains or loads, per
 build configuration, and the license of each piece. It is enforced by
-`scripts/check-licenses.py`, `deny.toml`, and the root license checks
+Selkies' license gate (`cargo xtask licenses --crate crates/pixelflux`),
+`deny.toml`, and the root license checks
 (see [How this is enforced](#how-this-is-enforced)).
 
 Categories used below:
@@ -82,8 +83,8 @@ build, `kvazaar` in the non-GPL one. The OpenH264 crates stay in both, since
 their decoder is the virtual camera's H.264 decoder.
 
 License expressions as published by the crates (count of the 203):
-MIT OR Apache-2.0 (and spellings of it) 96, MIT 63, MIT OR Apache-2.0 OR Zlib (and spellings of it) 11, Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT 6, BSD-2-Clause 5, BSD-3-Clause 4, Unlicense OR MIT 4, BSD-3-Clause OR Apache-2.0 3, BSD-2-Clause OR Apache-2.0 OR MIT 2, ISC 2, and one each of (MIT OR Apache-2.0) AND Unicode-3.0 (`unicode-ident`), 0BSD OR MIT OR Apache-2.0 (`adler2`), Apache-2.0 (`gethostname`), BSL-1.0 (`xxhash-rust`), CC0-1.0 OR Apache-2.0 (`imgref`), MPL-2.0 (`pixelflux`), Zlib (`zlib-rs`). `scripts/check-licenses.py --markdown` regenerates the full
-table below.
+MIT OR Apache-2.0 (and spellings of it) 96, MIT 63, MIT OR Apache-2.0 OR Zlib (and spellings of it) 11, Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT 6, BSD-2-Clause 5, BSD-3-Clause 4, Unlicense OR MIT 4, BSD-3-Clause OR Apache-2.0 3, BSD-2-Clause OR Apache-2.0 OR MIT 2, ISC 2, and one each of (MIT OR Apache-2.0) AND Unicode-3.0 (`unicode-ident`), 0BSD OR MIT OR Apache-2.0 (`adler2`), Apache-2.0 (`gethostname`), BSL-1.0 (`xxhash-rust`), CC0-1.0 OR Apache-2.0 (`imgref`), MPL-2.0 (`pixelflux`), Zlib (`zlib-rs`). `cargo xtask licenses --crate . --markdown`, run from this directory in Selkies'
+tree, prints the full table of each configuration; the table below merges the two.
 
 <details>
 <summary>All 203 crates (Build: both, GPL only, non-GPL only)</summary>
@@ -348,18 +349,22 @@ The default build (`gpl` feature, what the published wheels and
 
 ## How this is enforced
 
-- `scripts/check-licenses.py` resolves both configurations with `cargo
-  metadata --locked` (no build, normal dependencies only), classifies every
-  crate's SPDX expression, overlays the native libraries behind the binding
-  crates (the `NATIVE` table in the script, the source of the component table
-  above), and fails when a copyleft component appears in a configuration not
-  listed for it in `ALLOWED_COPYLEFT` (`codec-sys` where its `x264` or `x265`
-  feature is on, → `gpl` only), when a crate has no usable license
-  metadata, or when a crate named like a native binding
-  (`-sys`, `_sys`, `-ffi`) is not described in `NATIVE`. Run it from the
-  repository root: `python3 scripts/check-licenses.py` (`--set non-gpl`,
-  `--markdown`, `--metadata FILE` for a saved `cargo metadata` JSON). It
-  reports `PASS`/`FAIL` per configuration and exits non-zero on a failure.
+- Selkies' license gate (`crates/xtask`) resolves both configurations as the
+  wheels build them, outside the workspace on this crate's own `Cargo.lock`,
+  with `cargo metadata --locked` over the four Linux release targets (no build,
+  normal dependencies only), classifies every crate's SPDX expression, overlays
+  the native libraries behind the binding crates (the `NATIVE` table in
+  `crates/xtask/src/licenses/native.rs`, whose `wheel` descriptions are the
+  source of the component table above), and fails when a copyleft component
+  appears in a configuration not listed for it in `ALLOWED_COPYLEFT`
+  (`codec-sys` where its `x264` or `x265` feature is on, → `gpl` only), when a
+  crate's own license is LGPL (a static link cannot keep it replaceable), when
+  a crate has no usable license metadata, or when a crate named like a native
+  binding (`-sys`, `_sys`, `-ffi`) is not described in `NATIVE`. Run it from
+  this directory in Selkies' tree: `cargo xtask licenses --crate .`
+  (`--set non-gpl`, `--markdown`, `--metadata FILE` for a saved
+  `cargo metadata` JSON). It reports `PASS`/`FAIL` per configuration and exits
+  non-zero on a failure.
 - `deny.toml` is the [cargo-deny](https://embarkstudios.github.io/cargo-deny/)
   policy: its graph is the non-GPL configuration and the allow list is
   permissive-only. The GPL libraries come in through `codec-sys`'s features,
@@ -371,11 +376,11 @@ The default build (`gpl` feature, what the published wheels and
 - The root license workflow inventories the workspace in both configurations;
   the cargo-deny invocations above additionally audit this crate standalone.
 - Adding a dependency that links, loads, or vendors native code means adding it
-  to `NATIVE` in the script and to the table above; adding a copyleft
+  to the gate's `NATIVE` and to the table above; adding a copyleft
   dependency means an `ALLOWED_COPYLEFT` entry, a `deny.toml` clarification
   and exception, and a row here. To exercise the gate itself, save the GPL
   graph (`cargo metadata --format-version 1 --manifest-path Cargo.toml
   > gpl.json`) and audit it under the non-GPL policy
-  (`scripts/check-licenses.py --metadata gpl.json --set non-gpl`): it must
-  fail on `codec-sys` for its `x264` and `x265` features.
+  (`cargo xtask licenses --crate . --metadata gpl.json --set non-gpl`): it
+  must fail on `codec-sys` for its `x264` and `x265` features.
 

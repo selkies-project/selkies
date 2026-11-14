@@ -469,9 +469,10 @@ covers the ring, decoders (including an OpenH264 encode-and-decode round trip), 
 checks live in Selkies (`tests/integration/test_webcam_device.py`, `tests/e2e/test_webcam.py` from the repository root).
 
 Licensing is part of the build matrix: `LICENSES.md` inventories every crate and native library of the default
-(`gpl`, libx264) and `PIXELFLUX_ENABLE_GPL=0` (`openh264`) builds, `scripts/check-licenses.py` and
-`deny.toml` gate both (the root license workflow runs the workspace equivalents), and a new crate that links, loads, or vendors
-native code has to be described in the script's `NATIVE` table and in `LICENSES.md` before the check passes.
+(`gpl`, libx264) and `PIXELFLUX_ENABLE_GPL=0` (`openh264`) builds, `cargo xtask licenses --crate crates/pixelflux`
+(the workspace's license gate over this crate's own lock and features) and `deny.toml` gate both, and a new crate
+that links, loads, or vendors native code has to be described in the gate's `NATIVE` table
+(`../xtask/src/licenses/native.rs`) and in `LICENSES.md` before the check passes.
 Copyleft stays confined to the `gpl` feature.
 
 Logging follows one rule on every backend, because the combined selkies log is what a remote user pastes

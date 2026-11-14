@@ -15,7 +15,8 @@
 //!   serves ([`file_index`]);
 //! - `logo-assets` regenerates every image from the logo artwork ([`logo_assets`]);
 //! - `licenses` audits the crate graphs and the web packages' lockfiles and holds the
-//!   generated tables of `docs/licensing.md` to them ([`licenses`]).
+//!   generated tables of `docs/licensing.md` to them, and with `--crate` audits pixelflux's
+//!   own graph, as its wheels build it ([`licenses`]).
 //!
 //! The sources are read as text and the crate graph through `cargo metadata`, so the tool
 //! depends on no crate of the workspace and builds without the native libraries they link.
@@ -65,8 +66,8 @@ fn main() -> ExitCode {
         "licenses" => licenses::run(&args),
         _ => Err(
             "usage: cargo xtask settings-doc [--check] | file-index [--check] | logo-assets [--check] | licenses \
-                  [--write | --markdown] [--set gpl|non-gpl] [--metadata FILE] [--page FILE] \
-                  [--quiet]"
+                  [--crate DIR] [--write | --markdown] [--set gpl|non-gpl] [--metadata FILE] \
+                  [--target TRIPLE] [--page FILE] [--quiet]"
                 .into(),
         ),
     };

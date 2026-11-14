@@ -909,4 +909,4 @@ A copy of the MPL 2.0 can be found at https://mozilla.org/MPL/2.0/.
 
 Note that the default build links the GPL-2.0+ `libx264` as its software H.264 encoder and the GPL-2.0+ x265 for H.265; build with `PIXELFLUX_ENABLE_GPL=0` to exclude every GPL-licensed component (the BSD-licensed OpenH264 and kvazaar then take their places).
 
-[LICENSES.md](LICENSES.md) inventories every third-party component of both builds (crates, linked and vendored native libraries, what is loaded at run time) with its license, and describes the check (`scripts/check-licenses.py`, `deny.toml`, the root license checks) that keeps the non-GPL build free of copyleft code.
+[LICENSES.md](LICENSES.md) inventories every third-party component of both builds (crates, linked and vendored native libraries, what is loaded at run time) with its license, and describes the check (Selkies' `cargo xtask licenses --crate crates/pixelflux`, `deny.toml`, the root license checks) that keeps the non-GPL build free of copyleft code.

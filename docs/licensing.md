@@ -304,5 +304,6 @@ it ignores listed in `deny.toml` with the reason. pixelflux and pcmflux carry
 the same gate over their own graphs (pixelflux's
 [LICENSES.md](https://github.com/selkies-project/selkies/blob/main/crates/pixelflux/LICENSES.md)),
 which `scripts/ci/crate-licenses.sh` runs on a copy of each crate as its wheels
-build it, on the crate's own `Cargo.lock` and features: pixelflux's
-inventory script over both of its builds, and the `deny.toml` beside each.
+build it, on the crate's own `Cargo.lock` and features:
+`cargo xtask licenses --crate` over both of pixelflux's builds, and the
+`deny.toml` beside each.
