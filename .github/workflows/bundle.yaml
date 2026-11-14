@@ -4,20 +4,23 @@ name: Bundle
 # architecture (infra/bundle/build.sh), the wheel repackaged from it
 # (infra/wheel/build.py), and, where `packages` is set, the native packages
 # (infra/packaging/package.sh) and, on glibc, the AppImage
-# (infra/appimage/build.sh) repackaged from it too. glibc's bundle is built in
-# manylinux_2_28, whose glibc 2.28 is its floor, musl's in musllinux_1_2: in the
-# toolchain image of that target (infra/bundle/Dockerfile), which ci.yaml's
-# `toolchain` job publishes from main and this job pulls, so it compiles the
-# server, the shell, and the interposers alone; where its tree names an image
-# main has not published, build.sh builds it here.
+# (infra/appimage/build.sh) repackaged from it too. Each bundle is built in the
+# builder image of its platform, whose C library is its floor
+# (infra/bundle/toolchain.sh `platform`): in the toolchain image of that target
+# (infra/bundle/Dockerfile), which ci.yaml's `toolchain` job publishes from main
+# and this job pulls, so it compiles the server, the shell, and the interposers
+# alone; where its tree names an image main has not published, build.sh builds
+# it here.
 #
 # Each target is a call of its own (build-wheel.yaml calls this once per
 # target), so a target's wheel and packages follow its own bundle rather than
 # the slowest of all four, and only the jobs that need every target wait for
-# every target. The bundle is checked on a bare host of its C library, where
-# nothing it carries is installed, and each package in pristine containers of
-# the distributions its format serves (scripts/ci/verify-package.sh), the
-# AppImage on AlmaLinux 8, its glibc floor (scripts/ci/verify-appimage.sh).
+# every target. The bundle is checked on bare hosts of its C library, where
+# nothing it carries is installed: a current one and one at its platform's
+# floor, CentOS 7 for manylinux_2_17 and AlmaLinux 8 for manylinux_2_28. Each
+# package is checked in pristine containers of the distributions its format
+# serves (scripts/ci/verify-package.sh), and the AppImage on the floor's host
+# (scripts/ci/verify-appimage.sh).
 # The web client every target embeds is the caller's `bundle-web-client`.
 on:
   workflow_call:
@@ -44,10 +47,28 @@ jobs:
   bundle:
     name: Bundle and wheel (${{ inputs.libc }}, ${{ inputs.arch }})
     runs-on: ${{ inputs.arch == 'aarch64' && 'ubuntu-26.04-arm' || 'ubuntu-latest' }}
+    outputs:
+      floor_host: ${{ steps.platform.outputs.floor_host }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Name the platform and a host at its floor
+        id: platform
+        env:
+          LIBC: ${{ inputs.libc }}
+          ARCH: ${{ inputs.arch }}
+        run: |
+          platform="$(infra/bundle/toolchain.sh platform "${LIBC}" "${ARCH}")"
+          # A pristine image whose C library is the oldest the platform admits
+          case "${platform}" in
+            manylinux_2_17) host=centos:7 ;;
+            manylinux_2_28) host=almalinux:8 ;;
+            musllinux_1_2) host=alpine:3.22 ;;
+            *) echo "::error::no host at the floor of ${platform}"; exit 1 ;;
+          esac
+          echo "${LIBC} on ${ARCH}: ${platform}, checked on ${host}"
+          echo "floor_host=${host}" >> "$GITHUB_OUTPUT"
       - name: Free disk space
         uses: endersonmenezes/free-disk-space@8b8cd4e2277836962939a8f3b4ea0ee4bc006156 # v4
         with:
@@ -68,29 +89,42 @@ jobs:
         env:
           SELKIES_VERSION: ${{ inputs.package_version }}
         run: ./infra/bundle/build.sh out "${{ inputs.libc }}"
-      - name: Start a session from the bundle on a bare host
-        # Nothing the bundle carries is installed on the host: the session's
-        # buses, sound server, and X server are the bundle's, and its server has
-        # to answer
+      - name: Start a session from the bundle on bare hosts
+        # Nothing the bundle carries is installed on a host: every program it
+        # carries and every sound server module has to resolve what it links,
+        # at the versions it needs, the session's buses, sound server, and X
+        # server are the bundle's, and its server has to answer
         env:
-          HOST: ${{ inputs.libc == 'musl' && 'alpine:3.22' || 'debian:stable-slim' }}
-          SETUP: ${{ inputs.libc == 'musl' && 'apk add --no-cache -q bash curl procps' || 'apt-get update -qq > /dev/null && apt-get install -y -qq curl procps > /dev/null' }}
+          HOSTS: ${{ inputs.libc == 'musl' && steps.platform.outputs.floor_host || format('debian:stable-slim {0}', steps.platform.outputs.floor_host) }}
         run: |
-          scripts/ci/retry.sh 5 60 docker pull "${HOST}"
           mkdir -p unpacked && tar -C unpacked -xzf out/selkies-*.tar.gz
-          docker run --rm -e SETUP -v "${GITHUB_WORKSPACE}/unpacked:/opt:ro" "${HOST}" sh -c '
-            sh -c "${SETUP}"
-            adduser -D u 2> /dev/null || useradd -m u
-            mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
-            selkies="$(echo /opt/selkies-*/bin/selkies)"
-            "${selkies}" --version
-            su u -c "XDG_RUNTIME_DIR=/tmp ${selkies} session --runtime-dir /tmp/xdg --session \"sleep 600\" -- --port=8080 --enable-basic-auth=false > /tmp/log 2>&1 &"
-            for _ in $(seq 1 60); do
-              curl -fs http://127.0.0.1:8080/api/health > /dev/null && break
-              sleep 1
-            done
-            cat /tmp/log
-            curl -fs http://127.0.0.1:8080/api/health'
+          for host in ${HOSTS}; do
+            echo "::group::${host}"
+            case "${host}" in
+              alpine:*) setup='apk add --no-cache -q bash curl procps' ;;
+              debian:*) setup='apt-get update -qq > /dev/null && apt-get install -y -qq curl procps > /dev/null' ;;
+              *) setup=true ;;
+            esac
+            scripts/ci/retry.sh 5 60 docker pull "${host}"
+            docker run --rm -e SETUP="${setup}" -v "${GITHUB_WORKSPACE}/unpacked:/opt:ro" "${host}" sh -c '
+              sh -c "${SETUP}"
+              missing="$(find /opt/selkies-*/bin /opt/selkies-*/libexec /opt/selkies-*/lib/selkies/pulse -type f | while read -r f; do
+                head -c4 "$f" | grep -q ELF && ldd "$f" 2>&1 | grep "not found" | sed "s|^|$f: |"
+              done)"
+              [ -z "${missing}" ] || { echo "${missing}"; exit 1; }
+              adduser -D u 2> /dev/null || useradd -m u
+              mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+              selkies="$(echo /opt/selkies-*/bin/selkies)"
+              "${selkies}" --version
+              su u -c "XDG_RUNTIME_DIR=/tmp ${selkies} session --runtime-dir /tmp/xdg --session \"sleep 600\" -- --port=8080 --enable-basic-auth=false > /tmp/log 2>&1 &"
+              for _ in $(seq 1 60); do
+                curl -fs http://127.0.0.1:8080/api/health > /dev/null && break
+                sleep 1
+              done
+              cat /tmp/log
+              curl -fs http://127.0.0.1:8080/api/health'
+            echo "::endgroup::"
+          done
       - name: Repackage the bundle as its wheel
         run: python3 infra/wheel/build.py out/selkies-*.tar.gz wheelhouse
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -187,11 +221,13 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq squashfs-tools
           ./infra/appimage/build.sh bundle/selkies-*.tar.gz out
       - name: Check the AppImage on a pristine host at its glibc floor
+        env:
+          HOST: ${{ needs.bundle.outputs.floor_host }}
         run: |
-          scripts/ci/retry.sh 5 60 docker pull almalinux:8
+          scripts/ci/retry.sh 5 60 docker pull "${HOST}"
           docker run --rm -v "${GITHUB_WORKSPACE}/out:/out:ro" \
             -v "${GITHUB_WORKSPACE}/scripts/ci/verify-appimage.sh:/verify.sh:ro" \
-            almalinux:8 sh -c 'sh /verify.sh /out/*.AppImage'
+            "${HOST}" sh -c 'sh /verify.sh /out/*.AppImage'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: appimage-${{ inputs.arch }}
