@@ -11,7 +11,6 @@ while the stream shows the rest of the view empty. A fullscreen Wayland client
 
 Usage: python3 tests/e2e/test_wayland_screen_size.py [websockets|webrtc|all]
 """
-import importlib.util
 import os
 import sys
 import time
@@ -63,8 +62,6 @@ def run(res: H.Results, browser, mode: str, size: tuple) -> None:
 def main() -> int:
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     res = H.Results(f"wl-screen-size-{which}")
-    if importlib.util.find_spec("pixelflux") is None:
-        H.skip_suite("pixelflux is not installed")
     with sync_playwright() as p:
         browser = C.chromium_launch(p)
         try:

@@ -15,7 +15,6 @@ where the page's own resize request carries the new rectangle.
 Usage: python3 tests/e2e/test_wayland_secondary_shrink.py [websockets|webrtc]
 """
 import asyncio
-import importlib.util
 import json
 import os
 import sys
@@ -244,8 +243,6 @@ def drive_webrtc(res: "H.Results") -> None:
 def main() -> "H.Results":
     which = sys.argv[1] if len(sys.argv) > 1 else "websockets"
     res = H.Results(f"wl-secondary-shrink-{which}")
-    if importlib.util.find_spec("pixelflux") is None:
-        H.skip_suite("pixelflux is not installed")
     H.server_start(mode=which, wayland=True)
     try:
         if which == "webrtc":

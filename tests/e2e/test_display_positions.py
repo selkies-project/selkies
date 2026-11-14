@@ -17,7 +17,6 @@ clients against the in-process pixelflux compositor, no browser.
 Usage: python3 tests/e2e/test_display_positions.py
 """
 import asyncio
-import importlib.util
 import json
 import os
 import sys
@@ -184,8 +183,6 @@ async def drive(res: "H.Results") -> None:
 
 def main() -> "H.Results":
     res = H.Results("display-positions")
-    if importlib.util.find_spec("pixelflux") is None:
-        H.skip_suite("pixelflux is not installed")
     H.server_start(mode="websockets", wayland=True, extra_env={"SELKIES_DEBUG": "true"})
     try:
         asyncio.run(drive(res))

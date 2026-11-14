@@ -7,7 +7,6 @@ says so in the log, and keeps serving, so a fresh client still maps a window.
 
 Usage: python3 tests/e2e/test_wayland_virtual_keyboard.py
 """
-import importlib.util
 import os
 import subprocess
 import sys
@@ -19,8 +18,6 @@ import helpers as H
 
 def main() -> bool:
     res = H.Results("wl-virtual-keyboard")
-    if importlib.util.find_spec("pixelflux") is None:
-        H.skip_suite("pixelflux is not installed")
     H.server_start(mode="websockets", wayland=True)
     obs = None
     try:
