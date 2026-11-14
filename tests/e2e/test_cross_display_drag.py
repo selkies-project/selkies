@@ -328,7 +328,7 @@ def managed_window_drag(res: "H.Results", mode: str, page: Any, seam: int,
     happens on.
 
     X11 only: on the Wayland backend the session compositor owns the window and
-    the seam is its own (`test_wayland_seam`).
+    the seam is its own (`crates/pixelflux/tests/wayland_seam.rs`).
 
     Args:
         page: The page holding the grab.

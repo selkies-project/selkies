@@ -19,7 +19,7 @@ the drawing back to the client -- where pointer motion damages no frame at all.
 
 The X11 backend is what this reads, where each capture composites the sprite
 into its own region of the root; the Wayland compositor paints its cursor per
-output under the same tunable, and its seam is test_wayland_seam's.
+output under the same tunable, and its seam is pixelflux's wayland_seam test's.
 
 Usage: python3 tests/integration/test_locked_cursor_across_displays.py
 """

@@ -336,7 +336,7 @@ def crossed(res: "H.Results", p: Any, desk: Desk, page: Any, wayland: bool,
     lock does not break when the pointer it can no longer place leaves the
     display the page shows, and no absolute position goes out in place of the
     deltas. The crossing itself is read from the X pointer; on the Wayland
-    backend, which has none to read, the seam is test_wayland_seam's.
+    backend, which has none to read, the seam is pixelflux's wayland_seam test's.
     """
     browser, dpage = neighbor_page(p)
     try:

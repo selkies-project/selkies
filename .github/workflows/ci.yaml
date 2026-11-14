@@ -161,7 +161,8 @@ jobs:
         # wheel recipe pins where the distribution does not carry it
         run: |
           scripts/ci/server-build-deps.sh
-          sudo apt-get install -y --no-install-recommends python3-dev xvfb
+          # The capture tests' X servers, and the Xwayland and Mesa a nested session runs on
+          sudo apt-get install -y --no-install-recommends python3-dev xvfb xwayland libegl-mesa0 libgl1-mesa-dri
           # The non-GPL tests need the same rate-control ABI as the wheels.
           # Use a carrying distribution package when available; otherwise build
           # the exact release-pinned commit, rather than just its tag.
@@ -238,6 +239,8 @@ jobs:
         run: cargo test --locked --profile iterate -p pixelflux --test frame_timing -- --include-ignored
       - name: A nested session's screens on their own outputs
         run: cargo test --locked -p pixelflux --test wayland_multi_output -- --include-ignored
+      - name: A window and a drag across the seam between two displays
+        run: cargo test --locked -p pixelflux --test wayland_seam -- --include-ignored
       - name: Test the non-GPL pixelflux configuration
         run: cargo test --locked -p pixelflux --lib --no-default-features --features openh264
 
