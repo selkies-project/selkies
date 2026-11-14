@@ -466,7 +466,7 @@ Selkies V4L2 interposer (`ring.rs`/`server.rs`; the layout is mirrored byte-for-
 v4l2loopback output device (`v4l2out.rs`), and a PipeWire `Video/Source` node (`pipewire.rs`, `libpipewire-0.3`
 loaded at run time, pods built by hand — never add a build-time PipeWire dependency). `cargo test --lib webcam`
 covers the ring, decoders (including an OpenH264 encode-and-decode round trip), and pod layouts; the device-level and browser
-checks live in Selkies (`tests/integration/test_webcam_device.py`, `tests/e2e/test_webcam.py` from the repository root).
+checks live in Selkies (`crates/selkies/tests/webcam_device.rs`, `tests/e2e/test_webcam.py` from the repository root).
 
 Licensing is part of the build matrix: `LICENSES.md` inventories every crate and native library of the default
 (`gpl`, libx264) and `PIXELFLUX_ENABLE_GPL=0` (`openh264`) builds, `cargo xtask licenses --crate crates/pixelflux`

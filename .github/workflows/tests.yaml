@@ -204,6 +204,23 @@ jobs:
         run: cargo test --locked --workspace
       - name: cargo test (vendored rtc crates)
         run: scripts/ci/test-vendored.sh
+      # The virtual webcam below the transports (crates/selkies/tests/webcam_device.rs): read
+      # through the interposer by its probe, ffmpeg and v4l2-ctl, and from the camera's PipeWire
+      # node, which a session daemon with its session manager links; every check has to run
+      - name: The virtual webcam through the interposer
+        run: |
+          sudo apt-get install --no-install-recommends -y ffmpeg v4l-utils dbus pipewire pipewire-bin wireplumber libpipewire-0.3-dev
+          if ! pw-cli info 0 > /dev/null 2>&1; then
+            dbus-run-session -- /usr/bin/pipewire > /tmp/selkies-pipewire.log 2>&1 &
+            timeout 60 sh -c 'until pw-cli info 0 > /dev/null 2>&1; do sleep 0.5; done'
+            dbus-run-session -- /usr/bin/wireplumber > /tmp/selkies-wireplumber.log 2>&1 &
+          fi
+          set -o pipefail
+          cargo test --locked -p selkies --test webcam_device -- --include-ignored --nocapture 2>&1 | tee webcam-device.log
+          if grep '^SKIP' webcam-device.log; then
+            echo "::error::the webcam suite left checks unrun"
+            exit 1
+          fi
 
   # The server the suites drive is the one this run's selkies wheel carries,
   # and the pixelflux and pcmflux they drive beside it ride wheels this run has in
