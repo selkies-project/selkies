@@ -10,11 +10,12 @@
 # deps.sh installs, the Rust toolchain (infra/packaging/rust.sh), the X servers
 # and their static dependencies (xservers.sh), CUPS (cups.sh), the codecs
 # (infra/packaging/codecs.sh), libxkbcommon (infra/packaging/xkbcommon.sh),
-# PipeWire's headers (pipewire.sh), and, on glibc, NVIDIA's X11 EGL platform
-# (egl-x11.sh). infra/bundle/build-in-image.sh, run in it, then compiles only the
-# server, the shell, and the interposers, and finds each of these where it left
-# it, once the key the image records matches its tree's; run in a bare builder
-# image, or in one built from other files, it builds them first.
+# PipeWire's headers (pipewire.sh), dbus-daemon (dbus.sh), and, on glibc,
+# NVIDIA's X11 EGL platform (egl-x11.sh). infra/bundle/build-in-image.sh, run in
+# it, then compiles only the server, the shell, and the interposers, and finds
+# each of these where it left it, once the key the image records matches its
+# tree's; run in a bare builder image, or in one built from other files, it
+# builds them first.
 #
 # Each component builds in a stage of its own from the tools, so the stages run
 # beside one another and a change to one script rebuilds that stage alone. The
@@ -46,12 +47,13 @@ RUN PATH="/opt/python/cp312-cp312/bin:${PATH}" \
 
 # The libraries the interposers and the server build against without linking
 # anything of the build image's: libxkbcommon, PipeWire's headers, and NVIDIA's
-# X11 EGL platform, which only glibc's bundle carries
+# X11 EGL platform, which only glibc's bundle carries; and the session's bus
 FROM tools AS libraries
 COPY infra/packaging/xkbcommon.sh /toolchain/infra/packaging/
 RUN PATH="/opt/python/cp312-cp312/bin:${PATH}" BUILD=/tmp sh -c '. /toolchain/infra/packaging/xkbcommon.sh'
-COPY infra/bundle/pipewire.sh infra/bundle/egl-x11.sh /toolchain/infra/bundle/
-RUN sh /toolchain/infra/bundle/pipewire.sh "${SELKIES_TOOLCHAIN}/pipewire" \
+COPY infra/bundle/pipewire.sh infra/bundle/egl-x11.sh infra/bundle/dbus.sh /toolchain/infra/bundle/
+RUN sh /toolchain/infra/bundle/dbus.sh "${SELKIES_TOOLCHAIN}/dbus" \
+    && sh /toolchain/infra/bundle/pipewire.sh "${SELKIES_TOOLCHAIN}/pipewire" \
     && if ! ldd --version 2>&1 | grep -qi musl; then \
         sh /toolchain/infra/bundle/egl-x11.sh "${SELKIES_TOOLCHAIN}/egl-x11"; \
     fi

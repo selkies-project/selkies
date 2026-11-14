@@ -7,8 +7,8 @@
 # musllinux_1_2 image rather than from this tree: what the server's build needs
 # (infra/packaging/portable-deps.sh, PulseAudio's client libraries among it),
 # the PulseAudio server of that same release, the tools and headers the X
-# servers and NVIDIA's X11 EGL platform build against, the distribution's
-# dbus-daemon, and, on glibc, a 32-bit toolchain for the interposers.
+# servers, NVIDIA's X11 EGL platform, and dbus-daemon build against, and, on
+# glibc, a 32-bit toolchain for the interposers.
 # infra/bundle/Dockerfile runs it once into the toolchain image the build then
 # runs in; build-in-image.sh runs it itself in a bare manylinux image.
 #
@@ -40,15 +40,14 @@ PATH="/opt/python/cp312-cp312/bin:${PATH}" sh "${REPO}/crates/pcmflux/scripts/bu
     /usr "${libdir}" daemon
 if command -v dnf > /dev/null; then
     dnf install -y --disablerepo='epel*' bison flex expat-devel mesa-libgbm-devel \
-        mesa-libEGL-devel mesa-libGL-devel libX11-devel libxslt gettext perl-XML-Parser xz \
-        dbus-daemon
+        mesa-libEGL-devel mesa-libGL-devel libX11-devel libxslt gettext perl-XML-Parser xz
     dnf install -y --disablerepo='epel*' glibc-devel.i686 libgcc.i686 || true
     dnf clean all
     ldconfig
 elif command -v yum > /dev/null; then
     yum install -y --disablerepo='epel*' --disablerepo='centos-sclo*' bison flex expat-devel \
         mesa-libgbm-devel mesa-libEGL-devel mesa-libGL-devel libX11-devel libxslt gettext \
-        perl-XML-Parser xz dbus
+        perl-XML-Parser xz
     yum install -y --disablerepo='epel*' --disablerepo='centos-sclo*' glibc-devel.i686 \
         libgcc.i686 || true
     yum clean all
@@ -92,6 +91,6 @@ elif command -v yum > /dev/null; then
     [ "$(pkg-config --modversion gbm)" = 23.1.4 ]
     rm -f "/tmp/${gbm_devel}"
 else
-    apk add --no-cache bison flex expat-dev mesa-dev libxslt gettext perl-xml-parser xz dbus \
+    apk add --no-cache bison flex expat-dev mesa-dev libxslt gettext perl-xml-parser xz \
         linux-headers patch
 fi

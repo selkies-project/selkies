@@ -7,8 +7,9 @@
 # makes for one C library and architecture, holding everything a bundle carries
 # or links that this tree does not compile itself (the build tools and headers,
 # the Rust toolchain, the X servers and their static dependencies, CUPS, the
-# codecs, libxkbcommon, PipeWire's headers, and NVIDIA's X11 EGL platform), so a
-# bundle build compiles only the server, the shell, and the interposers.
+# codecs, libxkbcommon, PipeWire's headers, dbus-daemon, and NVIDIA's X11 EGL
+# platform), so a bundle build compiles only the server, the shell, and the
+# interposers.
 #
 # The image is named for its inputs rather than for a branch: its tag is the C
 # library, the architecture, and a digest of every file the Dockerfile copies
@@ -24,7 +25,7 @@
 # The Dockerfile's stage for a target, `<libc>-<arch>`, is the one place its
 # builder image is chosen, and that image's C library is the floor of the
 # target's bundle and of everything repackaged from it: `base` and `platform`
-# read it from there for the wheel's tag (infra/wheel/build.py), the packages'
+# read it from there for the wheel's tag (cargo xtask wheel), the packages'
 # C library dependency (infra/packaging/package.sh), and the hosts CI checks
 # the floor on.
 #
@@ -49,7 +50,8 @@ files() {
     printf '%s\n' infra/bundle/Dockerfile infra/bundle/toolchain.sh infra/bundle/deps.sh \
         infra/packaging/portable-deps.sh crates/pcmflux/scripts/build-libpulse.sh \
         infra/packaging/rust.sh infra/packaging/xkbcommon.sh infra/bundle/pipewire.sh \
-        infra/bundle/egl-x11.sh infra/packaging/codecs.sh crates/pixelflux/pyproject.toml \
+        infra/bundle/egl-x11.sh infra/bundle/dbus.sh infra/packaging/codecs.sh \
+        crates/pixelflux/pyproject.toml \
         infra/bundle/xservers.sh infra/bundle/gbm-loader.c infra/bundle/gl-loader.c \
         infra/bundle/cups.sh
     find crates/pixelflux/patches/x264 crates/pixelflux/patches/x265 \

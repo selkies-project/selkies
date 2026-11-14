@@ -34,10 +34,12 @@
 # or one built from other files, it builds those under toolchain/ in the build
 # directory first, kept there for the next build of the same files. A target
 # directory kept from a build against another toolchain is emptied, since
-# codec-sys binds the codecs' headers without watching them. PulseAudio and
-# dbus-daemon are the image's distribution's builds with their libraries
-# alongside; the server, the shell, and the interposers are built from this
-# tree, the codecs taken from SELKIES_CODECS where set, else from the toolchain.
+# codec-sys binds the codecs' headers without watching them. PulseAudio
+# (crates/pcmflux/scripts/build-libpulse.sh) is built from the release that
+# script pins, with the libraries it links alongside, and dbus-daemon (dbus.sh)
+# from its own, linking the C library alone; the server, the shell, and the
+# interposers are built from this tree, the codecs taken from SELKIES_CODECS
+# where set, else from the toolchain.
 #
 # The bundle's wheel, `cargo xtask wheel`'s repackaging of it, is written beside it.
 #
@@ -72,6 +74,7 @@ export PATH="/opt/python/cp312-cp312/bin:${PATH}"
 
 "${REPO}/infra/bundle/xservers.sh" "${TREE}"
 "${REPO}/infra/bundle/cups.sh" "${TREE}"
+"${REPO}/infra/bundle/dbus.sh" "${TOOLCHAIN}/dbus"
 
 
 # The server links the libgbm loader and pixman from the archives the X servers
@@ -100,9 +103,8 @@ fi
 install -Dm755 "${BUILD}/server-root/usr/bin/selkies" "${TREE}/bin/selkies"
 install -Dm755 "${BUILD}/server-root/usr/bin/selkies-desktop" "${TREE}/bin/selkies-desktop"
 
-# PulseAudio with the modules Selkies loads, and the distribution's dbus-daemon
-# with its configuration
-install -m755 /usr/bin/pulseaudio /usr/bin/dbus-daemon "${TREE}/libexec/selkies/"
+# PulseAudio with the modules Selkies loads, and dbus-daemon
+install -m755 /usr/bin/pulseaudio "${TOOLCHAIN}/dbus/bin/dbus-daemon" "${TREE}/libexec/selkies/"
 modules="$(dirname "$(find /usr/lib64 /usr/lib -name module-null-sink.so 2> /dev/null | head -n 1)")"
 for module in module-native-protocol-unix module-always-sink module-null-sink module-virtual-source; do
     install -m755 "${modules}/${module}.so" "${TREE}/lib/selkies/pulse/modules/"
@@ -132,7 +134,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
         with open(f"{sys.argv[2]}/{name}", "wb") as out:
             out.write(archive.read(member))
 PY
-cp /usr/share/dbus-1/session.conf "${TREE}/share/selkies/dbus-1/"
+cp "${TOOLCHAIN}/dbus/share/dbus-1/session.conf" "${TREE}/share/selkies/dbus-1/"
 # The session's system bus: the distribution's configuration names the account
 # the daemon drops to, which the daemon looks up even when it never drops, and
 # which a host need not have; this one takes what the session user sends, and
@@ -229,9 +231,9 @@ while [ -n "${queue}" ]; do
     queue="${next}"
 done
 # The run paths: rewritten in place where a library has one (patchelf grows a
-# file by its whole alignment to add one), and the daemons' as an RPATH, which
-# their libraries' own lookups take too; neither daemon shares a process with a
-# GPU driver
+# file by its whole alignment to add one), and the sound server's as an RPATH,
+# which its libraries' own lookups take too; it shares no process with a GPU
+# driver. dbus-daemon links the C library alone.
 for elf in "${LIBDIR}"/*.so*; do
     if [ -n "$(patchelf --print-rpath "${elf}")" ]; then
         patchelf --set-rpath "\$ORIGIN" "${elf}"
@@ -242,9 +244,7 @@ for elf in "${LIBDIR}"/pulse/modules/*.so; do
         patchelf --set-rpath "\$ORIGIN:\$ORIGIN/../.." "${elf}"
     fi
 done
-for elf in "${TREE}"/libexec/selkies/pulseaudio "${TREE}"/libexec/selkies/dbus-daemon; do
-    patchelf --force-rpath --set-rpath "\$ORIGIN/../../lib/selkies" "${elf}"
-done
+patchelf --force-rpath --set-rpath "\$ORIGIN/../../lib/selkies" "${TREE}/libexec/selkies/pulseaudio"
 patchelf --force-rpath --set-rpath "\$ORIGIN/../../../../lib/selkies" \
     "${TREE}/libexec/selkies/cups/sbin/cupsd"
 patchelf --force-rpath --set-rpath "\$ORIGIN/../../../../../../lib/selkies" \
