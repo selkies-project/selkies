@@ -7392,9 +7392,13 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 smithay::wayland::selection::primary_selection::set_primary_selection(
                     &state.dh,
                     &state.seat,
-                    mimes,
+                    mimes.clone(),
                     payload,
                 );
+                let clipboard = smithay::wayland::selection::SelectionTarget::Clipboard;
+                let primary = smithay::wayland::selection::SelectionTarget::Primary;
+                crate::wayland::xwm::announce_selection(state, clipboard, Some(mimes.clone()));
+                crate::wayland::xwm::announce_selection(state, primary, Some(mimes));
                 // The selection is compositor-owned now; a later SetClipboardCallback
                 // must not try to re-read a client source that no longer holds it.
                 state.current_selection_mimes.clear();

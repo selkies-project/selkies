@@ -2639,10 +2639,11 @@ fn read_selection(reader: std::io::PipeReader) -> Option<Vec<u8>> {
 impl SelectionHandler for AppState {
     type SelectionUserData = std::sync::Arc<Vec<(String, Vec<u8>)>>;
 
-    /// A client took the clipboard, or cleared it: pick the flavors to read and stage them for
-    /// the loop.
+    /// A client took the clipboard, or cleared it: announce it to Xwayland, pick the flavors
+    /// to read, and stage them for the loop.
     ///
-    /// Only client-owned clipboard (not primary) selections are relayed to Python. The source's
+    /// Both selections are announced to Xwayland, so X11 clients paste what a Wayland client
+    /// copied. Only client-owned clipboard (not primary) selections are relayed to Python. The source's
     /// flavors (`clipboard_flavors`) are recorded in `pending_clipboard_read`, and a cleared
     /// selection as no flavors. The read itself is deferred: the new source is stored only after
     /// this handler returns, so `process_pending_clipboard_read` runs post-dispatch and reads the
@@ -2653,6 +2654,11 @@ impl SelectionHandler for AppState {
         source: Option<SelectionSource>,
         seat: Seat<Self>,
     ) {
+        crate::wayland::xwm::announce_selection(
+            self,
+            ty,
+            source.as_ref().map(SelectionSource::mime_types),
+        );
         if ty != SelectionTarget::Clipboard {
             return;
         }
@@ -2670,9 +2676,8 @@ impl SelectionHandler for AppState {
         let _ = seat;
     }
 
-    /// A client pastes the Python-owned selection: stream the stored bytes into the client's
-    /// fd on a spawned thread, since the receiving pipe may backpressure. Bounded by an
-    /// idle deadline: a client that never reads its paste fd must not pin the thread.
+    /// A client pastes a compositor-owned selection: an X11 client's copy is read from
+    /// Xwayland, the consumer's is served from its entries ([`serve_selection`]).
     fn send_selection(
         &mut self,
         ty: SelectionTarget,
@@ -2684,10 +2689,7 @@ impl SelectionHandler for AppState {
         if ty != SelectionTarget::Clipboard && ty != SelectionTarget::Primary {
             return;
         }
-        // The text aliases are all advertised for the first text entry, so a request for
-        // any of them takes it; every other advertised mime is an entry of its own.
-        let entries = user_data.clone();
-        if entries.is_empty()
+        if user_data.is_empty()
             && let Some(xwm) = self.xwm.wm.as_mut()
         {
             if let Err(e) = xwm.send_selection(ty, mime_type, fd) {
@@ -2695,26 +2697,40 @@ impl SelectionHandler for AppState {
             }
             return;
         }
-        let Some(index) = entries
-            .iter()
-            .position(|(mime, _)| *mime == mime_type)
-            .or_else(|| {
-                entries
-                    .iter()
-                    .position(|(mime, _)| mime.starts_with("text/plain"))
-                    .filter(|_| !mime_type.contains('/') || mime_type.starts_with("text/plain"))
-            })
-        else {
-            return;
-        };
-        std::thread::spawn(move || {
-            let _ = crate::wayland::wlclient::write_fd_all(
-                &fd,
-                &entries[index].1,
-                crate::wayland::wlclient::IO_TIMEOUT,
-            );
-        });
+        serve_selection(user_data.clone(), &mime_type, fd);
     }
+}
+
+/// Stream the entry of a compositor-owned selection that answers `mime_type` into a pasting
+/// client's fd, on a spawned thread since the receiving pipe may backpressure, bounded by an
+/// idle deadline so a client that never reads its paste fd cannot pin the thread.
+///
+/// The text aliases are all advertised for the first text entry, so a request for any of them
+/// takes it; every other advertised mime is an entry of its own. A mime no entry answers
+/// closes the fd unwritten.
+pub(crate) fn serve_selection<E>(entries: E, mime_type: &str, fd: std::os::fd::OwnedFd)
+where
+    E: std::ops::Deref<Target = Vec<(String, Vec<u8>)>> + Send + 'static,
+{
+    let Some(index) = entries
+        .iter()
+        .position(|(mime, _)| mime == mime_type)
+        .or_else(|| {
+            entries
+                .iter()
+                .position(|(mime, _)| mime.starts_with("text/plain"))
+                .filter(|_| !mime_type.contains('/') || mime_type.starts_with("text/plain"))
+        })
+    else {
+        return;
+    };
+    std::thread::spawn(move || {
+        let _ = crate::wayland::wlclient::write_fd_all(
+            &fd,
+            &entries[index].1,
+            crate::wayland::wlclient::IO_TIMEOUT,
+        );
+    });
 }
 
 /// `wl_data_device` protocol: exposes the managed state for drag-and-drop and clipboard
