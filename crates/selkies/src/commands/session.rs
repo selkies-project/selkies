@@ -113,19 +113,6 @@ pub fn answers(path: &Path) -> bool {
     UnixStream::connect(path).is_ok()
 }
 
-/// Whether the program `daemon` names takes `option`, run with it ahead of `--version`:
-/// dbus-daemon reads its arguments in order and refuses one it does not know with its usage
-/// before it reaches `--version`.
-fn takes_option(daemon: &str, option: &str) -> bool {
-    Command::new(daemon)
-        .args([option, "--version"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
 /// Whether `child` has exited, and with what status (`None` while it runs).
 fn exited(child: &mut Child) -> Option<i32> {
     child
@@ -552,9 +539,6 @@ impl Session {
             .bundle
             .clone()
             .filter(|b| b.program("dbus-daemon").is_some());
-        // dbus 1.11 added --nosyslog, which keeps the system bus off the host's log; a daemon
-        // older than that (Enterprise Linux 7's 1.10) refuses it and starts no bus
-        let nosyslog = takes_option(&daemon, "--nosyslog");
         let session = self.runtime_dir.join("bus");
         let system = self.runtime_dir.join("dbus-system-bus");
         for (kind, socket, var) in [
@@ -567,14 +551,17 @@ impl Session {
                 Some(b) => format!("--config-file={}", b.dbus_config(&kind[2..]).display()),
                 None => kind.to_string(),
             };
-            let mut argv: Vec<String> = [daemon.as_str(), &config, "--nofork", "--nopidfile"]
-                .iter()
-                .map(|a| a.to_string())
-                .collect();
-            if nosyslog {
-                argv.push("--nosyslog".to_string());
-            }
-            argv.push(format!("--address={address}"));
+            let argv: Vec<String> = [
+                daemon.as_str(),
+                &config,
+                "--nofork",
+                "--nopidfile",
+                "--nosyslog",
+            ]
+            .iter()
+            .map(|a| a.to_string())
+            .chain([format!("--address={address}")])
+            .collect();
             let index = match self.spawn(&argv, None, None, false) {
                 Ok(index) => index,
                 Err(err) => {
@@ -1643,13 +1630,6 @@ mod tests {
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|a| a.to_string()).collect()
-    }
-
-    #[test]
-    fn an_option_is_taken_only_where_the_program_accepts_it() {
-        assert!(takes_option("true", "--nosyslog"));
-        assert!(!takes_option("false", "--nosyslog"));
-        assert!(!takes_option("/nonexistent/dbus-daemon", "--nosyslog"));
     }
 
     #[test]
