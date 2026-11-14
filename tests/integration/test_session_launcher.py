@@ -214,6 +214,17 @@ def logged(log: str, prefix: str) -> Optional[str]:
     return None
 
 
+def logged_within(log: str, prefix: str, seconds: float) -> Optional[str]:
+    """`logged`, waiting up to `seconds` for the line: on Wayland the launcher starts the
+    desktop only once Selkies' compositor socket is up, which can be after its port answers."""
+    deadline = time.time() + seconds
+    while True:
+        found = logged(log, prefix)
+        if found is not None or time.time() >= deadline:
+            return found
+        time.sleep(0.2)
+
+
 def stop(proc: subprocess.Popen, pid: int, detached: bool) -> Optional[int]:
     """SIGTERM to the launcher, returning once it has exited (it removes its runtime
     directory last, after collecting its session); its exit status where this
@@ -292,8 +303,11 @@ def block(res: H.Results, tag: str, wayland: bool, session: list, path_env: Opti
                 else:
                     res.skip(f"{tag} the Xvfb refuses a client without the session's cookie", "no xdpyinfo")
         else:
-            nested = logged(log, "desktop ")
-            res.check(f"{tag} the host's compositor nests in Selkies' compositor", nested is not None, nested)
+            # Started on a Wayland socket, not on an X display: a launcher that moved the
+            # session to X11 runs the compositor as an X11 client and nests nothing
+            nested = logged_within(log, "desktop ", 20)
+            res.check(f"{tag} the host's compositor nests in Selkies' compositor",
+                      nested is not None and " on wayland-" in nested, nested)
             deadline = time.time() + 20
             sockets = []
             while time.time() < deadline and len(sockets) < 2:
