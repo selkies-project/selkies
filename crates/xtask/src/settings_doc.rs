@@ -129,6 +129,7 @@ const SECTIONS: &[Section] = &[
             "desktop",
             "session_switch",
             "app_restart",
+            "app_logs",
             "wm_maximize",
             "wm_decorations",
             "wm_buttons",

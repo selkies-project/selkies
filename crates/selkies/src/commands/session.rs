@@ -337,6 +337,9 @@ pub struct Session {
     requested_display: Option<String>,
     /// The release bundle the executable runs from, whose programs the session takes first.
     bundle: Option<Bundle>,
+    /// The desktop's output is discarded rather than written to the launcher's own streams
+    /// (`app_logs` off).
+    pub quiet_desktop: bool,
 }
 
 impl Session {
@@ -459,16 +462,19 @@ impl Session {
             sockets_before: BTreeSet::new(),
             requested_display,
             bundle,
+            quiet_desktop: false,
         }
     }
 
     /// Start `argv` in the session's process group, founding it with the first child; the
-    /// result indexes `children`. `inherit` is a descriptor the child keeps open past exec.
+    /// result indexes `children`. `inherit` is a descriptor the child keeps open past exec, and
+    /// `quiet` sends the child's output to `/dev/null` rather than the launcher's own streams.
     fn spawn(
         &mut self,
         argv: &[String],
         env: Option<&Env>,
         inherit: Option<&OwnedFd>,
+        quiet: bool,
     ) -> io::Result<usize> {
         let group = self.groups.iter().next().copied().unwrap_or(0);
         let mut command = Command::new(&argv[0]);
@@ -477,6 +483,9 @@ impl Session {
             .env_clear()
             .envs(env.unwrap_or(&self.env))
             .stdin(Stdio::null());
+        if quiet {
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+        }
         let keep = inherit.map(std::os::fd::AsRawFd::as_raw_fd);
         unsafe {
             command.pre_exec(move || {
@@ -553,7 +562,7 @@ impl Session {
             .map(|a| a.to_string())
             .chain([format!("--address={address}")])
             .collect();
-            let index = match self.spawn(&argv, None, None) {
+            let index = match self.spawn(&argv, None, None, false) {
                 Ok(index) => index,
                 Err(err) => {
                     log(&format!("the {} bus did not start: {err}", &kind[2..]));
@@ -668,7 +677,7 @@ impl Session {
             }
             let mut started = Vec::new();
             for argv in &servers {
-                match self.spawn(argv, None, None) {
+                match self.spawn(argv, None, None, false) {
                     Ok(index) => started.push(index),
                     Err(err) => log(&format!("{} did not start: {err}", argv[0])),
                 }
@@ -829,7 +838,7 @@ impl Session {
                 );
             }
             let index = self
-                .spawn(&argv, Some(&env), Some(&write))
+                .spawn(&argv, Some(&env), Some(&write), false)
                 .map_err(|e| format!("Xvfb did not start: {e}"))?;
             drop(write);
             let number = read_line_within(read, Duration::from_secs(30));
@@ -964,8 +973,9 @@ impl Session {
             .or_else(|| env.get("DISPLAY"))
             .cloned()
             .unwrap_or_default();
+        let quiet = self.quiet_desktop;
         let index = self
-            .spawn(&argv, Some(&env), None)
+            .spawn(&argv, Some(&env), None, quiet)
             .map_err(|e| format!("the desktop did not start: {e}"))?;
         self.desktop = Some(index);
         log(&format!(
@@ -991,7 +1001,7 @@ impl Session {
             bundle.selkies_env(&mut env);
         }
         let index = self
-            .spawn(command, Some(&env), None)
+            .spawn(command, Some(&env), None, false)
             .map_err(|e| format!("selkies did not start: {e}"))?;
         self.selkies = Some(index);
         Ok(())
@@ -1454,6 +1464,7 @@ pub fn main(argv: &[String], prog: &str) -> i32 {
             return 1;
         }
     };
+    session.quiet_desktop = !settings.app_logs().on;
     let mut status = 1;
     let run = |session: &mut Session, status: &mut i32| -> Result<(), String> {
         let exe = std::env::current_exe()
@@ -2225,8 +2236,12 @@ mod tests {
             return;
         }
         let mut session = Session::new_in(None, Env::new()).unwrap();
-        let first = session.spawn(&argv(&["sleep", "30"]), None, None).unwrap();
-        let second = session.spawn(&argv(&["sleep", "30"]), None, None).unwrap();
+        let first = session
+            .spawn(&argv(&["sleep", "30"]), None, None, false)
+            .unwrap();
+        let second = session
+            .spawn(&argv(&["sleep", "30"]), None, None, false)
+            .unwrap();
         let pids: Vec<i32> = [first, second]
             .iter()
             .map(|i| session.children[*i].id() as i32)

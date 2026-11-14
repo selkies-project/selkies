@@ -181,6 +181,7 @@ pub fn start(is_wayland: bool) {
         .then(|| std::env::var("DISPLAY").ok())
         .flatten();
     let mut env = SessionEnv::new(wayland_display.as_deref(), x11_display.as_deref());
+    env.set_quiet_apps(!settings().app_logs().on);
     let preload = application_preload(|var| env.get(var).map(str::to_string));
     if !preload.is_empty() {
         env.set("LD_PRELOAD", &preload);

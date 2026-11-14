@@ -55,6 +55,9 @@ const SHELL_TOOLKITS: &str = "SELKIES_DESKTOP_TOOLKITS";
 #[derive(Clone, Debug, Default)]
 pub struct SessionEnv {
     vars: HashMap<String, String>,
+    /// The applications started in it have their error output discarded rather than written
+    /// to this process's own stream, the session's log.
+    quiet_apps: bool,
 }
 
 impl SessionEnv {
@@ -94,7 +97,25 @@ impl SessionEnv {
                 );
             }
         }
-        SessionEnv { vars }
+        SessionEnv {
+            vars,
+            quiet_apps: false,
+        }
+    }
+
+    /// Discard the error output of the applications started in this environment, or, with
+    /// `false`, write it to this process's own stream as by default.
+    pub fn set_quiet_apps(&mut self, quiet: bool) {
+        self.quiet_apps = quiet;
+    }
+
+    /// The error stream an application started in this environment writes to.
+    fn app_stderr(&self) -> Stdio {
+        if self.quiet_apps {
+            Stdio::null()
+        } else {
+            Stdio::inherit()
+        }
     }
 
     /// Set a variable.
@@ -180,14 +201,14 @@ impl Drop for SessionBus {
 }
 
 /// Start `program` with `args` in `env`, detached from the caller: its exit is reaped on a
-/// thread of its own and its output goes to the log's stream.
+/// thread of its own and its error output goes where `env` sends an application's.
 fn spawn_detached(env: &SessionEnv, program: &str, args: &[&str], what: &str) {
     let mut child = env.command(program);
     child
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit());
+        .stderr(env.app_stderr());
     match child.spawn() {
         Ok(mut child) => {
             log::info!(target: "wm", "started: {what}");
@@ -427,7 +448,7 @@ fn run_autostart_once(env: &SessionEnv, file: &Path, lock_path: &Path) -> std::i
         .arg(file)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit());
+        .stderr(env.app_stderr());
     // SAFETY: the hook runs in the forked child before exec and only calls fcntl on a
     // descriptor the child's table holds, which is async-signal-safe.
     unsafe {

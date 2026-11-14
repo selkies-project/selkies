@@ -1672,6 +1672,20 @@ pub static DEFINITIONS: &[SettingDef] = &[
         client_excluded: true,
     },
     SettingDef {
+        name: "app_logs",
+        kind: Kind::Bool,
+        default: "True",
+        help: "Keep the error output of the applications the session starts (the window manager's autostart and the programs its menus launch, and the desktop session selkies session starts) in Selkies' own log stream, the container log; false sends their output to /dev/null instead. Selkies' own log (the server, the window manager, and the desktop shell) is kept either way, and the applications the shell's start menu or file manager open discard theirs already.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
         name: "wm_maximize",
         kind: Kind::Bool,
         default: "True",
@@ -3151,6 +3165,10 @@ impl Settings {
 
     pub fn app_restart(&self) -> BoolSetting {
         self.bool_setting("app_restart")
+    }
+
+    pub fn app_logs(&self) -> BoolSetting {
+        self.bool_setting("app_logs")
     }
 
     pub fn wm_maximize(&self) -> BoolSetting {
