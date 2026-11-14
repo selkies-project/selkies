@@ -6,9 +6,8 @@
 #
 # usage: stamp-version.sh <tree> <version>
 #
-# The tree versions its crates 0.0.0 (selkies, selkies-rtc, selkies-wm,
-# selkies-draw, selkies-desktop, pelorus, selkies-turn-rest, xtask, pixelflux,
-# and pcmflux), and a
+# The tree versions its crates 0.0.0 (every workspace member that takes the
+# workspace's version, and pixelflux and pcmflux), and a
 # build of a release writes its PEP 440 version (2.3.0, 2.3.0rc0) into them in
 # Cargo's semver spelling: the workspace manifest and its lock, and the manifest
 # and lock each native crate keeps for its standalone wheel build, so the root
@@ -44,7 +43,14 @@ stamp_lock() {
 }
 
 stamp_manifest "${TREE}/Cargo.toml"
-for member in selkies selkies-rtc selkies-wm selkies-draw selkies-desktop pelorus selkies-turn-rest xtask pixelflux pcmflux; do
+# Every member that takes the workspace's version, then the two components that
+# carry their own
+for manifest in "${TREE}"/crates/*/Cargo.toml; do
+    if grep -q '^version.workspace = true$' "${manifest}"; then
+        stamp_lock "${TREE}/Cargo.lock" "$(sed -n 's/^name = "\(.*\)"$/\1/p' "${manifest}" | head -n 1)"
+    fi
+done
+for member in pixelflux pcmflux; do
     stamp_lock "${TREE}/Cargo.lock" "${member}"
 done
 for component in pixelflux pcmflux; do
