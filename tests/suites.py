@@ -139,7 +139,6 @@ SUITES: list = [
     {"path": RUST + "xvfb_vidmode.rs", "tier": "integration", "timeout": 120},
     {"path": "integration/test_webcam_device.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_capture_demand.py", "tier": "integration", "timeout": 300},
-    {"path": "integration/test_wire_header_picture_type.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_session_launcher.py", "tier": "integration", "timeout": 600},
 
     # e2e

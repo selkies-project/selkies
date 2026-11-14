@@ -161,7 +161,7 @@ jobs:
         # wheel recipe pins where the distribution does not carry it
         run: |
           scripts/ci/server-build-deps.sh
-          sudo apt-get install -y --no-install-recommends python3-dev
+          sudo apt-get install -y --no-install-recommends python3-dev xvfb
           # The non-GPL tests need the same rate-control ABI as the wheels.
           # Use a carrying distribution package when available; otherwise build
           # the exact release-pinned commit, rather than just its tag.
@@ -184,6 +184,9 @@ jobs:
         # A test binary of its own, the compositor being one per process; ignored where
         # cargo runs every test at once
         run: cargo test --locked -p pixelflux --test screenshots -- --include-ignored
+      - name: The wire header of each picture, on X11 and the in-process compositor
+        # Its own binary for the same reason; it starts an Xvfb of its own
+        run: cargo test --locked -p pixelflux --test wire_header -- --include-ignored
       - name: Test the non-GPL pixelflux configuration
         run: cargo test --locked -p pixelflux --lib --no-default-features --features openh264
 
