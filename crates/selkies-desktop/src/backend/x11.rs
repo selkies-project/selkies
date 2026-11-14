@@ -2317,7 +2317,7 @@ fn load_cursors(
 /// Allocates an anonymous shared memory file of a size.
 fn create_memfd(size: usize) -> Option<OwnedFd> {
     let name = c"selkies-desktop-x11";
-    let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
+    let fd = super::memfd_create(name, libc::MFD_CLOEXEC);
     if fd < 0 {
         return None;
     }

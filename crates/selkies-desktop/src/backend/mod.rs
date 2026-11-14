@@ -161,6 +161,14 @@ pub fn copy_bgra(src: &[u8], dst: &mut [u8], stride: usize, x: usize, y: usize, 
     }
 }
 
+/// `memfd_create(2)` through the raw system call, which both backends' shared
+/// memory comes from: glibc wraps it only from 2.27, and the glibc bundle on
+/// x86_64 holds to the 2.17 floor. The descriptor, or -1 with `errno` set.
+fn memfd_create(name: &std::ffi::CStr, flags: libc::c_uint) -> libc::c_int {
+    // SAFETY: `name` is a NUL-terminated string that outlives the call.
+    unsafe { libc::syscall(libc::SYS_memfd_create, name.as_ptr(), flags) as libc::c_int }
+}
+
 #[cfg(test)]
 mod tests {
     use super::copy_bgra;

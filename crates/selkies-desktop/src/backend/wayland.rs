@@ -1381,7 +1381,7 @@ fn anchor_panel(layer: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, version: u32,
 fn create_memfd(size: usize) -> Option<OwnedFd> {
     use std::os::fd::FromRawFd;
     let name = c"selkies-desktop";
-    let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
+    let fd = super::memfd_create(name, libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING);
     if fd < 0 {
         return None;
     }
