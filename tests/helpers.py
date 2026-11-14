@@ -28,6 +28,22 @@ REPO = os.environ.get(
 TOOLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools")
 
 
+def camera_bin() -> str:
+    """pixelflux's virtual_camera example, the suites' stand-in camera: SELKIES_TEST_CAMERA where
+    CI hands a built one in, else the target directory's, built first where cargo is at hand."""
+    given = os.environ.get("SELKIES_TEST_CAMERA")
+    if given:
+        return given
+    target = os.environ.get("CARGO_TARGET_DIR") or os.path.join(REPO, "target")
+    path = os.path.join(target, "debug", "examples", "virtual_camera")
+    if shutil.which("cargo"):
+        subprocess.run(["cargo", "build", "--quiet", "--locked", "-p", "pixelflux", "--example", "virtual_camera"],
+                       cwd=REPO, check=True)
+    if not os.path.exists(path):
+        raise RuntimeError(f"{path} is not built and SELKIES_TEST_CAMERA names no camera")
+    return path
+
+
 def suites_bin(name: str) -> str:
     """A helper program of crates/selkies-suites (its src/bin), built first where cargo is at
     hand, from the target directory cargo uses (CARGO_TARGET_DIR, else the tree's target/)."""

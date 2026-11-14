@@ -225,15 +225,46 @@ jobs:
     with:
       package_version: 0.0.0.dev0
 
+  # The suites' stand-in camera, pixelflux's virtual_camera example, built
+  # where the server's libraries are, since the suites job compiles none of
+  # pixelflux; the distribution packages it loads ride along with it
+  # (scripts/ci/runtime-packages.sh)
+  camera:
+    name: Stand-in camera
+    if: ${{ github.event_name != 'schedule' || github.repository == 'selkies-project/selkies' }}
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the server's toolchain and libraries
+        run: scripts/ci/server-build-deps.sh
+      - name: Build the stand-in camera
+        run: |
+          cargo build --locked -p pixelflux --example virtual_camera
+          mkdir -p camera/bin
+          cp target/debug/examples/virtual_camera camera/bin/
+          strip camera/bin/virtual_camera
+          scripts/ci/runtime-packages.sh record camera
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: suites-camera
+          path: camera/
+          if-no-files-found: error
+          retention-days: 1
+
   # Three shards unless the caller names others, each the share of the
   # selected cases tests/conftest.py deals it by budget, so a shard stays
   # inside the job's two hours.
   suites:
     name: Suites (${{ inputs.tiers || 'integration or e2e' }}, ${{ matrix.shard }}/${{ strategy.job-total }})
-    needs: [wheel, wheels]
+    needs: [wheel, wheels, camera]
     if: >-
       ${{ always() && contains(fromJSON('["success", "skipped"]'), needs.wheel.result)
           && contains(fromJSON('["success", "skipped"]'), needs.wheels.result)
+          && needs.camera.result == 'success'
           && (github.event_name != 'schedule' || github.repository == 'selkies-project/selkies') }}
     runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 120
@@ -386,6 +417,17 @@ jobs:
         with:
           name: selkies-wheel
           path: dist/
+      - name: Download the stand-in camera
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: suites-camera
+          path: ${{ runner.temp }}/camera
+      - name: Install the stand-in camera
+        run: |
+          chmod +x "${RUNNER_TEMP}/camera/bin/virtual_camera"
+          scripts/ci/runtime-packages.sh install "${RUNNER_TEMP}/camera"
+          "${RUNNER_TEMP}/camera/bin/virtual_camera" --bogus 2>&1 | grep -q "unknown option"
+          echo "SELKIES_TEST_CAMERA=${RUNNER_TEMP}/camera/bin/virtual_camera" >> "$GITHUB_ENV"
       - name: Download the pixelflux wheels (local crates)
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true

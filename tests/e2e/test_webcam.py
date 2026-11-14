@@ -21,11 +21,9 @@ import random
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 from typing import Optional
 
-import pixelflux
 from PIL import Image, ImageChops, ImageDraw
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -119,52 +117,46 @@ def detail_frames(width: int = 1280, height: int = 720, count: int = 24):
 
 
 class PublishedCamera:
-    """The camera both engines capture. pixelflux's VirtualCamera publishes the
-    frames through the interposer, so Firefox and Chromium read the same pixels
-    at the same rate rather than each engine's own synthetic fake, and what the
-    camera is showing is the test's to choose."""
+    """The camera both engines capture. pixelflux's virtual_camera example
+    publishes the frames through the interposer, so Firefox and Chromium read the
+    same pixels at the same rate rather than each engine's own synthetic fake,
+    and what the camera is showing is the test's to choose."""
 
     def __init__(self, frames, width: int = 640, height: int = 480, fps: int = CAMERA_FPS,
                  pixel_format: str = "I420"):
         self.frames, self.width, self.height, self.fps = frames, width, height, fps
         self.pixel_format = pixel_format
         self.sock_dir = tempfile.mkdtemp(prefix="selkies-cam-")
-        self._cam = None
-        self._stop = threading.Event()
+        self._proc: Optional[subprocess.Popen] = None
 
     def start(self) -> "PublishedCamera":
-        settings = pixelflux.VirtualCameraSettings()
-        settings.socket_path = os.path.join(self.sock_dir, "selkies_webcam0.sock")
-        settings.width, settings.height = self.width, self.height
-        settings.pixel_format = self.pixel_format
-        settings.device_path = ""
-        # Reachable only over its own socket, which is the browser's to read: a
-        # PipeWire node would also be found by the probe and the device under
-        # test would then be this camera rather than the server's.
-        settings.pipewire = False
-        self._cam = pixelflux.VirtualCamera()
-        self._cam.start(settings)
-        threading.Thread(target=self._pump, daemon=True).start()
+        socket = os.path.join(self.sock_dir, "selkies_webcam0.sock")
+        argv = [H.camera_bin(), "--socket", socket, "--width", str(self.width),
+                "--height", str(self.height), "--fps", str(self.fps),
+                "--pixel-format", self.pixel_format, "--always",
+                # Reachable only over its own socket, which is the browser's to read: a
+                # PipeWire node would also be found by the probe and the device under
+                # test would then be this camera rather than the server's.
+                "--no-pipewire"]
+        for i, frame in enumerate(self.frames):
+            path = os.path.join(self.sock_dir, f"frame{i}.jpg")
+            with open(path, "wb") as fh:
+                fh.write(frame)
+            argv += ["--picture", path]
+        self._proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.time() + 10
+        while not os.path.exists(socket) and time.time() < deadline:
+            time.sleep(0.1)
         time.sleep(0.5)
         return self
 
-    def _pump(self) -> None:
-        i = 0
-        while not self._stop.is_set():
-            try:
-                self._cam.push(self.frames[i % len(self.frames)],
-                               pixelflux.VirtualCamera.CODEC_MJPEG, True)
-            except Exception:
-                return
-            i += 1
-            time.sleep(1.0 / self.fps)
-
     def stop(self) -> None:
-        self._stop.set()
-        try:
-            self._cam.stop()
-        except Exception:
-            pass
+        if self._proc is not None:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
 
 
 # A half turn stamped onto every uplink frame's flags byte, which is what a client

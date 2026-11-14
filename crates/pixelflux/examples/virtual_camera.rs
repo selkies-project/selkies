@@ -15,12 +15,15 @@
 //!     ffmpeg -f v4l2 -i /dev/video0 -frames:v 10 out.mkv
 //! ```
 //!
-//! Options, each taking a value but the last two: `--socket` (default: the session's camera
+//! Options, each taking a value but the last three: `--socket` (default: the session's camera
 //! socket, where the interposer looks), `--width` and `--height` of the device (1280x720),
 //! `--fps` (30), `--pixel-format` (`I420`, `NV12`, `YUYV`, or `MJPEG`), `--device` (a
 //! v4l2loopback output to mirror: `auto` or a path; none by default), `--source-width` and
-//! `--source-height` of the synthetic frames (the device's size), `--always` (feed frames with
-//! no consumer connected) and `--stats` (print the camera's counters once a second).
+//! `--source-height` of the synthetic frames (the device's size), `--picture` (a JPEG file to
+//! show instead of the synthetic frames; given more than once, the pictures are shown in turn),
+//! `--always` (feed frames with no consumer connected), `--no-pipewire` (publish no PipeWire
+//! node, so the camera is reached over its socket alone) and `--stats` (print the camera's
+//! counters once a second).
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -33,6 +36,7 @@ use pixelflux::webcam::{VirtualCamera, VirtualCameraSettings};
 struct Args {
     settings: VirtualCameraSettings,
     source: (u32, u32),
+    pictures: Vec<Vec<u8>>,
     always: bool,
     stats: bool,
 }
@@ -45,6 +49,7 @@ fn parse(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     };
     let (mut source_width, mut source_height) = (0, 0);
     let (mut always, mut stats) = (false, false);
+    let mut pictures = Vec::new();
     while let Some(flag) = argv.next() {
         let mut value = || argv.next().ok_or_else(|| format!("{flag} takes a value"));
         let number = |text: String| {
@@ -60,7 +65,12 @@ fn parse(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
             "--device" => settings.device_path = value()?,
             "--source-width" => source_width = number(value()?)?,
             "--source-height" => source_height = number(value()?)?,
+            "--picture" => {
+                let path = value()?;
+                pictures.push(std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?);
+            }
             "--always" => always = true,
+            "--no-pipewire" => settings.pipewire = false,
             "--stats" => stats = true,
             _ => return Err(format!("unknown option {flag}")),
         }
@@ -81,6 +91,7 @@ fn parse(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     Ok(Args {
         settings,
         source,
+        pictures,
         always,
         stats,
     })
@@ -142,7 +153,12 @@ fn main() -> ExitCode {
     let mut phase = 0u32;
     loop {
         if camera.clients() > 0 || args.always {
-            let pushed = frame(args.source, phase).and_then(|jpeg| {
+            let picture = if args.pictures.is_empty() {
+                frame(args.source, phase)
+            } else {
+                Ok(args.pictures[phase as usize % args.pictures.len()].clone())
+            };
+            let pushed = picture.and_then(|jpeg| {
                 camera
                     .push(&jpeg, VirtualCamera::CODEC_MJPEG, true, 0, false)
                     .map_err(|e| e.to_string())
