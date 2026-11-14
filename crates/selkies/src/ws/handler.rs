@@ -16,7 +16,12 @@
 //! incoming ping inside its read, so the loop needs no pong of its own; a pong reaches the loop,
 //! which feeds it to the uplink clock.
 //!
-//! Dispatch order: `_gz,1` and `_pad,1`; the viewer gate; `SETTINGS,`; `_stats,`;
+//! `_sent,<n>` is echoed as it is: when the echo reaches the page, everything the page sent
+//! before it has left the browser, which lets the page discount what the browser's
+//! `bufferedAmount` still counts of it (Firefox keeps a message counted after it went out when
+//! a pong left during it).
+//!
+//! Dispatch order: `_gz,1`, `_pad,1` and `_sent,`; the viewer gate; `SETTINGS,`; `_stats,`;
 //! `CLIENT_FRAME_ACK`; `START_VIDEO`; `PAGE_HIDDEN`/`PAGE_SHOWN`; `STOP_VIDEO`; `DECODE_PACE `;
 //! `LOST_FRAME `; `REQUEST_KEYFRAME`; `START_AUDIO`; `STOP_AUDIO`;
 //! `SET_NATIVE_CURSOR_RENDERING,`; then the gamepad slot gate, the secure-input gate, the
@@ -582,6 +587,12 @@ impl Connection {
         if message == "_pad,1" {
             // The page drops `0x07` padding unread: its stream may be padded.
             self.client.set_pad();
+            return Flow::Continue(());
+        }
+        if let Some(n) = message.strip_prefix("_sent,") {
+            if let Ok(n) = n.parse::<u64>() {
+                say(&self.client, &format!("_sent,{n}")).await;
+            }
             return Flow::Continue(());
         }
         let perms = self.client.perms();

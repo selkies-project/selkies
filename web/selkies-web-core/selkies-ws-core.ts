@@ -637,6 +637,13 @@ const ACK_HEARTBEAT_MS = 1000;
 /** How often the socket worker re-reports a draining send buffer. */
 const BUFFERED_DRAIN_MS = 20;
 /**
+ * How long the socket's `bufferedAmount` stays above what the worker already
+ * knows went out before the worker sends a `_sent,<n>` probe, and how long an
+ * unanswered probe waits before the next.
+ */
+const SENT_PROBE_BUSY_MS = 250;
+const SENT_PROBE_RETRY_MS = 2000;
+/**
  * Raw bytes per clipboard chunk, before base64 expansion, and the socket
  * backlog a transfer waits below before queueing the next.
  *
@@ -6779,21 +6786,66 @@ let videoLastId = -1, videoLastIdAt = 0, videoAckedId = -1, videoAckSentAt = 0, 
 // (epoch ms), which the thread that shows a frame measures its delay from.
 let statsOn = false;
 
+// Firefox takes each pong's payload off bufferedAmount, though a pong was
+// never counted, and then refuses to take off a message larger than what is
+// left: that message stays counted after it went out, and every gate reading
+// the count would hold for good. So a count that stays up is checked with a
+// '_sent,<n>' probe the server echoes: by the echo everything sent before the
+// probe has gone out, and what the count holds beyond the bytes sent since is
+// 'gone', taken off every report until the count falls below it.
+let sentBytes = 0, gone = 0;
+let busySince = -1;
+let probeSeq = 0, probeMark = -1, probeAt = 0;
+function send(data) {
+  // What pongs took off since the last read comes off 'gone' first, or the
+  // new bytes would fill the gap and go unreported.
+  if (ws.bufferedAmount < gone) gone = ws.bufferedAmount;
+  ws.send(data);
+  // Three bytes per UTF-16 unit bounds a string's UTF-8 length: counting
+  // high only makes 'gone' smaller.
+  sentBytes += typeof data === 'string' ? data.length * 3
+    : (data.byteLength !== undefined ? data.byteLength : (data.size || 0));
+}
+function buffered() {
+  if (!ws) return 0;
+  const raw = ws.bufferedAmount;
+  if (raw < gone) gone = raw;
+  const now = performance.now();
+  if (raw === gone) busySince = -1;
+  else if (busySince < 0) busySince = now;
+  else if (ws.readyState === 1 && now - busySince >= ${SENT_PROBE_BUSY_MS}
+      && (probeMark < 0 || now - probeAt >= ${SENT_PROBE_RETRY_MS})) {
+    probeSeq += 1;
+    probeAt = now;
+    try { send('_sent,' + probeSeq); probeMark = sentBytes; } catch (err) {}
+  }
+  return raw - gone;
+}
+function probeAnswered(text) {
+  if (probeMark < 0 || Number(text.slice(6)) !== probeSeq) return;
+  gone = Math.max(0, ws.bufferedAmount - (sentBytes - probeMark));
+  probeMark = -1;
+  busySince = performance.now();
+  reportBuffered();
+}
+
 // The page gates its own sends on what this reports, so a socket left holding
 // bytes has to be reported as it drains: reporting only on send would freeze
 // the page's view at the moment of a message too big for its gate, and nothing
 // would ever send again to correct it.
 let bufferedTimer = null;
 function reportBuffered() {
-  self.postMessage({ type: 'buffered', amount: ws ? ws.bufferedAmount : 0 });
-  if (!ws || ws.bufferedAmount === 0) {
+  const amount = buffered();
+  self.postMessage({ type: 'buffered', amount });
+  if (amount === 0) {
     if (bufferedTimer) { clearInterval(bufferedTimer); bufferedTimer = null; }
     return;
   }
   if (bufferedTimer) return;
   bufferedTimer = setInterval(() => {
-    self.postMessage({ type: 'buffered', amount: ws ? ws.bufferedAmount : 0 });
-    if (!ws || ws.bufferedAmount === 0) { clearInterval(bufferedTimer); bufferedTimer = null; }
+    const left = buffered();
+    self.postMessage({ type: 'buffered', amount: left });
+    if (left === 0) { clearInterval(bufferedTimer); bufferedTimer = null; }
   }, ${BUFFERED_DRAIN_MS});
 }
 
@@ -6809,7 +6861,7 @@ function syncVideoAckTimer() {
       // tab clamps to a second. The server subtracts it, so the round trip it
       // reports stays the path's rather than this timer's.
       const held = Math.max(0, Math.round(now - videoLastIdAt));
-      try { ws.send('CLIENT_FRAME_ACK ' + videoLastId + ' ' + held); videoAckedId = videoLastId; videoAckSentAt = now; } catch (err) {}
+      try { send('CLIENT_FRAME_ACK ' + videoLastId + ' ' + held); videoAckedId = videoLastId; videoAckSentAt = now; } catch (err) {}
     }, ${BACKPRESSURE_INTERVAL_MS});
   } else if (!want && videoAckTimer) {
     clearInterval(videoAckTimer);
@@ -6846,7 +6898,7 @@ self.onmessage = (e) => {
     // Fully framed messages from another worker (the microphone encoder).
     m.port.onmessage = (ev) => {
       if (!ws || ws.readyState !== 1) return;
-      try { ws.send(ev.data); } catch (err) { /* onclose reports */ }
+      try { send(ev.data); } catch (err) { /* onclose reports */ }
     };
     return;
   }
@@ -6864,7 +6916,7 @@ self.onmessage = (e) => {
       msg[2] = (f.keyframe ? 0x01 : 0x00) | ((((f.rotation || 0) / 90) & 0x03) << 1) | (f.flip ? 0x08 : 0x00);
       msg.set(new Uint8Array(f.buffer), 3);
       try {
-        ws.send(msg.buffer);
+        send(msg.buffer);
         if (f.keyframe) webcamChainBroken = false;
       } catch (err) { webcamChainBroken = true; }
     };
@@ -6880,6 +6932,7 @@ self.onmessage = (e) => {
       return;
     }
     ws.binaryType = 'arraybuffer';
+    sentBytes = 0; gone = 0; busySince = -1; probeMark = -1;
     ws.onopen = () => self.postMessage({ type: 'open' });
     ws.onerror = () => self.postMessage({ type: 'error' });
     ws.onclose = (ev) => {
@@ -6911,6 +6964,7 @@ self.onmessage = (e) => {
           return;
         }
       }
+      if (typeof d === 'string' && d.startsWith('_sent,')) { probeAnswered(d); return; }
       if (d instanceof ArrayBuffer) {
         // Padding (0x07) is dropped here rather than handed to the page.
         if (d.byteLength >= 1 && new Uint8Array(d, 0, 1)[0] === 0x07) return;
@@ -6921,7 +6975,7 @@ self.onmessage = (e) => {
   }
   if (!ws) return;
   if (m.type === 'send') {
-    try { ws.send(m.data); } catch (err) { /* a closing socket reports through onclose */ }
+    try { send(m.data); } catch (err) { /* a closing socket reports through onclose */ }
     reportBuffered();
     return;
   }

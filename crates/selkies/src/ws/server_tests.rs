@@ -131,6 +131,28 @@ async fn gz_is_echoed_and_a_gzip_frame_dispatches_as_text() {
 }
 
 #[tokio::test]
+async fn a_sent_probe_is_echoed_to_any_role() {
+    let rig = Rig::new();
+    let mut page = rig.owner("a").await;
+    let mut viewer = rig.viewer().await;
+    page.clear().await;
+    viewer.clear().await;
+    page.say("_sent,7").await;
+    viewer.say("_sent,8").await;
+    assert!(page.has("_sent,7").await);
+    assert!(viewer.has("_sent,8").await);
+    page.clear().await;
+    page.say("_sent,x").await;
+    page.say("_sent,-1").await;
+    settle().await;
+    assert!(
+        !page.texts().await.iter().any(|t| t.starts_with("_sent,")),
+        "only a counter is echoed"
+    );
+    assert!(rig.input.messages.lock().is_empty());
+}
+
+#[tokio::test]
 async fn a_viewer_sends_only_what_it_may() {
     let rig = Rig::new();
     let mut viewer = rig.viewer().await;
