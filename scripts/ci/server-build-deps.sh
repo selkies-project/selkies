@@ -5,12 +5,12 @@
 #
 # Install what building the server from this checkout takes on an apt-based
 # host, for clippy and `cargo test --workspace` outside a package build: the
-# toolchain the images build it with, with rustfmt and clippy, and the headers
-# of every library it links, the list the base image's `server` stage installs.
+# toolchain the bundle builds it with, with rustfmt and clippy, and the headers
+# of every library it links.
 #
-# The toolchain is read from addons/base/Dockerfile's RUST_TOOLCHAIN, so this
-# cannot drift from the images and the bundle (tests/unit/test_toolchain.py
-# holds those two together). A host with rustup (a GitHub runner) installs it
+# The toolchain is read from infra/packaging/rust.sh's PIN, the pin
+# the bundle's build installs, so this cannot drift from what ships. A host with
+# rustup (a GitHub runner) installs it
 # there; any other gets rustup-init, checked against the hash rustup publishes
 # beside it, which puts cargo in ${CARGO_HOME:-~/.cargo}/bin. The codec
 # libraries are the distribution's: pixelflux's codec-sys names their floors,
@@ -23,8 +23,8 @@
 # Usage: server-build-deps.sh
 set -eu
 REPO="$(dirname "$(readlink -f "$0")")/../.."
-RUST_TOOLCHAIN="${RUST_TOOLCHAIN:-$(sed -n 's/^ARG RUST_TOOLCHAIN="\(.*\)"$/\1/p' "${REPO}/addons/base/Dockerfile")}"
-[ -n "${RUST_TOOLCHAIN}" ] || { echo "addons/base/Dockerfile names no RUST_TOOLCHAIN" >&2; exit 1; }
+RUST_TOOLCHAIN="${RUST_TOOLCHAIN:-$(sed -n 's/^PIN="\(.*\)"$/\1/p' "${REPO}/infra/packaging/rust.sh")}"
+[ -n "${RUST_TOOLCHAIN}" ] || { echo "infra/packaging/rust.sh names no RUST_TOOLCHAIN" >&2; exit 1; }
 
 SUDO=""
 [ "$(id -u)" -eq 0 ] || SUDO=sudo

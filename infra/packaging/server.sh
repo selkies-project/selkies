@@ -3,18 +3,19 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
-# Build the Selkies server and stage it under a root at usr/bin/selkies, with
-# the web client compiled into it: the bundle's server (infra/bundle), built in
-# the manylinux_2_28 or musllinux_1_2 image whose C library is the bundle's
-# floor. The codec libraries are the static archives built for the
-# architecture and C library (codecs.sh, scripts/ci/build-codecs.sh), whose
-# prefix SELKIES_CODECS names, and a build refuses to start without them. The
-# toolchain is the pinned release the images
-# build with, installed by rustup-init checked against the hash rustup
-# publishes beside it. pixelflux and pcmflux are copied with the workspace and
-# built through local path dependencies. The checkout stays read-only:
-# the manifests are copied out so the release version can be stamped into
-# them, and everything Cargo writes goes under /build.
+# Build the Selkies server and the desktop shell and stage them under a root at
+# usr/bin/selkies and usr/bin/selkies-desktop, with the web client compiled into
+# the server: the bundle's (infra/bundle), built in the manylinux_2_28 or
+# musllinux_1_2 image whose C library is the bundle's floor. Both come from one
+# cargo invocation, so the crates they share are compiled once, with the
+# features the two unify on. The codec libraries are the static archives built
+# for the architecture and C library (codecs.sh), whose prefix SELKIES_CODECS
+# names, and a build refuses to start without them. The toolchain is the one
+# infra/packaging/rust.sh pins, which the bundle's toolchain image already
+# carries. pixelflux and pcmflux are copied with the workspace and built through
+# local path dependencies. The checkout stays read-only: the manifests are
+# copied out so the release version can be stamped into them, and everything
+# Cargo writes goes under /build.
 #
 # The web client is built once per run by scripts/ci/build-web.sh into
 # dist/web and copied beside the crates, where the server's build script
@@ -27,11 +28,10 @@
 set -eux
 PKG_ROOT="${1:?usage: server.sh <pkg-root>}"
 [ -f "${SELKIES_CODECS:-}/env.sh" ] || {
-    echo "no codec prefix in SELKIES_CODECS; build one with scripts/ci/build-codecs.sh" >&2
+    echo "no codec prefix in SELKIES_CODECS; build one with infra/packaging/codecs.sh" >&2
     exit 1
 }
 REPO="$(dirname "$(readlink -f "$0")")/../.."
-RUST_TOOLCHAIN="${RUST_TOOLCHAIN:-1.99.1}"
 BUILD="${SELKIES_BUILD_DIR:-/build}"
 
 test -f "${REPO}/dist/web/index.html" || {
@@ -41,21 +41,12 @@ test -f "${REPO}/dist/web/index.html" || {
 
 export RUSTUP_HOME="${RUSTUP_HOME:-/opt/rust/rustup}" CARGO_HOME="${CARGO_HOME:-/opt/rust/cargo}"
 export PATH="${CARGO_HOME}/bin:${PATH}"
-libc=gnu
 if ldd --version 2>&1 | grep -qi musl; then
-    libc=musl
     # rustup's musl targets link the C runtime statically, which leaves a
     # binary unable to load the distribution's shared libraries
     export RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }-C target-feature=-crt-static"
 fi
-if ! command -v cargo > /dev/null; then
-    url="https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-${libc}/rustup-init"
-    curl -fsSL --retry 5 -o /tmp/rustup-init "${url}"
-    echo "$(curl -fsSL --retry 5 "${url}.sha256" | cut -d' ' -f1)  /tmp/rustup-init" | sha256sum -c -
-    chmod +x /tmp/rustup-init
-    /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain "${RUST_TOOLCHAIN}"
-    rm -f /tmp/rustup-init
-fi
+sh "${REPO}/infra/packaging/rust.sh"
 
 # shellcheck source=infra/packaging/version.sh
 . "${REPO}/infra/packaging/version.sh"
@@ -77,9 +68,10 @@ cargo fetch --locked --manifest-path "${SRC}/Cargo.toml"
 
 PROFILE="${SELKIES_CARGO_PROFILE:-release}"
 CARGO_TARGET_DIR="${BUILD}/target" cargo build --profile "${PROFILE}" --locked -p selkies \
-    --manifest-path "${SRC}/Cargo.toml"
+    -p selkies-desktop --manifest-path "${SRC}/Cargo.toml"
 
 install -Dm755 "${BUILD}/target/${PROFILE}/selkies" "${PKG_ROOT}/usr/bin/selkies"
+install -Dm755 "${BUILD}/target/${PROFILE}/selkies-desktop" "${PKG_ROOT}/usr/bin/selkies-desktop"
 # Fails the package build rather than shipping a server that cannot start, one
 # reporting a version other than the package's, or one without its client
 "${PKG_ROOT}/usr/bin/selkies" --version | grep -F "selkies ${CRATE_VERSION} (pixelflux ${CRATE_VERSION} ("

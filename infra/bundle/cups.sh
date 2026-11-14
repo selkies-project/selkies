@@ -15,19 +15,23 @@
 # than converted.
 #
 # Runs inside the bundle's build image after xservers.sh, whose static zlib it
-# links. Its source is fetched once into SELKIES_SOURCE_CACHE.
+# links, once into the bundle's toolchain image (infra/bundle/Dockerfile) under
+# SELKIES_TOOLCHAIN: a build that finds the staged install there finished takes
+# the scheduler from it. Its source is fetched once into SELKIES_SOURCE_CACHE.
 #
 # Usage: cups.sh <tree>
 set -eux
 TREE="$(readlink -f "${1:?usage: cups.sh <tree>}")"
-BUILD="${SELKIES_BUILD_DIR:-/build}/cups"
+TOOLCHAIN="${SELKIES_TOOLCHAIN:-${SELKIES_BUILD_DIR:-/build}}"
+BUILD="${TOOLCHAIN}/cups"
 CACHE="${SELKIES_SOURCE_CACHE:-${BUILD}/sources}"
-DEPS="${SELKIES_XSERVERS_DIR:-${SELKIES_BUILD_DIR:-/build}/xservers}/deps"
+DEPS="${TOOLCHAIN}/xservers/deps"
 VERSION=2.4.20
 SHA256=ab4d9cd7f3e58060091d2b24972223d6401675f11c49b65abf4f6ef31dea22ff
 OUT="${TREE}/libexec/selkies/cups"
 mkdir -p "${BUILD}" "${CACHE}"
 
+if [ ! -f "${BUILD}/stage/.complete" ]; then
 name="cups-${VERSION}-source.tar.gz"
 if [ ! -f "${CACHE}/${name}" ]; then
     curl -fsSL --retry 5 --connect-timeout 30 -o "${CACHE}/${name}.part" \
@@ -48,6 +52,9 @@ patch -d "${BUILD}/src" -p1 < "$(dirname "$(readlink -f "$0")")/patches/cups/wit
     --with-languages=none > /dev/null)
 make -C "${BUILD}/src" -j"$(nproc)" > /dev/null
 make -C "${BUILD}/src" DESTDIR="${BUILD}/stage" install > /dev/null
+rm -rf "${BUILD}/src"
+touch "${BUILD}/stage/.complete"
+fi
 
 # The scheduler, the helper it runs every filter and backend through, and the
 # types it reads a document's format from: the queue's backend is its own, and

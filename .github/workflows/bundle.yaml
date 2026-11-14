@@ -5,7 +5,11 @@ name: Bundle
 # (infra/wheel/build.py), and, where `packages` is set, the native packages
 # (infra/packaging/package.sh) and, on glibc, the AppImage
 # (infra/appimage/build.sh) repackaged from it too. glibc's bundle is built in
-# manylinux_2_28, whose glibc 2.28 is its floor, musl's in musllinux_1_2.
+# manylinux_2_28, whose glibc 2.28 is its floor, musl's in musllinux_1_2: in the
+# toolchain image of that target (infra/bundle/Dockerfile), which ci.yaml's
+# `toolchain` job publishes from main and this job pulls, so it compiles the
+# server, the shell, and the interposers alone; where its tree names an image
+# main has not published, build.sh builds it here.
 #
 # Each target is a call of its own (build-wheel.yaml calls this once per
 # target), so a target's wheel and packages follow its own bundle rather than

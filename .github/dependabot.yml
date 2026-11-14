@@ -71,9 +71,11 @@ updates:
       - dependency-name: typescript
         update-types: ["version-update:semver-major"]
 
-  # Base images of the wheel builder, devcontainer, fuzzers, scanner, and published images
+  # Base images of the wheel builder, the bundle's toolchain (whose digest pins
+  # are its tag's inputs, so a bump publishes it anew), devcontainer, fuzzers,
+  # scanner, and published images
   - package-ecosystem: docker
-    directories: ["/", "/.clusterfuzzlite", "/.devcontainer", "/.oss-scanner", "/addons/base", "/addons/coturn", "/addons/desktop", "/addons/turn-rest"]
+    directories: ["/", "/infra/bundle", "/.clusterfuzzlite", "/.devcontainer", "/.oss-scanner", "/addons/base", "/addons/coturn", "/addons/desktop", "/addons/turn-rest"]
     schedule:
       interval: weekly
     groups:

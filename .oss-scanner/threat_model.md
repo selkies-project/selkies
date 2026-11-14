@@ -157,8 +157,8 @@
 - `cargo test --workspace` runs the server's own tests in process, and they show how to drive the token table
   (`http/tokens.rs`), the auth gate and the routes over a real loopback listener (`http/route_tests.rs`), the file
   routes' confinement (`files/route_tests.rs`), and the input dispatcher and its authority (`input/tests.rs`). It
-  builds pixelflux and pcmflux, so it needs the native libraries they build against (the packages the `server` stage
-  of `addons/base/Dockerfile` installs); the ICE topology tests in `crates/selkies-rtc/src/ice/tests.rs` need a
+  builds pixelflux and pcmflux, so it needs the native libraries they build against (the packages
+  `scripts/ci/server-build-deps.sh` installs); the ICE topology tests in `crates/selkies-rtc/src/ice/tests.rs` need a
   network interface besides loopback for their host candidates and fail without one.
 - `python -m pytest tests -m unit` runs offline from the source tree, as the unprivileged `tester` user the image
   creates, since some suites check that permission errors are handled; the suites in `tests/unit` drive the web

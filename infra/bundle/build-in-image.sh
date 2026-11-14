@@ -12,9 +12,11 @@
 #   libexec/selkies/  Xvfb, Xwayland, xkbcomp (xservers.sh), pulseaudio, dbus-daemon,
 #                     cups/, the print queue's scheduler (cups.sh)
 #   lib/selkies/      the libraries those link that are not glibc's or the GPU
-#                     driver's, pulse/modules/, and preload/, the interposers
-#   share/selkies/    the xkb data, the buses' configuration, the logo, and fonts/,
-#                     the shell's UI face
+#                     driver's, pulse/modules/, preload/, the interposers, and on
+#                     glibc egl-x11/, NVIDIA's X11 EGL platform, for the images
+#   share/selkies/    the xkb data, the buses' configuration, the logo, fonts/,
+#                     the shell's UI face, and on glibc egl/, that platform's
+#                     configuration
 #
 # Every program finds its libraries through a run path relative to itself
 # ($ORIGIN), a RUNPATH rather than an RPATH, so it binds that program's own
@@ -24,11 +26,18 @@
 # Alpine installs neither), and the graphics stack (libgbm is reached through gbm-loader.c, the
 # rest is loaded at run time). The X servers carry nothing of their own at all.
 #
-# Runs inside the manylinux_2_28 or musllinux_1_2 image (infra/bundle/build.sh),
-# whose C library is the bundle's floor. PulseAudio and dbus-daemon are the image's distribution's
-# builds with their libraries alongside; the server, the shell, and the
-# interposers are built from this tree, the codecs from SELKIES_CODECS where
-# set (scripts/ci/build-codecs.sh), else built here.
+# Runs inside the bundle's toolchain image (infra/bundle/Dockerfile, which
+# infra/bundle/build.sh picks), whose C library is the bundle's floor, and takes
+# everything this tree does not compile itself from where that image built it,
+# SELKIES_TOOLCHAIN, once the key the image records is this tree's
+# (infra/bundle/toolchain.sh); in a bare manylinux_2_28 or musllinux_1_2 image,
+# or one built from other files, it builds those under toolchain/ in the build
+# directory first, kept there for the next build of the same files. A target
+# directory kept from a build against another toolchain is emptied, since
+# codec-sys binds the codecs' headers without watching them. PulseAudio and
+# dbus-daemon are the image's distribution's builds with their libraries
+# alongside; the server, the shell, and the interposers are built from this
+# tree, the codecs taken from SELKIES_CODECS where set, else from the toolchain.
 #
 # Usage: build-in-image.sh <out-dir>   (dist/web built; SELKIES_VERSION stamps)
 set -eux
@@ -45,8 +54,16 @@ rm -rf "${BUILD}/bundle"
 mkdir -p "${TREE}/bin" "${TREE}/libexec/selkies" "${TREE}/lib/selkies/pulse/modules" \
     "${TREE}/lib/selkies/preload" "${TREE}/share/selkies/dbus-1"
 
-# Installed once into the builder image (infra/bundle/Dockerfile), else here
-[ -f /etc/selkies-bundle-deps ] || "${REPO}/infra/bundle/deps.sh"
+KEY="$(sh "${REPO}/infra/bundle/toolchain.sh" key)"
+TOOLCHAIN="${SELKIES_TOOLCHAIN:-}"
+if [ -z "${TOOLCHAIN}" ] || [ "$(cat "${TOOLCHAIN}/key" 2> /dev/null)" != "${KEY}" ]; then
+    [ -z "${TOOLCHAIN}" ] || echo "the toolchain image was built from other files than this tree's; building its components" >&2
+    TOOLCHAIN="${BUILD}/toolchain"
+    [ "$(cat "${TOOLCHAIN}/key" 2> /dev/null)" = "${KEY}" ] || rm -rf "${TOOLCHAIN}"
+    mkdir -p "${TOOLCHAIN}"
+    "${REPO}/infra/bundle/deps.sh"
+fi
+export SELKIES_TOOLCHAIN="${TOOLCHAIN}"
 export PATH="/opt/python/cp312-cp312/bin:${PATH}"
 # shellcheck source=infra/packaging/xkbcommon.sh
 . "${REPO}/infra/packaging/xkbcommon.sh"
@@ -59,28 +76,27 @@ export PATH="/opt/python/cp312-cp312/bin:${PATH}"
 # were built with: -lgbm and -lpixman-1 find a directory holding only the
 # archive first, so neither is a library the host has to have
 if [ -z "${SELKIES_CODECS:-}" ]; then
-    [ -f "${BUILD}/codecs/env.sh" ] \
-        || "${REPO}/infra/packaging/codecs.sh" "${BUILD}/codecs" "${REPO}/crates/pixelflux"
-    export SELKIES_CODECS="${BUILD}/codecs"
+    [ -f "${TOOLCHAIN}/codecs/env.sh" ] \
+        || "${REPO}/infra/packaging/codecs.sh" "${TOOLCHAIN}/codecs" "${REPO}/crates/pixelflux"
+    export SELKIES_CODECS="${TOOLCHAIN}/codecs"
 fi
 STATIC="${BUILD}/static-link"
 mkdir -p "${STATIC}"
-cp "${BUILD}/xservers/deps/lib/libgbm.a" "${BUILD}/xservers/deps/lib/libpixman-1.a" "${STATIC}/"
+cp "${TOOLCHAIN}/xservers/deps/lib/libgbm.a" "${TOOLCHAIN}/xservers/deps/lib/libpixman-1.a" "${STATIC}/"
 export LIBRARY_PATH="${STATIC}:${LIBRARY_PATH}"
 # The build image's own link names would be found first on the search path the
 # crates' build scripts add; this image is thrown away with them
 rm -f /usr/lib64/libgbm.so /usr/lib64/libpixman-1.so /usr/lib/libgbm.so /usr/lib/libpixman-1.so
 # The server's libraries beside it, as a RUNPATH binding its own lookups alone
 export RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }-C link-arg=-Wl,--enable-new-dtags -C link-arg=-Wl,-rpath,\$ORIGIN/../lib/selkies"
+if [ "$(cat "${BUILD}/target/.toolchain-key" 2> /dev/null)" != "${KEY}" ]; then
+    mkdir -p "${BUILD}/target"
+    find "${BUILD}/target" -mindepth 1 -delete
+    echo "${KEY}" > "${BUILD}/target/.toolchain-key"
+fi
 "${REPO}/infra/packaging/server.sh" "${BUILD}/server-root"
 install -Dm755 "${BUILD}/server-root/usr/bin/selkies" "${TREE}/bin/selkies"
-# The toolchain server.sh installed, and the profile it built with
-export RUSTUP_HOME="${RUSTUP_HOME:-/opt/rust/rustup}" CARGO_HOME="${CARGO_HOME:-/opt/rust/cargo}"
-export PATH="${CARGO_HOME}/bin:${PATH}"
-PROFILE="${SELKIES_CARGO_PROFILE:-release}"
-CARGO_TARGET_DIR="${BUILD}/target" cargo build --profile "${PROFILE}" --locked -p selkies-desktop \
-    --manifest-path "${BUILD}/server/Cargo.toml"
-install -Dm755 "${BUILD}/target/${PROFILE}/selkies-desktop" "${TREE}/bin/selkies-desktop"
+install -Dm755 "${BUILD}/server-root/usr/bin/selkies-desktop" "${TREE}/bin/selkies-desktop"
 
 # PulseAudio with the modules Selkies loads, and the distribution's dbus-daemon
 # with its configuration
@@ -143,17 +159,35 @@ cat > "${TREE}/share/selkies/dbus-1/system.conf" <<'EOF'
 </busconfig>
 EOF
 # The Wayland server library the server opens at run time, found through its run path
-cp -L "${BUILD}/xservers/deps/lib/libwayland-server.so.0" "${TREE}/lib/selkies/"
+cp -L "${TOOLCHAIN}/xservers/deps/lib/libwayland-server.so.0" "${TREE}/lib/selkies/"
+
+# NVIDIA's X11 EGL platform, which the images install where a driver's EGL looks
+# (addons/base): nothing of a bundle on a host loads it, whose driver brings its own
+if [ "${LIBC}" = gnu ]; then
+    "${REPO}/infra/bundle/egl-x11.sh" "${TOOLCHAIN}/egl-x11"
+    mkdir -p "${TREE}/lib/selkies/egl-x11" "${TREE}/share/selkies/egl"
+    cp "${TOOLCHAIN}"/egl-x11/lib/libnvidia-egl-*.so.1 "${TREE}/lib/selkies/egl-x11/"
+    cp -r "${TOOLCHAIN}/egl-x11/share/egl/egl_external_platform.d" "${TREE}/share/selkies/egl/"
+fi
 
 # The interposers the session's applications preload, and their 32-bit builds
-# where the image has a 32-bit toolchain
+# where the image has a 32-bit toolchain. The webcam interposer's PipeWire frame
+# source builds against the toolchain's PipeWire headers, its library opened at
+# run time.
+"${REPO}/infra/bundle/pipewire.sh" "${TOOLCHAIN}/pipewire"
+PW_CFLAGS="-I${TOOLCHAIN}/pipewire/include/pipewire-0.3 -I${TOOLCHAIN}/pipewire/include/spa-0.2"
 build_interposers() {
     suffix="$1"
     shift
     gcc "$@" -O2 -shared -fPIC -o "${TREE}/lib/selkies/preload/selkies_input_interposer${suffix}.so" \
         "${REPO}/addons/input-interposer/input_interposer.c" -ldl -pthread
-    gcc "$@" -O2 -shared -fPIC -o "${TREE}/lib/selkies/preload/selkies_v4l2_interposer${suffix}.so" \
-        "${REPO}/addons/v4l2-interposer/v4l2_interposer.c" -ldl -pthread
+    rm -rf "${BUILD}/v4l2-interposer"
+    cp -r "${REPO}/addons/v4l2-interposer" "${BUILD}/v4l2-interposer"
+    if [ -z "${suffix}" ]; then v4l2=selkies_v4l2_interposer.so; else v4l2=all32; fi
+    make -C "${BUILD}/v4l2-interposer" PW_CFLAGS="${PW_CFLAGS}" "${v4l2}" > /dev/null
+    built="$(find "${BUILD}/v4l2-interposer" -maxdepth 1 -name 'selkies_v4l2_interposer*.so')"
+    grep -qF libpipewire-0.3.so.0 "${built}"
+    install -m755 "${built}" "${TREE}/lib/selkies/preload/selkies_v4l2_interposer${suffix}.so"
     rm -rf "${BUILD}/fake-udev"
     cp -r "${REPO}/addons/fake-udev" "${BUILD}/fake-udev"
     make -C "${BUILD}/fake-udev" CC="gcc $*" > /dev/null
@@ -233,5 +267,6 @@ fi
 "${TREE}/bin/selkies" --version
 readelf -d "${TREE}/bin/selkies" | grep -E 'NEEDED|RUNPATH'
 
+echo "${KEY}" > "${TOOLCHAIN}/key"
 tar -C "${BUILD}/bundle" -czf "${OUT}/${NAME}.tar.gz" "${NAME}"
 ls -la "${OUT}/${NAME}.tar.gz"

@@ -150,10 +150,12 @@ program or library under its own license, unmodified but for the patches named:
 | XLibre Xvfb | MIT/X11 | built from the pinned release with Selkies' patches (`addons/base/patches`, `infra/bundle/patches`), its dependencies linked statically |
 | Xwayland, xkbcomp | MIT/X11 | built from the pinned releases, `infra/bundle/patches` applied to Xwayland |
 | xkeyboard-config | MIT/X11 | the keymap data, as released |
+| FreeType | FreeType License (FTL), or GPL-2.0-or-later | linked statically into the X servers, through which they open scalable core fonts; portions of this software are copyright © The FreeType Project (www.freetype.org), all rights reserved |
 | libglvnd (glibc bundles) | MIT-style | `libEGL`, `libGLdispatch`, `libGLES*`, `libOpenGL`, built from the pinned release, which hand every call to the host's driver |
 | PulseAudio | LGPL-2.1-or-later | the daemon and the modules a session loads, with its libraries |
 | dbus-daemon | AFL-2.1 OR GPL-2.0-or-later | the build image distribution's, with its libraries |
 | CUPS scheduler | Apache-2.0 with its linking exceptions | built from the pinned release with `infra/bundle/patches/cups` |
+| NVIDIA egl-x11 (glibc bundles) | Apache-2.0 | `lib/selkies/egl-x11`, built from the pinned release, for the images, which install it where a driver's EGL looks |
 | Inter | SIL Open Font License 1.1 | `share/selkies/fonts`, with its license beside it |
 | The libraries those programs link (libsystemd, libcap, libgcrypt, libcrypt, libexpat, and the rest) | LGPL-2.1-or-later, BSD, MIT | the build image distribution's, under `lib/selkies` |
 | libstdc++ and libgcc_s (musl bundles) | GPL-3.0 with the GCC Runtime Library Exception | the build image distribution's, under `lib/selkies` |
@@ -236,7 +238,7 @@ so it matches the sources.
 | Component | License | Links or loads | Notes |
 | --- | --- | --- | --- |
 | Input Interposer (`addons/input-interposer`, `selkies_input_interposer.so`) | MPL-2.0 | libc, libdl | `LD_PRELOAD` library |
-| V4L2 interposer (`addons/v4l2-interposer`) | MPL-2.0 | libc, libdl; `dlopen`s libpipewire-0.3 (MIT) when a PipeWire source is configured | shares its ring layout with pixelflux's `VirtualCamera` |
+| V4L2 interposer (`addons/v4l2-interposer`) | MPL-2.0 | libc, libdl; compiled against PipeWire's and SPA's headers (MIT) from the pinned release (`infra/bundle/pipewire.sh`), and `dlopen`s libpipewire-0.3 (MIT) when a PipeWire source is configured | shares its ring layout with pixelflux's `VirtualCamera` |
 | fake-udev (`addons/fake-udev`) | MPL-2.0 (own `libudev.h` declarations, no systemd code) | libc, libdl; `dlopen`s the system libudev (LGPL) for everything but the virtual gamepads | replaces the LGPL libudev only by ABI, for virtual gamepads |
 | coturn addon (`addons/coturn`) | MPL-2.0 scripts around the coturn image | runs coturn (BSD-3-Clause) | TURN server |
 | TURN REST (`addons/turn-rest`, `crates/selkies-turn-rest`) | MPL-2.0 | musl libc and AWS-LC (`aws-lc-rs`), linked statically | `axum` and `tokio`, at the versions the server links; TURN REST credential service |

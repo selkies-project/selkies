@@ -8,6 +8,22 @@
 # since it dropped Xwayland), the xkbcomp both of them run, and the
 # xkeyboard-config data they and the server's xkbcommon read.
 #
+# Xvfb is XLibre's because the distributions' has neither glamor nor DRI3, so
+# GL clients render in software even with a GPU present; XLibre's has both, on
+# Mesa's GBM and on NVIDIA's own EGL. Its patches: xvfb-gpu-screen-pixmap keeps
+# the screen pixmap on the GPU and sizes the framebuffer to the RandR screen;
+# xvfb-hotplug-outputs gives the server spare outputs with CRTCs of their own
+# that Selkies plugs in as a display is added; xvfb-syncobj-present lets a DRI3
+# client synchronize its presents explicitly, as the NVIDIA driver's must;
+# xvfb-vblank-rate runs the vblank the server fakes at the rate the session is
+# captured at, to the millihertz; xvfb-vidmode tells a GLX client that rate
+# through XFree86-VidModeExtension, which Mesa's glXGetMscRateOML reads;
+# xvfb-zero-copy-semaphore signals a GPU semaphore the capture shares with
+# glamor after its blit, so the encoder waits for it on the GPU rather than on
+# the CPU; and xvfb-zero-copy-shared-framebuffer keeps a system-memory screen in
+# a memfd the capture reads in place, told where it changed without a round
+# trip. The bundle and the images run this one build (addons/base installs it).
+#
 # The servers run beside the host's GPU driver in one process (glamor loads the
 # host's EGL, and with it the libraries that driver links), so they carry no
 # shared library of their own that a driver could also want in a newer version:
@@ -30,16 +46,18 @@
 # DRI directories (DRI_DIRS) that holds it, where the builder's dri.pc names
 # its own alone.
 #
-# Runs inside the manylinux_2_28 image infra/bundle/build.sh starts, whose glibc
-# is the bundle's floor. Each source is fetched once into SELKIES_SOURCE_CACHE
-# (default <build>/sources) and checked against the digest pinned here.
+# Runs inside the manylinux_2_28 or musllinux_1_2 image, whose C library is the
+# bundle's floor, once into the bundle's toolchain image (infra/bundle/Dockerfile)
+# under SELKIES_TOOLCHAIN, where every later build takes the servers it left.
+# Each source is fetched once into SELKIES_SOURCE_CACHE (default <build>/sources)
+# and checked against the digest pinned here.
 #
 # Usage: xservers.sh <tree>
 #   writes <tree>/libexec/selkies/{Xvfb,Xwayland,xkbcomp} and <tree>/share/selkies/xkb
 set -eux
 TREE="$(mkdir -p "${1:?usage: xservers.sh <tree>}" && readlink -f "$1")"
 REPO="$(dirname "$(readlink -f "$0")")/../.."
-BUILD="${SELKIES_BUILD_DIR:-/build}/xservers"
+BUILD="${SELKIES_TOOLCHAIN:-${SELKIES_BUILD_DIR:-/build}}/xservers"
 CACHE="${SELKIES_SOURCE_CACHE:-${BUILD}/sources}"
 DEPS="${BUILD}/deps"
 JOBS="$(nproc)"
@@ -138,12 +156,17 @@ autotools "${d}" --disable-specs --disable-xf86bigfont --without-xmlto --without
 d="$(fetch https://xorg.freedesktop.org/archive/individual/lib/libxshmfence-1.3.3.tar.xz \
     d4a4df096aba96fea02c029ee3a44e11a47eb7f7213c1a729be83e85ec3fde10)"
 autotools "${d}"
+# FreeType, through which libXfont2 opens the scalable core fonts (Type1, TrueType)
+# a distribution installs for the X11 applications that ask for them
+d="$(fetch https://download.savannah.gnu.org/releases/freetype/freetype-2.13.3.tar.xz \
+    0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289)"
+autotools "${d}" --with-zlib=yes --with-bzip2=no --with-png=no --with-harfbuzz=no --with-brotli=no
 d="$(fetch https://xorg.freedesktop.org/archive/individual/lib/libfontenc-1.1.8.tar.xz \
     7b02c3d405236e0d86806b1de9d6868fe60c313628b38350b032914aa4fd14c6)"
 autotools "${d}"
 d="$(fetch https://xorg.freedesktop.org/archive/individual/lib/libXfont2-2.0.7.tar.xz \
     8b7b82fdeba48769b69433e8e3fbb984a5f6bf368b0d5f47abeec49de3e58efb)"
-autotools "${d}" --disable-freetype --disable-devel-docs --disable-selective-werror
+autotools "${d}" --disable-devel-docs --disable-selective-werror
 d="$(fetch https://xorg.freedesktop.org/archive/individual/lib/libxkbfile-1.1.3.tar.xz \
     a9b63eea997abb9ee6a8b4fbb515831c841f471af845a09de443b28003874bec)"
 mesonbuild "${d}"

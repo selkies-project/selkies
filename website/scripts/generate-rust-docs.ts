@@ -14,8 +14,8 @@
  *
  * `cargo doc` type-checks every dependency, which runs the build scripts of
  * pixelflux and pcmflux, so it needs the Rust toolchain and the codec, audio,
- * and display libraries they build against (the packages the `server` stage
- * of addons/base/Dockerfile installs). It builds in a target directory of its
+ * and display libraries they build against (the packages
+ * scripts/ci/server-build-deps.sh installs). It builds in a target directory of its
  * own, `reference` under the workspace's (`CARGO_TARGET_DIR` is honored), so
  * the rustdoc output holds these crates alone whatever else was documented in
  * the workspace's. A tree without the workspace, a release whose server is

@@ -23,184 +23,46 @@
 #     of its own instead (SELKIES_WAYLAND_COMPOSITOR)
 #   - s6 service supervision, running as PID 1 or below a foreign init
 #   - Joystick interposer + fake-udev (container-only gamepad plumbing) and the
-#     V4L2 webcam interposer, all built in-tree and wired with LD_PRELOAD
+#     V4L2 webcam interposer, wired with LD_PRELOAD
 #   - GPU wiring: NVIDIA/VA-API/Vulkan runtime and Zink for hardware OpenGL
 #   - Audio: PipeWire with the PulseAudio, ALSA, JACK, and V4L2 interfaces,
 #     recorded through the PulseAudio one by pcmflux
 #   - Embedded coTURN for WebRTC firewall traversal
-#   - The Selkies server, built from this tree's crates and local pixelflux and
-#     pcmflux path dependencies, and the web client it serves
+#   - The Selkies server and the web client it serves
+#
+# Nothing is compiled here: the server, the desktop shell, the X server, the
+# interposers, and NVIDIA's X11 EGL platform are the glibc bundle's of this tree
+# for the image's architecture (infra/bundle), which every other channel
+# repackages too, so the image runs the binaries the bundle's checks ran.
 #
 # Supported bases: Ubuntu 26.04 and Debian Trixie, and later releases of both
 # (select with --build-arg DISTRIB_IMAGE=ubuntu|debian DISTRIB_RELEASE=26.04|trixie).
 
 ARG DISTRIB_IMAGE="ubuntu"
 ARG DISTRIB_RELEASE="26.04"
-# The X server the session runs on, built here rather than installed: the
-# distribution's Xvfb has neither glamor nor DRI3, so GL clients render in
-# software even with a GPU present. XLibre's Xvfb has both, on Mesa's GBM and
-# on NVIDIA's own EGL, and is built from its release tag with
-# addons/base/patches/xvfb-gpu-screen-pixmap.patch, which keeps the screen
-# pixmap on the GPU and sizes the framebuffer to the RandR screen, and
-# addons/base/patches/xvfb-hotplug-outputs.patch, which gives the server spare
-# outputs with CRTCs of their own that Selkies plugs in as a display is added,
-# addons/base/patches/xvfb-syncobj-present.patch, which lets a DRI3 client
-# synchronize its presents explicitly, as the NVIDIA driver's must, and
-# addons/base/patches/xvfb-vblank-rate.patch, which runs the vblank the server
-# fakes at the rate the session is captured at, to the millihertz,
-# addons/base/patches/xvfb-vidmode.patch, which tells a GLX client that rate
-# through XFree86-VidModeExtension, which Mesa's glXGetMscRateOML reads, and
-# addons/base/patches/xvfb-zero-copy-semaphore.patch, which signals a GPU
-# semaphore the capture shares with glamor after its blit, so the encoder waits
-# for it on the GPU rather than on the CPU, and
-# addons/base/patches/xvfb-zero-copy-shared-framebuffer.patch, which keeps a
-# system-memory screen in a memfd the capture reads in place, told where it
-# changed without a round trip.
-# Both come as the archives GitHub generates for their tags, with no tarball
-# of the project's own beside them, so each tag carries the checksum of the
-# archive the build has to receive.
-ARG XLIBRE_TAG="xlibre-xserver-25.2.2"
-ARG XLIBRE_SHA256="3c1f07f4b5f8a483473097be4b964ee97a2b92adde9de6c0d8d9d7217a382810"
-ARG EGL_X11_TAG="v1.0.6"
-ARG EGL_X11_SHA256="370870b0dea12dde0ddac0b77594ff94215cf2694ac0a5ded98f5d2f9864f6e0"
+ARG TARGETARCH
+# The toolchain images the bundle is built in (infra/bundle/toolchain.sh), the
+# newest main published for each architecture
+ARG TOOLCHAIN_REPOSITORY="ghcr.io/selkies-project/selkies/bundle-toolchain"
+# Where the bundle the image installs comes from: the stage below that builds
+# it, or a build context naming a directory that holds it already
+ARG BUNDLE="bundle-from-source"
 
-FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS xvfb
-ARG DEBIAN_FRONTEND="noninteractive"
-ARG XLIBRE_TAG
-ARG XLIBRE_SHA256
-# The retry configuration the final stage sets further down, repeated here for
-# the same reason the add-ons stage repeats it.
-RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
-        > /etc/apt/apt.conf.d/99-selkies-retries
-RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
-        ca-certificates \
-        curl \
-        gcc \
-        git \
-        meson \
-        ninja-build \
-        patch \
-        pkg-config \
-        # The server itself
-        libaudit-dev \
-        libbsd-dev \
-        libpixman-1-dev \
-        libselinux1-dev \
-        libssl-dev \
-        libx11-dev \
-        libxau-dev \
-        libxcvt-dev \
-        libxdmcp-dev \
-        libxext-dev \
-        libxfont-dev \
-        libxkbfile-dev \
-        libxshmfence-dev \
-        mesa-common-dev \
-        x11proto-dev \
-        xtrans-dev \
-        # glamor's EGL/GBM backend, which is what DRI3 hands buffers out of
-        libdrm-dev \
-        libepoxy-dev \
-        libgbm-dev && \
-    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
-COPY addons/base/build-xvfb.sh /build/
-COPY addons/base/patches/xvfb-*.patch /build/patches/
-RUN XLIBRE_TAG="${XLIBRE_TAG}" XLIBRE_SHA256="${XLIBRE_SHA256}" DESTDIR=/build-out /build/build-xvfb.sh
-
-# NVIDIA's EGL platform library for X11 (xcb and xlib), open source and
-# independent of the driver's version, built from its release tag: through it
-# the injected driver's EGL reaches X11 windows on the framebuffer server's
-# DRI3. The distributions that package it ship the same library; Debian's
-# stable has none.
-FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS egl-x11
-ARG DEBIAN_FRONTEND="noninteractive"
-ARG EGL_X11_TAG
-ARG EGL_X11_SHA256
-RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
-        > /etc/apt/apt.conf.d/99-selkies-retries
-RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
-        ca-certificates \
-        curl \
-        gcc \
-        libc6-dev \
-        meson \
-        ninja-build \
-        pkg-config \
-        eglexternalplatform-dev \
-        libdrm-dev \
-        libegl-dev \
-        libgbm-dev \
-        libx11-dev \
-        libx11-xcb-dev \
-        libxcb1-dev \
-        libxcb-dri3-dev \
-        libxcb-present-dev && \
-    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
-RUN set -e; \
-    cd /tmp; \
-    curl -fsSL --retry 8 --retry-delay 30 --connect-timeout 30 -o egl-x11.tar.gz \
-        "https://github.com/NVIDIA/egl-x11/archive/refs/tags/${EGL_X11_TAG}.tar.gz"; \
-    echo "${EGL_X11_SHA256}  egl-x11.tar.gz" | sha256sum -c -; \
-    tar -xf egl-x11.tar.gz; \
-    cd "egl-x11-${EGL_X11_TAG#v}"; \
-    meson setup build --prefix=/usr --libdir="lib/$(gcc -print-multiarch)" --buildtype=release; \
-    ninja -C build; \
-    DESTDIR=/build-out meson install -C build; \
-    ls /build-out/usr/share/egl/egl_external_platform.d/20_nvidia_xcb.json /build-out/usr/share/egl/egl_external_platform.d/20_nvidia_xlib.json
-
-# Build the joystick and webcam interposers and fake-udev inside this
-# repository (they are dedicated to containerized environments and are not
-# desktop components)
-FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS add-ons
-ARG DEBIAN_FRONTEND="noninteractive"
-# The retry configuration the final stage sets further down, repeated here: a
-# separate stage is a separate filesystem, so the drop-in the later apt-get
-# invocations of this stage inherit has to be written in this one.
-RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
-        > /etc/apt/apt.conf.d/99-selkies-retries
-# libpipewire headers compile the webcam interposer's PipeWire frame source;
-# the library itself is dlopen'ed at runtime, so no -dev package is needed in
-# the final image.
-RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
-        build-essential \
-        ca-certificates \
-        libpipewire-0.3-dev && \
-    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
-COPY addons/input-interposer /build/input-interposer
-COPY addons/fake-udev /build/fake-udev
-COPY addons/v4l2-interposer /build/v4l2-interposer
-# They sit where the linuxserver.io images and proot-apps' app roots put theirs
-# (/usr/lib and /opt/lib, the 32-bit builds beside them with a _32 suffix), so
-# the preload an application inherits names the same files inside an app root
-# as here. fake-udev stays out of the system library directory: it is reached
-# only through the preload, as the interposers are.
-RUN set -e; \
-    mkdir -p /opt/add-ons/usr/lib /opt/add-ons/opt/lib; \
-    gcc -shared -fPIC -o /opt/add-ons/usr/lib/selkies_input_interposer.so /build/input-interposer/input_interposer.c -ldl -pthread; \
-    ln -sf selkies_input_interposer.so /opt/add-ons/usr/lib/selkies_joystick_interposer.so; \
-    make -C /build/v4l2-interposer; \
-    cp /build/v4l2-interposer/selkies_v4l2_interposer.so /opt/add-ons/usr/lib/; \
-    make -C /build/fake-udev; \
-    cp /build/fake-udev/libudev.so.1.0.0-fake /opt/add-ons/opt/lib/; \
-    # The 32-bit builds, for the launchers that preload them into 32-bit
-    # (Wine-era) processes, as Steam's does; amd64 only. fake-udev is built
-    # with the 64-bit build's SONAME, which a preload has to carry to stand
-    # in for libudev.so.1.
-    if [ "$(uname -m)" = "x86_64" ]; then \
-        apt-get update && apt-get install --no-install-recommends -y gcc-multilib; \
-        gcc -m32 -shared -fPIC -o /opt/add-ons/usr/lib/selkies_input_interposer_32.so /build/input-interposer/input_interposer.c -ldl -pthread; \
-        ln -sf selkies_input_interposer_32.so /opt/add-ons/usr/lib/selkies_joystick_interposer_32.so; \
-        make -C /build/v4l2-interposer all32; \
-        cp /build/v4l2-interposer/selkies_v4l2_interposer_x86.so /opt/add-ons/usr/lib/selkies_v4l2_interposer_32.so; \
-        make -C /build/fake-udev clean; \
-        make -C /build/fake-udev CC="gcc -m32"; \
-        cp /build/fake-udev/libudev.so.1.0.0-fake /opt/add-ons/opt/lib/libudev.so.1.0.0-fake_32; \
-    fi
-
-# The web client, through scripts/ci/build-web.sh as every channel builds it, for
-# the server stage to compile in. The controller database's GitHub lookups use
-# the build secret github_token where one is given
-# (`--secret id=github_token,env=GITHUB_TOKEN`).
+# The bundle the image installs, a directory holding the glibc bundle's tarball
+# for the image's architecture. A build that has one passes it as a build
+# context and names it in BUNDLE (`--build-context bundle=<dir> --build-arg
+# BUNDLE=bundle`), and builds none: images.yaml passes the one its run built, a
+# local build the out directory of infra/bundle/build.sh. Naming it through an
+# argument rather than replacing the stage keeps the stages that would build it
+# out of the build, the toolchain image's lookup among them. A build without
+# one builds it here, from this tree in the toolchain image, which compiles the
+# server, the shell, and the interposers and takes the rest from the image, or
+# builds that too where the tree changed what the image is built from
+# (infra/bundle/build-in-image.sh); `--build-context
+# toolchain-<arch>=docker-image://<image>` names another toolchain image. The
+# web client is built through scripts/ci/build-web.sh as every channel builds
+# it, its controller database's GitHub lookups using the build secret
+# github_token where one is given (`--secret id=github_token,env=GITHUB_TOKEN`).
 FROM node:26-alpine AS web
 WORKDIR /build
 COPY Cargo.toml ./
@@ -211,100 +73,28 @@ COPY web/universal-touch-gamepad ./web/universal-touch-gamepad
 COPY docs/assets/logo ./docs/assets/logo
 RUN --mount=type=secret,id=github_token sh scripts/ci/build-web.sh
 
-# The software encoders pixelflux links statically, each built in a stage of its
-# own so the four build beside one another and beside the server stage's own
-# toolchain and dependency fetch: libx264, x265, libvpx, and SVT-AV1 from
-# pixelflux's scripts/build-x264.sh, build-x265.sh, build-libvpx.sh, and
-# build-svtav1.sh, with the patches it carries for them (pixelflux reads the API
-# those patches add, so none comes from a distribution). Each installs under its
-# stage's /usr/local, which the server stage lays over its own, so the
-# pkg-config files name the prefix the libraries are found at.
-FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS codec-tools
-ARG DEBIAN_FRONTEND="noninteractive"
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates git build-essential pkg-config cmake nasm && \
-    rm -rf /var/lib/apt/lists/*
-WORKDIR /build/pixelflux
-COPY crates/pixelflux/pyproject.toml ./
-COPY crates/pixelflux/patches ./patches
-COPY crates/pixelflux/scripts ./scripts
+FROM ${TOOLCHAIN_REPOSITORY}:glibc-x86_64 AS toolchain-amd64
+FROM ${TOOLCHAIN_REPOSITORY}:glibc-aarch64 AS toolchain-arm64
 
-FROM codec-tools AS codec-x264
-RUN sh scripts/build-x264.sh /usr/local
-
-FROM codec-tools AS codec-x265
-RUN sh scripts/build-x265.sh /usr/local
-
-FROM codec-tools AS codec-libvpx
-RUN sh scripts/build-libvpx.sh /usr/local
-
-FROM codec-tools AS codec-svtav1
-RUN sh scripts/build-svtav1.sh /usr/local
-
-# The server, built on the image's own distribution so it links the sonames the
-# final stage installs, with the toolchain pinned and its installer checked
-# against the hash rustup publishes beside it. The packages behind every
-# library the binary links are recorded for the final stage, so the image
-# declares what the server needs rather than inheriting it from whatever else
-# happens to pull those libraries in. pixelflux and pcmflux build from local
-# workspace path dependencies; the encoders come from the stages above and are
-# linked statically. The dependency fetch runs before those stages are waited
-# for, so it overlaps their builds. The web client is compiled in from the web
-# stage's dist/web, which SELKIES_WEB_DIST names so a build that finds none fails.
-FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS server
-ARG DEBIAN_FRONTEND="noninteractive"
-ARG RUST_TOOLCHAIN="1.99.1"
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl git build-essential pkg-config cmake nasm clang libclang-dev \
-        libdav1d-dev libde265-dev libopus-dev \
-        libva-dev libdrm-dev libgbm-dev libegl-dev libgles-dev libwayland-dev libinput-dev \
-        libudev-dev libxkbcommon-dev libpixman-1-dev libxcb1-dev libxcb-shm0-dev \
-        libxcb-xfixes0-dev libpulse-dev && \
-    rm -rf /var/lib/apt/lists/*
-ENV RUSTUP_HOME="/opt/rustup" CARGO_HOME="/opt/cargo" PATH="/opt/cargo/bin:${PATH}"
-RUN set -e; \
-    triple="$(uname -m)-unknown-linux-gnu"; \
-    url="https://static.rust-lang.org/rustup/dist/${triple}/rustup-init"; \
-    curl -fsSL --retry 5 -o /tmp/rustup-init "${url}"; \
-    echo "$(curl -fsSL --retry 5 "${url}.sha256" | cut -d' ' -f1)  /tmp/rustup-init" | sha256sum -c -; \
-    chmod +x /tmp/rustup-init; \
-    /tmp/rustup-init -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}"; \
-    rm /tmp/rustup-init
-WORKDIR /src
+FROM toolchain-${TARGETARCH} AS bundle-build
+ARG SELKIES_VERSION=""
+WORKDIR /repo
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-COPY infra/packaging/version.sh infra/packaging/stamp-version.sh /tmp/packaging/
-# A release's build passes its version (images.yaml), which every public crate
-# then carries as the packages' builds stamp it; any other build keeps the
-# tree's 0.0.0
-ARG SELKIES_VERSION=""
-RUN --mount=type=cache,target=/opt/cargo/registry --mount=type=cache,target=/opt/cargo/git \
-    set -e; \
-    if [ -n "${SELKIES_VERSION}" ]; then sh /tmp/packaging/stamp-version.sh /src "${SELKIES_VERSION}"; fi; \
-    cargo fetch --locked
-COPY --from=codec-x264 /usr/local/ /usr/local/
-COPY --from=codec-x265 /usr/local/ /usr/local/
-COPY --from=codec-libvpx /usr/local/ /usr/local/
-COPY --from=codec-svtav1 /usr/local/ /usr/local/
+COPY infra ./infra
+COPY addons/base/patches ./addons/base/patches
+COPY addons/input-interposer ./addons/input-interposer
+COPY addons/fake-udev ./addons/fake-udev
+COPY addons/v4l2-interposer ./addons/v4l2-interposer
+COPY docs/assets/logo ./docs/assets/logo
 COPY --from=web /build/dist/web ./dist/web
-ENV SELKIES_WEB_DIST="/src/dist/web"
-RUN --mount=type=cache,target=/opt/cargo/registry --mount=type=cache,target=/opt/cargo/git \
-    --mount=type=cache,target=/src/target \
-    set -e; \
-    # codec-sys binds the installed headers without watching them, so the cached
-    # target would keep bindings and link lines from before a change to the
-    # patches or the libraries they build
-    cargo clean --release -p codec-sys; \
-    X264_STATIC=1 X265_STATIC=1 VPX_STATIC=1 SVTAV1ENC_STATIC=1 \
-        cargo build --release --locked -p selkies -p selkies-desktop; \
-    install -Dm755 target/release/selkies /out/selkies; \
-    install -Dm755 target/release/selkies-desktop /out/selkies-desktop; \
-    version="$(. /tmp/packaging/version.sh && crate_version "${SELKIES_VERSION:-0.0.0}")"; \
-    /out/selkies --version | grep -F "selkies ${version} (pixelflux ${version} ("; \
-    /out/selkies --version | grep -F ", pcmflux ${version})"; \
-    ldd /out/selkies | awk '/=>/ {print $3}' | xargs -r readlink -f | xargs -r dpkg -S | \
-        cut -d: -f1 | sort -u > /out/runtime-packages; \
-    test -s /out/runtime-packages
+RUN --mount=type=cache,target=/build/target --mount=type=cache,target=/opt/rust/cargo/registry \
+    sh infra/bundle/build-in-image.sh /out
+
+FROM scratch AS bundle-from-source
+COPY --from=bundle-build /out/ /
+
+FROM ${BUNDLE} AS bundle-source
 
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE}
 
@@ -642,43 +432,73 @@ ENV __GL_SYNC_TO_VBLANK="0"
 # Keep the log dir present for in-session apt runs.
 RUN install -d /var/log/apt
 
-# The Selkies server from the stage above, at /usr/local/bin/selkies with the
-# web client compiled in. The packages behind every library the binary links
-# go in first, recorded where it was built.
-COPY --from=server /out/runtime-packages /tmp/selkies-runtime-packages
-RUN apt-get update && \
-    apt-get install --no-install-recommends -y $(cat /tmp/selkies-runtime-packages) && \
-    apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/selkies-runtime-packages
-COPY --from=server --chown=1000:1000 /out/selkies /usr/local/bin/selkies
-# The desktop shell the server starts under SELKIES_DESKTOP, built from the same tree.
-COPY --from=server --chown=1000:1000 /out/selkies-desktop /usr/local/bin/selkies-desktop
+# The bundle's server and shell at /usr/local/bin, the libraries their run path
+# names beside them at /usr/local/lib/selkies, and its X server, the patched
+# XLibre Xvfb with glamor and DRI3 (infra/bundle/xservers.sh), with its keymap
+# compiler and data under /usr/local/libexec/selkies and /usr/local/share/selkies,
+# where it finds them relative to itself; it takes the distribution's place at
+# /usr/bin/Xvfb, whose own has neither glamor nor DRI3, so GL clients would
+# render in software with a GPU present. The interposers go where the
+# linuxserver.io images and proot-apps' app roots put theirs (/usr/lib and
+# /opt/lib, the 32-bit builds beside them with a _32 suffix), so the preload an
+# application inherits names the same files inside an app root as here;
+# fake-udev stays out of the system library directory, reached only through the
+# preload. NVIDIA's X11 EGL platform goes where the injected driver's EGL looks
+# for it. The bundle's sound server, buses, Xwayland, and print scheduler stay
+# out: the image runs the distribution's PipeWire, buses, and Xwayland, and its
+# CUPS, whose filters convert what the bundle's scheduler refuses.
+RUN --mount=type=bind,from=bundle-source,target=/tmp/bundle \
+    set -e; \
+    tarball="$(find /tmp/bundle -maxdepth 1 -name "selkies-*-$(uname -m)-linux-gnu.tar.gz")"; \
+    if [ "$(echo "${tarball}" | grep -c .)" != 1 ]; then \
+        echo "the bundle holds no single glibc bundle for $(uname -m) (infra/bundle/build.sh)" >&2; \
+        exit 1; \
+    fi; \
+    unpacked=/tmp/selkies-bundle; \
+    mkdir -p "${unpacked}"; \
+    tar -xzf "${tarball}" -C "${unpacked}" --strip-components=1; \
+    install -Dm755 "${unpacked}/bin/selkies" /usr/local/bin/selkies; \
+    install -Dm755 "${unpacked}/bin/selkies-desktop" /usr/local/bin/selkies-desktop; \
+    mkdir -p /usr/local/lib/selkies /usr/local/libexec/selkies /usr/local/share/selkies; \
+    find "${unpacked}/lib/selkies" -maxdepth 1 -type f -exec cp -a {} /usr/local/lib/selkies/ \;; \
+    cp -a "${unpacked}/libexec/selkies/Xvfb" "${unpacked}/libexec/selkies/xkbcomp" /usr/local/libexec/selkies/; \
+    cp -a "${unpacked}/share/selkies/xkb" "${unpacked}/share/selkies/fonts" \
+        "${unpacked}"/share/selkies/icon.* /usr/local/share/selkies/; \
+    ln -sf /usr/local/libexec/selkies/Xvfb /usr/bin/Xvfb; \
+    preload="${unpacked}/lib/selkies/preload"; \
+    mkdir -p /opt/lib; \
+    for suffix in "" _32; do \
+        [ -f "${preload}/selkies_input_interposer${suffix}.so" ] || continue; \
+        install -m755 "${preload}/selkies_input_interposer${suffix}.so" "${preload}/selkies_v4l2_interposer${suffix}.so" /usr/lib/; \
+        ln -sf "selkies_input_interposer${suffix}.so" "/usr/lib/selkies_joystick_interposer${suffix}.so"; \
+        install -m755 "${preload}/libudev.so.1.0.0-fake${suffix}" /opt/lib/; \
+    done; \
+    multiarch="/usr/lib/$(uname -m)-linux-gnu"; \
+    install -m755 "${unpacked}"/lib/selkies/egl-x11/libnvidia-egl-*.so.1 "${multiarch}/"; \
+    mkdir -p /usr/share/egl/egl_external_platform.d; \
+    install -m644 "${unpacked}"/share/selkies/egl/egl_external_platform.d/*.json /usr/share/egl/egl_external_platform.d/; \
+    rm -rf "${unpacked}"
 
 # Fails the image build rather than publishing one whose payload cannot start:
-# the server carries its web client, every library it links resolves, and the
-# ones pixelflux and pcmflux open by name at run time, which no ELF dependency
-# names and only the apt lines above put here, are present.
+# the server carries its web client, every library it and the X server link
+# resolves, the ones pixelflux and the X server open by name from the host at
+# run time, which no ELF dependency names and only the apt lines above put
+# here, are present, and the X server is the patched one.
 RUN set -e; \
     selkies --version; \
     selkies --help > /dev/null; \
     selkies --version | grep -F "web client: embedded ("; \
-    ! ldd /usr/local/bin/selkies | grep 'not found'; \
-    for name in libwayland-server.so.0 libEGL.so.1 libgbm.so.1 libpulse.so.0 libva.so.2 \
-            libva-drm.so.2 libdrm.so.2 libxkbcommon.so.0 libpixman-1.so.0; do \
+    selkies-desktop --help > /dev/null; \
+    for elf in /usr/local/bin/selkies /usr/local/bin/selkies-desktop /usr/local/libexec/selkies/Xvfb; do \
+        ! ldd "${elf}" | grep 'not found'; \
+    done; \
+    for name in libgbm.so.1 libva.so.2 libva-drm.so.2 libdrm.so.2; do \
         ldconfig -p | awk '{print $1}' | grep -qxF "${name}" || { echo "missing ${name}"; exit 1; }; \
-    done
-
-# XLibre's server replaces the distribution's /usr/bin/Xvfb; chowned
-# to the session user like the rest of the image so fakeroot-sudo apt can
-# still write under /usr after the copy
-COPY --from=xvfb --chown=1000:1000 /build-out/usr/bin/Xvfb /usr/bin/Xvfb
-# NVIDIA's X11 EGL platform: the libraries beside the distribution's, the
-# platform files where the driver's EGL looks for them
-COPY --from=egl-x11 --chown=1000:1000 /build-out/usr/lib/ /usr/lib/
-COPY --from=egl-x11 --chown=1000:1000 /build-out/usr/share/egl/ /usr/share/egl/
-
-# Install the joystick and webcam interposers and fake-udev (container-only)
-COPY --from=add-ons --chown=1000:1000 /opt/add-ons/usr/lib/ /usr/lib/
-COPY --from=add-ons --chown=1000:1000 /opt/add-ons/opt/lib/ /opt/lib/
+    done; \
+    usage="$(Xvfb -help 2>&1 || true)"; \
+    echo "${usage}" | grep -q -- '-glamor'; \
+    echo "${usage}" | grep -q -- 'CRTCs per screen (default: 4)'; \
+    test -f /usr/lib/selkies_input_interposer.so && test -f /opt/lib/libudev.so.1.0.0-fake
 
 # A PulseAudio client that leaves its buffer to pipewire-pulse gets 40 ms, not 2 s
 COPY --chown=1000:1000 addons/base/pipewire-pulse.conf.d/ /etc/pipewire/pipewire-pulse.conf.d/

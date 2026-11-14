@@ -80,8 +80,13 @@ fi
 # with it on, glamor's GL provider declines the screen and the swrast one takes
 # it, whose Mesa driver is a stub that creates no context, and the first
 # indirect glXMakeCurrent (a 32-bit client with no 32-bit driver) kills the server.
+# The font path is the distribution's core fonts ahead of the server's built-in
+# ones: the bundle's server, relocatable, compiles in only the latter, and an
+# X11 application that asks for a core font needs the former (xfonts-scalable,
+# xbitmaps). The server drops an entry it cannot open.
+FONT_PATH="/usr/share/fonts/X11/misc,/usr/share/fonts/X11/cyrillic,/usr/share/fonts/X11/100dpi/:unscaled,/usr/share/fonts/X11/75dpi/:unscaled,/usr/share/fonts/X11/Type1,/usr/share/fonts/X11/100dpi,/usr/share/fonts/X11/75dpi,built-ins"
 # shellcheck disable=SC2086  # VFB_DEVICE is an option pair or empty
-/usr/bin/Xvfb "${DISPLAY}" -verbose 1 +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +render -nolisten "tcp" -noreset -s 0 -dpms ${VFB_DEVICE} &
+/usr/bin/Xvfb "${DISPLAY}" -verbose 1 -fp "${FONT_PATH}" +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +render -nolisten "tcp" -noreset -s 0 -dpms ${VFB_DEVICE} &
 XVFB_PID=$!
 trap 'kill "${XVFB_PID}" 2>/dev/null' TERM INT
 

@@ -90,8 +90,9 @@ def set_rate(display_name: str, name: str, value) -> None:
 
 
 def images_xvfb() -> bool:
-    """Whether the Xvfb on PATH is the one the images build: its patches add
-    the spare outputs' CRTCs to its usage, which build-xvfb.sh checks too."""
+    """Whether the Xvfb on PATH is the patched one the bundle builds and the
+    images ship: its patches add the spare outputs' CRTCs to its usage, which
+    the base image's build checks too."""
     usage = subprocess.run(["Xvfb", "-help"], capture_output=True, text=True, timeout=10)
     return "CRTCs per screen" in usage.stdout + usage.stderr
 

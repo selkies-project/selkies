@@ -22,6 +22,9 @@ inputs:
   build-args:
     description: Newline-separated build arguments.
     default: ""
+  build-contexts:
+    description: Newline-separated named build contexts (name=path).
+    default: ""
   outputs:
     description: buildx output specification, naming the image to push.
     required: true
@@ -56,6 +59,7 @@ runs:
         file: ${{ inputs.file }}
         platforms: ${{ inputs.platforms }}
         build-args: ${{ inputs.build-args }}
+        build-contexts: ${{ inputs.build-contexts }}
         outputs: ${{ inputs.outputs }}
         secrets: github_token=${{ inputs.github-token }}
         no-cache: ${{ inputs.no-cache == 'true' }}
@@ -76,6 +80,7 @@ runs:
         file: ${{ inputs.file }}
         platforms: ${{ inputs.platforms }}
         build-args: ${{ inputs.build-args }}
+        build-contexts: ${{ inputs.build-contexts }}
         outputs: ${{ inputs.outputs }}
         secrets: github_token=${{ inputs.github-token }}
         no-cache: ${{ inputs.no-cache == 'true' }}

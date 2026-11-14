@@ -15,9 +15,9 @@
 # commit read out of the pixelflux checkout the server is built against, so the
 # two never drift, and none is taken from a distribution: an archive from here
 # is the same whichever distribution links it. It runs where a binary's C
-# library floor is, the images the wheels are built in, once for each
-# architecture and C library (scripts/ci/build-codecs.sh), and each native
-# package links what that build left. A static archive in a prefix of its own
+# library floor is, once for each architecture and C library into the bundle's
+# toolchain image (infra/bundle/Dockerfile), and every bundle of that target
+# links what that build left. A static archive in a prefix of its own
 # is what pkg-config-rs and system-deps link statically when told to, which the
 # written environment does per library.
 #

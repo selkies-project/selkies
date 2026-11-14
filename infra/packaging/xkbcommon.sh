@@ -4,14 +4,17 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # Build libxkbcommon from its pinned release as a static archive under
-# ${BUILD}/xkbcommon and point the compiler driver and pkg-config at it, for a
-# server built where the distribution's libxkbcommon is older than the API the
-# server reads keysyms through (Enterprise Linux 7 and 8), and so that the
-# server links none from the host. Sourced by the wheel and bundle builds, after
+# xkbcommon/ in SELKIES_TOOLCHAIN (else BUILD) and point the compiler driver and
+# pkg-config at it, for a server built where the distribution's libxkbcommon is
+# older than the API the server reads keysyms through (Enterprise Linux 8), and
+# so that the server links none from the host. Sourced by the bundle build after
 # portable-deps.sh, with BUILD set; it exports LIBRARY_PATH and PKG_CONFIG_PATH.
-# The xkb data stays the host's (/usr/share/X11/xkb), which XKB_CONFIG_ROOT
-# overrides where the host has none.
+# A finished build there, the one the bundle's toolchain image carries
+# (infra/bundle/Dockerfile), is taken as it is. The xkb data stays the host's
+# (/usr/share/X11/xkb), which XKB_CONFIG_ROOT overrides where the host has none.
 
+XKB="${SELKIES_TOOLCHAIN:-${BUILD}}/xkbcommon"
+if [ ! -f "${XKB}/.complete" ]; then
 # libxkbcommon's parser takes bison 3.6 or newer, which CentOS 7 and
 # AlmaLinux 8 predate (3.0.4): the release pinned here is built where it is.
 # It comes from a GNU mirror through ftpmirror.gnu.org, as GNU asks, and from
@@ -30,7 +33,6 @@ if [ "$(printf '%s\n3.6\n' "${bison}" | sort -V | head -n 1)" != 3.6 ]; then
     rm -rf /tmp/bison /tmp/bison.tar.xz
 fi
 
-XKB="${BUILD}/xkbcommon"
 rm -rf "${XKB}"
 git init -q "${XKB}/src"
 git -C "${XKB}/src" fetch -q --depth 1 https://github.com/xkbcommon/libxkbcommon.git \
@@ -42,6 +44,9 @@ meson setup "${XKB}/build" "${XKB}/src" --prefix="${XKB}" --libdir=lib --buildty
     -Denable-docs=false -Denable-tools=false -Denable-xkbregistry=false \
     -Dxkb-config-root=/usr/share/X11/xkb -Dx-locale-root=/usr/share/X11/locale
 ninja -C "${XKB}/build" install
+rm -rf "${XKB}/src" "${XKB}/build"
+touch "${XKB}/.complete"
+fi
 # The crates name the library to the linker rather than through pkg-config, so
 # its directory goes ahead of the system's for the compiler driver as well
 export LIBRARY_PATH="${XKB}/lib${LIBRARY_PATH:+:${LIBRARY_PATH}}" PKG_CONFIG_PATH="${XKB}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"

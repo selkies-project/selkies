@@ -3,11 +3,15 @@ name: Images
 # Multi-architecture (x86_64 + aarch64) container images, published to ghcr.io.
 # Follows the llama.cpp docker build procedure: each architecture builds on a
 # native runner (no QEMU), pushes by digest, and a merge job assembles the
-# multi-arch manifest.
+# multi-arch manifest. The base image compiles nothing: it installs the glibc
+# bundle of its architecture that the calling run built (bundle.yaml's
+# bundle-glibc-<arch> artifact), so the images carry the binaries the bundle's
+# own checks ran.
 
-# Triggered by ci.yaml on pushes to main and by release.yaml for releases;
-# can also be run standalone via the Actions tab, from main alone since the
-# images leave the run.
+# Triggered by ci.yaml on pushes to main and by release.yaml for releases,
+# whose runs build the bundles before this; can also be run standalone via the
+# Actions tab, from main alone since the images leave the run, and then builds
+# the bundles first.
 
 on:
   workflow_dispatch:
@@ -36,6 +40,11 @@ on:
         description: Also move the floating `latest` tags onto this build
         type: boolean
         default: true
+      bundles:
+        # A dispatch has no such input, which is what builds them here
+        description: The calling run carries the glibc bundles (bundle-glibc-<arch>)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -52,9 +61,17 @@ env:
   PUSH_RETRY_DELAY: "60"
 
 jobs:
+  bundles:
+    name: Bundles
+    if: ${{ !inputs.bundles }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-wheel.yaml
+
   build:
     name: ${{ matrix.flavor.name }} (${{ matrix.arch.name }})
-    if: ${{ github.repository == 'selkies-project/selkies' && (github.ref == 'refs/heads/main' || (inputs.release && startsWith(github.ref, 'refs/tags/') && inputs.tag_prefix == github.ref_name)) }}
+    needs: bundles
+    if: ${{ !cancelled() && needs.bundles.result != 'failure' && github.repository == 'selkies-project/selkies' && (github.ref == 'refs/heads/main' || (inputs.release && startsWith(github.ref, 'refs/tags/') && inputs.tag_prefix == github.ref_name)) }}
     runs-on: ${{ matrix.arch.runner }}
     strategy:
       fail-fast: false
@@ -70,11 +87,18 @@ jobs:
           - name: amd64
             platform: linux/amd64
             runner: ubuntu-latest
+            bundle: x86_64
           - name: arm64
             platform: linux/arm64
             runner: ubuntu-26.04-arm
+            bundle: aarch64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download the bundle the base image installs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bundle-glibc-${{ matrix.arch.bundle }}
+          path: bundle
       - name: Free disk space
         # The tool cache is kept: setup-python and setup-node resolve from it
         uses: endersonmenezes/free-disk-space@8b8cd4e2277836962939a8f3b4ea0ee4bc006156 # v4
@@ -124,11 +148,12 @@ jobs:
           context: .
           file: addons/base/Dockerfile
           platforms: ${{ matrix.arch.platform }}
+          build-contexts: bundle=bundle
           build-args: |
+            BUNDLE=bundle
             DISTRIB_IMAGE=${{ matrix.flavor.image }}
             DISTRIB_RELEASE=${{ matrix.flavor.release }}
             DISTRIB_ARCHIVE=${{ steps.upstream.outputs.archive }}
-            SELKIES_VERSION=${{ inputs.release && inputs.tag_prefix || '' }}
           outputs: type=image,"name=${{ env.BASE_IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
           cache-scope: base-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
           retry-delay: ${{ env.PUSH_RETRY_DELAY }}
@@ -380,7 +405,7 @@ jobs:
     steps:
       - uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1
         with:
-          packages: selkies/base,selkies/desktop,selkies/coturn,selkies/turn-rest
+          packages: selkies/base,selkies/desktop,selkies/coturn,selkies/turn-rest,selkies/bundle-toolchain
           delete-untagged: true
           # A build in flight has its platform images untagged until its
           # manifest lands, so the window stays well clear of a publish

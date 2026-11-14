@@ -285,11 +285,79 @@ jobs:
       shards: '[1]'
       wheels_ready: true
 
+  toolchain:
+    name: Bundle toolchain (${{ matrix.libc }}, ${{ matrix.arch }})
+    # The image each target's bundle is built in, named for the files it is
+    # built from (infra/bundle/toolchain.sh): the first push to main that names
+    # one builds and publishes it, and every later run naming it pulls it, so
+    # the bundles below compile the server, the shell, and the interposers
+    # alone. A pull request publishes nothing, and its bundle builds the image
+    # itself where its changes name one main has not published.
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-26.04-arm' || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        libc: [glibc, musl]
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Before the lookup, which then sees the package whatever its visibility
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        if: github.repository == 'selkies-project/selkies' && github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Look up the image
+        id: image
+        env:
+          LIBC: ${{ matrix.libc }}
+        run: |
+          image="$(infra/bundle/toolchain.sh image "${LIBC}")"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          if docker buildx imagetools inspect "${image}" > /dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "${image} is published"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "${image} is not published"
+          fi
+      - name: Free disk space
+        if: steps.image.outputs.published == 'false' && github.repository == 'selkies-project/selkies' && github.event_name == 'push'
+        uses: endersonmenezes/free-disk-space@8b8cd4e2277836962939a8f3b4ea0ee4bc006156 # v4
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: false
+          remove_packages: azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* mysql* mongodb*
+          remove_packages_one_command: true
+          remove_folders: /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle /usr/local/share/vcpkg
+      - name: Build and publish the image
+        if: steps.image.outputs.published == 'false' && github.repository == 'selkies-project/selkies' && github.event_name == 'push'
+        env:
+          LIBC: ${{ matrix.libc }}
+          ARCH: ${{ matrix.arch }}
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          set -e
+          infra/bundle/toolchain.sh ensure "${LIBC}"
+          # The floating tag is the newest main published, for a local build to
+          # start its layer cache from; nothing in CI reads it
+          docker tag "${IMAGE}" "${IMAGE%:*}:${LIBC}-${ARCH}"
+          scripts/ci/retry.sh 3 60 docker push "${IMAGE}"
+          scripts/ci/retry.sh 3 60 docker push "${IMAGE%:*}:${LIBC}-${ARCH}"
+
   wheel:
     name: Build wheel
-    # Built while the pixelflux and pcmflux wheels still are: it depends on nothing
-    # but the interpreters.
-    needs: [python-compat]
+    # Built while the pixelflux and pcmflux wheels still are: it depends on
+    # nothing but the interpreters and the toolchain images its bundles pull.
+    needs: [python-compat, toolchain]
     permissions:
       contents: read
     uses: ./.github/workflows/build-wheel.yaml
