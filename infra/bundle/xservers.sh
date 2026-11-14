@@ -129,9 +129,20 @@ d="$(fetch https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.ta
 d="$(fetch https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz \
     b0dea9df23c863a7a50e825440f3ebffabd65df1497108e5d437747843895a4e)"
 autotools "${d}" --disable-docs --disable-multi-os-directory
-d="$(fetch https://ftp.gnu.org/gnu/nettle/nettle-3.10.1.tar.gz \
-    b0fcdd7fc0cdea6e80dcf1dd85ba794af0d5b4a57e26397eee3bc193272d9132)"
-autotools "${d}" --disable-public-key --disable-openssl --disable-documentation
+# OpenSSL's libcrypto, for the servers' SHA-1 (RENDER's glyph cache): a static
+# archive of the digests and the provider they are fetched through, with every
+# protocol and algorithm the servers have no use for left out, and its
+# configuration file never read, so a host's cannot change what it computes
+d="$(fetch https://github.com/openssl/openssl/releases/download/openssl-4.1.0/openssl-4.1.0.tar.gz \
+    50c17baf54cb008f6ce42d50deb4b28050a1aad711636cabd4b241c7e90cc2fd)"
+(cd "${d}" && ./Configure --prefix="${DEPS}" --libdir=lib no-shared no-module no-tests no-docs \
+    no-apps no-autoload-config no-tls no-dtls no-quic no-sock no-http no-ocsp no-cms no-ts no-ct \
+    no-cmp no-srp no-psk no-comp no-dso no-aria no-bf no-blake2 no-camellia no-cast no-chacha \
+    no-poly1305 no-des no-dh no-dsa no-ec no-ecx no-idea no-md4 no-mdc2 no-ocb no-rc2 no-rc4 \
+    no-rc5 no-rmd160 no-scrypt no-seed no-siphash no-siv no-sm2 no-sm3 no-sm4 no-whirlpool \
+    no-gost no-argon2 no-ml-dsa no-ml-kem no-slh-dsa no-lms no-cmac no-ui-console \
+    no-thread-pool > /dev/null && make -j"${JOBS}" build_libs > /dev/null \
+    && make install_dev > /dev/null)
 d="$(fetch https://xorg.freedesktop.org/archive/individual/proto/xorgproto-2024.1.tar.xz \
     372225fd40815b8423547f5d890c5debc72e88b91088fbfb13158c20495ccb59)"
 mesonbuild "${d}"
@@ -312,7 +323,7 @@ fi
 
 # Paths the servers resolve against their own directory, libexec/selkies
 XKB_ARGS="-Dxkb_dir=../../share/selkies/xkb -Dxkb_bin_dir=. -Dxkb_output_dir=/var/lib/xkb \
-    -Ddefault_font_path=built-ins -Dsha1=libnettle -Dxdmcp=false -Dxdm-auth-1=false \
+    -Ddefault_font_path=built-ins -Dsha1=libcrypto -Dxdmcp=false -Dxdm-auth-1=false \
     -Dxselinux=false -Ddtrace=false -Dlibunwind=false -Ddocs=false -Ddevel-docs=false"
 
 DRI_DIRS="/usr/lib/$(uname -m)-linux-gnu/dri:/usr/lib64/dri:/usr/lib/dri"

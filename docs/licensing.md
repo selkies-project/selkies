@@ -150,6 +150,7 @@ program or library under its own license, unmodified but for the patches named:
 | XLibre Xvfb | MIT/X11 | built from the pinned release with Selkies' patches (`addons/base/patches`, `infra/bundle/patches`), its dependencies linked statically |
 | Xwayland, xkbcomp | MIT/X11 | built from the pinned releases, `infra/bundle/patches` applied to Xwayland |
 | xkeyboard-config | MIT/X11 | the keymap data, as released |
+| OpenSSL libcrypto | Apache-2.0 | linked statically into the X servers for their SHA-1 (RENDER's glyph cache), from the pinned release, with the protocols and algorithms they do not use left out |
 | FreeType | FreeType License (FTL), or GPL-2.0-or-later | linked statically into the X servers, through which they open scalable core fonts; portions of this software are copyright © The FreeType Project (www.freetype.org), all rights reserved |
 | libglvnd (glibc bundles) | MIT-style | `libEGL`, `libGLdispatch`, `libGLES*`, `libOpenGL`, built from the pinned release, which hand every call to the host's driver |
 | PulseAudio | LGPL-2.1-or-later | the daemon and the modules a session loads, with its libraries, built from the pinned release |
