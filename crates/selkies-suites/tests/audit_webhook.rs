@@ -131,11 +131,11 @@ async fn every_transfer_reaches_the_collector_as_metadata_alone() {
     // Paste into the session, then ask for the session's own clipboard back.
     let page = Client::connect(&server, "").await;
     page.send(&format!("cw,{PASTED_BASE64}"));
-    collector
-        .received_when(Duration::from_millis(1500), |posted| {
-            count(posted, "clipboard.receive") >= 1
-        })
-        .await;
+    // The server's write of the paste comes back to its clipboard monitor as a selection
+    // change, and a change the monitor handles once another client owns the selection is that
+    // client's copy: the copy is taken only after the paste's change has been handled, which
+    // nothing reports, so after the second a session's clipboard takes to settle.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
     {
         let _owner = SelectionOwner::serving(&test_display(), COPIED);
         page.send("cr");
