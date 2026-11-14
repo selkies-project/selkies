@@ -188,8 +188,11 @@ build_interposers() {
     shift
     gcc "$@" -O2 -shared -fPIC -o "${TREE}/lib/selkies/preload/selkies_input_interposer${suffix}.so" \
         "${REPO}/addons/input-interposer/input_interposer.c" -ldl -pthread
+    # Copies of the sources, emptied of what a build in the tree left there, which make
+    # would otherwise take as built
     rm -rf "${BUILD}/v4l2-interposer"
     cp -r "${REPO}/addons/v4l2-interposer" "${BUILD}/v4l2-interposer"
+    make -C "${BUILD}/v4l2-interposer" clean > /dev/null
     if [ -z "${suffix}" ]; then v4l2=selkies_v4l2_interposer.so; else v4l2=all32; fi
     make -C "${BUILD}/v4l2-interposer" PW_CFLAGS="${PW_CFLAGS}" "${v4l2}" > /dev/null
     built="$(find "${BUILD}/v4l2-interposer" -maxdepth 1 -name 'selkies_v4l2_interposer*.so')"
@@ -197,6 +200,7 @@ build_interposers() {
     install -m755 "${built}" "${TREE}/lib/selkies/preload/selkies_v4l2_interposer${suffix}.so"
     rm -rf "${BUILD}/fake-udev"
     cp -r "${REPO}/addons/fake-udev" "${BUILD}/fake-udev"
+    make -C "${BUILD}/fake-udev" clean > /dev/null
     make -C "${BUILD}/fake-udev" CC="gcc $*" > /dev/null
     install -m755 "${BUILD}/fake-udev/libudev.so.1.0.0-fake" \
         "${TREE}/lib/selkies/preload/libudev.so.1.0.0-fake${suffix}"
