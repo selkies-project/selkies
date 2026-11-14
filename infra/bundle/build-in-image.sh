@@ -37,9 +37,12 @@
 # codec-sys binds the codecs' headers without watching them. PulseAudio
 # (crates/pcmflux/scripts/build-libpulse.sh, with libltdl), dbus-daemon
 # (dbus.sh), and the scheduler's libcrypt (cups.sh) are built from the releases
-# their scripts pin, with the libraries they link alongside; the server, the
-# shell, and the interposers are built from this tree, the codecs taken from
-# SELKIES_CODECS where set, else from the toolchain.
+# their scripts pin, as everything else the toolchain holds, and a library that
+# belongs to a package of the image's distribution, or that the image built
+# itself under /usr/local, fails the build, so nothing a distribution released
+# is carried but musl's C++ runtime, which comes with its compiler; the server,
+# the shell, and the interposers are built from this tree, the codecs taken
+# from SELKIES_CODECS where set, else from the toolchain.
 #
 # The bundle's wheel, `cargo xtask wheel`'s repackaging of it, is written beside it.
 #
@@ -204,8 +207,24 @@ if echo 'int main(void){return 0;}' | gcc -m32 -x c - -o /dev/null 2> /dev/null;
 fi
 
 # The libraries every program and module links, but for the C library's, glibc's
-# C++ runtime, and the graphics stack, each copied once under its soname
-# (libcrypt.so.1 is cups.sh's libxcrypt, in the tree already).
+# C++ runtime, and the graphics stack, each copied once under its soname: the
+# ones this build and the toolchain made (libcrypt.so.1 is cups.sh's libxcrypt,
+# in the tree already), never one a package of the image's distribution owns
+# or the image built itself under /usr/local (manylinux2014's libcrypt), but
+# for musl's C++ runtime, which comes with the distribution's compiler.
+provider() {
+    case "$1" in
+        /usr/local/*) echo "the builder image's own build" ;;
+        *)
+            if command -v rpm > /dev/null; then
+                rpm -qf "$1" > /dev/null 2>&1 && echo "the distribution's $(rpm -qf "$1")"
+            elif command -v apk > /dev/null; then
+                apk info -W "$1" 2> /dev/null | sed -n "s/.* is owned by /the distribution's /p"
+            fi
+            ;;
+    esac
+    return 0
+}
 CXX_RUNTIME='|gcc_s|stdc\+\+'
 [ "${LIBC}" = gnu ] || CXX_RUNTIME=''
 HOST_LIBS="^(ld-linux.*|ld-musl.*|libc\\.musl.*|linux-vdso|lib(c|m|dl|pthread|rt|resolv|util|mvec|anl|nsl|BrokenLocale${CXX_RUNTIME})|lib(GL|GLX|GLdispatch|OpenGL|EGL|GLESv[12]_CM|GLESv2|gbm|drm|vulkan|va|va-drm|va-x11|va-wayland|cuda|nvidia-.*))\\.so"
@@ -223,6 +242,11 @@ while [ -n "${queue}" ]; do
             dest="${LIBDIR}/${soname}"
             case "${path}" in */pulseaudio/modules/*) dest="${LIBDIR}/pulse/modules/${soname}" ;; esac
             [ -e "${dest}" ] && continue
+            from="$(provider "$(readlink -f "${path}")")"
+            if [ -n "${from}" ] && ! echo "${soname}" | grep -qE '^lib(stdc\+\+|gcc_s)\.so'; then
+                echo "${elf} links ${path}, from ${from}" >&2
+                exit 1
+            fi
             cp -L "${path}" "${dest}"
             chmod 755 "${dest}"
             next="${next} ${dest}"
