@@ -36,6 +36,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use libloading::{Library, Symbol};
 use smithay::backend::allocator::{Buffer, Fourcc, dmabuf::Dmabuf};
 
+use super::client_pins::{ClientPins, HostRegister, RowsOwner};
 use super::codec::{
     Codec, FRAME_ANCHOR, FRAME_DELTA, FRAME_INTRA, FRAME_KEY, Hardware, VIDEO_HEADER_LEN,
     av1_level, h264_dpb_frames, h264_level, h265_dpb_frames, h265_level, h265_tier,
@@ -248,6 +249,18 @@ struct CudaFunctions {
         ) -> CUresult,
     >,
     cuDestroyExternalSemaphore: Option<unsafe extern "C" fn(sem: CUexternalSemaphore) -> CUresult>,
+}
+
+impl HostRegister for CudaFunctions {
+    fn register(&self, base: usize, len: usize) -> bool {
+        unsafe {
+            (self.cuMemHostRegister_v2)(base as *mut c_void, len, 0) == CUresult::CUDA_SUCCESS
+        }
+    }
+
+    fn unregister(&self, base: usize) {
+        unsafe { (self.cuMemHostUnregister)(base as *mut c_void) };
+    }
 }
 
 /// Dynamically loaded NVENC entry points (from `libnvidia-encode`).
@@ -1714,6 +1727,7 @@ impl BandHash {
 /// cycles it).
 /// `pinned_hosts` maps each page-locked host upload source's base pointer to its registered length,
 /// with a `0` length recording a failed registration so that address is never re-pinned.
+/// `client_pins` holds the page-locked rows of client buffers, each at a mapping of its own.
 /// `codec` and `fullcolor` name the session's codec and negotiated chroma; `current_qp` tracks the
 /// live ConstQP so a paint-over reconfigure is skipped when unchanged. `encode_config` and
 /// `init_params` are retained so in-place reconfigure can resubmit them.
@@ -1794,6 +1808,7 @@ pub struct NvencEncoder {
     dmabuf_cache: HashMap<i32, CachedDmaBuf>,
     external_inputs: Vec<ExternalInput>,
     pinned_hosts: HashMap<usize, usize>,
+    client_pins: ClientPins,
     cuda: Arc<CudaFunctions>,
     /// The EGL entry points a dmabuf import takes, loaded for a session given an EGL display.
     egl: Option<Arc<EglFunctions>>,
@@ -1898,6 +1913,7 @@ impl Drop for NvencEncoder {
                     (self.cuda.cuMemHostUnregister)(*base as *mut c_void);
                 }
             }
+            self.client_pins.release(&*self.cuda);
 
             if !self.blit_semaphore.is_null()
                 && let Some(destroy) = self.cuda.cuDestroyExternalSemaphore
@@ -2888,6 +2904,7 @@ impl NvencEncoder {
                 dmabuf_cache: HashMap::new(),
                 external_inputs: Vec::new(),
                 pinned_hosts: HashMap::new(),
+                client_pins: ClientPins::default(),
                 cuda,
                 egl,
                 _nvenc_lib: nvenc_lib,
@@ -3331,6 +3348,7 @@ impl NvencEncoder {
                     (self.cuda.cuMemHostUnregister)(base as *mut c_void);
                 }
             }
+            self.client_pins.release(&*self.cuda);
 
             if is_cbr {
                 let bps = cbr_bps(settings);
@@ -3474,7 +3492,8 @@ impl NvencEncoder {
         }
     }
 
-    /// Drop every page-locked host registration, under the pushed CUDA context.
+    /// Drop every page-locked host registration, a client's rows' among them, under the pushed
+    /// CUDA context.
     ///
     /// Called when the capture's shm segments are recreated at unchanged dimensions, and when a
     /// Wayland encode thread hands its session on, before its pool is freed: new buffers often
@@ -3483,7 +3502,7 @@ impl NvencEncoder {
     /// re-pin lazily. A `0`-length entry marks a registration that failed and so
     /// is not unregistered.
     pub fn release_pinned_hosts(&mut self) {
-        if self.pinned_hosts.is_empty() {
+        if self.pinned_hosts.is_empty() && self.client_pins.is_empty() {
             return;
         }
         unsafe {
@@ -3493,6 +3512,7 @@ impl NvencEncoder {
                     (self.cuda.cuMemHostUnregister)(base as *mut c_void);
                 }
             }
+            self.client_pins.release(&*self.cuda);
             let _ = (self.cuda.cuCtxPopCurrent_v2)(ptr::null_mut());
         }
     }
@@ -4937,7 +4957,8 @@ impl NvencEncoder {
     ///    once into `pin_uploads`), page-lock each distinct source base address via `pin_host_source`
     ///    so the upload is a direct DMA from the caller's buffer instead of a pageable copy staged
     ///    through a driver bounce buffer. The persistent, bounded shm / pool sources make this a
-    ///    one-time bounded cost.
+    ///    one-time bounded cost. The upload counts toward letting go of client rows the session
+    ///    has stopped encoding in place (`ClientPins::age`).
     /// 3. **Upload and submit**: `cuMemcpy2DAsync` the rows into the input surface on the default
     ///    stream honoring `src_stride`, then `submit_frame`. NVENC processes its input on that same
     ///    stream, so the upload is ordered before the encode without a host wait, and the blocking
@@ -4991,6 +5012,7 @@ impl NvencEncoder {
             }
 
             if self.pin_uploads {
+                self.client_pins.age(&*self.cuda);
                 self.pin_host_source(pixels.as_ptr() as usize, pixels.len());
             }
 
@@ -5045,22 +5067,44 @@ impl NvencEncoder {
         }
     }
 
-    /// `encode_cpu_packed` for rows a client owns, such as a wl_shm pool's, uploaded without
-    /// page-locking them. The client unmaps its pool whenever it likes, and a registration
-    /// outlives the mapping: a pool mapped later over the same addresses would be read from the
-    /// old pool's pages, or fail to upload where it straddles them.
-    pub fn encode_client_packed(
+    /// `encode_cpu_packed` for rows a client owns, such as a wl_shm pool's, read through the
+    /// buffer `owner`. smithay unmaps a pool when the client resizes it, or once the pool and
+    /// its buffers are gone, and a registration outlives the mapping, so the rows are
+    /// page-locked at a mapping of their own that `client_pins` keeps for the buffer, and
+    /// uploaded from there.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "encode_cpu_packed's arguments and the buffer the rows belong to"
+    )]
+    pub(crate) fn encode_client_packed(
         &mut self,
         pixels: &[u8],
+        owner: &RowsOwner,
         src_stride: usize,
         rgba_input: bool,
         frame_number: u64,
         crf: u32,
         force_idr: bool,
     ) -> Result<Vec<u8>, String> {
+        let mut rows = pixels;
+        if self.pin_uploads {
+            unsafe {
+                let _ = (self.cuda.cuCtxPushCurrent_v2)(self.cuda_context);
+                let from = self.client_pins.claim(
+                    pixels.as_ptr() as usize,
+                    pixels.len(),
+                    owner,
+                    &*self.cuda,
+                );
+                (self.cuda.cuCtxPopCurrent_v2)(ptr::null_mut());
+                // SAFETY: `pixels` itself, or the mapping of the same pages `client_pins` holds
+                // until its next call.
+                rows = std::slice::from_raw_parts(from as *const u8, pixels.len());
+            }
+        }
         let pin = std::mem::replace(&mut self.pin_uploads, false);
         let out =
-            self.encode_cpu_packed(pixels, src_stride, rgba_input, frame_number, crf, force_idr);
+            self.encode_cpu_packed(rows, src_stride, rgba_input, frame_number, crf, force_idr);
         self.pin_uploads = pin;
         out
     }
@@ -7307,8 +7351,8 @@ pub(crate) mod gpu_tests {
     }
 
     /// A client's memfd pool replaced by one mapped at the same address, as a toolkit swaps its
-    /// buffers, uploads the picture the new pool holds: the rows are read where they lie and
-    /// never page-locked, so no registration keeps the old pool's pages at that address.
+    /// buffers, uploads the picture the new pool holds: each buffer's rows are page-locked at a
+    /// mapping of their own, so the old pool's registration is never read for the new one's.
     /// Ignored by default.
     #[test]
     #[ignore]
@@ -7339,10 +7383,11 @@ pub(crate) mod gpu_tests {
                 std::slice::from_raw_parts_mut(p as *mut u8, len)
             };
             at = rows.as_mut_ptr().cast();
+            let buffer: RowsOwner = Arc::new(pool);
             for i in frames {
                 rows.copy_from_slice(&moving_frame(w, h, i));
                 let pkt = enc
-                    .encode_client_packed(rows, w * 4, false, i as u64, 25, i == 0)
+                    .encode_client_packed(rows, &buffer, w * 4, false, i as u64, 25, i == 0)
                     .expect("encode");
                 let psnr = luma_psnr(&mut dec, &pkt, &moving_frame(w, h, i), w, h);
                 assert!(
@@ -7357,6 +7402,182 @@ pub(crate) mod gpu_tests {
             // SAFETY: the mapping made above, which no slice outlives.
             unsafe { libc::munmap(at, len) };
         }
+    }
+
+    /// Test helper: a fresh memfd pool of `len` bytes mapped shared, as smithay maps a client's,
+    /// over `at` where it is not null. The caller unmaps it once no slice of it is left.
+    fn memfd_rows<'a>(at: *mut c_void, len: usize, name: &CStr) -> &'a mut [u8] {
+        let fd = crate::memfd_create(name, libc::MFD_CLOEXEC);
+        assert!(fd >= 0, "memfd_create");
+        let fixed = if at.is_null() { 0 } else { libc::MAP_FIXED };
+        // SAFETY: a fresh memfd sized to `len` and mapped whole, over `at` only where the caller
+        // unmapped that range for it, so nothing else holds it.
+        unsafe {
+            assert_eq!(libc::ftruncate(fd, len as libc::off_t), 0);
+            let p = libc::mmap(
+                at,
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED | fixed,
+                fd,
+                0,
+            );
+            libc::close(fd);
+            assert_ne!(p, libc::MAP_FAILED, "mmap");
+            std::slice::from_raw_parts_mut(p as *mut u8, len)
+        }
+    }
+
+    /// The session's own rows mapped where a client's pool lay before a resize moved it, with
+    /// the client's buffer still held, upload the picture they hold: the client's registration
+    /// is at a mapping of its own, so the session's rows are page-locked where they lie. Ignored
+    /// by default.
+    #[test]
+    #[ignore]
+    fn gpu_the_sessions_own_rows_where_a_client_pool_lay_upload_their_own_picture() {
+        use crate::webcam::decode::VideoDecoder;
+        let (w, h) = (1280usize, 720usize);
+        let len = w * h * 4;
+        let mut enc = NvencEncoder::new(&settings(w as i32, h as i32, 60.0), ptr::null())
+            .expect("NVENC init");
+        let mut dec = VideoDecoder::new(Codec::H264).expect("decoder");
+        let client = memfd_rows(ptr::null_mut(), len, c"client-pool");
+        let at: *mut c_void = client.as_mut_ptr().cast();
+        let buffer: RowsOwner = Arc::new(());
+        for i in 0..2usize {
+            client.copy_from_slice(&moving_frame(w, h, i));
+            let pkt = enc
+                .encode_client_packed(client, &buffer, w * 4, false, i as u64, 25, i == 0)
+                .expect("encode");
+            luma_psnr(&mut dec, &pkt, &moving_frame(w, h, i), w, h);
+        }
+        // SAFETY: the client mapping made above, which is not touched again.
+        unsafe { libc::munmap(at, len) };
+        let own = memfd_rows(at, len, c"session-pool");
+        for i in 2..6usize {
+            own.copy_from_slice(&moving_frame(w, h, i));
+            let pkt = enc
+                .encode_cpu_packed(own, w * 4, false, i as u64, 25, false)
+                .expect("encode");
+            let psnr = luma_psnr(&mut dec, &pkt, &moving_frame(w, h, i), w, h);
+            assert!(
+                psnr > 30.0,
+                "frame {i}: {psnr:.1} dB against the picture just painted"
+            );
+        }
+        drop(enc);
+        // SAFETY: the mapping made above, which no slice outlives.
+        unsafe { libc::munmap(own.as_mut_ptr().cast(), len) };
+    }
+
+    /// Another session's rows mapped where a client's pool lay before a resize moved it, with
+    /// the client's buffer still registered in the first session, upload the picture they hold:
+    /// sessions on one device share the CUDA context and with it every registration, and the
+    /// client's is at a mapping of its own. Ignored by default.
+    #[test]
+    #[ignore]
+    fn gpu_another_sessions_rows_where_a_client_pool_lay_upload_their_own_picture() {
+        use crate::webcam::decode::VideoDecoder;
+        let (w, h) = (1280usize, 720usize);
+        let len = w * h * 4;
+        let new = || {
+            NvencEncoder::new(&settings(w as i32, h as i32, 60.0), ptr::null()).expect("NVENC init")
+        };
+        let (mut first, mut second) = (new(), new());
+        let mut first_dec = VideoDecoder::new(Codec::H264).expect("decoder");
+        let mut second_dec = VideoDecoder::new(Codec::H264).expect("decoder");
+        let client = memfd_rows(ptr::null_mut(), len, c"client-pool");
+        let at: *mut c_void = client.as_mut_ptr().cast();
+        let buffer: RowsOwner = Arc::new(());
+        for i in 0..3usize {
+            client.copy_from_slice(&moving_frame(w, h, i));
+            let pkt = first
+                .encode_client_packed(client, &buffer, w * 4, false, i as u64, 25, i == 0)
+                .expect("encode");
+            luma_psnr(&mut first_dec, &pkt, &moving_frame(w, h, i), w, h);
+        }
+        assert!(
+            !first.client_pins.locked().is_empty(),
+            "the client's rows are locked"
+        );
+        // SAFETY: the client mapping made above, which is not touched again.
+        unsafe { libc::munmap(at, len) };
+        let other = memfd_rows(at, len, c"other-pool");
+        for i in 3..7usize {
+            other.copy_from_slice(&moving_frame(w, h, i));
+            let pkt = second
+                .encode_cpu_packed(other, w * 4, false, i as u64, 25, i == 3)
+                .expect("encode");
+            let psnr = luma_psnr(&mut second_dec, &pkt, &moving_frame(w, h, i), w, h);
+            assert!(
+                psnr > 30.0,
+                "frame {i}: {psnr:.1} dB against the picture just painted"
+            );
+        }
+        drop((first, second));
+        // SAFETY: the mapping made above, which no slice outlives.
+        unsafe { libc::munmap(other.as_mut_ptr().cast(), len) };
+    }
+
+    /// A client that alternates between two buffers of one memfd pool, as double buffering
+    /// does, has the rows of both page-locked once for their uploads, and each frame decodes to
+    /// the picture just painted into the buffer it came from. At 1600x900 a buffer is no whole
+    /// number of pages, so the two share the page where one ends and the next begins. Ignored
+    /// by default.
+    #[test]
+    #[ignore]
+    fn gpu_the_buffers_a_client_alternates_between_are_page_locked() {
+        use crate::webcam::decode::VideoDecoder;
+        let (w, h) = (1600usize, 900usize);
+        let len = w * h * 4;
+        assert_ne!(len % 4096, 0);
+        let mut enc = NvencEncoder::new(&settings(w as i32, h as i32, 60.0), ptr::null())
+            .expect("NVENC init");
+        let mut dec = VideoDecoder::new(Codec::H264).expect("decoder");
+        let pool = memfd_rows(ptr::null_mut(), 2 * len, c"client-pool");
+        let buffers: [RowsOwner; 2] = [Arc::new(0), Arc::new(1)];
+        let mut first = Vec::new();
+        for i in 0..8usize {
+            if i == 4 {
+                first = enc.client_pins.locked();
+            }
+            let rows = &mut pool[(i % 2) * len..(i % 2 + 1) * len];
+            rows.copy_from_slice(&moving_frame(w, h, i));
+            let pkt = enc
+                .encode_client_packed(rows, &buffers[i % 2], w * 4, false, i as u64, 25, i == 0)
+                .expect("encode");
+            let psnr = luma_psnr(&mut dec, &pkt, &moving_frame(w, h, i), w, h);
+            assert!(
+                psnr > 30.0,
+                "buffer {}, frame {i}: {psnr:.1} dB against the picture just painted",
+                i % 2
+            );
+        }
+        unsafe {
+            let lib = Library::new("libcuda.so.1").expect("libcuda");
+            let host_flags: Symbol<unsafe extern "C" fn(*mut u32, *mut c_void) -> CUresult> =
+                lib.get(b"cuMemHostGetFlags\0").unwrap();
+            let locked = enc.client_pins.locked();
+            assert_eq!(locked.len(), 2, "both buffers' rows are page-locked");
+            assert_eq!(locked, first, "and were not registered again");
+            let _ = (enc.cuda.cuCtxPushCurrent_v2)(enc.cuda_context);
+            for (buffer, at) in locked.iter().enumerate() {
+                let mut flags = 0u32;
+                let st = host_flags(&mut flags, (at + len / 2) as *mut c_void);
+                assert_eq!(
+                    st,
+                    CUresult::CUDA_SUCCESS,
+                    "buffer {buffer}'s mapping is locked"
+                );
+            }
+            let mut flags = 0u32;
+            let st = host_flags(&mut flags, pool.as_mut_ptr().add(len / 2).cast());
+            assert_ne!(st, CUresult::CUDA_SUCCESS, "the pool's own mapping is not");
+            (enc.cuda.cuCtxPopCurrent_v2)(ptr::null_mut());
+        }
+        drop(enc);
+        // SAFETY: the mapping made above, which no slice outlives.
+        unsafe { libc::munmap(pool.as_mut_ptr().cast(), 2 * len) };
     }
 
     /// On a real GPU whose driver caps the NVENC sessions a device runs at once, as it does on
