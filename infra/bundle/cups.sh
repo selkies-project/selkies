@@ -14,12 +14,13 @@
 # and Ghostscript stay out, and a document of another format is refused rather
 # than converted.
 #
-# The print queue runs a copy of cupsd outside the bundle, which its run path
-# does not reach, so the libcrypt it links has to be one hosts carry,
-# libcrypt.so.1. Where the image's link name is another (manylinux2014's
-# libxcrypt is libcrypt.so.2, its libcrypt.so.1 exporting crypt only at glibc's
-# own symbol version), crypt is bound to that version of libcrypt.so.1, which
-# glibc's libcrypt and libxcrypt's compatible builds export alike.
+# On glibc the scheduler links libxcrypt's libcrypt.so.1, built from the release
+# pinned here with glibc's interface and put in the tree's lib/selkies, rather
+# than the builder image's libcrypt. The print queue runs a copy of cupsd
+# outside the bundle, which its run path does not reach, so crypt is bound to
+# the symbol version libcrypt.so.1 keeps for glibc compatibility, which glibc's
+# own libcrypt and libxcrypt's compatible builds export alike: the copy runs
+# against whichever libcrypt.so.1 a host has.
 #
 # Runs inside the bundle's build image after xservers.sh, whose static zlib it
 # links, once into the bundle's toolchain image (infra/bundle/Dockerfile) under
@@ -35,6 +36,8 @@ CACHE="${SELKIES_SOURCE_CACHE:-${BUILD}/sources}"
 DEPS="${TOOLCHAIN}/xservers/deps"
 VERSION=2.4.20
 SHA256=ab4d9cd7f3e58060091d2b24972223d6401675f11c49b65abf4f6ef31dea22ff
+XCRYPT_VERSION=4.5.2
+XCRYPT_SHA256=71513a31c01a428bccd5367a32fd95f115d6dac50fb5b60c779d5c7942aec071
 OUT="${TREE}/libexec/selkies/cups"
 mkdir -p "${BUILD}" "${CACHE}"
 
@@ -52,21 +55,34 @@ tar -xzf "${CACHE}/${name}" -C "${BUILD}/src" --strip-components=1
 # A build without DNS-SD lacks the local-queue fields the enumeration fills
 patch -d "${BUILD}/src" -p1 < "$(dirname "$(readlink -f "$0")")/patches/cups/without-dnssd.patch"
 CRYPT_LIBS=""
-# The file the linker takes for -lcrypt
-libcrypt="$(printf 'int main(void) { return 0; }\n' | cc -x c -o /dev/null -Wl,--trace -lcrypt - 2> /dev/null \
-    | grep -o '/[^ ()]*/libcrypt\.[^ ()]*' | head -n 1 || true)"
-if [ -n "${libcrypt}" ] && [ "$(objdump -p "${libcrypt}" | awk '$1 == "SONAME" {print $2}')" != libcrypt.so.1 ] \
-        && [ -e "$(dirname "${libcrypt}")/libcrypt.so.1" ]; then
-    libcrypt="$(dirname "${libcrypt}")/libcrypt.so.1"
-    version="$(objdump -T "${libcrypt}" | awk '$NF == "crypt" {gsub(/[()]/, "", $(NF - 1)); print $(NF - 1)}')"
+CRYPT_CPPFLAGS=""
+if ! ldd --version 2>&1 | grep -qi musl; then
+    xcrypt="libxcrypt-${XCRYPT_VERSION}.tar.xz"
+    if [ ! -f "${CACHE}/${xcrypt}" ]; then
+        curl -fsSL --retry 5 --connect-timeout 30 -o "${CACHE}/${xcrypt}.part" \
+            "https://github.com/besser82/libxcrypt/releases/download/v${XCRYPT_VERSION}/${xcrypt}"
+        mv "${CACHE}/${xcrypt}.part" "${CACHE}/${xcrypt}"
+    fi
+    echo "${XCRYPT_SHA256}  ${CACHE}/${xcrypt}" | sha256sum -c -
+    rm -rf "${BUILD}/xcrypt-src" "${BUILD}/xcrypt"
+    mkdir -p "${BUILD}/xcrypt-src"
+    tar -xJf "${CACHE}/${xcrypt}" -C "${BUILD}/xcrypt-src" --strip-components=1
+    (cd "${BUILD}/xcrypt-src" && ./configure --prefix="${BUILD}/xcrypt" --libdir="${BUILD}/xcrypt/lib" \
+        --enable-obsolete-api=glibc --disable-static > /dev/null && make -j"$(nproc)" > /dev/null \
+        && make install > /dev/null)
+    rm -rf "${BUILD}/xcrypt-src"
+    libcrypt="${BUILD}/xcrypt/lib/libcrypt.so.1"
+    version="$(objdump -T "${libcrypt}" | awk '$NF == "crypt" && $(NF - 1) ~ /GLIBC_/ {gsub(/[()]/, "", $(NF - 1)); print $(NF - 1)}')"
+    [ -n "${version}" ]
     printf 'char *crypt_versioned(const char *, const char *);\n__asm__(".symver crypt_versioned,crypt@%s");\nchar *crypt(const char *key, const char *salt) { return crypt_versioned(key, salt); }\n' \
         "${version}" > "${BUILD}/crypt.c"
     cc -O2 -fPIC -c "${BUILD}/crypt.c" -o "${BUILD}/crypt.o"
     rm -f "${BUILD}/libcrypt-versioned.a"
     ar rcs "${BUILD}/libcrypt-versioned.a" "${BUILD}/crypt.o"
     CRYPT_LIBS="${BUILD}/libcrypt-versioned.a ${libcrypt}"
+    CRYPT_CPPFLAGS=" -I${BUILD}/xcrypt/include"
 fi
-(cd "${BUILD}/src" && CFLAGS="-O2 -fPIC" CXXFLAGS="-O2 -fPIC" CPPFLAGS="-I${DEPS}/include" LDFLAGS="-L${DEPS}/lib" LIBS="${CRYPT_LIBS}" ./configure \
+(cd "${BUILD}/src" && CFLAGS="-O2 -fPIC" CXXFLAGS="-O2 -fPIC" CPPFLAGS="-I${DEPS}/include${CRYPT_CPPFLAGS}" LDFLAGS="-L${DEPS}/lib" LIBS="${CRYPT_LIBS}" ./configure \
     --prefix=/usr --sysconfdir=/etc --localstatedir=/var --libdir=/usr/lib \
     --disable-shared --enable-static --with-tls=no --with-dnssd=no \
     --disable-dbus --disable-pam --disable-libusb --disable-gssapi --disable-libpaper \
@@ -89,4 +105,8 @@ cp -a "${BUILD}/stage/usr/share/cups/mime" "${OUT}/share/cups/mime"
 test -x "${OUT}/lib/cups/daemon/cups-exec"
 test -d "${OUT}/lib/cups/filter"
 test -f "${OUT}/share/cups/mime/mime.types"
+if [ -e "${BUILD}/xcrypt/lib/libcrypt.so.1" ]; then
+    mkdir -p "${TREE}/lib/selkies"
+    cp -L "${BUILD}/xcrypt/lib/libcrypt.so.1" "${TREE}/lib/selkies/libcrypt.so.1"
+fi
 readelf -d "${OUT}/sbin/cupsd" | grep NEEDED

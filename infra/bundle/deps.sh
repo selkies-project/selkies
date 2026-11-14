@@ -7,7 +7,8 @@
 # musllinux_1_2 image rather than from this tree: what the server's build needs
 # (infra/packaging/portable-deps.sh, PulseAudio's client libraries among it),
 # the PulseAudio server of that same release, the tools and headers the X
-# servers, NVIDIA's X11 EGL platform, and dbus-daemon build against, and, on
+# servers, NVIDIA's X11 EGL platform, dbus-daemon, and libxcrypt build against
+# (Perl's open module, which AlmaLinux 8 packages apart, for libxcrypt), and, on
 # glibc, a 32-bit toolchain for the interposers.
 # infra/bundle/Dockerfile runs it once into the toolchain image the build then
 # runs in; build-in-image.sh runs it itself in a bare manylinux image.
@@ -40,7 +41,8 @@ PATH="/opt/python/cp312-cp312/bin:${PATH}" sh "${REPO}/crates/pcmflux/scripts/bu
     /usr "${libdir}" daemon
 if command -v dnf > /dev/null; then
     dnf install -y --disablerepo='epel*' bison flex expat-devel mesa-libgbm-devel \
-        mesa-libEGL-devel mesa-libGL-devel libX11-devel libxslt gettext perl-XML-Parser xz
+        mesa-libEGL-devel mesa-libGL-devel libX11-devel libxslt gettext perl-XML-Parser xz \
+        perl-open
     dnf install -y --disablerepo='epel*' glibc-devel.i686 libgcc.i686 || true
     dnf clean all
     ldconfig

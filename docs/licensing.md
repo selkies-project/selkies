@@ -157,9 +157,9 @@ program or library under its own license, unmodified but for the patches named:
 | dbus-daemon | AFL-2.1 OR GPL-2.0-or-later | built from the pinned release (`infra/bundle/dbus.sh`), its own library linked in statically |
 | Expat | MIT | linked statically into dbus-daemon, from the pinned release |
 | CUPS scheduler | Apache-2.0 with its linking exceptions | built from the pinned release with `infra/bundle/patches/cups` |
+| libxcrypt (glibc bundles) | LGPL-2.1-or-later | `lib/selkies/libcrypt.so.1`, built from the pinned release, which the CUPS scheduler links |
 | NVIDIA egl-x11 (glibc bundles) | Apache-2.0 | `lib/selkies/egl-x11`, built from the pinned release, for the images, which install it where a driver's EGL looks |
 | Inter | SIL Open Font License 1.1 | `share/selkies/fonts`, with its license beside it |
-| The libraries those programs link (libcrypt, on glibc) | LGPL-2.1-or-later | the build image distribution's, under `lib/selkies` |
 | libstdc++ and libgcc_s (musl bundles) | GPL-3.0 with the GCC Runtime Library Exception | the build image distribution's, under `lib/selkies` |
 
 Each is dynamically linked or a program of its own, so each can be replaced in

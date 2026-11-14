@@ -35,11 +35,11 @@
 # directory first, kept there for the next build of the same files. A target
 # directory kept from a build against another toolchain is emptied, since
 # codec-sys binds the codecs' headers without watching them. PulseAudio
-# (crates/pcmflux/scripts/build-libpulse.sh, with libltdl) and dbus-daemon
-# (dbus.sh) are built from the releases their scripts pin, with the libraries
-# they link alongside; the server, the shell, and the interposers are built from
-# this tree, the codecs taken from SELKIES_CODECS where set, else from the
-# toolchain.
+# (crates/pcmflux/scripts/build-libpulse.sh, with libltdl), dbus-daemon
+# (dbus.sh), and the scheduler's libcrypt (cups.sh) are built from the releases
+# their scripts pin, with the libraries they link alongside; the server, the
+# shell, and the interposers are built from this tree, the codecs taken from
+# SELKIES_CODECS where set, else from the toolchain.
 #
 # The bundle's wheel, `cargo xtask wheel`'s repackaging of it, is written beside it.
 #
@@ -204,8 +204,8 @@ if echo 'int main(void){return 0;}' | gcc -m32 -x c - -o /dev/null 2> /dev/null;
 fi
 
 # The libraries every program and module links, but for the C library's, glibc's
-# C++ runtime, and the graphics stack, each copied once under its soname.
-# libcrypt is carried: distributions moved it to a compat package with soname 2.
+# C++ runtime, and the graphics stack, each copied once under its soname
+# (libcrypt.so.1 is cups.sh's libxcrypt, in the tree already).
 CXX_RUNTIME='|gcc_s|stdc\+\+'
 [ "${LIBC}" = gnu ] || CXX_RUNTIME=''
 HOST_LIBS="^(ld-linux.*|ld-musl.*|libc\\.musl.*|linux-vdso|lib(c|m|dl|pthread|rt|resolv|util|mvec|anl|nsl|BrokenLocale${CXX_RUNTIME})|lib(GL|GLX|GLdispatch|OpenGL|EGL|GLESv[12]_CM|GLESv2|gbm|drm|vulkan|va|va-drm|va-x11|va-wayland|cuda|nvidia-.*))\\.so"
