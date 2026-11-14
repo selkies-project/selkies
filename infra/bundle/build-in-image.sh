@@ -39,6 +39,8 @@
 # alongside; the server, the shell, and the interposers are built from this
 # tree, the codecs taken from SELKIES_CODECS where set, else from the toolchain.
 #
+# The bundle's wheel, `cargo xtask wheel`'s repackaging of it, is written beside it.
+#
 # Usage: build-in-image.sh <out-dir>   (dist/web built; SELKIES_VERSION stamps)
 set -eux
 OUT="$(mkdir -p "${1:?usage: build-in-image.sh <out-dir>}" && readlink -f "$1")"
@@ -269,4 +271,11 @@ readelf -d "${TREE}/bin/selkies" | grep -E 'NEEDED|RUNPATH'
 
 echo "${KEY}" > "${TOOLCHAIN}/key"
 tar -C "${BUILD}/bundle" -czf "${OUT}/${NAME}.tar.gz" "${NAME}"
-ls -la "${OUT}/${NAME}.tar.gz"
+# The wheel of this platform, the bundle repackaged (crates/xtask/src/wheel.rs)
+# by a tool built from the tree in place, without the server's link flags; on
+# musl with the C runtime linked dynamically, as server.sh builds there
+XTASK_RUSTFLAGS=""
+[ "${LIBC}" = gnu ] || XTASK_RUSTFLAGS="-C target-feature=-crt-static"
+RUSTUP_HOME="${RUSTUP_HOME:-/opt/rust/rustup}" RUSTFLAGS="${XTASK_RUSTFLAGS}" CARGO_TARGET_DIR="${BUILD}/target" \
+    "${CARGO_HOME:-/opt/rust/cargo}/bin/cargo" run --quiet --locked --manifest-path "${REPO}/Cargo.toml" -p xtask -- wheel "${OUT}/${NAME}.tar.gz" "${OUT}"
+ls -la "${OUT}/${NAME}.tar.gz" "${OUT}"/*.whl

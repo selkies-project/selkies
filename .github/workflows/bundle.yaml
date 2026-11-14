@@ -1,8 +1,8 @@
 name: Bundle
 # One target's release media, from its bundle down: the Selkies bundle
 # selkies-<version>-<arch>-linux-<gnu|musl>.tar.gz for a C library and an
-# architecture (infra/bundle/build.sh), the wheel repackaged from it
-# (infra/wheel/build.py), and, where `packages` is set, the native packages
+# architecture (infra/bundle/build.sh), the wheel the same build repackages
+# from it (cargo xtask wheel), and, where `packages` is set, the native packages
 # (infra/packaging/package.sh) and, on glibc, the AppImage
 # (infra/appimage/build.sh) repackaged from it too. Each bundle is built in the
 # builder image of its platform, whose C library is its floor
@@ -125,19 +125,17 @@ jobs:
               curl -fs http://127.0.0.1:8080/api/health'
             echo "::endgroup::"
           done
-      - name: Repackage the bundle as its wheel
-        run: python3 infra/wheel/build.py out/selkies-*.tar.gz wheelhouse
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bundle-${{ inputs.libc }}-${{ inputs.arch }}
-          path: out/*
+          path: out/*.tar.gz
           compression-level: 0
           if-no-files-found: error
           retention-days: 14
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: selkies-wheel-${{ inputs.libc }}-${{ inputs.arch }}
-          path: wheelhouse/*
+          path: out/*.whl
           compression-level: 0
           if-no-files-found: error
           retention-days: 1

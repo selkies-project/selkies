@@ -41,7 +41,7 @@ COPY . ./
 # The production build of the web client, which the server embeds
 COPY --from=web-build /build/dist/web ./dist/web
 
-# Stamps the version, installs the build's tools (infra/bundle/deps.sh), and
-# builds everything the bundle carries from this tree and its pinned sources
-RUN SELKIES_VERSION="${PACKAGE_VERSION}" sh infra/bundle/build-in-image.sh /opt/build/dist \
-    && /opt/python/cp312-cp312/bin/python infra/wheel/build.py /opt/build/dist/selkies-*.tar.gz /opt/build/dist
+# Stamps the version, installs the build's tools (infra/bundle/deps.sh), builds
+# everything the bundle carries from this tree and its pinned sources, and
+# repackages the bundle as its wheel
+RUN SELKIES_VERSION="${PACKAGE_VERSION}" sh infra/bundle/build-in-image.sh /opt/build/dist
