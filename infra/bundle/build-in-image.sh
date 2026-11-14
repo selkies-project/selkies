@@ -35,11 +35,11 @@
 # directory first, kept there for the next build of the same files. A target
 # directory kept from a build against another toolchain is emptied, since
 # codec-sys binds the codecs' headers without watching them. PulseAudio
-# (crates/pcmflux/scripts/build-libpulse.sh) is built from the release that
-# script pins, with the libraries it links alongside, and dbus-daemon (dbus.sh)
-# from its own, linking the C library alone; the server, the shell, and the
-# interposers are built from this tree, the codecs taken from SELKIES_CODECS
-# where set, else from the toolchain.
+# (crates/pcmflux/scripts/build-libpulse.sh, with libltdl) and dbus-daemon
+# (dbus.sh) are built from the releases their scripts pin, with the libraries
+# they link alongside; the server, the shell, and the interposers are built from
+# this tree, the codecs taken from SELKIES_CODECS where set, else from the
+# toolchain.
 #
 # The bundle's wheel, `cargo xtask wheel`'s repackaging of it, is written beside it.
 #

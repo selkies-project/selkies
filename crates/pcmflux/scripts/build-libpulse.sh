@@ -13,7 +13,12 @@
 # release publishes). meson and ninja come from the caller's PATH. Given
 # `daemon`, the PulseAudio server is built beside them from the same release
 # and with the same features left out, for the Selkies bundle, whose session
-# runs it: its own libraries are then the ones the client links.
+# runs it: its own libraries are then the ones the client links. The daemon
+# loads its modules through libltdl, which is then built from the libtool
+# release pinned here into PulseAudio's own library directory, where the
+# daemon's and libpulsecore's run path finds it rather than a distribution's;
+# on musl the daemon build takes the C library's gettext (below), so neither
+# it nor the client libraries link libintl.
 #
 # Usage: build-libpulse.sh <prefix> <libdir> [daemon]   (e.g. /usr lib64)
 
@@ -27,6 +32,8 @@ SNDFILE=1.2.2
 SNDFILE_SHA256=3799ca9924d3125038880367bf1468e53a1b7e3686a934f098b7e1d286cdb80e
 PULSE=17.0
 PULSE_SHA256=053794d6671a3e397d849e478a80b82a63cb9d8ca296bd35b73317bb5ceb87b5
+LIBTOOL=2.6.2
+LIBTOOL_SHA256=2ef1067c16c97db930fd740cc9bc3d3ba9a583804ae5ac42cc3e8719e49e191e
 
 work="$(mktemp -d)"
 trap 'rm -rf "${work}"' EXIT
@@ -62,14 +69,55 @@ cmake --install "${work}/sndfile-build"
 
 # PulseAudio links no libintl where the C library has dgettext, as musl does,
 # but GNU gettext's libintl.h, where installed (musllinux), renames the calls
-# to libintl's own.
+# to libintl's own. The daemon build declares the C library's own instead.
+c_args=
 link_args=
 if ldd --version 2>&1 | grep -q musl && [ -e /usr/lib/libintl.so ]; then
-    link_args=-lintl
+    if [ "${DAEMON}" = true ]; then
+        mkdir -p "${work}/intl"
+        cat > "${work}/intl/libintl.h" <<'EOF'
+#ifndef _LIBINTL_H
+#define _LIBINTL_H
+#ifdef __cplusplus
+extern "C" {
+#endif
+char *gettext(const char *);
+char *dgettext(const char *, const char *);
+char *dcgettext(const char *, const char *, int);
+char *ngettext(const char *, const char *, unsigned long);
+char *dngettext(const char *, const char *, const char *, unsigned long);
+char *dcngettext(const char *, const char *, const char *, unsigned long, int);
+char *textdomain(const char *);
+char *bindtextdomain(const char *, const char *);
+char *bind_textdomain_codeset(const char *, const char *);
+#ifdef __cplusplus
+}
+#endif
+#endif
+EOF
+        c_args="-I${work}/intl"
+    else
+        link_args=-lintl
+    fi
+fi
+
+if [ "${DAEMON}" = true ]; then
+    fetch "https://ftpmirror.gnu.org/libtool/libtool-${LIBTOOL}.tar.xz" "${LIBTOOL_SHA256}" \
+        "${work}/libtool.tar.xz" \
+        || fetch "https://ftp.gnu.org/gnu/libtool/libtool-${LIBTOOL}.tar.xz" "${LIBTOOL_SHA256}" \
+            "${work}/libtool.tar.xz"
+    mkdir -p "${work}/libtool-src" "${PREFIX}/${LIBDIR}/pulseaudio"
+    tar -xJf "${work}/libtool.tar.xz" -C "${work}/libtool-src" --strip-components=1
+    (cd "${work}/libtool-src" && ./configure --prefix="${work}/ltdl" --enable-ltdl-install \
+        --disable-static > /dev/null && make -j"$(nproc)" > /dev/null && make install > /dev/null)
+    cp -P "${work}"/ltdl/lib/libltdl.so.* "${PREFIX}/${LIBDIR}/pulseaudio/"
+    c_args="${c_args:+${c_args} }-I${work}/ltdl/include"
+    link_args="${link_args:+${link_args} }-L${work}/ltdl/lib"
 fi
 
 PKG_CONFIG_PATH="${work}/sndfile/lib/pkgconfig" meson setup "${work}/pulse-build" "${work}/pulse-src" \
-    --prefix="${PREFIX}" --libdir="${LIBDIR}" --buildtype=release -Dc_link_args="${link_args}" \
+    --prefix="${PREFIX}" --libdir="${LIBDIR}" --buildtype=release -Dc_args="${c_args}" \
+    -Dc_link_args="${link_args}" \
     -Ddaemon="${DAEMON}" -Dclient=true -Ddoxygen=false -Dman=false -Dtests=false -Ddatabase=simple \
     -Dalsa=disabled -Dasyncns=disabled -Davahi=disabled -Dbluez5=disabled -Dconsolekit=disabled \
     -Ddbus=disabled -Delogind=disabled -Dfftw=disabled -Dglib=disabled -Dgstreamer=disabled \
