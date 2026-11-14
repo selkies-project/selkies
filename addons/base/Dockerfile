@@ -121,14 +121,18 @@ RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https:
     fi
 
 # What dpkg leaves out of every package, in this image and every image and
-# in-session install on top of it: the man pages, info manuals, translations,
-# and documentation apart from each package's copyright, which Ubuntu's image
+# in-session install on top of it: the man pages, info manuals, and
+# documentation apart from each package's copyright, which Ubuntu's image
 # already drops and Debian's keeps, and of the CJK fonts all but the regular
-# sans face, whose bold fontconfig synthesizes (fonts-noto-cjk below).
-RUN printf '%s\n' \
+# sans face, whose bold fontconfig synthesizes (fonts-noto-cjk below). The
+# applications' translations stay, which Ubuntu's image drops as well: its rule
+# for them is taken out, so every package installed from here carries them.
+RUN if [ -f /etc/dpkg/dpkg.cfg.d/excludes ]; then \
+        sed -i '\#/usr/share/locale/#d' /etc/dpkg/dpkg.cfg.d/excludes; \
+    fi && \
+    printf '%s\n' \
         'path-exclude=/usr/share/man/*' \
         'path-exclude=/usr/share/info/*' \
-        'path-exclude=/usr/share/locale/*/LC_MESSAGES/*.mo' \
         'path-exclude=/usr/share/doc/*' \
         'path-include=/usr/share/doc/*/copyright' \
         'path-exclude=/usr/share/fonts/opentype/noto/NotoSerifCJK-*' \
