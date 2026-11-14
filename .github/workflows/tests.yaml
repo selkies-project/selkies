@@ -446,16 +446,17 @@ jobs:
         run: make -C tests/tools
       # The Rust suites (crates/selkies-suites) depend on no crate of the
       # workspace, so they build here without the server's libraries, on the
-      # toolchain the images build the server with (scripts/ci/server-build-deps.sh
-      # reads the same pin). Built ahead of the run, so no suite's budget pays
-      # for the compile, and kept between runs, so a run whose lockfile and
-      # suites are unchanged pays for neither the crates nor the build.
+      # toolchain the server is built with (infra/packaging/rust.sh, the pin
+      # scripts/ci/server-build-deps.sh reads too). Built ahead of the run, so no
+      # suite's budget pays for the compile, and kept between runs, so a run
+      # whose lockfile and suites are unchanged pays for neither the crates nor
+      # the build.
       - name: Resolve the Rust toolchain pin
         id: rust
         if: contains(inputs.tiers || 'integration or e2e', 'integration')
         run: |
           {
-            echo "toolchain=$(sed -n 's/^ARG RUST_TOOLCHAIN="\(.*\)"$/\1/p' addons/base/Dockerfile)"
+            echo "toolchain=$(sed -n 's/^PIN="\(.*\)"$/\1/p' infra/packaging/rust.sh)"
             echo "image=$(. /etc/os-release && echo "${ID}${VERSION_ID}")"
           } >> "$GITHUB_OUTPUT"
       - name: Cache the Rust suites' build

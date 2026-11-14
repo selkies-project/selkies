@@ -42,20 +42,20 @@ fn is_exactly(rate: (u64, u64), millihertz: u64) -> bool {
     rate.0 * 1000 == millihertz * rate.1
 }
 
-/// Whether the Xvfb on `PATH` is the one the images build: its patches add the spare outputs'
-/// CRTCs to its usage, which `build-xvfb.sh` checks too.
+/// Whether the Xvfb on `PATH` is the patched one the bundle builds and the images ship: its
+/// patches add the spare outputs' CRTCs to its usage.
 fn images_xvfb() -> bool {
     run_within(Command::new("Xvfb").arg("-help"), Duration::from_secs(10))
         .is_ok_and(|ran| format!("{}{}", ran.stdout, ran.stderr).contains("CRTCs per screen"))
 }
 
 #[test]
-#[ignore = "needs the Xvfb the images build (addons/base/build-xvfb.sh) on PATH"]
+#[ignore = "needs the bundle's patched Xvfb (the wheel's libexec/selkies/Xvfb) on PATH"]
 fn the_images_xvfb_reports_its_fake_vblank_rate_through_vidmode() {
     let mut checks = Checks::new("xvfb-vidmode");
     assert!(
         images_xvfb(),
-        "the Xvfb on PATH is not the images' own: build it with addons/base/build-xvfb.sh"
+        "the Xvfb on PATH is not the bundle's patched one: put the wheel's libexec/selkies/Xvfb on PATH"
     );
     {
         let server = Xvfb::start(u32::from(SIZE.0), u32::from(SIZE.1), &[]);
