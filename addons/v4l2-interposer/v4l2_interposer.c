@@ -73,6 +73,14 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #include <linux/ioctl.h>
 #include <linux/version.h>
 #include <linux/videodev2.h>
+/* glibc describes memfd's flags only from 2.27 and statx only from 2.28: the
+ * kernel's headers do where its own do not */
+#ifndef MFD_CLOEXEC
+#include <linux/memfd.h>
+#endif
+#ifndef STATX_TYPE
+#include <linux/stat.h>
+#endif
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
@@ -788,7 +796,9 @@ int __fxstatat64(int ver, int dirfd, const char *pathname, struct stat64 *buf, i
 #ifdef STATX_TYPE
 static int (*real_statx)(int, const char *, int, unsigned int, struct statx *) = NULL;
 int statx(int dirfd, const char *pathname, int flags, unsigned int mask, struct statx *buf) {
-    if (!real_statx && load_real_func((void *)&real_statx, "statx") < 0) { errno = EFAULT; return -1; }
+    /* A C library without statx (glibc before 2.28) answers as a kernel without the call
+     * would, so a caller that found this hook by name falls back to stat, hooked too */
+    if (!real_statx && load_real_func((void *)&real_statx, "statx") < 0) { errno = ENOSYS; return -1; }
     if (at_path_is_virtual(dirfd, pathname, flags)) {
         struct stat st;
         if (is_our_device_path(pathname)) {
