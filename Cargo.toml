@@ -61,6 +61,14 @@ lto = "fat"
 codegen-units = 1
 strip = true
 
+# The deflate and digests of the wheel `cargo xtask wheel` writes, two orders slower unoptimized
+[profile.dev.package.zlib-rs]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3
+
 # rtc-dtls carries the handshake's retransmission fix and rtc-srtp the in-place RTP encryption,
 # both with code-scanning fixes, and rtc-sctp the Selkies SCTP fixes, until they land upstream
 # (crates/selkies-rtc/vendor/*/*-selkies.patch).

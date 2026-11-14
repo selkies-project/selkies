@@ -16,7 +16,8 @@
 //! - `logo-assets` regenerates every image from the logo artwork ([`logo_assets`]);
 //! - `licenses` audits the crate graphs and the web packages' lockfiles and holds the
 //!   generated tables of `docs/licensing.md` to them, and with `--crate` audits pixelflux's
-//!   own graph, as its wheels build it ([`licenses`]).
+//!   own graph, as its wheels build it ([`licenses`]);
+//! - `wheel` repackages a release bundle as the selkies wheel of its platform ([`wheel`]).
 //!
 //! The sources are read as text and the crate graph through `cargo metadata`, so the tool
 //! depends on no crate of the workspace and builds without the native libraries they link.
@@ -28,6 +29,7 @@ mod file_index;
 mod licenses;
 mod logo_assets;
 mod settings_doc;
+mod wheel;
 
 /// The repository root, two directories above this crate.
 fn repo() -> PathBuf {
@@ -64,10 +66,11 @@ fn main() -> ExitCode {
         "file-index" => check_flag(&args).and_then(file_index::run),
         "logo-assets" => check_flag(&args).and_then(logo_assets::run),
         "licenses" => licenses::run(&args),
+        "wheel" => wheel::run(&args),
         _ => Err(
             "usage: cargo xtask settings-doc [--check] | file-index [--check] | logo-assets [--check] | licenses \
                   [--crate DIR] [--write | --markdown] [--set gpl|non-gpl] [--metadata FILE] \
-                  [--target TRIPLE] [--page FILE] [--quiet]"
+                  [--target TRIPLE] [--page FILE] [--quiet] | wheel <bundle.tar.gz> <out-dir>"
                 .into(),
         ),
     };
