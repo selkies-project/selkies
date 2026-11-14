@@ -27,7 +27,7 @@ WORKFLOW = os.path.join(REPO, ".github", "workflows", "release.yaml")
 DELIVERED = (
     ("a glibc bundle", "selkies-2.0.0rc0-x86_64-linux-gnu.tar.gz"),
     ("a musl bundle", "selkies-2.0.0rc0-aarch64-linux-musl.tar.gz"),
-    ("a manylinux wheel", "selkies-2.0.0rc0-py3-none-manylinux_2_28_x86_64.whl"),
+    ("a manylinux wheel", "selkies-2.0.0rc0-py3-none-manylinux_2_17_x86_64.whl"),
     ("a musllinux wheel", "selkies-2.0.0rc0-py3-none-musllinux_1_2_aarch64.whl"),
     ("the sdist", "selkies-2.0.0rc0.tar.gz"),
     ("a pixelflux manylinux wheel", "pixelflux-2.0.0rc0-cp311-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"),

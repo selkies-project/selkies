@@ -3,7 +3,7 @@ title: Native Install
 description: Install Selkies as a wheel, a package, an AppImage, or the bundle, and run its own desktop or attach it to a display you already run.
 ---
 
-Selkies also ships outside a container: the bundle, a directory you unpack anywhere, and the same bundle repackaged as the wheel (`pip install selkies`), native packages, and an AppImage. Each brings the whole session with it: the server and its desktop shell, XLibre's Xvfb with Selkies' patches, Xwayland, `xkbcomp` and the xkb data, PulseAudio, `dbus-daemon`, the CUPS scheduler the print queue runs, the GPU front end (libglvnd, on glibc), a UI font, and the interposers. A host provides its C library (glibc 2.28 or newer, or musl 1.2), the kernel, and, for the GPU, its driver: the driver's own libraries, `libgbm` among them, which a desktop machine already has. Every block below uses the release version, which is the release's tag, so paste this line first (set `SELKIES_VERSION` yourself for a release other than the latest):
+Selkies also ships outside a container: the bundle, a directory you unpack anywhere, and the same bundle repackaged as the wheel (`pip install selkies`), native packages, and an AppImage. Each brings the whole session with it: the server and its desktop shell, XLibre's Xvfb with Selkies' patches, Xwayland, `xkbcomp` and the xkb data, PulseAudio, `dbus-daemon`, the CUPS scheduler the print queue runs, the GPU front end (libglvnd, on glibc), a UI font, and the interposers. A host provides its C library (glibc 2.17 or newer on x86_64 and 2.28 or newer on aarch64, or musl 1.2), the kernel, and, for the GPU, its driver: the driver's own libraries, `libgbm` among them, which a desktop machine already has. Every block below uses the release version, which is the release's tag, so paste this line first (set `SELKIES_VERSION` yourself for a release other than the latest):
 
 ```bash
 export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name')"
@@ -41,7 +41,7 @@ sudo apt-get install -y "./${PKG}"
 ```
 
 ```bash
-# Fedora and Enterprise Linux 8 and later
+# Fedora and Enterprise Linux 8 and later (Enterprise Linux 7 on x86_64: yum in place of dnf)
 PKG="selkies-${SELKIES_VERSION}-$(uname -m).rpm"
 curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_VERSION}/${PKG}"
 sudo dnf install -y "./${PKG}"
@@ -67,7 +67,7 @@ For hardware-accelerated encoding, add your GPU's driver: NVENC comes with the N
 
 ## The AppImage
 
-Runs from wherever you put it, on any distribution with glibc 2.28 or newer (Enterprise Linux 8, Debian 10, Ubuntu 18.10, and later), without touching the system. It is the glibc bundle behind AppImage's runtime, so run with no arguments it is [your own desktop in a browser](#your-own-desktop-in-a-browser):
+Runs from wherever you put it, on any distribution with glibc 2.17 or newer on x86_64 (Enterprise Linux 7, Debian 8, Ubuntu 14.04, and later) or 2.28 or newer on aarch64 (Enterprise Linux 8, Debian 10, Ubuntu 18.10, and later), without touching the system. It is the glibc bundle behind AppImage's runtime, so run with no arguments it is [your own desktop in a browser](#your-own-desktop-in-a-browser):
 
 ```bash
 APP="selkies-${SELKIES_VERSION}-$(uname -m).AppImage"
@@ -86,7 +86,7 @@ Given `session` as its first argument, it runs a whole session with the desktop 
 
 ## The bundle
 
-`selkies-<version>-<architecture>-linux-<gnu|musl>.tar.gz` is the bundle itself, one directory unpacked anywhere: the build every other channel repackages, for glibc 2.28 or newer or for musl 1.2 (Alpine). `selkies` from its `bin/` takes each program it runs from the bundle, so a host needs no X server, sound server, bus, or CUPS of its own (the bundled queue takes the PDF browsers and desktop applications print; a host whose CUPS has cups-filters converts other formats too):
+`selkies-<version>-<architecture>-linux-<gnu|musl>.tar.gz` is the bundle itself, one directory unpacked anywhere: the build every other channel repackages, for glibc 2.17 or newer on x86_64, 2.28 or newer on aarch64, or musl 1.2 (Alpine). `selkies` from its `bin/` takes each program it runs from the bundle, so a host needs no X server, sound server, bus, or CUPS of its own (the bundled queue takes the PDF browsers and desktop applications print; a host whose CUPS has cups-filters converts other formats too):
 
 ```bash
 tar -xzf "selkies-${SELKIES_VERSION}-$(uname -m)-linux-gnu.tar.gz"

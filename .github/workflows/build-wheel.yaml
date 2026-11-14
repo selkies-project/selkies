@@ -2,12 +2,13 @@ name: Build wheel
 # The release media of every target: the web client once, then one call of
 # bundle.yaml for each C library and architecture (glibc and musl, x86_64 and
 # aarch64), each building its bundle and repackaging it as the wheel of its
-# platform, manylinux_2_28 or musllinux_1_2, and, where `packages` is set, as
-# its native packages and AppImage, so each target's media follow its own
-# bundle. Nothing past the bundles is compiled. The wheels are collected with
-# the sdist, written for an index that wants one (a build from it carries the
-# server alone), as the one artifact callers name; the bundles, packages, and
-# AppImages stay in the run under their own names.
+# platform (infra/bundle/toolchain.sh: manylinux_2_17 on x86_64 and
+# manylinux_2_28 on aarch64 for glibc, musllinux_1_2 for musl), and, where
+# `packages` is set, as its native packages and AppImage, so each target's media
+# follow its own bundle. Nothing past the bundles is compiled. The wheels are
+# collected with the sdist, written for an index that wants one (a build from it
+# carries the server alone), as the one artifact callers name; the bundles,
+# packages, and AppImages stay in the run under their own names.
 on:
   workflow_dispatch:
     inputs:

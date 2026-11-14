@@ -6,14 +6,15 @@
 # Build the Selkies bundle (selkies-<version>-<arch>-linux-<gnu|musl>.tar.gz)
 # for this runner's architecture and a C library into <out-dir>:
 # infra/bundle/build-in-image.sh run inside the bundle's toolchain image for
-# them (infra/bundle/Dockerfile), the manylinux_2_28 image for glibc, whose
-# glibc, 2.28, is the glibc bundle's floor on both architectures, or the
-# musllinux_1_2 one for musl, with everything the bundle carries that this tree
-# does not compile already built into it. infra/bundle/toolchain.sh names the
-# image for the files it is built from and takes it from this machine, else from
-# the registry main publishes it to, else builds it, so a build compiles the
-# server, the shell, and the interposers alone wherever the toolchain is
-# unchanged. The web client the server embeds has to be in dist/web already
+# them (infra/bundle/Dockerfile), the builder image whose C library is the
+# bundle's floor (`toolchain.sh platform`: manylinux_2_17 for glibc on x86_64,
+# manylinux_2_28 on aarch64, musllinux_1_2 for musl), with everything the
+# bundle carries that this tree does not compile already built into it.
+# infra/bundle/toolchain.sh names the image for the files it is built from and
+# takes it from this machine, else from the registry main publishes it to, else
+# builds it, so a build compiles the server, the shell, and the interposers
+# alone wherever the toolchain is unchanged. The web client the server embeds
+# has to be in dist/web already
 # (scripts/ci/build-web.sh). SELKIES_SOURCE_CACHE names a directory the sources
 # fetched at build time are kept in between runs, and the build directory under
 # build/bundle is kept between runs, so a rebuild compiles only what changed.

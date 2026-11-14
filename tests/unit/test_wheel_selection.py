@@ -33,7 +33,7 @@ def tags(interpreter: str, abi: str, platform: str = "manylinux_2_17_x86_64"):
 P = "manylinux_2_17_x86_64"
 ABI3 = "pixelflux-2.3.0-cp311-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
 PCM = "pcmflux-2.2.2-cp311-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
-ROOT = "selkies-2.3.0-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
+ROOT = "selkies-2.3.0-py3-none-manylinux_2_17_x86_64.whl"
 OLD = "pixelflux-2.2.3-cp312-cp312-manylinux_2_28_x86_64.whl"
 
 for minor in range(11, 16):

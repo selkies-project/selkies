@@ -5,9 +5,11 @@
 # Builds the Selkies bundle and the selkies wheel repackaged from it, with the
 # HTML5 web client built from source inside this same repo (web/) and compiled
 # into its server. No external or pre-published images are consumed. Both are
-# for the C library of BUILD_IMAGE, a manylinux_2_28 or musllinux_1_2 image of
-# this machine's architecture, and land in /opt/build/dist.
-ARG BUILD_IMAGE="quay.io/pypa/manylinux_2_28_x86_64"
+# for the C library of BUILD_IMAGE, the target's builder image of this machine's
+# architecture (infra/bundle/Dockerfile pins each), and land in /opt/build/dist:
+# manylinux2014 on x86_64, the default, and manylinux_2_28 on aarch64 for glibc,
+# musllinux_1_2 for musl.
+ARG BUILD_IMAGE="quay.io/pypa/manylinux2014_x86_64"
 
 # 1) Build the web client through the same script the CI wheel build and every
 #    other channel run, so every channel ships an identical bundle

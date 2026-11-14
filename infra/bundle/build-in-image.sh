@@ -30,7 +30,7 @@
 # infra/bundle/build.sh picks), whose C library is the bundle's floor, and takes
 # everything this tree does not compile itself from where that image built it,
 # SELKIES_TOOLCHAIN, once the key the image records is this tree's
-# (infra/bundle/toolchain.sh); in a bare manylinux_2_28 or musllinux_1_2 image,
+# (infra/bundle/toolchain.sh); in a bare builder image of the target,
 # or one built from other files, it builds those under toolchain/ in the build
 # directory first, kept there for the next build of the same files. A target
 # directory kept from a build against another toolchain is emptied, since
