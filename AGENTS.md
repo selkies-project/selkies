@@ -11,8 +11,8 @@ server as a black box and the harness they share, and `crates/xtask` the reposit
 generated pages, fragments, and images, and the license gate); neither of the last two depends on a crate of the
 workspace. The server links both native libraries directly as Rust crates, without Python. Their optional PyO3
 features are only for standalone wheels: the Python bindings serve outside users, so nothing in this repository drives
-pixelflux or pcmflux through them but their own tests and examples, and tools and tests reach the libraries through
-the Rust API, the server, or its commands. The web client is under `web/`: `selkies-web-core` (the streaming core),
+pixelflux or pcmflux through them but their own tests (the `soak` tier's API suites, `tests/soak`) and examples, and
+tools and tests reach the libraries through the Rust API, the server, or its commands. The web client is under `web/`: `selkies-web-core` (the streaming core),
 `selkies-dashboard` (the dashboard built on it), and `universal-touch-gamepad`; `addons/` holds what runs beside
 Selkies rather than in it: the interposers, `fake-udev`, the images, and the integrations.
 
