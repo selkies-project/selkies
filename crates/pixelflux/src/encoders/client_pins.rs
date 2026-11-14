@@ -245,13 +245,15 @@ mod tests {
         }
     }
 
-    /// A memfd pool of `len` bytes filled with `fill`, mapped shared as smithay maps one, over
-    /// `at` where it is given.
+    /// A memfd pool of `len` bytes filled with `fill`, mapped shared as smithay maps one, in
+    /// place of the test's own mapping at `at` where it is given. `MAP_FIXED` replaces that
+    /// mapping in one step: unmapping it first would leave a hole another test's thread could
+    /// map into, and the fixed mapping would then replace that thread's memory.
     fn pool(len: usize, fill: u8, at: Option<usize>) -> usize {
         let fd = crate::memfd_create(c"client-pool", libc::MFD_CLOEXEC);
         assert!(fd >= 0, "memfd_create");
-        // SAFETY: a fresh memfd sized to `len` and mapped whole, at `at` only over a range the
-        // test unmapped for it.
+        // SAFETY: a fresh memfd sized to `len` and mapped whole, at `at` only over a mapping
+        // the test made there itself.
         unsafe {
             assert_eq!(libc::ftruncate(fd, len as libc::off_t), 0);
             let fixed = if at.is_some() { libc::MAP_FIXED } else { 0 };
@@ -335,8 +337,6 @@ mod tests {
         let (old, new) = (owner(), owner());
         pins.claim(at, LEN, &old, &cuda);
         let stale = pins.claim(at, LEN, &old, &cuda);
-        // SAFETY: the pool mapped above, replaced by another over the same range.
-        unsafe { libc::munmap(at as *mut c_void, LEN) };
         assert_eq!(pool(LEN, 2, Some(at)), at);
         pins.claim(at, LEN, &new, &cuda);
         let from = pins.claim(at, LEN, &new, &cuda);

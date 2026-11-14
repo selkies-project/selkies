@@ -7373,8 +7373,8 @@ pub(crate) mod gpu_tests {
             } else {
                 libc::MAP_SHARED | libc::MAP_FIXED
             };
-            // SAFETY: a fresh memfd sized to `len` and mapped whole; the second pool is placed
-            // over the range the first one was unmapped from, which nothing else holds.
+            // SAFETY: a fresh memfd sized to `len` and mapped whole; the second pool replaces
+            // the first in one step, which leaves no hole for another mapping to land in.
             let rows = unsafe {
                 assert_eq!(libc::ftruncate(fd, len as libc::off_t), 0);
                 let p = libc::mmap(at, len, libc::PROT_READ | libc::PROT_WRITE, flags, fd, 0);
@@ -7399,19 +7399,21 @@ pub(crate) mod gpu_tests {
                 enc.pin_uploads,
                 "the client path restores the production default"
             );
-            // SAFETY: the mapping made above, which no slice outlives.
-            unsafe { libc::munmap(at, len) };
         }
+        // SAFETY: the last pool mapped above, which no slice outlives.
+        unsafe { libc::munmap(at, len) };
     }
 
     /// Test helper: a fresh memfd pool of `len` bytes mapped shared, as smithay maps a client's,
-    /// over `at` where it is not null. The caller unmaps it once no slice of it is left.
+    /// in place of the caller's own mapping at `at` where it is not null, which `MAP_FIXED`
+    /// replaces in one step rather than leaving a hole another mapping could land in. The
+    /// caller unmaps it once no slice of it is left.
     fn memfd_rows<'a>(at: *mut c_void, len: usize, name: &CStr) -> &'a mut [u8] {
         let fd = crate::memfd_create(name, libc::MFD_CLOEXEC);
         assert!(fd >= 0, "memfd_create");
         let fixed = if at.is_null() { 0 } else { libc::MAP_FIXED };
-        // SAFETY: a fresh memfd sized to `len` and mapped whole, over `at` only where the caller
-        // unmapped that range for it, so nothing else holds it.
+        // SAFETY: a fresh memfd sized to `len` and mapped whole, over `at` only in place of a
+        // mapping the caller made there itself and reads no more.
         unsafe {
             assert_eq!(libc::ftruncate(fd, len as libc::off_t), 0);
             let p = libc::mmap(
@@ -7451,8 +7453,6 @@ pub(crate) mod gpu_tests {
                 .expect("encode");
             luma_psnr(&mut dec, &pkt, &moving_frame(w, h, i), w, h);
         }
-        // SAFETY: the client mapping made above, which is not touched again.
-        unsafe { libc::munmap(at, len) };
         let own = memfd_rows(at, len, c"session-pool");
         for i in 2..6usize {
             own.copy_from_slice(&moving_frame(w, h, i));
@@ -7500,8 +7500,6 @@ pub(crate) mod gpu_tests {
             !first.client_pins.locked().is_empty(),
             "the client's rows are locked"
         );
-        // SAFETY: the client mapping made above, which is not touched again.
-        unsafe { libc::munmap(at, len) };
         let other = memfd_rows(at, len, c"other-pool");
         for i in 3..7usize {
             other.copy_from_slice(&moving_frame(w, h, i));
