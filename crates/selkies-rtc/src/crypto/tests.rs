@@ -166,8 +166,7 @@ fn aes_256_ctr_matches_nist_sp_800_38a_f5_5() {
 #[test]
 fn aes_ctr_carries_the_counter_through_all_128_bits() {
     let key = hex("2B7E151628AED2A6ABF7158809CF4F3C");
-    let mut iv = [0u8; 16];
-    iv[8..].fill(0xFF);
+    let iv = hex("0000000000000000 ffffffffffffffff");
     let mut keystream = [0u8; 32];
     AwsLcCrypto
         .new_stream_cipher(StreamCipherAlgorithm::Aes128Ctr, &key)
@@ -326,7 +325,7 @@ fn one_ccm_object_keeps_no_state_between_messages() {
     let mut cipher = AwsLcCrypto
         .new_aead(AeadAlgorithm::Aes128Ccm, &hex(key))
         .unwrap();
-    let other_nonce = [9u8; 12];
+    let other_nonce = hex("090909090909090909090909");
     let mut scratch_tag = [0u8; 16];
 
     for _ in 0..2 {
@@ -381,9 +380,10 @@ fn one_ccm_object_keeps_no_state_between_messages() {
         assert_eq!(scratch_tag.as_slice(), tag);
     }
 
-    // The lengths the suites fix are enforced.
+    // The lengths the suites fix are enforced: a nonce one byte longer, a tag of CCM-8's length.
+    let long_nonce: Vec<u8> = nonce.iter().chain(&nonce[..1]).copied().collect();
     assert!(matches!(
-        cipher.seal_in_place(&[0; 13], &[], &mut [], &mut scratch_tag),
+        cipher.seal_in_place(&long_nonce, &[], &mut [], &mut scratch_tag),
         Err(CryptoError::InvalidNonceLength { .. })
     ));
     assert!(matches!(
