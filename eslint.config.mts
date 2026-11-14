@@ -40,7 +40,12 @@ export default [
       globals: { ...globals.node, ...globals.browser },
       parser: tseslint.parser,
       parserOptions: {
-        project: ['tests/tools/tsconfig.json', 'web/selkies-dashboard/tsconfig.node.json', 'website/tsconfig.json'],
+        project: [
+          'tests/tools/tsconfig.json',
+          'tests/tools/tsconfig.browser.json',
+          'web/selkies-dashboard/tsconfig.node.json',
+          'website/tsconfig.json',
+        ],
         tsconfigRootDir: import.meta.dirname,
       },
     },
@@ -66,9 +71,22 @@ export default [
     },
   },
   {
-    // Classic scripts the tester pages load with <script>.
-    files: ['tests/image/site/**/*.js'],
-    languageOptions: { ecmaVersion: 'latest', sourceType: 'script', globals: globals.browser },
-    rules,
+    // The classic script the tester pages load with <script>, its types
+    // stripped, checked with the browser's types alone.
+    files: ['tests/image/site/**/*.ts'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'script',
+      globals: globals.browser,
+      parser: tseslint.parser,
+      parserOptions: { project: ['tests/tools/tsconfig.browser.json'], tsconfigRootDir: import.meta.dirname },
+    },
+    plugins: { '@typescript-eslint': tseslint.plugin },
+    rules: {
+      ...rules,
+      ...tseslint.configs.recommendedTypeChecked.reduce((acc, c) => ({ ...acc, ...c.rules }), {}),
+      'no-unused-vars': 'off',
+      '@typescript-eslint/no-unused-vars': ['error', { caughtErrors: 'none' }],
+    },
   },
 ]

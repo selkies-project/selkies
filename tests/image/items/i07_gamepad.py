@@ -1,7 +1,7 @@
 """7. Test the gamepad (first, the touch gamepad, and your real gamepad if you happen to have it), both on Firefox and Chrome (they each use different joypad interfaces) with https://hardwaretester.com/gamepad, or any other native client. You need to press all buttons and test four diagonal directions for each thumbstick.
 
 The real pad is a virtual one in the client page (the Gamepad API the client
-polls, tests/tools/pad_init.js), and the touch gamepad is the dashboard's own,
+polls, tests/tools/pad_init.ts), and the touch gamepad is the dashboard's own,
 tapped and dragged with touches (CDP touch in Chrome, synthetic touches in
 WebKit; Firefox's persistent profile cannot emulate touch). Every button and
 four diagonals of each stick must reach a tester page in the session's own

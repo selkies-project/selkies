@@ -815,7 +815,7 @@ async def drained(ws):
 
 
 UINPUT_SHIM = os.path.join(TOOLS, "uinput_shim.so")
-PAD_INIT_JS = os.path.join(TOOLS, "pad_init.js")
+PAD_INIT_TS = os.path.join(TOOLS, "pad_init.ts")
 
 
 def shim_created(log: str, name: str) -> int:
@@ -868,9 +868,11 @@ def uinput_shim_env(tag: str) -> tuple:
 
 
 def pad_init_js() -> str:
-    """Browser init script installing a synthetic W3C Gamepad the tests drive."""
-    with open(PAD_INIT_JS) as f:
-        return f.read()
+    """Browser init script installing a synthetic W3C Gamepad the tests drive:
+    tests/tools/pad_init.ts with its types stripped."""
+    from ts_static import strip_types
+    with open(PAD_INIT_TS) as f:
+        return strip_types(f.read())
 
 
 def decode_input_events(path: str) -> list:

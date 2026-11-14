@@ -14,5 +14,6 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["*.ts", "../../web/selkies-web-core/lib/window-globals.d.ts"]
+  "include": ["*.ts", "../../web/selkies-web-core/lib/window-globals.d.ts"],
+  "exclude": ["pad_init.ts"]
 }

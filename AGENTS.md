@@ -65,12 +65,13 @@ so keep anything shaped like `<name>` or containing braces inside backticks.
   the shape its module declares), and an untyped global or a vendor-prefixed API is declared in a `.d.ts`
   augmentation (`web/selkies-web-core/lib/window-globals.d.ts`), never reached through a cast. ESLint refuses the
   rest (`no-explicit-any` and the type-checked `no-unsafe-*` rules).
-- JavaScript (`.js`), left only in the classic scripts a browser is handed with no build step
-  (`tests/tools/pad_init.js` and the image tier's tester pages): the same JSDoc blocks, but the tags carry the types
-  (`@param {Type} name`, `@returns {Type}`, `@typedef`/`@callback` for option bags and callbacks). The web core is
-  TypeScript, checked strictly by its own `tsc -b` (`web/selkies-web-core/tsconfig.json`), and the dashboard's `tsc`
-  compiles the `lib` modules it imports, the touch gamepad, and the build helpers Node runs with their types
-  stripped (`tsconfig.node.json`); the site's `tsc` checks its scripts (`website/scripts`). The Node audits under
+- No JavaScript files: a classic script a browser is handed as it is (`tests/tools/pad_init.ts`, the image tier's
+  `tests/image/site/it.ts`) is TypeScript too, its types stripped where it is handed out (`tests/ts_static.py`
+  `strip_types`), so it keeps to erasable syntax, declares the `window` globals it sets with `declare global`, and is
+  checked against the browser's types alone (`tests/tools/tsconfig.browser.json`). The web core is TypeScript,
+  checked strictly by its own `tsc -b` (`web/selkies-web-core/tsconfig.json`), and the dashboard's `tsc` compiles
+  the `lib` modules it imports, the touch gamepad, and the build helpers Node runs with their types stripped
+  (`tsconfig.node.json`); the site's `tsc` checks its scripts (`website/scripts`). The Node audits under
   `tests/tools` are TypeScript that Node runs with the types stripped, checked by their own project
   (`tests/tools/tsconfig.json`) and held to the same lint rules; what they build to stand in for the browser is
   typed as a `StandIn` subset of the interface it stands in for (`tests/tools/stand_in.ts`) wherever one describes

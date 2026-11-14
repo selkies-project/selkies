@@ -364,13 +364,18 @@ CLIP_ARGS = ("-f lavfi -i testsrc2=size=640x360:rate=30 -f lavfi -i sine=frequen
 
 def install_site(target: Any) -> bool:
     """Copy the tester site into the session and serve it on loopback there,
-    with a clip (a moving picture and a tone) made by whichever side has ffmpeg."""
+    with a clip (a moving picture and a tone) made by whichever side has ffmpeg.
+    A .ts file goes as the classic .js script the pages load, its types stripped."""
+    from ts_static import strip_types
     site = os.path.join(HERE, "site")
     for name in os.listdir(site):
         if not os.path.isfile(os.path.join(site, name)):
             continue
         with open(os.path.join(site, name), "rb") as f:
-            target.put(f"{SITE_ROOT}/site/{name}", f.read())
+            data = f.read()
+        if name.endswith(".ts"):
+            name, data = name[:-3] + ".js", strip_types(data.decode()).encode()
+        target.put(f"{SITE_ROOT}/site/{name}", data)
     clip = os.path.join(H.WORKDIR, "av.webm")
     if not os.path.exists(clip) and shutil.which("ffmpeg"):
         subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *CLIP_ARGS.split(), clip],
