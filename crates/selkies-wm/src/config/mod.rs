@@ -1250,9 +1250,12 @@ pub struct Menu {
     pub items: Vec<MenuItem>,
 }
 
-/// The menu used where no menu file is found: the desktop's own commands, the installed
-/// applications, and the open windows, so an image ships no menu of its own to have one.
+/// The menu every session starts from: the desktop's own commands, the installed applications,
+/// and the open windows, so an image ships no menu of its own to have one.
 const DEFAULT_MENU: &str = include_str!("menu.xml");
+
+/// The id of the menu a click on the desktop opens.
+const ROOT_MENU: &str = "root-menu";
 
 /// Every menu the files define, by id. The ones the window manager fills itself are resolved
 /// by the engine whatever a file says of them: `client-menu`, `client-list-combined-menu`, and
@@ -1265,11 +1268,20 @@ pub struct Menus {
 }
 
 impl Menus {
-    /// The menus of every file the configuration names, found along its search directories, or
-    /// the built-in menu ([`DEFAULT_MENU`]) where none of them is found.
+    /// The built-in menu ([`DEFAULT_MENU`]) with the menus of every file the configuration
+    /// names added to it, each found along its search directories.
+    ///
+    /// A file adds to the built-in menu rather than replacing it, so an image can list programs
+    /// the installed desktop entries miss (an AppImage, a program outside the system's
+    /// directories) and still keep the applications, the window list, and the desktop's
+    /// commands: the items of its `root-menu` go above the built-in root menu's, a separator
+    /// between, less those the built-in one carries already ([`Menus::add`]), and every other
+    /// menu it defines replaces the built-in one of its id.
     pub fn load(config: &Config) -> Menus {
         let mut menus = Menus::default();
-        let mut found = false;
+        if let Err(e) = menus.apply(DEFAULT_MENU) {
+            log::error!(target: "wm", "the built-in menu is not read: {e}");
+        }
         for file in &config.menu_files {
             let Some(path) = find_file(&config.search_dirs, file) else {
                 if file != "menu.xml" {
@@ -1277,19 +1289,48 @@ impl Menus {
                 }
                 continue;
             };
-            found = true;
             match std::fs::read_to_string(&path) {
-                Ok(text) => match menus.apply(&text) {
+                Ok(text) => match menus.add(&text) {
                     Ok(()) => menus.sources.push(path),
                     Err(e) => log::warn!(target: "wm", "{}: not read: {e}", path.display()),
                 },
                 Err(e) => log::warn!(target: "wm", "{}: not read: {e}", path.display()),
             }
         }
-        if !found && let Err(e) = menus.apply(DEFAULT_MENU) {
-            log::error!(target: "wm", "the built-in menu is not read: {e}");
-        }
         menus
+    }
+
+    /// Fold a menu file in over the menus already defined, its `root-menu` items placed above
+    /// the root menu's own and a separator: an item the root menu already has (a submenu of the
+    /// same id, an item taking the same actions) is left out, so a file that lists the
+    /// applications or the window list does not show them twice.
+    pub fn add(&mut self, text: &str) -> Result<(), String> {
+        let own = self.menus.remove(ROOT_MENU);
+        let applied = self.apply(text);
+        let added = self.menus.remove(ROOT_MENU);
+        let Some(mut root) = own else {
+            if let Some(added) = added {
+                self.menus.insert(ROOT_MENU.to_string(), added);
+            }
+            return applied;
+        };
+        if let Some(added) = added {
+            let mut items: Vec<MenuItem> = added
+                .items
+                .into_iter()
+                .filter(|item| !root.items.iter().any(|have| same_entry(have, item)))
+                .collect();
+            if items
+                .iter()
+                .any(|item| !matches!(item, MenuItem::Separator { .. }))
+            {
+                items.push(MenuItem::Separator { label: None });
+                items.append(&mut root.items);
+                root.items = items;
+            }
+        }
+        self.menus.insert(ROOT_MENU.to_string(), root);
+        applied
     }
 
     /// Fold a `menu.xml` document in: every `<menu>` with content defines a menu, wherever it
@@ -1355,6 +1396,16 @@ impl Menus {
     pub fn parse_pipe(&mut self, text: &str) -> Result<Vec<MenuItem>, String> {
         let root = xml::parse(text)?;
         Ok(self.items_of(&root))
+    }
+}
+
+/// Whether two menu entries do the same thing: submenus opening the same menu, or items taking
+/// the same actions, whatever their labels.
+fn same_entry(a: &MenuItem, b: &MenuItem) -> bool {
+    match (a, b) {
+        (MenuItem::Submenu { id: a, .. }, MenuItem::Submenu { id: b, .. }) => a == b,
+        (MenuItem::Item { actions: a, .. }, MenuItem::Item { actions: b, .. }) => !a.is_empty() && a == b,
+        _ => false,
     }
 }
 
@@ -1756,6 +1807,53 @@ mod tests {
                 .iter()
                 .any(|i| matches!(i, MenuItem::Item { label, .. } if label == "Change Wallpaper")),
             "the desktop's own commands"
+        );
+    }
+
+    /// An image's menu file puts its entries above the built-in root menu, which keeps the
+    /// desktop's commands, the applications, and the window list, each listed once.
+    #[test]
+    fn an_images_menu_file_adds_its_entries_above_the_built_in_menu() {
+        let dir = std::env::temp_dir().join(format!("selkies-wm-menu-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("menu.xml"),
+            r#"<openbox_menu xmlns="http://openbox.org/3.4/menu">
+<menu id="root-menu" label="MENU">
+<item label="WebCord" icon="/usr/share/pixmaps/webcord.png"><action name="Execute"><command>/usr/bin/webcord</command></action></item>
+<item label="Tool"><action name="Execute"><command>/opt/tool/Tool.AppImage</command></action></item>
+<menu id="client-list-combined-menu" />
+</menu>
+</openbox_menu>"#,
+        )
+        .unwrap();
+        let config = Config {
+            search_dirs: vec![dir.clone()],
+            ..Config::default()
+        };
+        let menus = Menus::load(&config);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(menus.sources, vec![dir.join("menu.xml")]);
+        let root = &menus.menus["root-menu"];
+        assert_eq!(root.label, "Selkies", "the built-in root menu stays the root");
+        let label = |i: usize| match &root.items[i] {
+            MenuItem::Item { label, .. } => label.as_str(),
+            _ => "",
+        };
+        assert_eq!((label(0), label(1)), ("WebCord", "Tool"));
+        assert!(matches!(root.items[2], MenuItem::Separator { label: None }));
+        assert_eq!(label(3), "New Folder", "the desktop's commands follow");
+        let windows = root
+            .items
+            .iter()
+            .filter(|i| matches!(i, MenuItem::Submenu { id, .. } if id == "client-list-combined-menu"))
+            .count();
+        assert_eq!(windows, 1, "the window list is listed once");
+        assert!(
+            root.items
+                .iter()
+                .any(|i| matches!(i, MenuItem::Submenu { id, .. } if id == "selkies-applications")),
+            "the installed applications stay"
         );
     }
 

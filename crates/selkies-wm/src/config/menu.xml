@@ -5,9 +5,10 @@
   file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
   The window manager's built-in right-click menu on the desktop, compiled into
-  it and used where no menu.xml is found along its configuration directories;
-  an image's /etc/xdg/openbox/menu.xml or a user's ~/.config/openbox/menu.xml
-  replaces it. It offers the desktop's own commands, which the window manager
+  it. The menu.xml found along its configuration directories, an image's
+  /etc/xdg/openbox/menu.xml or a user's ~/.config/openbox/menu.xml, adds to it:
+  that file's root-menu items go above these, and any other menu it defines
+  replaces the one of its id here. It offers the desktop's own commands, which the window manager
   leaves out while the application runs alone, every installed application by
   category, and the open windows. The selkies-applications menu
   is the window manager's own, filled from the installed desktop entries with

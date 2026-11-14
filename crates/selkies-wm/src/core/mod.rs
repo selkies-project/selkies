@@ -4919,7 +4919,6 @@ fn tile_title_rect(
     )
 }
 
-/// The icon name an app id resolves to in an icon theme: the id itself, else its last segment.
 /// Whether a menu file's item only commands the desktop shell: every action it takes runs the
 /// shell's program with a command word, which reaches nothing while the application runs alone,
 /// so the engine leaves such an item out of that session's menus.
@@ -4953,6 +4952,7 @@ fn tidy_separators(entries: Vec<Entry>) -> Vec<Entry> {
     tidy
 }
 
+/// The icon name an app id resolves to in an icon theme.
 fn icon_name(app_id: &str) -> String {
     app_id.to_string()
 }
@@ -5540,6 +5540,47 @@ mod tests {
                 "-",
                 "Show Desktop"
             ]
+        );
+    }
+
+    /// An image's menu entries head the root menu in both session modes, the application alone
+    /// keeping the applications and the window list beneath them and the desktop its commands.
+    #[test]
+    fn an_images_menu_entries_head_the_root_menu_in_both_modes() {
+        let own = r#"<openbox_menu>
+  <menu id="root-menu">
+    <item label="New Folder"><action name="Execute"><command>selkies-desktop --new-folder</command></action></item>
+    <separator />
+    <menu id="selkies-applications" />
+    <menu id="client-list-combined-menu" />
+  </menu>
+</openbox_menu>"#;
+        let image = r#"<openbox_menu>
+  <menu id="root-menu" label="MENU">
+    <item label="WebCord"><action name="Execute"><command>/usr/bin/webcord</command></action></item>
+  </menu>
+</openbox_menu>"#;
+        let labels = |entries: &[Entry]| -> Vec<String> {
+            entries
+                .iter()
+                .map(|e| match e {
+                    Entry::Item { label, .. } | Entry::Submenu { label, .. } => label.clone(),
+                    Entry::Separator { .. } => "-".to_string(),
+                })
+                .collect()
+        };
+        let (mut engine, mode) = session_engine(false);
+        mode.lock().unwrap().switchable = false;
+        engine.menus = Menus::default();
+        engine.menus.apply(own).unwrap();
+        engine.menus.add(image).unwrap();
+        let (entries, _) = engine.entries_for("root-menu", None);
+        assert_eq!(labels(&entries), ["WebCord", "-", "Applications", "Windows"]);
+        mode.lock().unwrap().desktop = true;
+        let (entries, _) = engine.entries_for("root-menu", None);
+        assert_eq!(
+            labels(&entries),
+            ["WebCord", "-", "New Folder", "-", "Applications", "Windows"]
         );
     }
 
