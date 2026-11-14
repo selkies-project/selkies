@@ -202,9 +202,7 @@ RUN --mount=type=secret,id=github_token,uid=1000 mkdir -pm755 /opt/proot-apps &&
     if ! command -v setcap > /dev/null; then \
         apt-get update && apt-get install --no-install-recommends -y libcap2-bin && \
         apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*; \
-    fi && \
-    mkdir -pm755 /opt/proot-apps-cap && \
-    cp /opt/proot-apps/proot /opt/proot-apps-cap/proot
+    fi
 COPY --chown=1000:1000 addons/desktop/selkies-proot /usr/local/bin/selkies-proot
 COPY addons/desktop/proot-apps /opt/proot-apps/proot-apps
 RUN chmod -f 755 /usr/local/bin/selkies-proot /opt/proot-apps/proot-apps
@@ -298,10 +296,11 @@ USER 0
 # file owned by uid 1000, which the kernel refuses to honor. The terminals' utempter
 # needs its setgid to record sessions. `restore` covers everything released
 # above, which is the base's own set rather than these. A file capability set
-# under fakeroot is lost the same way, so the apps panel's second proot gets its
-# CAP_SYS_PTRACE here.
+# under fakeroot is lost the same way, so the apps panel's second proot is
+# copied and given its CAP_SYS_PTRACE here, written once in this layer.
 SHELL ["/bin/sh", "-c"]
-RUN chown -R root:root /opt/proot-apps-cap && setcap cap_sys_ptrace+ep /opt/proot-apps-cap/proot && \
+RUN install -d -m755 /opt/proot-apps-cap && install -m755 /opt/proot-apps/proot /opt/proot-apps-cap/proot && \
+    setcap cap_sys_ptrace+ep /opt/proot-apps-cap/proot && \
     selkies-privileged-files restore && \
     for helper in /usr/lib/*/utempter/utempter /usr/libexec/utempter/utempter; do \
         if [ -e "$helper" ]; then chown -f root:utmp "$helper" && chmod -f 2755 "$helper" || echo "Failed to restore setgid for $helper"; fi; \

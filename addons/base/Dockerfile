@@ -120,6 +120,21 @@ RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https:
         sed -i 's/^Components: .*/& contrib non-free/' /etc/apt/sources.list.d/debian.sources; \
     fi
 
+# What dpkg leaves out of every package, in this image and every image and
+# in-session install on top of it: the man pages, info manuals, translations,
+# and documentation apart from each package's copyright, which Ubuntu's image
+# already drops and Debian's keeps, and of the CJK fonts all but the regular
+# sans face, whose bold fontconfig synthesizes (fonts-noto-cjk below).
+RUN printf '%s\n' \
+        'path-exclude=/usr/share/man/*' \
+        'path-exclude=/usr/share/info/*' \
+        'path-exclude=/usr/share/locale/*/LC_MESSAGES/*.mo' \
+        'path-exclude=/usr/share/doc/*' \
+        'path-include=/usr/share/doc/*/copyright' \
+        'path-exclude=/usr/share/fonts/opentype/noto/NotoSerifCJK-*' \
+        'path-exclude=/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc' \
+        > /etc/dpkg/dpkg.cfg.d/selkies-excludes
+
 # Ownership of the image's setuid and setgid files, used at both ends of the
 # rootless build below and by every image layered on this one
 COPY addons/base/selkies-privileged-files /usr/local/bin/selkies-privileged-files
@@ -364,17 +379,17 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         # for anything they cannot decode themselves
         ffmpeg \
         libavcodec-extra \
-        # Fonts: DejaVu/Liberation for Latin, Noto for worldwide script and emoji coverage
+        # Fonts: DejaVu/Liberation for Latin, Noto for worldwide script and emoji
+        # coverage. Noto's -extra packages are left out: they add weights and
+        # widths of families these already carry, no script, and two thirds of
+        # the image's fonts by size.
         fonts-dejavu-core \
         fonts-liberation \
         fonts-noto-core \
         fonts-noto-cjk \
         fonts-noto-color-emoji \
-        fonts-noto-extra \
-        fonts-noto-cjk-extra \
         fonts-symbola \
         fonts-noto-ui-core \
-        fonts-noto-ui-extra \
         fonts-dejavu-extra \
         fonts-freefont-ttf \
         fonts-hack \
@@ -436,10 +451,11 @@ RUN install -d /var/log/apt
 # names beside them at /usr/local/lib/selkies, and its X server, the patched
 # XLibre Xvfb with glamor and DRI3 (infra/bundle/xservers.sh), with its keymap
 # compiler and data under /usr/local/libexec/selkies and /usr/local/share/selkies,
-# where it finds them relative to itself; it takes the distribution's place at
+# where it finds them relative to itself. It takes the distribution's place at
 # /usr/bin/Xvfb, whose own has neither glamor nor DRI3, so GL clients would
-# render in software with a GPU present. The interposers go where the
-# linuxserver.io images and proot-apps' app roots put theirs (/usr/lib and
+# render in software with a GPU present; the distribution's is diverted, so an
+# upgrade of its package puts that server beside this one rather than over it.
+# The interposers go where the linuxserver.io images and proot-apps' app roots put theirs (/usr/lib and
 # /opt/lib, the 32-bit builds beside them with a _32 suffix), so the preload an
 # application inherits names the same files inside an app root as here;
 # fake-udev stays out of the system library directory, reached only through the
@@ -464,6 +480,7 @@ RUN --mount=type=bind,from=bundle-source,target=/tmp/bundle \
     cp -a "${unpacked}/libexec/selkies/Xvfb" "${unpacked}/libexec/selkies/xkbcomp" /usr/local/libexec/selkies/; \
     cp -a "${unpacked}/share/selkies/xkb" "${unpacked}/share/selkies/fonts" \
         "${unpacked}"/share/selkies/icon.* /usr/local/share/selkies/; \
+    dpkg-divert --quiet --local --rename --add /usr/bin/Xvfb; \
     ln -sf /usr/local/libexec/selkies/Xvfb /usr/bin/Xvfb; \
     preload="${unpacked}/lib/selkies/preload"; \
     mkdir -p /opt/lib; \
