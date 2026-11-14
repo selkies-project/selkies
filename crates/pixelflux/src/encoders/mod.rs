@@ -12,6 +12,9 @@
 pub mod bits;
 /// The GPU semaphore an X server's blit signals for the encoder, made through Vulkan.
 pub(crate) mod blit_semaphore;
+/// The page-locked rows of the client buffers a hardware session uploads, and when each
+/// registration ends.
+pub(crate) mod client_pins;
 /// Codec identities, wire framing, quantizer domains, level ladders, bitstream reads.
 pub mod codec;
 /// The identity of a dmabuf behind an fd, for the sessions that keep an import of each buffer.
@@ -1246,12 +1249,18 @@ impl FrameEncoder {
     }
 
     /// `encode_host` for rows a client owns and may unmap after the call, as the wl_shm buffer
-    /// a Wayland capture encodes as it stands: NVENC uploads them without page-locking them
+    /// a Wayland capture encodes as it stands, read through the buffer `owner`: NVENC keeps the
+    /// rows of a buffer presented again page-locked at a mapping of their own
     /// (`NvencEncoder::encode_client_packed`), and every other session reads them as
     /// `encode_host` does.
-    pub fn encode_client_host(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "encode_host's arguments and the buffer the rows belong to"
+    )]
+    pub(crate) fn encode_client_host(
         &mut self,
         pixels: &[u8],
+        owner: &client_pins::RowsOwner,
         stride: usize,
         rgba: bool,
         frame_number: u64,
@@ -1260,7 +1269,7 @@ impl FrameEncoder {
     ) -> Result<Vec<u8>, String> {
         match self {
             FrameEncoder::Nvenc(enc) => {
-                enc.encode_client_packed(pixels, stride, rgba, frame_number, qp, force_idr)
+                enc.encode_client_packed(pixels, owner, stride, rgba, frame_number, qp, force_idr)
             }
             _ => self.encode_host(pixels, stride, rgba, frame_number, qp, force_idr),
         }

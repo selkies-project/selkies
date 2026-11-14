@@ -1820,9 +1820,10 @@ fn wayland_encode_loop<B: WlPayload>(
                         wayland::host::wait_gpu_done(client);
                     }
                     match f.shm.as_ref() {
-                        Some(shm) => encode_shm_rows(shm, width, height, |rows| {
+                        Some(shm) => encode_shm_rows(shm, width, height, |rows, owner| {
                             encoder.encode_client_host(
                                 rows,
+                                owner,
                                 (width.max(0) as usize) * 4,
                                 cfg.use_gpu,
                                 u64::from(f.frame_id),
@@ -2016,7 +2017,7 @@ fn wayland_encode_loop<B: WlPayload>(
                 )
             };
             out = match f.shm.as_ref() {
-                Some(shm) => match encode_shm_rows(shm, width, height, |rows| Ok(run(rows))) {
+                Some(shm) => match encode_shm_rows(shm, width, height, |rows, _| Ok(run(rows))) {
                     Ok(out) => out,
                     Err(e) => {
                         crate::log::debug!("[Wayland] Output {}: {e}.", cfg.display_id);
@@ -2058,8 +2059,9 @@ fn wayland_encode_loop<B: WlPayload>(
     } else {
         session.lock().unwrap().take()
     };
-    // The host buffers NVENC pinned are this thread's pool's, freed once the thread ends. They
-    // are unregistered while still mapped: an address freed while registered stays known to CUDA
+    // The host buffers NVENC pinned are this thread's pool's, freed once the thread ends, and
+    // the client buffers whose rows it pinned are let go with their registrations. They are
+    // unregistered while still mapped: an address freed while registered stays known to CUDA
     // at its old length, and a larger buffer a successor's pool gets there then fails its upload.
     if let Some(FrameEncoder::Nvenc(enc)) = video_encoder.as_mut() {
         enc.release_pinned_hosts();
@@ -2821,14 +2823,17 @@ const SHM_GONE: &str = "the client's shm buffer is gone";
 
 /// Run `encode` on the rows of a client's shm buffer a frame names (`WlFrame::shm`), `height`
 /// rows of `width` pixels packed four bytes each: the pool's mapping is valid only inside this
-/// call, so the encode runs inside it. `SHM_GONE` where the pool was resized or destroyed under
-/// the frame.
+/// call, so the encode runs inside it, handed the buffer's data as well, which tells the buffer
+/// apart for an encoder that keeps its rows page-locked past the call. `SHM_GONE` where the pool
+/// was resized or destroyed under the frame.
 fn encode_shm_rows<T>(
     buffer: &SurfaceBuffer,
     width: i32,
     height: i32,
-    encode: impl FnOnce(&[u8]) -> Result<T, String>,
+    encode: impl FnOnce(&[u8], &encoders::client_pins::RowsOwner) -> Result<T, String>,
 ) -> Result<T, String> {
+    use smithay::reexports::wayland_server::Resource;
+    let owner = buffer.object_data().ok_or_else(|| SHM_GONE.to_string())?;
     with_buffer_contents(buffer, |ptr, len, data| {
         let stride = (width.max(0) as usize) * 4;
         let offset = data.offset.max(0) as usize;
@@ -2836,11 +2841,12 @@ fn encode_shm_rows<T>(
         if data.stride.max(0) as usize != stride || offset.saturating_add(needed) > len {
             return Err(SHM_GONE.to_string());
         }
-        // SAFETY: smithay maps the pool for `len` bytes for the span of this closure, the
-        // rows lie within them, and the SIGBUS of a pool shrunk under the read becomes the
-        // error mapped below.
+        // SAFETY: smithay maps the pool for `len` bytes for the span of this closure and the
+        // rows lie within them. Its guard turns the SIGBUS of a CPU read from a pool shrunk
+        // under it into the error mapped below. The mapping NVENC uploads a registered buffer
+        // from lies outside that guard and is read by the device alone (`ClientPins::claim`).
         let rows = unsafe { std::slice::from_raw_parts(ptr.add(offset), needed) };
-        encode(rows)
+        encode(rows, owner)
     })
     .map_err(|_| SHM_GONE.to_string())?
 }
