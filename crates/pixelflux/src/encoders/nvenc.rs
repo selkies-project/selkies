@@ -253,12 +253,14 @@ struct CudaFunctions {
 
 impl HostRegister for CudaFunctions {
     fn register(&self, base: usize, len: usize) -> bool {
+        // SAFETY: CUDA validates the range and answers an error for one it cannot lock.
         unsafe {
             (self.cuMemHostRegister_v2)(base as *mut c_void, len, 0) == CUresult::CUDA_SUCCESS
         }
     }
 
     fn unregister(&self, base: usize) {
+        // SAFETY: CUDA answers an error for an address it holds no registration at.
         unsafe { (self.cuMemHostUnregister)(base as *mut c_void) };
     }
 }
@@ -4974,6 +4976,35 @@ impl NvencEncoder {
         crf: u32,
         force_idr: bool,
     ) -> Result<Vec<u8>, String> {
+        let pin_source = self.pin_uploads;
+        self.encode_packed(
+            pixels,
+            src_stride,
+            rgba_input,
+            frame_number,
+            crf,
+            force_idr,
+            pin_source,
+        )
+    }
+
+    /// `encode_cpu_packed`, page-locking the source by its address only where `pin_source`. A
+    /// client's rows pass `false`: `ClientPins` page-locks them at a mapping of its own and has
+    /// counted the upload already, so registering them here would register that mapping twice.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "encode_cpu_packed's arguments and whether the source is page-locked by address"
+    )]
+    fn encode_packed(
+        &mut self,
+        pixels: &[u8],
+        src_stride: usize,
+        rgba_input: bool,
+        frame_number: u64,
+        crf: u32,
+        force_idr: bool,
+        pin_source: bool,
+    ) -> Result<Vec<u8>, String> {
         unsafe {
             self.reconfigure_if_needed(crf);
             let _ = (self.cuda.cuCtxPushCurrent_v2)(self.cuda_context);
@@ -5011,7 +5042,7 @@ impl NvencEncoder {
                 return Err(e);
             }
 
-            if self.pin_uploads {
+            if pin_source {
                 self.client_pins.age(&*self.cuda);
                 self.pin_host_source(pixels.as_ptr() as usize, pixels.len());
             }
@@ -5039,7 +5070,7 @@ impl NvencEncoder {
                     self.width,
                     self.height,
                     self.input_pitch,
-                    self.pin_uploads
+                    pin_source
                 ));
             }
 
@@ -5102,11 +5133,15 @@ impl NvencEncoder {
                 rows = std::slice::from_raw_parts(from as *const u8, pixels.len());
             }
         }
-        let pin = std::mem::replace(&mut self.pin_uploads, false);
-        let out =
-            self.encode_cpu_packed(rows, src_stride, rgba_input, frame_number, crf, force_idr);
-        self.pin_uploads = pin;
-        out
+        self.encode_packed(
+            rows,
+            src_stride,
+            rgba_input,
+            frame_number,
+            crf,
+            force_idr,
+            false,
+        )
     }
 
     /// Run the chroma convert over an array-typed import through `tex`, answering the input
@@ -7395,10 +7430,6 @@ pub(crate) mod gpu_tests {
                     "pool {pool}, frame {i}: {psnr:.1} dB against the picture just painted"
                 );
             }
-            assert!(
-                enc.pin_uploads,
-                "the client path restores the production default"
-            );
         }
         // SAFETY: the last pool mapped above, which no slice outlives.
         unsafe { libc::munmap(at, len) };

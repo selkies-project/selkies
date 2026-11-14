@@ -85,12 +85,23 @@ impl ClientRows {
     }
 }
 
+/// The first page under `len` bytes at `base` and the length of whole pages covering them, or
+/// `None` where the page size cannot be read or the end of the span would overflow.
+fn page_span(base: usize, len: usize) -> Option<(usize, usize)> {
+    // SAFETY: sysconf has no preconditions.
+    let page = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })
+        .ok()
+        .filter(|page| page.is_power_of_two())?;
+    let start = base & !(page - 1);
+    let end = base.checked_add(len)?.checked_next_multiple_of(page)?;
+    Some((start, end - start))
+}
+
 /// Map the pages under `len` bytes at `base` a second time and page-lock that mapping.
 fn lock(base: usize, len: usize, cuda: &impl HostRegister) -> Pages {
-    // SAFETY: sysconf has no preconditions.
-    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
-    let start = base & !(page - 1);
-    let span = (base + len).next_multiple_of(page) - start;
+    let Some((start, span)) = page_span(base, len) else {
+        return Pages::Unlocked;
+    };
     // SAFETY: the pages lie within the client's shared pool mapping, which a zero old size
     // leaves in place while a new mapping of the same pages is made elsewhere.
     let at = unsafe { libc::mremap(start as *mut c_void, 0, span, libc::MREMAP_MAYMOVE) };
@@ -120,8 +131,9 @@ impl ClientPins {
     /// The address to upload the `len` bytes smithay maps at `base`, read through `owner`, from:
     /// their page-locked mapping where the buffer was presented before, else `base` itself. The
     /// address stays valid until the next call on this table. A page-locked mapping lies outside
-    /// smithay's SIGBUS guard and is for the device's upload only: it must never be read on the
-    /// CPU, where a pool the client shrank would raise a SIGBUS that nothing turns into an error.
+    /// smithay's SIGBUS guard and is for the device's upload only: a client's pool is never read
+    /// through it on the CPU, where a pool the client shrank would raise a SIGBUS that nothing
+    /// turns into an error.
     pub(crate) fn claim(
         &mut self,
         base: usize,
@@ -409,5 +421,17 @@ mod tests {
         pins.release(&cuda);
         assert!(cuda.unregistered.borrow().is_empty());
         assert!(pins.is_empty());
+    }
+
+    #[test]
+    fn rows_whose_end_would_overflow_the_address_space_are_uploaded_where_they_lie() {
+        let cuda = Calls::new();
+        let mut pins = ClientPins::default();
+        let a = owner();
+        let base = usize::MAX - 0x10;
+        for _ in 0..3 {
+            assert_eq!(pins.claim(base, 0x100, &a, &cuda), base);
+        }
+        assert!(cuda.registered.borrow().is_empty());
     }
 }
