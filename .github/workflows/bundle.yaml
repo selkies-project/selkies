@@ -152,8 +152,10 @@ jobs:
       matrix:
         # The formats a bundle of this C library and architecture serves: apk
         # for musl, and for glibc deb, rpm, and, on x86_64, the pacman package,
-        # since Arch Linux publishes an x86_64-only image
-        kind: ${{ fromJSON(inputs.libc == 'musl' && '[{"name":"apk","image":"alpine:latest","hosts":"alpine:latest","install":"apk add --quiet --allow-untrusted /out/*.apk"}]' || (inputs.arch == 'x86_64' && '[{"name":"deb","image":"debian:stable-slim","hosts":"ubuntu:24.04 ubuntu:26.04 debian:bookworm debian:trixie","install":"apt-get update -qq && apt-get install -y -qq /out/*.deb"},{"name":"rpm","image":"fedora:43","hosts":"fedora:43 almalinux:9 almalinux:8","install":"dnf install -y -q util-linux /out/*.rpm"},{"name":"arch","image":"archlinux:base-devel","hosts":"archlinux:base","install":"pacman -Sy --noconfirm > /dev/null && pacman -U --noconfirm /out/*.pkg.tar.zst"}]' || '[{"name":"deb","image":"debian:stable-slim","hosts":"ubuntu:24.04 ubuntu:26.04 debian:bookworm debian:trixie","install":"apt-get update -qq && apt-get install -y -qq /out/*.deb"},{"name":"rpm","image":"fedora:43","hosts":"fedora:43 almalinux:9 almalinux:8","install":"dnf install -y -q util-linux /out/*.rpm"}]')) }}
+        # since Arch Linux publishes an x86_64-only image. The rpm is also
+        # installed on the host at the bundle's glibc floor, an Enterprise
+        # Linux whose 7 has no dnf
+        kind: ${{ fromJSON(inputs.libc == 'musl' && '[{"name":"apk","image":"alpine:latest","hosts":"alpine:latest","install":"apk add --quiet --allow-untrusted /out/*.apk"}]' || (inputs.arch == 'x86_64' && '[{"name":"deb","image":"debian:stable-slim","hosts":"ubuntu:24.04 ubuntu:26.04 debian:bookworm debian:trixie","install":"apt-get update -qq && apt-get install -y -qq /out/*.deb"},{"name":"rpm","image":"fedora:43","hosts":"fedora:43 almalinux:9 almalinux:8","install":"if command -v dnf > /dev/null; then dnf install -y -q util-linux /out/*.rpm; else rpm -i /out/*.rpm; fi"},{"name":"arch","image":"archlinux:base-devel","hosts":"archlinux:base","install":"pacman -Sy --noconfirm > /dev/null && pacman -U --noconfirm /out/*.pkg.tar.zst"}]' || '[{"name":"deb","image":"debian:stable-slim","hosts":"ubuntu:24.04 ubuntu:26.04 debian:bookworm debian:trixie","install":"apt-get update -qq && apt-get install -y -qq /out/*.deb"},{"name":"rpm","image":"fedora:43","hosts":"fedora:43 almalinux:9 almalinux:8","install":"if command -v dnf > /dev/null; then dnf install -y -q util-linux /out/*.rpm; else rpm -i /out/*.rpm; fi"}]')) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -179,8 +181,14 @@ jobs:
         env:
           HOSTS: ${{ matrix.kind.hosts }}
           INSTALL: ${{ matrix.kind.install }}
+          FORMAT: ${{ matrix.kind.name }}
+          FLOOR: ${{ needs.bundle.outputs.floor_host }}
         run: |
           set -e
+          case "${FORMAT}:${FLOOR}:" in
+            rpm:centos:*|rpm:almalinux:*)
+              case " ${HOSTS} " in *" ${FLOOR} "*) ;; *) HOSTS="${HOSTS} ${FLOOR}" ;; esac ;;
+          esac
           for host in ${HOSTS}; do
             echo "::group::${host}"
             scripts/ci/retry.sh 5 60 docker pull "${host}"

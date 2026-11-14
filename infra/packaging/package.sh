@@ -38,11 +38,18 @@ ARCH="${ARCH##*-}"
 VERSION="${NAME#selkies-}"
 VERSION="${VERSION%-"${ARCH}"-linux-*}"
 [ "${ARCH}" = "$(uname -m)" ] || { echo "package.sh: a ${ARCH} bundle on $(uname -m)" >&2; exit 2; }
-# The glibc a glibc bundle needs, its builder image's (infra/bundle/toolchain.sh)
+# The glibc a glibc bundle needs, its builder image's (infra/bundle/toolchain.sh).
+# Enterprise Linux 7's rpm (4.11) reads no zstd payload, the default of the
+# Fedora rpmbuild that packs it: a bundle that runs there, below Enterprise
+# Linux 8's glibc 2.28, is packed with xz.
 case "${NAME}" in
     *-linux-gnu)
         platform="$(sh "${REPO}/infra/bundle/toolchain.sh" platform glibc "${ARCH}")"
         GLIBC="$(echo "${platform#manylinux_}" | tr _ .)"
+        RPM_PAYLOAD=""
+        if [ "$(printf '%s\n2.28\n' "${GLIBC}" | sort -V | head -n 1)" != 2.28 ]; then
+            RPM_PAYLOAD="%global _binary_payload w6T.xzdio"
+        fi
         ;;
 esac
 WORK="${SELKIES_BUILD_DIR:-/build}/package"
@@ -104,7 +111,7 @@ Version: $(tilde_version "${VERSION}")-1
 Architecture: ${DEB_ARCH}
 Maintainer: Selkies Project <pypi@linuxserver.io>
 Installed-Size: $(du -sk "${ROOT}" | cut -f1)
-Depends: libc6 (>= ${GLIBC}), libstdc++6, libgcc-s1
+Depends: libc6 (>= ${GLIBC}), libstdc++6, libgcc-s1 | libgcc1
 Recommends: libgbm1, libegl1
 Section: net
 Priority: optional
@@ -126,6 +133,7 @@ URL: ${URL}
 Requires: glibc >= ${GLIBC}, libstdc++, libgcc
 Recommends: mesa-libgbm, mesa-libEGL
 AutoReqProv: no
+${RPM_PAYLOAD}
 %global __os_install_post %{nil}
 %global debug_package %{nil}
 %global _build_id_links none
