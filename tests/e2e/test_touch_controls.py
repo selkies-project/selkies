@@ -297,7 +297,8 @@ def keyboard_button_block(res: "H.Results", dashboard: str, engine: str) -> None
 
 # A convertible's primary pointer, which Edge on a Surface turns fine when the
 # keyboard and its touchpad are attached and coarse when they are detached:
-# `__setPointerFine` flips it the same way, with the change events Edge sends.
+# `__setPointerFine` flips it the same way, with the change events Edge sends,
+# and `__setPointerFineSilently` without them, as an attach Edge does not announce.
 POINTER_POSTURE_JS = """
 (() => {
   const real = window.matchMedia.bind(window);
@@ -320,6 +321,7 @@ POINTER_POSTURE_JS = """
   window.matchMedia = (query) => lists.get(String(query).trim()) || real(query);
   Object.defineProperty(Navigator.prototype, 'maxTouchPoints', { get: () => 10, configurable: true });
   window.__setPointerFine = (to) => { fine = to; for (const list of lists.values()) list.fire(); };
+  window.__setPointerFineSilently = (to) => { fine = to; };
 })();
 """
 
@@ -328,7 +330,10 @@ def keyboard_posture_block(res: "H.Results", dashboard: str, engine: str) -> Non
     """A convertible says at once whether its keyboard is attached: the
     primary pointer turns coarse when it is detached and fine when it is
     attached. The keyboard button follows at once, with no key pressed and no
-    touch needed, and a touch does not bring it back while the keyboard is on."""
+    touch needed, and a touch does not bring it back while the keyboard is on.
+    Where Edge misses an attach, the button still goes: on the window's resize
+    when the pointer turned fine without its event, and on the touchpad's use
+    when it stayed coarse."""
     tag = f"{dashboard} {engine} posture"
     H.server_start(mode="websockets", web_root=H.DASHBOARD_DIST, layout=dashboard)
     try:
@@ -357,6 +362,15 @@ def keyboard_posture_block(res: "H.Results", dashboard: str, engine: str) -> Non
                 res.check(f"{tag}: a touch leaves it away while the keyboard is attached", not shown())
                 page.evaluate("__setPointerFine(false)")
                 res.check(f"{tag}: and detaching it again brings it back", shown())
+                page.evaluate("__setPointerFineSilently(true); window.dispatchEvent(new Event('resize'))")
+                res.check(f"{tag}: an attach announced by no event goes with the window's resize", not shown())
+                page.evaluate("__setPointerFine(false)")
+                res.check(f"{tag}: detached once more, the button is back", shown())
+                size = page.viewport_size or {"width": 1280, "height": 720}
+                page.mouse.move(size["width"] / 2, size["height"] / 2)
+                page.mouse.move(size["width"] / 2 + 40, size["height"] / 2 + 20)
+                res.check(f"{tag}: with the pointer left coarse, the touchpad in use takes the button away",
+                          not shown())
             finally:
                 C.close_browser(browser)
     finally:

@@ -27,6 +27,13 @@
  * 8, within 0.1 s both ways). So on a touch screen a fine primary pointer, at
  * load or on a change, says a keyboard is attached until the pointer turns
  * coarse again, keys or no keys.
+ *
+ * Edge does not always follow a keyboard attached again: the pointer can stay
+ * coarse, the button with it. So the query is read again whenever the window
+ * resizes, as it does with each posture (the taskbar), or a mouse or touchpad
+ * is used, for a change that came without its event; and on a touch screen
+ * whose pointer has been fine, a convertible, its touchpad in use says the
+ * keyboard it comes with is back, as a keyboard-only key does.
  * @module
  */
 
@@ -69,7 +76,16 @@ export interface HardwareKeyboardWatch {
    * @param fine Whether the pointer turned fine.
    */
   onPointer: (fine: boolean) => void;
-  /** Forgets the verdict until the next keyboard-only key or pointer change, as when the user asks for the button back. */
+  /**
+   * A mouse or touchpad was used: on a convertible, whose primary pointer has
+   * been fine, its touchpad, so its keyboard, is back, like a keyboard-only key.
+   */
+  onMouse: () => void;
+  /**
+   * Forgets the verdict until the next keyboard-only key or pointer change, as
+   * when the user asks for the button back; until the pointer turns fine
+   * again, a touchpad says nothing either.
+   */
   reset: () => void;
   /**
    * Subscribes to verdict changes.
@@ -88,6 +104,8 @@ export function createHardwareKeyboardWatch({ now = () => Date.now(), idleMs = H
   let lastKeyAt = -Infinity;
   // Whether the verdict rests on a fine primary pointer, which only its turning coarse ends.
   let byPointer = false;
+  // Whether the primary pointer has turned fine, a convertible's touchpad coming with its keyboard.
+  let convertible = false;
   const subscribers = new Set<(attached: boolean) => void>();
   const set = (value: boolean): void => {
     if (value === attached) return;
@@ -106,12 +124,19 @@ export function createHardwareKeyboardWatch({ now = () => Date.now(), idleMs = H
     },
     onPointer(fine: boolean): void {
       byPointer = fine;
+      if (fine) convertible = true;
       lastKeyAt = -Infinity;
       set(fine);
+    },
+    onMouse(): void {
+      if (!convertible) return;
+      lastKeyAt = now();
+      set(true);
     },
     reset(): void {
       lastKeyAt = -Infinity;
       byPointer = false;
+      convertible = false;
       set(false);
     },
     subscribe(fn: (attached: boolean) => void): () => void {
@@ -126,7 +151,8 @@ let pageWatch: HardwareKeyboardWatch | null = null;
 /**
  * The page's watch, listening from its first use: keydowns and touches on the
  * window in the capture phase, before the stream's own handlers take them, and
- * on a touch screen the primary pointer.
+ * on a touch screen the primary pointer, read again on a resize and on a mouse
+ * or touchpad's events, which go to `onMouse` too.
  * @returns The page's watch.
  */
 export function hardwareKeyboard(): HardwareKeyboardWatch {
@@ -137,8 +163,22 @@ export function hardwareKeyboard(): HardwareKeyboardWatch {
     window.addEventListener('touchstart', () => pageWatch!.onTouch(), { capture: true, passive: true });
     const fine: MediaQueryList | null = typeof window.matchMedia === 'function' ? window.matchMedia('(pointer: fine)') : null;
     if (fine && typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0) {
-      if (fine.matches) pageWatch.onPointer(true);
-      fine.addEventListener('change', (e: MediaQueryListEvent) => pageWatch!.onPointer(e.matches));
+      let wasFine = fine.matches;
+      if (wasFine) pageWatch.onPointer(true);
+      const follow = (matches: boolean): void => {
+        if (matches === wasFine) return;
+        wasFine = matches;
+        pageWatch!.onPointer(matches);
+      };
+      fine.addEventListener('change', (e: MediaQueryListEvent) => follow(e.matches));
+      window.addEventListener('resize', () => follow(fine.matches), { passive: true });
+      const mouse = (e: PointerEvent): void => {
+        if (e.pointerType !== 'mouse' || !e.isTrusted) return;
+        follow(fine.matches);
+        pageWatch!.onMouse();
+      };
+      window.addEventListener('pointerdown', mouse, { capture: true, passive: true });
+      window.addEventListener('pointermove', mouse, { capture: true, passive: true });
     }
   }
   return pageWatch;

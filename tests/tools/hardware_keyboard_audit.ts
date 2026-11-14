@@ -12,7 +12,10 @@
  * after the idle period without such a key takes the verdict back, so a
  * keyboard detached mid-session leaves the button reachable again. On a touch
  * screen the primary pointer decides at once: fine with a convertible's
- * keyboard and touchpad attached, coarse once they are detached.
+ * keyboard and touchpad attached, coarse once they are detached. Where the
+ * engine misses an attach, the query read again on a resize or a mouse event
+ * catches a change that came without its event, and a convertible's touchpad
+ * in use says its keyboard is back.
  *
  * Prints one PASS/FAIL line per check and exits non-zero if any failed.
  * @module
@@ -108,17 +111,49 @@ check('but not a key the page dispatched itself',
     check('asking for the button back outweighs a fine pointer', watch.attached() === false);
 }
 
+{
+    let t = 0;
+    const watch = createHardwareKeyboardWatch({ now: () => t });
+    watch.onMouse();
+    check('a mouse on a screen whose pointer was never fine says nothing of a keyboard', watch.attached() === false);
+    watch.onPointer(true);
+    watch.onPointer(false);
+    watch.onMouse();
+    check("a convertible's touchpad in use hides the button, its pointer left coarse", watch.attached() === true);
+    t += HARDWARE_KEYBOARD_IDLE_MS - 1;
+    watch.onTouch();
+    check('a touch while the touchpad was in use keeps it hidden', watch.attached() === true);
+    t += 1;
+    watch.onTouch();
+    check('a touch once the touchpad went idle brings it back', watch.attached() === false);
+    watch.onMouse();
+    watch.onPointer(false);
+    check('as does the pointer turning coarse', watch.attached() === false);
+    watch.onMouse();
+    watch.reset();
+    watch.onMouse();
+    check('asking for the button back outweighs the touchpad until the pointer turns fine again',
+          watch.attached() === false);
+}
+
 /** The page's watch, imported afresh on a window whose primary pointer starts `fine`. */
-async function pageWatchOn(fine: boolean, maxTouchPoints: number, tag: string):
-    Promise<{ watch: HardwareKeyboardWatch; turn: (to: boolean) => void }> {
+async function pageWatchOn(fine: boolean, maxTouchPoints: number, tag: string): Promise<{
+    watch: HardwareKeyboardWatch;
+    turn: (to: boolean) => void;
+    turnSilently: (to: boolean) => void;
+    fire: (type: string, event?: StandIn<PointerEvent>) => void;
+}> {
     const listeners = new Set<(event: StandIn<MediaQueryListEvent>) => void>();
+    const windowListeners = new Map<string, ((event: StandIn<PointerEvent>) => void)[]>();
     const pointer = {
         matches: fine,
         addEventListener: (type: string, fn: (event: StandIn<MediaQueryListEvent>) => void) => type === 'change' && listeners.add(fn),
     } satisfies StandIn<MediaQueryList>;
     Object.assign(globalThis, {
         window: {
-            addEventListener() {},
+            addEventListener: (type: string, fn: (event: StandIn<PointerEvent>) => void) => {
+                windowListeners.set(type, [...(windowListeners.get(type) ?? []), fn]);
+            },
             matchMedia: (query: string) => (query === '(pointer: fine)' ? pointer : { matches: false, addEventListener() {} }),
         } satisfies StandIn<Window>,
     });
@@ -131,7 +166,11 @@ async function pageWatchOn(fine: boolean, maxTouchPoints: number, tag: string):
         pointer.matches = to;
         for (const fn of listeners) fn({ matches: to });
     };
-    return { watch: mod.hardwareKeyboard(), turn };
+    const turnSilently = (to: boolean): void => { pointer.matches = to; };
+    const fire = (type: string, event: StandIn<PointerEvent> = {}): void => {
+        for (const fn of windowListeners.get(type) ?? []) fn(event);
+    };
+    return { watch: mod.hardwareKeyboard(), turn, turnSilently, fire };
 }
 {
     const { watch, turn } = await pageWatchOn(true, 10, 'surface');
@@ -140,6 +179,25 @@ async function pageWatchOn(fine: boolean, maxTouchPoints: number, tag: string):
     check('the page follows its pointer turning coarse', watch.attached() === false);
     turn(true);
     check('and fine again', watch.attached() === true);
+}
+{
+    const { watch, turn, turnSilently, fire } = await pageWatchOn(true, 10, 'missed');
+    turn(false);
+    turnSilently(true);
+    fire('resize');
+    check('a pointer turned fine without its event is caught on the next resize', watch.attached() === true);
+    turn(false);
+    turnSilently(true);
+    fire('pointermove', { pointerType: 'touch', isTrusted: true });
+    check('but not on a touch', watch.attached() === false);
+    fire('pointermove', { pointerType: 'mouse', isTrusted: true });
+    check('or on the next mouse or touchpad event', watch.attached() === true);
+    turn(false);
+    fire('pointermove', { pointerType: 'mouse', isTrusted: false });
+    check('a pointer event the page made says nothing', watch.attached() === false);
+    fire('pointerdown', { pointerType: 'mouse', isTrusted: true });
+    check("with the pointer left coarse, the convertible's touchpad says its keyboard is back",
+          watch.attached() === true);
 }
 {
     const { watch, turn } = await pageWatchOn(true, 0, 'desktop');
