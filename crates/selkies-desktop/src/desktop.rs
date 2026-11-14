@@ -144,8 +144,18 @@ const DESKTOP_DRAG_THRESHOLD: f64 = 6.0;
 /// How long a floating bar takes to attach to the edge or come off it.
 const BAR_ATTACH: Duration = Duration::from_millis(220);
 
-/// How often the bar is drawn while it moves.
-const BAR_FRAME: Duration = Duration::from_millis(16);
+/// A floating bar's move toward or away from the edge.
+#[derive(Clone, Copy, Debug)]
+struct AttachMove {
+    /// The progress it started from.
+    from: f32,
+    /// The progress it goes to.
+    to: f32,
+    start: Instant,
+    /// When its next frame is drawn: a frame period after the last, so a wake for any other
+    /// reason (the compositor releasing the frame just sent) draws nothing new.
+    next: Instant,
+}
 
 /// The color behind a light wallpaper under a dark theme, whose own window color is dark: the
 /// window color of the Light scheme.
@@ -205,7 +215,7 @@ pub struct DisplayBar {
     dirty: bool,
     attached: bool,
     attach: f32,
-    attach_anim: Option<(f32, f32, Instant)>,
+    attach_anim: Option<AttachMove>,
     published_tasks: Vec<(u64, Rect)>,
     offset: (i32, i32),
     hover: Hover,
@@ -509,9 +519,8 @@ pub struct Desktop {
     bar_attached: bool,
     /// How far a floating bar has gone toward the edge: 0 floating, 1 attached.
     bar_attach: f32,
-    /// The bar's move toward or away from the edge: where it started, where it goes, and
-    /// when it began.
-    bar_attach_anim: Option<(f32, f32, Instant)>,
+    /// The bar's move toward or away from the edge.
+    bar_attach_anim: Option<AttachMove>,
     /// When a hiding bar goes away, after the pointer left it.
     hide_at: Option<Instant>,
     /// A slider value not yet applied to the bar, with the key it is for and
@@ -766,7 +775,13 @@ impl Desktop {
         }
         self.bar_attached = attached;
         let target = if attached { 1.0 } else { 0.0 };
-        self.bar_attach_anim = Some((self.bar_attach, target, Instant::now()));
+        let now = Instant::now();
+        self.bar_attach_anim = Some(AttachMove {
+            from: self.bar_attach,
+            to: target,
+            start: now,
+            next: now,
+        });
         self.panel_dirty = true;
     }
 
@@ -906,18 +921,26 @@ impl Desktop {
         }
     }
 
-    /// Advances the bar's move toward or away from the edge.
+    /// Advances the bar's move toward or away from the edge, a frame period at a time: the
+    /// main loop wakes for every event, the compositor's release of each frame among them, and
+    /// a step on every wake would draw the bar as fast as the compositor answers.
     fn step_bar_attach(&mut self, now: Instant) {
-        let Some((from, to, start)) = self.bar_attach_anim else {
+        let Some(mut anim) = self.bar_attach_anim else {
             return;
         };
-        let t = (now.saturating_duration_since(start).as_secs_f32() / BAR_ATTACH.as_secs_f32()).min(1.0);
-        let eased = 1.0 - (1.0 - t).powi(3);
-        self.bar_attach = from + (to - from) * eased;
-        if t >= 1.0 {
-            self.bar_attach = to;
-            self.bar_attach_anim = None;
+        if now < anim.next {
+            return;
         }
+        let t = (now.saturating_duration_since(anim.start).as_secs_f32() / BAR_ATTACH.as_secs_f32()).min(1.0);
+        let eased = 1.0 - (1.0 - t).powi(3);
+        self.bar_attach = anim.from + (anim.to - anim.from) * eased;
+        anim.next = now + ui::FRAME;
+        self.bar_attach_anim = if t >= 1.0 {
+            self.bar_attach = anim.to;
+            None
+        } else {
+            Some(anim)
+        };
         self.panel_dirty = true;
     }
 
@@ -2601,8 +2624,11 @@ impl Desktop {
         if let Some(due) = self.hide_at {
             deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
         }
-        if self.bar_attach_anim.is_some() || self.bars.iter().any(|b| b.attach_anim.is_some()) {
-            let due = now + BAR_FRAME;
+        let moving = self
+            .bar_attach_anim
+            .iter()
+            .chain(self.bars.iter().filter_map(|b| b.attach_anim.as_ref()));
+        if let Some(due) = moving.map(|anim| anim.next).min() {
             deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
         }
         if let Some((_, _, due)) = &self.preview {
@@ -3346,11 +3372,13 @@ impl Desktop {
         let damage: Vec<Rect> = if fresh {
             vec![whole]
         } else {
-            previous
+            let mut damage = previous
                 .iter()
                 .chain(&visible)
                 .map(|r| r.inflate(CLEAR_MARGIN))
-                .collect()
+                .collect();
+            crate::geom::coalesce(&mut damage);
+            damage
         };
         let grab = self.popup != Popup::None;
         let input = if grab {

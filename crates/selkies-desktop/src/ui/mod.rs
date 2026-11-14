@@ -46,6 +46,10 @@ pub const SCROLL_STEP: f64 = 48.0;
 pub const DOUBLE_CLICK_MS: u32 = 400;
 /// Milliseconds the pointer rests before a tooltip shows.
 pub const TOOLTIP_DELAY_MS: u64 = 600;
+/// The period between the frames of anything that moves: the bar attaching and the
+/// notification cards. A frame is drawn no sooner than this after the last, whatever woke the
+/// main loop.
+pub const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 /// Narrowest a file manager window may be made.
 pub const WINDOW_MIN_WIDTH: i32 = 480;
 /// Shortest a file manager window may be made.

@@ -113,9 +113,61 @@ impl Rect {
     }
 }
 
+/// Merges the rectangles that overlap into the one covering both wherever it covers no more
+/// pixels than the two did apart, and drops the empty ones, so a region handled rectangle by
+/// rectangle handles no pixel twice: a frame's damage is the area it left and the area it
+/// drew, nearly the same rectangle while something slides, and a buffer that missed several
+/// frames holds every one of them.
+///
+/// # Arguments
+/// * `rects` - The rectangles, merged in place.
+pub fn coalesce(rects: &mut Vec<Rect>) {
+    let area = |r: &Rect| i64::from(r.w) * i64::from(r.h);
+    rects.retain(|r| !r.is_empty());
+    let mut i = 0;
+    while i < rects.len() {
+        let mut merged = false;
+        let mut j = i + 1;
+        while j < rects.len() {
+            let (a, b) = (rects[i], rects[j]);
+            let union = a.union(&b);
+            if !a.intersect(&b).is_empty() && area(&union) <= area(&a) + area(&b) {
+                rects[i] = union;
+                rects.swap_remove(j);
+                merged = true;
+            } else {
+                j += 1;
+            }
+        }
+        if !merged {
+            i += 1;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Rect;
+    use super::{Rect, coalesce};
+
+    /// Overlapping rectangles become the one covering them where that adds no pixels; ones
+    /// that cross, whose cover would, and ones apart stay as they are.
+    #[test]
+    fn overlapping_damage_coalesces_without_growing() {
+        let mut slide = vec![
+            Rect::new(6, 1226, 2548, 48),
+            Rect::new(5, 1226, 2550, 49),
+            Rect::default(),
+            Rect::new(6, 1226, 2548, 48),
+        ];
+        coalesce(&mut slide);
+        assert_eq!(slide, vec![Rect::new(5, 1226, 2550, 49)]);
+        let mut cross = vec![Rect::new(0, 40, 100, 10), Rect::new(40, 0, 10, 100)];
+        coalesce(&mut cross);
+        assert_eq!(cross.len(), 2);
+        let mut apart = vec![Rect::new(0, 0, 10, 10), Rect::new(20, 0, 10, 10)];
+        coalesce(&mut apart);
+        assert_eq!(apart.len(), 2);
+    }
 
     #[test]
     fn intersect_and_union() {

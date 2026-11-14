@@ -98,8 +98,6 @@ const SLIDE: f32 = 24.0;
 const FADE_OUT: Duration = Duration::from_millis(120);
 /// How long a card takes to slide to a new place.
 const MOVE: Duration = Duration::from_millis(160);
-/// The redraw period while anything moves.
-const FRAME: Duration = Duration::from_millis(16);
 /// The redraw period while only countdown bars shrink.
 const COUNTDOWN_STEP: Duration = Duration::from_millis(100);
 /// How often the open center redraws its relative times.
@@ -680,8 +678,10 @@ impl NotificationState {
     pub fn next_deadline(&self, now: Instant) -> Option<Instant> {
         let mut due = self.records.iter().filter_map(|r| r.deadline).min();
         let mut sooner = |at: Instant| due = Some(due.map_or(at, |d| d.min(at)));
-        if self.dirty || self.settling || self.animating(now) {
-            sooner(now + FRAME);
+        if self.dirty {
+            sooner(now);
+        } else if self.settling || self.animating(now) {
+            sooner(self.drawn.map_or(now, |at| at + ui::FRAME));
         } else if self.counting_down() {
             sooner(self.drawn.map_or(now, |at| at + COUNTDOWN_STEP));
         }
@@ -720,8 +720,11 @@ impl NotificationState {
     /// Whether the stack needs drawing at a time, and whether only its
     /// countdown bars changed.
     fn frame_due(&self, now: Instant) -> Option<bool> {
-        if self.dirty || self.settling || self.animating(now) {
+        if self.dirty {
             return Some(false);
+        }
+        if self.settling || self.animating(now) {
+            return self.drawn.is_none_or(|at| now >= at + ui::FRAME).then_some(false);
         }
         let step = self.drawn.is_none_or(|at| now >= at + COUNTDOWN_STEP);
         (self.counting_down() && step).then_some(true)
@@ -1681,6 +1684,26 @@ mod tests {
         assert_eq!(state.surface_size().1, 344);
     }
 
+    /// A card that moves is drawn a frame period after its last frame, not on every wake.
+    #[test]
+    fn a_moving_card_is_drawn_a_frame_period_apart() {
+        let mut state = NotificationState::default();
+        let start = Instant::now();
+        state.receive(note(1, None), start);
+        state.advance(start, layout);
+        state.dirty = false;
+        state.drawn = Some(start);
+        let early = start + Duration::from_millis(5);
+        assert!(state.animating(early));
+        assert_eq!(
+            state.frame_due(early),
+            None,
+            "a wake inside the frame period draws nothing"
+        );
+        assert_eq!(state.next_deadline(early), Some(start + ui::FRAME));
+        assert_eq!(state.frame_due(start + ui::FRAME), Some(false));
+    }
+
     #[test]
     fn an_expired_notification_closes_as_expired_and_stays_in_the_history() {
         let mut state = NotificationState::default();
@@ -1689,8 +1712,8 @@ mod tests {
         state.advance(start, layout);
         assert_eq!(
             state.next_deadline(start),
-            Some(start + FRAME),
-            "a fresh card animates"
+            Some(start),
+            "a fresh card is drawn at once"
         );
         state.advance(start + Duration::from_secs(2), layout);
         assert_eq!(closed(&mut state), [(1, CloseReason::Expired)]);

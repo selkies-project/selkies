@@ -719,6 +719,7 @@ fn draw_window_glyph(canvas: &mut Canvas<'_>, rect: Rect) {
 mod tests {
     use super::*;
     use crate::event::{Event, Request, SurfaceId, ToplevelState};
+    use std::time::{Duration, Instant};
 
     /// A desktop with a configured bar, three windows of which the second is
     /// on another desktop, and three desktops with the second current.
@@ -747,6 +748,32 @@ mod tests {
         d.handle(Event::Desktops { count: 3, current: 1 });
         d.take_requests();
         d
+    }
+
+    /// The bar attaching draws a frame a frame period after the last however often the main
+    /// loop wakes in between, and the next frame is when the loop is told to wake.
+    #[test]
+    fn the_attaching_bar_draws_a_frame_a_period_apart_whatever_wakes_the_loop() {
+        let mut d = desktop();
+        d.config.show_clock = false;
+        let _ = d.render_panel();
+        d.set_bar_attached(true);
+        let start = Instant::now();
+        d.tick(start);
+        assert!(d.render_panel().is_some(), "the move starts at once");
+        let early = start + Duration::from_millis(5);
+        d.tick(early);
+        assert!(
+            d.render_panel().is_none(),
+            "a wake inside the frame period draws nothing"
+        );
+        let due = d.next_deadline(early).expect("the move asks to be woken");
+        assert!(due > early && due <= start + crate::ui::FRAME + Duration::from_millis(1));
+        d.tick(due);
+        assert!(
+            d.render_panel().is_some(),
+            "the next frame is drawn when it is due"
+        );
     }
 
     #[test]

@@ -394,6 +394,7 @@ impl State {
         for (i, other) in surface.buffers.iter_mut().enumerate() {
             if i != index {
                 other.missed.extend(frame.damage.iter().copied());
+                crate::geom::coalesce(&mut other.missed);
             }
         }
         let buffer = &mut surface.buffers[index];
@@ -405,6 +406,7 @@ impl State {
         let src = frame.pixmap.data();
         let mut to_copy: Vec<crate::geom::Rect> = std::mem::take(&mut buffer.missed);
         to_copy.extend(frame.damage.iter().copied());
+        crate::geom::coalesce(&mut to_copy);
         let whole_copy = to_copy.iter().any(|r| r.w >= surface_w && r.h >= surface_h) || to_copy.len() > 32;
         if whole_copy {
             super::copy_bgra(src, &mut buffer.map, stride, 0, 0, bw, bh);
