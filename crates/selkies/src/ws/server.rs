@@ -8,12 +8,12 @@
 //! model, the settings a page applies, the per-display captures with their relays and
 //! backpressure, the layout pass, and the broadcasts that tell the pages about all of it.
 //!
-//! `reconfigure_lock` serializes layout passes (a request during a pass coalesces into one
-//! follow-up) and `video_capture_lock` serializes per-display capture start and stop underneath
-//! it. One capture per display persists for the server's lifetime so a restart keeps the
-//! encoder backend warm. A display whose page dropped keeps its entry and its running capture
-//! for the reconnect grace, so a reloading page resumes on it instead of paying a pipeline
-//! rebuild.
+//! `reconfigure_lock` serializes the layout passes and the refresh a frame-rate change sets
+//! between them (a pass requested during a pass coalesces into one follow-up);
+//! `video_capture_lock` serializes per-display capture start and stop underneath it. One
+//! capture per display persists for the server's lifetime so a restart keeps the encoder backend
+//! warm. A display whose page dropped keeps its entry and its running capture for the reconnect
+//! grace, so a reloading page resumes on it instead of paying a pipeline rebuild.
 //!
 //! A display has one owner, whose size and encoding it streams with. With sharing on, a
 //! controller of another tab joins beside the owner: it is streamed as a viewer is (its relay
@@ -954,8 +954,38 @@ impl WsService {
     }
 
     /// Keep the display's refresh at the rule its resizes follow, after a frame rate changed
-    /// without one: never below the fastest display of the layout.
+    /// without one. A pass sets its modes at the rate it read when it began, so the refresh is
+    /// set under the reconfigure lock: at once when the lock is free, else on a task of its own
+    /// once the holder lets go. Waited for here, it would hold the page's read loop for as long
+    /// as a pass runs; left to a follow-up pass, it would be lost where displays are logical
+    /// monitors, whose layout sets no mode while its size stays.
     pub(crate) async fn refresh_display_mode(&self) {
+        if Self::is_wayland() {
+            return;
+        }
+        if let Ok(guard) = self.reconfigure_lock.try_lock() {
+            self.refresh_in_turn(guard).await;
+            return;
+        }
+        let service = self.arc();
+        tokio::spawn(async move {
+            let guard = service.reconfigure_lock.lock().await;
+            service.refresh_in_turn(guard).await;
+        });
+    }
+
+    /// Set the refresh under `guard`, then run the pass something asked for meanwhile.
+    async fn refresh_in_turn(&self, guard: tokio::sync::MutexGuard<'_, ()>) {
+        self.refresh_display_mode_locked().await;
+        drop(guard);
+        if self.reconfigure_pending.load(Ordering::Relaxed) {
+            self.reconfigure_displays().await;
+        }
+    }
+
+    /// `refresh_display_mode` under the reconfigure lock: never below the fastest display of
+    /// the layout.
+    async fn refresh_display_mode_locked(&self) {
         if Self::is_wayland() {
             return;
         }
@@ -2439,7 +2469,7 @@ impl WsService {
         }
         if old.live.0 != new.live.0 {
             info!(target: "ws", "Frame rate for '{did}' is now {} fps.", fps_label(new.live.0));
-            self.refresh_display_mode().await;
+            self.refresh_display_mode_locked().await;
         }
         needs_fallback
     }
@@ -3757,8 +3787,7 @@ impl WsService {
     /// for those with `video_active`. Self-serializing: a call during a pass coalesces into one
     /// follow-up pass, so state converges on the latest request without a reconfigure storm.
     pub async fn reconfigure_displays(&self) {
-        let Ok(mut guard) = self.reconfigure_lock.try_lock() else {
-            self.reconfigure_pending.store(true, Ordering::Relaxed);
+        let Some(mut guard) = self.layout_turn() else {
             debug!(target: "ws", "Reconfiguration already in progress; coalescing this request.");
             return;
         };
@@ -3774,6 +3803,18 @@ impl WsService {
                 Err(_) => return,
             };
         }
+    }
+
+    /// The reconfigure lock, or `None` with the request left to whoever holds it: every holder
+    /// runs a pass once it lets go of a lock something asked for meanwhile. The request is
+    /// flagged before the second try, so a holder letting go between the two is either seen
+    /// gone or has seen the flag.
+    fn layout_turn(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        if let Ok(guard) = self.reconfigure_lock.try_lock() {
+            return Some(guard);
+        }
+        self.reconfigure_pending.store(true, Ordering::Relaxed);
+        self.reconfigure_lock.try_lock().ok()
     }
 
     /// Tell every display's client the pipeline stopped on a reconfigure abort, keeping

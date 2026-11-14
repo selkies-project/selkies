@@ -7,6 +7,7 @@
 //! The service over stand-ins for what it drives: the handshake, the verbs, the owner model,
 //! the fan-out, and the teardown.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -398,6 +399,47 @@ async fn lost_frames_and_key_frames_are_floored() {
         "a page that does not own the display repairs once a second"
     );
     reset_clock();
+}
+
+#[tokio::test]
+async fn a_rate_change_during_a_layout_pass_is_the_refresh_the_display_keeps() {
+    let rig = Rig::new();
+    let _page = rig.owner("a").await;
+    settle().await;
+    rig.service.handle_opcode_fps(144.0, PRIMARY_DISPLAY).await;
+    assert_eq!(*rig.display.refresh.lock(), Some(144.0));
+    // A pass that read 144 fps is setting the modes of a new size when the rate changes.
+    let layouts = |rig: &Rig| {
+        let calls = rig.display.calls.lock();
+        calls.iter().filter(|c| c.starts_with("layout")).count()
+    };
+    let before = layouts(&rig);
+    let hold = Arc::new(tokio::sync::Notify::new());
+    *rig.display.hold_layout.lock() = Some(hold.clone());
+    let service = rig.service.clone();
+    let pass =
+        tokio::spawn(async move { service.handle_resize("1600x900", PRIMARY_DISPLAY).await });
+    while layouts(&rig) == before {
+        settle().await;
+    }
+    rig.service.handle_opcode_fps(90.0, PRIMARY_DISPLAY).await;
+    assert!(
+        rig.primary_capture().has("framerate 90"),
+        "the capture takes the rate without waiting for the pass"
+    );
+    hold.notify_one();
+    pass.await.unwrap();
+    for _ in 0..100 {
+        if *rig.display.refresh.lock() == Some(90.0) {
+            break;
+        }
+        settle().await;
+    }
+    assert_eq!(
+        *rig.display.refresh.lock(),
+        Some(90.0),
+        "the pass's mode-set cannot leave the display at the rate it read before the change"
+    );
 }
 
 #[tokio::test]

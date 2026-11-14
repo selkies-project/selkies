@@ -260,12 +260,19 @@ impl CaptureFactory for FakeCaptures {
 }
 
 /// A display server whose every request is realized, or refused at `root`. With `fits`, the
-/// extended layout is fitted to `root` in place, as the logical-monitor path does.
+/// extended layout is fitted to `root` in place, as the logical-monitor path does. A layout of
+/// the size the outputs already show sets no mode, as on that path.
 #[derive(Default)]
 pub struct FakeDisplay {
     pub root: Mutex<Option<(i32, i32)>>,
     pub calls: Mutex<Vec<String>>,
     pub fits: Mutex<bool>,
+    /// The refresh the outputs run at: what the last mode-set or refresh request carried.
+    pub refresh: Mutex<Option<f64>>,
+    /// The size the last mode-set gave the outputs.
+    pub shown: Mutex<Option<(i32, i32)>>,
+    /// Holds the next layout request, once it is recorded, until notified: a mode-set in flight.
+    pub hold_layout: Mutex<Option<Arc<tokio::sync::Notify>>>,
 }
 
 #[async_trait]
@@ -284,14 +291,15 @@ impl Display for FakeDisplay {
         true
     }
 
-    async fn apply_extended_layout(
-        &self,
-        layouts: &mut Layouts,
-        w: i32,
-        h: i32,
-        _fps: f64,
-    ) -> bool {
+    async fn apply_extended_layout(&self, layouts: &mut Layouts, w: i32, h: i32, fps: f64) -> bool {
         self.calls.lock().push(format!("layout {w}x{h}"));
+        let hold = self.hold_layout.lock().take();
+        if let Some(hold) = hold {
+            hold.notified().await;
+        }
+        if self.shown.lock().replace((w, h)) != Some((w, h)) {
+            *self.refresh.lock() = Some(fps);
+        }
         let root = *self.root.lock();
         if *self.fits.lock()
             && let Some((rw, rh)) = root
@@ -305,7 +313,9 @@ impl Display for FakeDisplay {
         self.root.lock().unwrap_or(fallback)
     }
 
-    async fn refresh_output_mode(&self, _fps: f64) {}
+    async fn refresh_output_mode(&self, fps: f64) {
+        *self.refresh.lock() = Some(fps);
+    }
 
     async fn set_dpi(&self, dpi: i32) -> bool {
         self.calls.lock().push(format!("dpi {dpi}"));
