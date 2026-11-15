@@ -469,7 +469,11 @@ pub fn test_display() -> String {
 }
 
 /// A loopback port nothing is listening on, from the kernel's own pool.
-fn free_port() -> u16 {
+///
+/// # Panics
+///
+/// When the kernel hands out no port.
+pub fn free_port() -> u16 {
     std::net::TcpListener::bind(("127.0.0.1", 0))
         .and_then(|probe| probe.local_addr())
         .expect("a free loopback port")
