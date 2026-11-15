@@ -127,7 +127,7 @@ SUITES: list = [
     {"path": RUST + "command_dispatch.rs", "tier": "integration", "timeout": 120},
     {"path": RUST + "two_display_pixels.rs", "tier": "integration", "timeout": 600},
     {"path": RUST + "locked_cursor_across_displays.rs", "tier": "integration", "timeout": 600},
-    {"path": "integration/test_lone_display_crtc_follows.py", "tier": "integration", "timeout": 300},
+    {"path": RUST + "lone_display_crtc_follows.rs", "tier": "integration", "timeout": 300},
     {"path": RUST + "xvfb_vidmode.rs", "tier": "integration", "timeout": 120},
     {"path": RUST + "capture_demand.rs", "tier": "integration", "timeout": 300},
     {"path": "integration/test_session_launcher.py", "tier": "integration", "timeout": 600},
