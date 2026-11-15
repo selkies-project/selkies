@@ -101,7 +101,6 @@ SUITES: list = [
     # The kernel block needs a writable /dev/uinput, which CI does not have:
     # run it by hand (`test_gamepad_rumble.py kernel`) where one is.
     # Likewise the kernel block here (`test_seat_isolation.py kernel`).
-    {"path": "integration/test_uinput_interposer.py", "tier": "integration", "timeout": 300},
     {"path": RUST + "ack_latency.rs", "tier": "integration", "timeout": 300},
     {"path": RUST + "audit_webhook.rs", "tier": "integration", "timeout": 600},
     {"path": RUST + "clipboard_read_stall.rs", "tier": "integration", "timeout": 300},

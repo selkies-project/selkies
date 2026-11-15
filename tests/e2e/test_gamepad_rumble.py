@@ -31,12 +31,19 @@ import helpers as H
 import core_lib as C
 from playwright.sync_api import sync_playwright
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                "integration"))
-from test_uinput_interposer import build_interposer  # noqa: E402
-
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_dashboards import bar_close_panel, bar_tool  # noqa: E402
+
+
+def build_interposer(workdir: str) -> str:
+    """The input interposer, built into `workdir`."""
+    so = os.path.join(workdir, "selkies_input_interposer.so")
+    subprocess.run(
+        ["gcc", "-O2", "-shared", "-fPIC", "-o", so,
+         os.path.join(H.REPO, "addons", "input-interposer", "input_interposer.c"), "-ldl", "-pthread"],
+        check=True, capture_output=True, text=True)
+    return so
+
 
 # A standard pad whose motors record what they are asked to play, in the
 # shape the engine gives its pads: `vibrationActuator` for Chromium and WebKit,
