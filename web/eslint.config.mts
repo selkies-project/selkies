@@ -8,14 +8,26 @@
 // they lint with the dashboard's ESLint, and these packages resolve
 // from its node_modules (scripts/ci/lint-web.sh installs them).
 import { createRequire } from 'node:module'
+import { fields } from './selkies-web-core/lib/narrow.ts'
 
 const require = createRequire(new URL('selkies-dashboard/', import.meta.url))
-const js = require('@eslint/js') as typeof import('@eslint/js')
-const globals = require('globals') as typeof import('globals')
-const tseslint = require('typescript-eslint') as typeof import('typescript-eslint')
+// Loaded by name from the dashboard's node_modules, which no import here can
+// name, so each package is read for the members this config takes from it.
+const js = fields(require('@eslint/js'))
+const globals = fields(require('globals'))
+const tseslint = fields(require('typescript-eslint'))
+/** The rules a preset turns on, a config or a list of them. */
+const rulesOf = (preset: unknown): Record<string, unknown> =>
+  (Array.isArray(preset) ? preset : [preset]).reduce<Record<string, unknown>>((acc, c) => ({ ...acc, ...fields(fields(c).rules) }), {})
+/** One of the `globals` package's tables, by environment. */
+const globalsOf = (name: string): Record<string, unknown> => fields(globals[name])
+const jsRecommended = rulesOf(fields(js.configs).recommended)
+const tsRecommended = rulesOf(fields(tseslint.configs).recommended)
+// The type-checked preset, and no type assertion that narrows: a check narrows, never `as`.
+const tsTypeChecked = { ...rulesOf(fields(tseslint.configs).recommendedTypeChecked), '@typescript-eslint/no-unsafe-type-assertion': 'error' }
 
 const rules = {
-  ...js.configs.recommended.rules,
+  ...jsRecommended,
   // Teardown and capability probes are best-effort: a catch that drops its
   // error says so by being empty.
   'no-empty': ['error', { allowEmptyCatch: true }],
@@ -26,19 +38,21 @@ const rules = {
 // `typescript` package here is (the @typescript/typescript6 shim); `tsc` is
 // the native TypeScript 7 compiler from @typescript/native. See package.json.
 const tsRules = {
-  ...js.configs.recommended.rules,
-  ...tseslint.configs.recommended.reduce((acc, c) => ({ ...acc, ...c.rules }), {}),
+  ...jsRecommended,
+  ...tsRecommended,
   'no-empty': ['error', { allowEmptyCatch: true }],
   'no-unused-vars': 'off',
   '@typescript-eslint/no-unused-vars': ['error', { caughtErrors: 'none' }],
   // No `any`: a value of unknown shape is `unknown` and narrowed, and the
   // type-checked rules refuse the `any` the DOM and JSON still hand over.
+  // Nor a type assertion that narrows: a check narrows, never `as`.
   '@typescript-eslint/no-explicit-any': 'error',
   '@typescript-eslint/no-unsafe-argument': 'error',
   '@typescript-eslint/no-unsafe-assignment': 'error',
   '@typescript-eslint/no-unsafe-call': 'error',
   '@typescript-eslint/no-unsafe-member-access': 'error',
   '@typescript-eslint/no-unsafe-return': 'error',
+  '@typescript-eslint/no-unsafe-type-assertion': 'error',
   // The `.js` files were never held to these three style rules, which the
   // typescript-eslint preset adds; the conversion keeps each declaration as it was.
   'no-var': 'off',
@@ -54,7 +68,7 @@ export default [
   { ignores: ['**/dist/'] },
   {
     files: ['selkies-web-core/**/*.{js,mjs}'],
-    languageOptions: { ecmaVersion: 'latest', sourceType: 'module', globals: globals.browser },
+    languageOptions: { ecmaVersion: 'latest', sourceType: 'module', globals: globalsOf('browser') },
     rules,
   },
   {
@@ -62,7 +76,7 @@ export default [
     ignores: ['selkies-web-core/clipboard-worker.ts'],
     languageOptions: {
       ecmaVersion: 2020,
-      globals: globals.browser,
+      globals: globalsOf('browser'),
       parser: tseslint.parser,
       parserOptions: {
         ecmaFeatures: { jsx: true },
@@ -78,7 +92,7 @@ export default [
     files: ['selkies-web-core/clipboard-worker.ts'],
     languageOptions: {
       ecmaVersion: 2020,
-      globals: globals.worker,
+      globals: globalsOf('worker'),
       parser: tseslint.parser,
       parserOptions: {
         ecmaFeatures: { jsx: true },
@@ -96,7 +110,7 @@ export default [
     files: ['selkies-web-core/vite.config.ts', 'selkies-web-core/gendb.ts', 'eslint.config.mts'],
     languageOptions: {
       ecmaVersion: 'latest',
-      globals: globals.node,
+      globals: globalsOf('node'),
       parser: tseslint.parser,
       parserOptions: {
         sourceType: 'module',
@@ -106,8 +120,8 @@ export default [
     },
     plugins: { '@typescript-eslint': tseslint.plugin },
     rules: {
-      ...js.configs.recommended.rules,
-      ...tseslint.configs.recommendedTypeChecked.reduce((acc, c) => ({ ...acc, ...c.rules }), {}),
+      ...jsRecommended,
+      ...tsTypeChecked,
       'no-empty': ['error', { allowEmptyCatch: true }],
       '@typescript-eslint/no-unused-vars': ['error', { caughtErrors: 'none' }],
     },
@@ -119,7 +133,7 @@ export default [
     files: ['universal-touch-gamepad/**/*.ts'],
     languageOptions: {
       ecmaVersion: 'latest',
-      globals: globals.browser,
+      globals: globalsOf('browser'),
       parser: tseslint.parser,
       parserOptions: {
         sourceType: 'module',
@@ -129,8 +143,8 @@ export default [
     },
     plugins: { '@typescript-eslint': tseslint.plugin },
     rules: {
-      ...js.configs.recommended.rules,
-      ...tseslint.configs.recommendedTypeChecked.reduce((acc, c) => ({ ...acc, ...c.rules }), {}),
+      ...jsRecommended,
+      ...tsTypeChecked,
       'no-empty': ['error', { allowEmptyCatch: true }],
       '@typescript-eslint/no-unused-vars': ['error', { caughtErrors: 'none' }],
     },

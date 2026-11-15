@@ -9,14 +9,25 @@
 // tier's tester pages. They lint with the dashboard's ESLint and
 // typescript-eslint, as web/eslint.config.mts does.
 import { createRequire } from 'node:module'
+import { fields } from './web/selkies-web-core/lib/narrow.ts'
 
 const require = createRequire(new URL('web/selkies-dashboard/', import.meta.url))
-const js = require('@eslint/js') as typeof import('@eslint/js')
-const globals = require('globals') as typeof import('globals')
-const tseslint = require('typescript-eslint') as typeof import('typescript-eslint')
+// Loaded by name from the dashboard's node_modules, which no import here can
+// name, so each package is read for the members this config takes from it.
+const js = fields(require('@eslint/js'))
+const globals = fields(require('globals'))
+const tseslint = fields(require('typescript-eslint'))
+/** The rules a preset turns on, a config or a list of them. */
+const rulesOf = (preset: unknown): Record<string, unknown> =>
+  (Array.isArray(preset) ? preset : [preset]).reduce<Record<string, unknown>>((acc, c) => ({ ...acc, ...fields(fields(c).rules) }), {})
+/** One of the `globals` package's tables, by environment. */
+const globalsOf = (name: string): Record<string, unknown> => fields(globals[name])
+const jsRecommended = rulesOf(fields(js.configs).recommended)
+// The type-checked preset, and no type assertion that narrows: a check narrows, never `as`.
+const tsTypeChecked = { ...rulesOf(fields(tseslint.configs).recommendedTypeChecked), '@typescript-eslint/no-unsafe-type-assertion': 'error' }
 
 const rules = {
-  ...js.configs.recommended.rules,
+  ...jsRecommended,
   'no-empty': ['error', { allowEmptyCatch: true }],
   'no-unused-vars': ['error', { caughtErrors: 'none' }],
 }
@@ -40,7 +51,7 @@ export default [
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'module',
-      globals: { ...globals.node, ...globals.browser },
+      globals: { ...globalsOf('node'), ...globalsOf('browser') },
       parser: tseslint.parser,
       parserOptions: {
         project: [
@@ -55,7 +66,7 @@ export default [
     plugins: { '@typescript-eslint': tseslint.plugin },
     rules: {
       ...rules,
-      ...tseslint.configs.recommendedTypeChecked.reduce((acc, c) => ({ ...acc, ...c.rules }), {}),
+      ...tsTypeChecked,
       'no-unused-vars': 'off',
       '@typescript-eslint/no-unused-vars': ['error', { caughtErrors: 'none' }],
     },
@@ -64,11 +75,17 @@ export default [
     // Node programs; the browser-side checks they run are strings.
     files: ['tests/browserstack/**/*.ts'],
     ignores: ['tests/browserstack/node_modules/'],
-    languageOptions: { ecmaVersion: 'latest', sourceType: 'module', globals: globals.node, parser: tseslint.parser },
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      globals: globalsOf('node'),
+      parser: tseslint.parser,
+      parserOptions: { project: ['tests/browserstack/tsconfig.json'], tsconfigRootDir: import.meta.dirname },
+    },
     plugins: { '@typescript-eslint': tseslint.plugin },
     rules: {
       ...rules,
-      ...tseslint.configs.recommended.reduce((acc, c) => ({ ...acc, ...c.rules }), {}),
+      ...tsTypeChecked,
       'no-unused-vars': 'off',
       '@typescript-eslint/no-unused-vars': ['error', { caughtErrors: 'none' }],
     },
@@ -80,14 +97,14 @@ export default [
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'script',
-      globals: globals.browser,
+      globals: globalsOf('browser'),
       parser: tseslint.parser,
       parserOptions: { project: ['tests/tools/tsconfig.browser.json'], tsconfigRootDir: import.meta.dirname },
     },
     plugins: { '@typescript-eslint': tseslint.plugin },
     rules: {
       ...rules,
-      ...tseslint.configs.recommendedTypeChecked.reduce((acc, c) => ({ ...acc, ...c.rules }), {}),
+      ...tsTypeChecked,
       'no-unused-vars': 'off',
       // IT is the global the tester pages call.
       '@typescript-eslint/no-unused-vars': ['error', { caughtErrors: 'none', varsIgnorePattern: '^IT$' }],

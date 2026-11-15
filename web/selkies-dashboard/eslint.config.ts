@@ -102,6 +102,8 @@ export default [
       '@typescript-eslint/no-unsafe-call': 'error',
       '@typescript-eslint/no-unsafe-member-access': 'error',
       '@typescript-eslint/no-unsafe-return': 'error',
+      // Nor a type assertion that narrows: a check narrows, never `as`.
+      '@typescript-eslint/no-unsafe-type-assertion': 'error',
     },
   },
   {
