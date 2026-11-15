@@ -3684,6 +3684,8 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "x11rb 0.14.0",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

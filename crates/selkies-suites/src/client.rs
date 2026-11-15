@@ -69,6 +69,8 @@ impl Binary {
 struct Inbox {
     texts: Vec<String>,
     binaries: Vec<Binary>,
+    /// Whole binary payloads, kept once [`Client::keep_payloads`] asks for them.
+    payloads: Option<Vec<Vec<u8>>>,
     closed: bool,
 }
 
@@ -132,6 +134,9 @@ impl Client {
                                             head,
                                             len: payload.len(),
                                         });
+                                        if let Some(kept) = inbox.payloads.as_mut() {
+                                            kept.push(payload.to_vec());
+                                        }
                                     }
                                 }
                                 _ => inbox.closed = true,
@@ -277,6 +282,27 @@ impl Client {
             .filter(|t| wanted(t))
             .cloned()
             .collect()
+    }
+
+    /// Keep every binary payload that arrives from now on, whole, for [`Client::take_payloads`].
+    /// Off unless asked for, so a page that streams for minutes holds only headers.
+    pub fn keep_payloads(&self) {
+        self.inbox
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .payloads
+            .get_or_insert_with(Vec::new);
+    }
+
+    /// The binary payloads kept since the last take, in arrival order; keeping goes on.
+    pub fn take_payloads(&self) -> Vec<Vec<u8>> {
+        self.inbox
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .payloads
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
     }
 
     /// The last text message that `wanted` accepts.
