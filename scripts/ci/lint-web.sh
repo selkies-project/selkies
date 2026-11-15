@@ -52,6 +52,14 @@ if [ ! -x "${site}/node_modules/.bin/tsc" ]; then
         --fetch-retries=5 --fetch-retry-maxtimeout=120000)
 fi
 
+# The smoke's type-checked lint below resolves WebdriverIO's types from its
+# own install
+smoke=tests/browserstack
+if [ ! -x "${smoke}/node_modules/.bin/tsc" ]; then
+    (cd "${smoke}" && npm ci --no-audit --no-fund \
+        --fetch-retries=5 --fetch-retry-maxtimeout=120000)
+fi
+
 # The Node audits, the BrowserStack smoke, the site's scripts and configs, the
 # image tier's tester pages and this config itself: eslint.config.mts at the
 # root, with the same ESLint.
@@ -77,11 +85,6 @@ echo "tsc: tests/tools"
 # The BrowserStack smoke checks itself with the TypeScript it declares, against
 # the WebdriverIO and Node types its own dependencies carry.
 echo "tsc: tests/browserstack"
-smoke=tests/browserstack
-if [ ! -x "${smoke}/node_modules/.bin/tsc" ]; then
-    (cd "${smoke}" && npm ci --no-audit --no-fund \
-        --fetch-retries=5 --fetch-retry-maxtimeout=120000)
-fi
 (cd "${smoke}" && npm run --silent typecheck)
 
 # The site checks its pages, its build scripts and its configs with the
