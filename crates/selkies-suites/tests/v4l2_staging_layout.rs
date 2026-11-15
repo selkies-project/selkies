@@ -11,13 +11,14 @@
 //! of a frame beyond the end of the file faults the application; a layout that fits is configured.
 //!
 //! Serves both layouts from a stand-in backend here and opens the device through the interposer
-//! with the libc-only `tests/tools/v4l2probe`, both built with make; no pixelflux, no display, so
-//! it runs with `cargo test --workspace`.
+//! with the libc-only `tests/tools/v4l2probe`, both built into the test's own directory (a build in
+//! the tree would stand in for the webcam suite's, which wants PipeWire's headers a later CI step
+//! installs); no pixelflux, no display, so it runs with `cargo test --workspace`.
 
 use std::io::{IoSlice, Read};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -102,8 +103,55 @@ fn serve_once(path: &Path, staging: &Path, memfd_size: u64) -> std::thread::Join
     })
 }
 
-/// What the probe logs opening the device with a memfd of `memfd_size` bytes.
-fn open_through_interposer(dir: &Path, memfd_size: u64) -> String {
+/// The interposer and the libc-only probe, built into `dir` rather than the tree, so a build here
+/// never stands in for one with headers a later step installs.
+fn build(dir: &Path) -> (PathBuf, PathBuf) {
+    let src = dir.join("v4l2-interposer");
+    std::fs::create_dir_all(&src).expect("the build directory");
+    for entry in std::fs::read_dir(repo().join("addons/v4l2-interposer")).expect("the interposer") {
+        let path = entry.expect("an entry").path();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if path.is_file() && !name.ends_with(".o") && !name.contains(".so") {
+            std::fs::copy(&path, src.join(&name)).expect("a source file");
+        }
+    }
+    let make = run_within(
+        Command::new("make").arg("-s").arg("-C").arg(&src),
+        Duration::from_secs(180),
+    )
+    .expect("make ran");
+    assert!(
+        make.status.success(),
+        "the interposer did not build: {}",
+        make.stderr
+    );
+    let probe = dir.join("v4l2probe");
+    let cc = run_within(
+        Command::new("cc")
+            .args(["-O2", "-Wall", "-o"])
+            .arg(&probe)
+            .arg(repo().join("tests/tools/v4l2probe.c")),
+        Duration::from_secs(120),
+    )
+    .expect("cc ran");
+    assert!(
+        cc.status.success(),
+        "v4l2probe did not build: {}",
+        cc.stderr
+    );
+    (src.join("selkies_v4l2_interposer.so"), probe)
+}
+
+/// What the probe logs opening the device through `interposer` with a memfd of `memfd_size`
+/// bytes.
+fn open_through_interposer(
+    (interposer, probe): (&Path, &Path),
+    dir: &Path,
+    memfd_size: u64,
+) -> String {
     let sockets = dir.join(format!("sockets-{memfd_size}"));
     let _ = std::fs::remove_dir_all(&sockets);
     std::fs::create_dir_all(&sockets).expect("the socket directory");
@@ -113,12 +161,9 @@ fn open_through_interposer(dir: &Path, memfd_size: u64) -> String {
         memfd_size,
     );
     let ran = run_within(
-        Command::new(repo().join("tests/tools/v4l2probe"))
+        Command::new(probe)
             .args(["--timeout", "300", "/dev/video0", "1"])
-            .env(
-                "LD_PRELOAD",
-                repo().join("addons/v4l2-interposer/selkies_v4l2_interposer.so"),
-            )
+            .env("LD_PRELOAD", interposer)
             .env("SELKIES_WEBCAM_SOCKET_PATH", &sockets)
             .env("SELKIES_WEBCAM_SOURCE", "socket")
             .env("WEBCAM_LOG", "1"),
@@ -136,33 +181,19 @@ fn tail(text: &str, n: usize) -> String {
 
 #[test]
 fn the_interposer_checks_the_staging_layout() {
-    for (dir, target) in [
-        ("addons/v4l2-interposer", None),
-        ("tests/tools", Some("v4l2probe")),
-    ] {
-        let mut make = Command::new("make");
-        make.arg("-s").arg("-C").arg(repo().join(dir));
-        if let Some(target) = target {
-            make.arg(target);
-        }
-        let built = run_within(&mut make, Duration::from_secs(180)).expect("make ran");
-        assert!(
-            built.status.success(),
-            "make -C {dir} failed: {}",
-            built.stderr
-        );
-    }
     let dir = workdir().join(format!("v4l2-staging-layout-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("the scratch directory");
+    let (interposer, probe) = build(&dir);
+    let built = (interposer.as_path(), probe.as_path());
     let mut checks = Checks::new("v4l2-staging-layout");
     let fits = u64::from(DATA_OFFSET) + u64::from(SLOTS) * u64::from(SLOT_SIZE);
-    let log = open_through_interposer(&dir, fits);
+    let log = open_through_interposer(built, &dir, fits);
     checks.check(
         "a layout inside its memfd is configured",
         log.contains("configured 64x48"),
         tail(&log, 160),
     );
-    let log = open_through_interposer(&dir, 2 * u64::from(DATA_OFFSET));
+    let log = open_through_interposer(built, &dir, 2 * u64::from(DATA_OFFSET));
     checks.check(
         "frames past the end of the memfd fail the open",
         log.contains("staging layout outside its memfd") && !log.contains("configured 64x48"),
