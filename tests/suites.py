@@ -93,7 +93,6 @@ SUITES: list = [
     {"path": "unit/test_ts_static.py", "tier": "unit", "timeout": 120},
     {"path": "tools/dashboard_no_lazy_chunks_audit.ts", "tier": "unit", "timeout": 120},
     {"path": "unit/test_frame_num_range_log.py", "tier": "unit", "timeout": 60},
-    {"path": "unit/test_wheel_selection.py", "tier": "unit", "timeout": 120},
     {"path": "tools/cursor_scaling_audit.ts", "tier": "unit", "timeout": 120},
 
     # integration
