@@ -12,7 +12,8 @@
 //! media sections: a malformed attribute is skipped rather than refusing the whole offer, as is
 //! an `a=rtpmap` for a payload type already mapped, a payload type outside 0-255 or in the
 //! forbidden 72-76 refuses it, and a section past `MAX_CODECS`, `MAX_SSRCS`, `MAX_RTCP_FB`, or
-//! `MAX_FINGERPRINTS`, or a description past `MAX_MEDIA_SECTIONS`, is refused at once, since
+//! `MAX_FINGERPRINTS`, or a description past `MAX_MEDIA_SECTIONS` or `MAX_RTCP_FB_TEXT`, is
+//! refused at once, since
 //! the parse runs on the task every session shares on what a page sends over signaling;
 //! `MAX_REMOTE_SDP` bounds what is parsed at all. A fingerprint that is not RFC 8122's for a
 //! function DTLS verifies with, and an ICE value past `MAX_ICE_VALUE`, are skipped: every
@@ -53,6 +54,10 @@ pub const MAX_SSRCS: usize = 512;
 /// codec it names, every codec for `*`, and counts at least once, so a section holds no more
 /// than it prints back.
 pub const MAX_RTCP_FB: usize = 512;
+/// The most text a description's feedback may print back, in bytes: an `a=rtcp-fb` line prints
+/// once for each codec it lands on, every codec of its section for `*`, so its length times
+/// those codecs is counted rather than what was read. A browser's offer prints a few kilobytes.
+pub const MAX_RTCP_FB_TEXT: usize = 64 * 1024;
 /// The longest remote description read at all, in bytes: a browser's answer is a few
 /// kilobytes.
 pub const MAX_REMOTE_SDP: usize = 256 * 1024;
@@ -861,6 +866,7 @@ impl SessionDescription {
         if parsed.media_descriptions.len() > MAX_MEDIA_SECTIONS {
             return Err(SdpError::Bound(MAX_MEDIA_SECTIONS, "media sections"));
         }
+        let mut feedback_text = 0usize;
         for rtc_media in &parsed.media_descriptions {
             let name = &rtc_media.media_name;
             if name.media.is_empty() || name.protos.is_empty() {
@@ -1117,9 +1123,16 @@ impl SessionDescription {
                         let payload_type = bits[0].parse::<u8>().ok();
                         let wildcard = bits[0] == "*";
                         let lands = |c: &Codec| wildcard || Some(c.payload_type) == payload_type;
-                        feedback += media.codecs.iter().filter(|c| lands(c)).count().max(1);
+                        let landed = media.codecs.iter().filter(|c| lands(c)).count();
+                        feedback += landed.max(1);
                         if feedback > MAX_RTCP_FB {
                             return Err(SdpError::Bound(MAX_RTCP_FB, "feedback entries"));
+                        }
+                        // Each prints `a=rtcp-fb:<payload type> <kind> <parameter>\r\n`, which
+                        // the value, its own payload type or `*` included, plus 16 bounds.
+                        feedback_text += landed * (value.len() + 16);
+                        if feedback_text > MAX_RTCP_FB_TEXT {
+                            return Err(SdpError::Bound(MAX_RTCP_FB_TEXT, "feedback text"));
                         }
                         let entry = RtcpFeedback {
                             kind: bits[1].to_owned(),

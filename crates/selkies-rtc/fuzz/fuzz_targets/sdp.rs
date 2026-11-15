@@ -84,9 +84,9 @@ fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);
     if let Ok(parsed) = SessionDescription::parse(&text) {
         let printed = parsed.to_sdp();
-        // Every section prints its session's ICE values and fingerprints again, which the
-        // parse bounds: what is printed stays within twice what is read at all, and parses
-        // back wherever it is within that.
+        // Every section prints its session's ICE values and fingerprints again, and a feedback
+        // line once for each codec it lands on, which the parse bounds: what is printed stays
+        // within twice what is read at all, and parses back wherever it is within that.
         assert!(
             printed.len() <= 2 * MAX_REMOTE_SDP,
             "{} characters read printed {}",

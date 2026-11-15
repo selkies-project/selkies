@@ -27,8 +27,8 @@ use super::codecs::{
 use super::munge::{StreamFormat, munge_sdp};
 use super::{
     Direction, DtlsFingerprint, IceParameters, LocalTransport, MAX_CODECS, MAX_FINGERPRINTS,
-    MAX_ICE_VALUE, MAX_MEDIA_SECTIONS, MAX_REMOTE_SDP, MAX_RTCP_FB, MAX_SSRCS, SdpError, SdpType,
-    Session, SessionDescription,
+    MAX_ICE_VALUE, MAX_MEDIA_SECTIONS, MAX_REMOTE_SDP, MAX_RTCP_FB, MAX_RTCP_FB_TEXT, MAX_SSRCS,
+    SdpError, SdpType, Session, SessionDescription,
 };
 
 fn head() -> String {
@@ -130,6 +130,45 @@ fn feedback_counts_every_codec_a_line_lands_on() {
     );
 }
 
+/// A video section of `codecs` payload types from 96 under `lines` lines of
+/// `a=rtcp-fb:* nack <parameter>`, each line's value `value` bytes long.
+fn long_feedback_section(codecs: u8, lines: usize, value: usize) -> String {
+    let mut text = "m=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\n".to_owned();
+    for pt in 96..96 + u16::from(codecs) {
+        text += &format!("a=rtpmap:{pt} VP8/90000\r\n");
+    }
+    let line = format!(
+        "a=rtcp-fb:* nack {}\r\n",
+        "p".repeat(value - "* nack ".len())
+    );
+    text + &line.repeat(lines)
+}
+
+/// What OSS-Fuzz issue 585919670 found: two long wildcard lines over 15 codecs, few entries,
+/// printed back ten times over. The bound is on the text the feedback prints.
+#[test]
+fn feedback_text_is_bounded_by_what_it_prints_not_by_its_lines() {
+    let fuzzed = format!("{}{}", head(), long_feedback_section(15, 2, 20_838));
+    assert!(fuzzed.len() < MAX_REMOTE_SDP);
+    assert_eq!(
+        SessionDescription::parse(&fuzzed),
+        Err(SdpError::Bound(MAX_RTCP_FB_TEXT, "feedback text")),
+        "30 entries printing 625,620 bytes"
+    );
+    // 16 codecs under 4 lines: 64 entries of 1008 + 16 bytes each, the bound exactly.
+    let at = format!("{}{}", head(), long_feedback_section(16, 4, 1008));
+    let parsed = SessionDescription::parse(&at).expect("feedback at the bound parses");
+    assert!(
+        parsed.to_sdp().len() < at.len() + MAX_RTCP_FB_TEXT,
+        "the bound holds what the feedback prints"
+    );
+    assert_eq!(
+        SessionDescription::parse(&format!("{}{}", head(), long_feedback_section(16, 4, 1009))),
+        Err(SdpError::Bound(MAX_RTCP_FB_TEXT, "feedback text")),
+        "one byte a line past it"
+    );
+}
+
 #[test]
 fn a_description_of_thousands_is_refused_at_once() {
     let big = section(4000, 4000, 4000);
@@ -216,17 +255,21 @@ fn a_description_past_its_fingerprints_or_sections_is_refused_and_a_long_ice_val
     );
 }
 
-/// Every section prints its session's ICE values and fingerprints again; at the bounds, a
-/// description still prints back within twice what is read at all.
+/// Every section prints its session's ICE values and fingerprints again, and a feedback line
+/// once for each codec it lands on; at the bounds, a description still prints back within
+/// twice what is read at all.
 #[test]
 fn a_description_at_every_bound_prints_back_within_twice_the_read_limit() {
     let ice = "u".repeat(MAX_ICE_VALUE);
     let fingerprint = format!("a=fingerprint:sha-512 {}\r\n", vec!["AA"; 64].join(":"));
+    // 128 codecs under 4 wildcard lines: MAX_RTCP_FB entries of 112 + 16 bytes each, which
+    // is MAX_RTCP_FB_TEXT.
     let text = format!(
         "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\na=ice-ufrag:{ice}\r\na=ice-pwd:{ice}\r\n\
-         a=ice-options:{ice}\r\n{}{}",
+         a=ice-options:{ice}\r\n{}{}{}",
         fingerprint.repeat(MAX_FINGERPRINTS),
-        AUDIO_SECTION.repeat(MAX_MEDIA_SECTIONS)
+        AUDIO_SECTION.repeat(MAX_MEDIA_SECTIONS - 1),
+        long_feedback_section(128, 4, 112)
     );
     let parsed = SessionDescription::parse(&text).expect("the description parses");
     let printed = parsed.to_sdp();
