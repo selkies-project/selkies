@@ -47,6 +47,7 @@ pub const CURSOR_HIDDEN: u32 = 1;
 pub const CURSOR_EMBEDDED: u32 = 2;
 pub const CURSOR_METADATA: u32 = 4;
 const SOURCE_MONITOR: u32 = 1;
+pub const SOURCE_VIRTUAL: u32 = 4;
 const PERSIST_UNTIL_REVOKED: u32 = 2;
 
 type Options<'a> = HashMap<&'a str, Variant<'a>>;
@@ -76,6 +77,8 @@ pub struct PortalSession {
     pub devices: u32,
     pub cursor_mode: u32,
     pub restore_token: Option<String>,
+    /// The portal's `AvailableSourceTypes` (`SOURCE_*` bits), read when the session started.
+    source_types: u32,
     /// RemoteDesktop interface version, 0 when the session drives no input. `ConnectToEIS`
     /// exists from version 2.
     pub rd_version: u32,
@@ -90,6 +93,26 @@ pub struct PortalSession {
     armed: bool,
     /// The input thread's queue, from the first `Notify*` call on.
     notify_tx: OnceLock<mpsc::Sender<NotifyCall>>,
+}
+
+/// The `types` a session selects: every monitor, or one virtual monitor the compositor
+/// creates for the session and removes with it.
+pub fn source_types_options(virtual_only: bool) -> u32 {
+    if virtual_only {
+        SOURCE_VIRTUAL
+    } else {
+        SOURCE_MONITOR
+    }
+}
+
+/// A `session_handle_token` no other session of this process has used.
+fn next_session_token() -> String {
+    static COUNTER: AtomicU32 = AtomicU32::new(1);
+    format!(
+        "pixelflux{}s{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 fn opt_u32(o: &mut Options<'_>, key: &'static str, v: u32) {
@@ -225,13 +248,33 @@ impl PortalSession {
     ) -> Result<Self, String> {
         zbus::block_on(async {
             let mut this = Self::connect(devices, cursor_mode).await?;
-            if let Err(e) = this.start(capture, devices, restore_token).await {
+            if let Err(e) = this.start(capture, devices, restore_token, false).await {
                 this.close().await;
                 return Err(e);
             }
             this.armed = true;
             Ok(this)
         })
+    }
+
+    /// A capture-only session on one virtual monitor: the compositor creates the monitor
+    /// for this session, sizes it to the format its stream is consumed at, and removes it
+    /// when the session closes.
+    pub fn open_virtual(cursor_mode: u32, restore_token: Option<&str>) -> Result<Self, String> {
+        zbus::block_on(async {
+            let mut this = Self::connect(0, cursor_mode).await?;
+            if let Err(e) = this.start(true, 0, restore_token, true).await {
+                this.close().await;
+                return Err(e);
+            }
+            this.armed = true;
+            Ok(this)
+        })
+    }
+
+    /// The `SOURCE_*` bits the portal offered when this session started.
+    pub fn available_source_types(&self) -> u32 {
+        self.source_types
     }
 
     /// The session bus and the portal interfaces a session with `devices` speaks to, before
@@ -261,6 +304,7 @@ impl PortalSession {
             devices: 0,
             cursor_mode,
             restore_token: None,
+            source_types: SOURCE_MONITOR,
             rd_version: 0,
             kde: false,
             mutter: false,
@@ -275,6 +319,7 @@ impl PortalSession {
         capture: bool,
         devices: u32,
         restore_token: Option<&str>,
+        virtual_only: bool,
     ) -> Result<(), String> {
         let sc_version: u32 = self
             .screencast
@@ -294,10 +339,7 @@ impl PortalSession {
         };
         self.rd_version = rd_version;
         let mut options = Options::new();
-        options.insert(
-            "session_handle_token",
-            Variant::from(format!("pixelflux{}", std::process::id())),
-        );
+        options.insert("session_handle_token", Variant::from(next_session_token()));
         let (_, results) = self
             .request("CreateSession", options, async |o| {
                 opener.call("CreateSession", &(o,)).await
@@ -329,9 +371,14 @@ impl PortalSession {
                     .find(|m| available & m != 0)
                     .unwrap_or(CURSOR_EMBEDDED);
             }
+            self.source_types = self
+                .screencast
+                .get_property("AvailableSourceTypes")
+                .await
+                .unwrap_or(SOURCE_MONITOR);
             let mut options = Options::new();
-            opt_u32(&mut options, "types", SOURCE_MONITOR);
-            options.insert("multiple", Variant::Bool(true));
+            opt_u32(&mut options, "types", source_types_options(virtual_only));
+            options.insert("multiple", Variant::Bool(!virtual_only));
             if sc_version >= 2 {
                 opt_u32(&mut options, "cursor_mode", self.cursor_mode);
             }
@@ -652,6 +699,21 @@ mod tests {
             .build()
             .unwrap();
         Variant::Structure(st)
+    }
+
+    #[test]
+    fn source_types_monitor_by_default() {
+        assert_eq!(source_types_options(false), SOURCE_MONITOR);
+    }
+
+    #[test]
+    fn source_types_virtual() {
+        assert_eq!(source_types_options(true), SOURCE_VIRTUAL);
+    }
+
+    #[test]
+    fn session_tokens_are_unique() {
+        assert_ne!(next_session_token(), next_session_token());
     }
 
     /// A `Start` response's stream list parses into node ids with the optional geometry, as
