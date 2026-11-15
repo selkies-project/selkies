@@ -45,7 +45,7 @@ SUITES: list = [
     {"path": "unit/test_fake_udev_enumeration.py", "tier": "unit", "timeout": 300},
     {"path": "unit/test_input_interposer_signals.py", "tier": "unit", "timeout": 180},
     {"path": "unit/test_input_interposer_early_calls.py", "tier": "unit", "timeout": 120},
-    {"path": "unit/test_i18n_keys.py", "tier": "unit", "timeout": 120},
+    {"path": "tools/i18n_audit.ts", "tier": "unit", "timeout": 120, "name": "unit/test_i18n_keys"},
     {"path": "unit/test_client_typing.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_keyboard_chords.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_track_transform.py", "tier": "unit", "timeout": 120},

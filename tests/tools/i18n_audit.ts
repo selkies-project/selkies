@@ -8,8 +8,10 @@
  * Resolve every translation key the dashboard asks for, the way it resolves it.
  *
  * The translator returns the key itself on a miss, so a wrong or absent key is
- * invisible until it renders as "clipboard.uploadImage" on screen. Emits JSON:
- * `{dashboard: {unresolved: {key: [site]}, gaps: {locale: [key]}, keys: n, ...}}`.
+ * invisible until it renders as "clipboard.uploadImage" on screen. Reads the web
+ * directory named on the command line, else the one in this tree.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
  * @module
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -18,7 +20,7 @@ import { pathToFileURL } from "node:url";
 import type { Dictionary } from "../../web/selkies-dashboard/src/translations.ts";
 
 // The web directory, resolved, and refused where it holds a NUL or names a parent.
-const WEB = resolve(process.argv[2] ?? "");
+const WEB = resolve(process.argv[2] ?? join(import.meta.dirname, "..", "..", "web"));
 if (!/^\/[^\0]*$/.test(WEB) || WEB.split("/").includes("..")) throw new Error(`i18n_audit: ${WEB} is not a usable path`);
 const LOCALES = "en es zh_cn zh_tw hi pt fr ru de tr it nl ar ko ja vi th fil da".split(" ");
 
@@ -128,5 +130,34 @@ for (const [tag, want] of Object.entries(ROUTES)) {
   const got = resolveLocale(tag);
   if (got !== want || !dict[got]) misrouted[tag] = got;
 }
-process.stdout.write(JSON.stringify({ dashboard: { keys, locales: LOCALES.length, enKeys: enKeys.length, unresolved, gaps,
-  punctuation, tiles, misrouted, routes: Object.keys(ROUTES).length } }));
+
+let passed = 0;
+let failed = 0;
+
+/** Prints one check's line and counts it. */
+function check(label: string, ok: boolean, detail: string): void {
+  if (ok) passed++;
+  else failed++;
+  console.log(`${ok ? "PASS" : "FAIL"}  [i18n] dashboard: ${label}  ${detail}`);
+}
+
+/** The first four entries of a report map, each worded by `entry`. */
+function first<T>(map: Record<string, T>, entry: (key: string, value: T) => string): string {
+  return Object.entries(map).slice(0, 4).map(([key, value]) => entry(key, value)).join(", ");
+}
+
+check("every key resolves", !Object.keys(unresolved).length,
+  first(unresolved, (key, sites) => `${key} (${sites[0]})`) || `${keys} keys`);
+check("no locale is missing a key English has", !Object.keys(gaps).length,
+  first(gaps, (locale, missing) => `${locale}: ${missing.length} missing (${missing[0]})`) ||
+    `${enKeys.length} keys x ${LOCALES.length} locales`);
+check("a label ends in a colon in every locale or in none", !Object.keys(punctuation).length,
+  first(punctuation, (key, locales) => `${key} (${locales.slice(0, 4).join(", ")})`) ||
+    `${enKeys.length} keys x ${LOCALES.length} locales`);
+check("every stats figure has a label to translate", !tiles.unlabeled.length,
+  tiles.unlabeled.slice(0, 4).join(", ") || `${tiles.shown} figures`);
+check("a browser tag reads the dictionary written for it", !Object.keys(misrouted).length,
+  first(misrouted, (tag, got) => `${tag} -> ${got}`) || `${Object.keys(ROUTES).length} tags`);
+
+console.log(`[i18n] ${passed}/${passed + failed} passed`);
+process.exit(failed ? 1 : 0);
