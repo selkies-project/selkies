@@ -66,7 +66,8 @@ so keep anything shaped like `<name>` or containing braces inside backticks.
   value whose shape is not known is `unknown` and narrowed before use (a wire message once, where it is parsed, by
   the shape its module declares), and an untyped global or a vendor-prefixed API is declared in a `.d.ts`
   augmentation (`web/selkies-web-core/lib/window-globals.d.ts`), never reached through a cast. ESLint refuses the
-  rest (`no-explicit-any` and the type-checked `no-unsafe-*` rules).
+  rest (`no-explicit-any` and the type-checked `no-unsafe-*` rules), and takes no inline configuration
+  (`noInlineConfig` in every config): a finding is fixed in the code, never turned off by a comment.
 - No JavaScript files: a classic script a browser is handed as it is (`tests/tools/pad_init.ts`, the image tier's
   `tests/image/site/it.ts`) is TypeScript too, its types stripped where it is handed out (`tests/ts_static.py`
   `strip_types`), so it keeps to erasable syntax, declares the `window` globals it sets with `declare global`, and is

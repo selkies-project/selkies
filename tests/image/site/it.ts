@@ -13,7 +13,6 @@
  * @module
  */
 
-/* exported IT */
 const IT = {
     ch: new URLSearchParams(location.search).get('ch') || 'main',
     /**

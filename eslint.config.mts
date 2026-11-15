@@ -22,6 +22,9 @@ const rules = {
 }
 
 export default [
+  // A rule holds everywhere it applies: no comment turns one off or
+  // reconfigures it, so a finding is fixed in the code.
+  { linterOptions: { noInlineConfig: true } },
   {
     // TypeScript Node runs with the types stripped, held to the type-checked
     // rules through the projects that compile them: the audits, which run the
@@ -86,7 +89,8 @@ export default [
       ...rules,
       ...tseslint.configs.recommendedTypeChecked.reduce((acc, c) => ({ ...acc, ...c.rules }), {}),
       'no-unused-vars': 'off',
-      '@typescript-eslint/no-unused-vars': ['error', { caughtErrors: 'none' }],
+      // IT is the global the tester pages call.
+      '@typescript-eslint/no-unused-vars': ['error', { caughtErrors: 'none', varsIgnorePattern: '^IT$' }],
     },
   },
 ]

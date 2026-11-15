@@ -47,6 +47,9 @@ const tsRules = {
 }
 
 export default [
+  // A rule holds everywhere it applies: no comment turns one off or
+  // reconfigures it, so a finding is fixed in the code.
+  { linterOptions: { noInlineConfig: true } },
   // Build output.
   { ignores: ['**/dist/'] },
   {
