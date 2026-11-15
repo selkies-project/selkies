@@ -1175,6 +1175,7 @@ impl HostSession {
                     let scale = state.scales.get(i).copied().unwrap_or(1).max(1);
                     let size = sizes.get(i).copied().unwrap_or((0, 0));
                     OutputGeom {
+                        mode: size,
                         pos: positions.get(i).copied().unwrap_or((0, 0)),
                         logical: (size.0 / scale, size.1 / scale),
                     }
@@ -2267,6 +2268,25 @@ pub(crate) struct OutputGeom {
     pos: (i32, i32),
     /// Mode divided by the integer scale.
     logical: (i32, i32),
+    /// Current mode, physical pixels, as the host announced it at connect.
+    mode: (i32, i32),
+}
+
+/// The size a portal stream is read at, and whether exactly: a grown display's stream at the
+/// display's size; a stream of a host virtual monitor at the output's current mode, since a
+/// virtual monitor takes the size its readers ask for and the host's owner sizes it; any
+/// other stream offers the display's size within what the producer allows.
+fn consume_size(
+    grown: bool,
+    host_virtual: bool,
+    want: (i32, i32),
+    mode: Option<(i32, i32)>,
+) -> ((i32, i32), bool) {
+    match (grown, host_virtual, mode) {
+        (true, _, _) => (want, true),
+        (false, true, Some(m)) if m.0 > 0 && m.1 > 0 => (m, true),
+        _ => (want, false),
+    }
 }
 
 /// Which portal stream backs each output rank: the stream announcing the output's position,
@@ -2657,11 +2677,19 @@ fn portal_capture_loop(
         let Some(core) = live.core.as_ref() else {
             continue;
         };
+        let assigned = assign_streams(&live.session.streams, &geoms)
+            .get(rank)
+            .copied()
+            .flatten();
+        let host_virtual = assigned.and_then(|i| live.session.streams[i].source_type)
+            == Some(crate::wayland::portal::SOURCE_VIRTUAL);
+        let (expect, exact_size) =
+            consume_size(grown, host_virtual, w.size, geoms.get(rank).map(|g| g.mode));
         let cfg = StreamConfig {
             zero_copy: w.zero_copy && !dma_formats.is_empty(),
             dma_formats: dma_formats.clone(),
             fps_milli: w.fps_milli,
-            expect: w.size,
+            expect,
             place: crate::wayland::pwcapture::CursorPlace {
                 origin,
                 size: w.size,
@@ -2675,7 +2703,7 @@ fn portal_capture_loop(
                     .or_else(|| geoms.get(index).map(|g| g.logical))
                     .unwrap_or((0, 0)),
             },
-            exact_size: grown,
+            exact_size,
         };
         match &stream {
             Some((s, _)) => {
@@ -2687,11 +2715,7 @@ fn portal_capture_loop(
                 }
             }
             None => {
-                let Some(si) = assign_streams(&live.session.streams, &geoms)
-                    .get(rank)
-                    .copied()
-                    .flatten()
-                else {
+                let Some(si) = assigned else {
                     if !warned_unshared {
                         warned_unshared = true;
                         eprintln!(
@@ -4023,6 +4047,31 @@ fn drain_ctl(
 
 #[cfg(test)]
 mod tests {
+    /// A host's own virtual monitor is sized by its owner: a stream of it is read at exactly
+    /// the output's current mode, never at the display's wish, which would resize the host's
+    /// monitor. A grown display's stream follows the display; any other stream offers the
+    /// display's wish within what the producer allows.
+    #[test]
+    fn a_host_virtual_monitor_is_read_at_its_current_mode() {
+        use super::consume_size;
+        assert_eq!(
+            consume_size(false, true, (2560, 1304), Some((2556, 1302))),
+            ((2556, 1302), true)
+        );
+        assert_eq!(
+            consume_size(true, true, (2544, 1318), Some((1, 1))),
+            ((2544, 1318), true)
+        );
+        assert_eq!(
+            consume_size(false, false, (2560, 1304), Some((2556, 1302))),
+            ((2560, 1304), false)
+        );
+        assert_eq!(
+            consume_size(false, true, (2560, 1304), None),
+            ((2560, 1304), false)
+        );
+    }
+
     /// An arranged host moves its outputs after the portal announced their streams: the
     /// pointer aims by where the output is now, the announced position only as a fallback.
     #[test]

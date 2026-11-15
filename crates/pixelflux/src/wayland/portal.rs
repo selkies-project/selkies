@@ -64,6 +64,8 @@ pub struct PortalStream {
     pub node_id: u32,
     pub position: Option<(i32, i32)>,
     pub size: Option<(i32, i32)>,
+    /// The portal source type behind the stream (1 monitor, 2 window, 4 virtual), when sent.
+    pub source_type: Option<u32>,
 }
 
 /// A started portal session: its streams, the devices it may drive, and the token that
@@ -202,6 +204,7 @@ fn parse_streams(v: &Variant<'_>) -> Vec<PortalStream> {
             node_id: *node_id,
             position: None,
             size: None,
+            source_type: None,
         };
         if let Some(Variant::Dict(d)) = fields.get(1) {
             for (k, val) in d.iter() {
@@ -209,6 +212,16 @@ fn parse_streams(v: &Variant<'_>) -> Vec<PortalStream> {
                 match k.as_str() {
                     "position" => stream.position = value_pair(val),
                     "size" => stream.size = value_pair(val),
+                    "source_type" => {
+                        stream.source_type = match val {
+                            Variant::U32(t) => Some(*t),
+                            Variant::Variant(inner) => match &**inner {
+                                Variant::U32(t) => Some(*t),
+                                _ => None,
+                            },
+                            _ => None,
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -761,12 +774,14 @@ mod tests {
                 PortalStream {
                     node_id: 113,
                     position: None,
-                    size: Some((1280, 720))
+                    size: Some((1280, 720)),
+                    source_type: Some(1),
                 },
                 PortalStream {
                     node_id: 42,
                     position: Some((1920, 0)),
-                    size: Some((1280, 720))
+                    size: Some((1280, 720)),
+                    source_type: None,
                 },
             ]
         );
