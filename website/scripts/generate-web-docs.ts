@@ -28,7 +28,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Minimatch } from 'minimatch';
 import { Application, TSConfigReader } from 'typedoc';
-import { fields, stringOr } from '../../web/selkies-web-core/lib/narrow.ts';
+import { fields, stringOr } from '../lib/narrow.ts';
 
 // TypeDoc 0.28 walks its entry points with Minimatch#matchOne, which minimatch
 // 11 dropped; 11.0.1 is the first release without GHSA-g3hv-75wg-m249, so the

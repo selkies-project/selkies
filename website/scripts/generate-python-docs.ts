@@ -27,7 +27,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as Python from 'fumadocs-python';
 import { writeHtml } from './python-reference-html.ts';
-import { isRecord } from '../../web/selkies-web-core/lib/narrow.ts';
+import { isRecord } from '../lib/narrow.ts';
 
 /**
  * Whether the docs build's JSON is the package fumadocs-python converts: the
