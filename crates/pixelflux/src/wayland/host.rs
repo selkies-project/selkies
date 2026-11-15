@@ -396,8 +396,10 @@ struct CtrlState {
     /// when the host keeps its own size (refused or unmanageable layout), the
     /// capture follows this instead of gating on the size it asked for.
     sizes: Arc<Mutex<Vec<(i32, i32)>>>,
-    /// Layout position and integer scale per output, registry-indexed.
-    positions: Vec<(i32, i32)>,
+    /// Layout position per output, registry-indexed and shared with the session: an
+    /// arranged host moves its outputs, and the pointer aims by where they are now.
+    positions: Arc<Mutex<Vec<(i32, i32)>>>,
+    /// Integer scale per output, registry-indexed.
     scales: Vec<i32>,
     /// Registry indices in display order (natural name sort — registry
     /// announcement order is not guaranteed to match output creation order).
@@ -525,10 +527,11 @@ impl Dispatch<wl_output::WlOutput, usize> for CtrlState {
                 sizes[*idx] = (width, height);
             }
             wl_output::Event::Geometry { x, y, .. } => {
-                if state.positions.len() <= *idx {
-                    state.positions.resize(*idx + 1, (0, 0));
+                let mut positions = state.positions.lock().unwrap();
+                if positions.len() <= *idx {
+                    positions.resize(*idx + 1, (0, 0));
                 }
-                state.positions[*idx] = (x, y);
+                positions[*idx] = (x, y);
             }
             wl_output::Event::Scale { factor } => {
                 if state.scales.len() <= *idx {
@@ -1045,6 +1048,8 @@ pub struct HostSession {
     /// Rank -> registry index, for looking a display's host output up in `sizes`.
     order: Vec<usize>,
     sizes: Arc<Mutex<Vec<(i32, i32)>>>,
+    /// Each host output's layout position as the host last announced it, registry-indexed.
+    positions: Arc<Mutex<Vec<(i32, i32)>>>,
     layouts: Arc<Mutex<LayoutLedger>>,
     alive: Arc<AtomicBool>,
     /// A finger's scroll the uinput wheels have not taken yet, in pixels (`pointer_scroll`).
@@ -1163,13 +1168,14 @@ impl HostSession {
             order.iter().map(|&i| state.outputs[i].1.clone()).collect();
         let geoms: Vec<OutputGeom> = {
             let sizes = state.sizes.lock().unwrap();
+            let positions = state.positions.lock().unwrap();
             order
                 .iter()
                 .map(|&i| {
                     let scale = state.scales.get(i).copied().unwrap_or(1).max(1);
                     let size = sizes.get(i).copied().unwrap_or((0, 0));
                     OutputGeom {
-                        pos: state.positions.get(i).copied().unwrap_or((0, 0)),
+                        pos: positions.get(i).copied().unwrap_or((0, 0)),
                         logical: (size.0 / scale, size.1 / scale),
                     }
                 })
@@ -1268,6 +1274,7 @@ impl HostSession {
         let (ctrl_wake_rd, ctrl_wake) = wake_pipe()?;
         let order_for_session = state.order.clone();
         let sizes = state.sizes.clone();
+        let positions = state.positions.clone();
         let layouts = Arc::new(Mutex::new(LayoutLedger::default()));
         {
             let conn = conn.clone();
@@ -1315,6 +1322,7 @@ impl HostSession {
             layout,
             order: order_for_session,
             sizes,
+            positions,
             layouts,
             alive,
             scroll_carry: Mutex::new((0.0, 0.0)),
@@ -1800,7 +1808,12 @@ impl HostSession {
         Some(PortalPoint {
             node: stream.node_id,
             logical: stream_point(slot, stream.size.unwrap_or(slot.want), x, y),
-            position: stream.position,
+            position: region_origin(
+                &self.order,
+                &self.positions.lock().unwrap(),
+                rank,
+                stream.position,
+            ),
         })
     }
 
@@ -2194,6 +2207,21 @@ struct PortalPoint {
     logical: (f64, f64),
     /// The stream's position in the compositor's logical space, where the portal gave one.
     position: Option<(i32, i32)>,
+}
+
+/// Where the output at `rank` lies in the compositor's logical space, which is where its EIS
+/// region lies: as the host announces it now, else as the portal announced its stream. An
+/// arranged host (Mutter places a grown monitor) moves outputs after the streams started.
+fn region_origin(
+    order: &[usize],
+    positions: &[(i32, i32)],
+    rank: usize,
+    announced: Option<(i32, i32)>,
+) -> Option<(i32, i32)> {
+    order
+        .get(rank)
+        .and_then(|&i| positions.get(i).copied())
+        .or(announced)
 }
 
 /// A union-layout point in the logical space of the stream behind `slot`: the slot captures
@@ -3995,6 +4023,23 @@ fn drain_ctl(
 
 #[cfg(test)]
 mod tests {
+    /// An arranged host moves its outputs after the portal announced their streams: the
+    /// pointer aims by where the output is now, the announced position only as a fallback.
+    #[test]
+    fn the_pointer_aims_by_the_output_position_the_host_reports_now() {
+        let order = [1, 0];
+        let positions = [(0, 0), (0, 1318)];
+        assert_eq!(
+            super::region_origin(&order, &positions, 0, Some((0, 0))),
+            Some((0, 1318))
+        );
+        assert_eq!(
+            super::region_origin(&order, &positions, 2, Some((5, 5))),
+            Some((5, 5))
+        );
+        assert_eq!(super::region_origin(&order, &[], 0, None), None);
+    }
+
     /// A finger's travel turns into whole notches with the fraction carried, both ways.
     #[test]
     fn a_finger_scroll_turns_into_whole_notches_with_the_rest_carried() {
