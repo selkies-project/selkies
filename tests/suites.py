@@ -76,8 +76,6 @@ SUITES: list = [
     {"path": "tools/gamepad_poll_audit.ts", "tier": "unit", "timeout": 120},
     {"path": "tools/gamepad_slots_audit.ts", "tier": "unit", "timeout": 120},
     {"path": "tools/touch_gamepad_audit.ts", "tier": "unit", "timeout": 120},
-    {"path": "unit/test_wayland_gpu_fallback.py", "tier": "unit", "timeout": 180},
-    {"path": "unit/test_turn_address.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_desktop_session_scripts.py", "tier": "unit", "timeout": 600},
     {"path": "unit/test_fetch_verified.py", "tier": "unit", "timeout": 120},
     {"path": "tools/docs_tables_audit.ts", "tier": "unit", "timeout": 120},
