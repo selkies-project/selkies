@@ -195,6 +195,10 @@ jobs:
           sudo apt-get install --no-install-recommends -y xvfb pulseaudio pulseaudio-utils
           scripts/ci/test-stack.sh
           echo "PULSE_SERVER=unix:$(pactl info | sed -n 's/^Server String: //p')" >> "$GITHUB_ENV"
+      # For the wheel selector's suite (crates/selkies-suites/tests/wheel_selection.rs):
+      # the selector reads wheel tags with packaging, under the runner's python3
+      - name: Install packaging for the wheel selector
+        run: sudo apt-get install --no-install-recommends -y python3-packaging
       # For the shell suite (crates/selkies-suites/tests/session_scripts.rs).
       # Without it the suite still passes, having run only bash -n: the lint
       # half reports itself skipped inside a test that passes, so nothing else
