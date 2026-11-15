@@ -5896,8 +5896,9 @@ fn find_output_overlap(
 
 /// Create an additional output mapped into the layout at `(x, y)`. Fails (false) on a
 /// duplicate id, non-positive geometry/scale, a rectangle overlapping a live output, or a
-/// GPU render-target allocation failure. Only Create/Reposition placements are validated:
-/// a capture reconfigure (StartCapture on an existing output) resizes UNVALIDATED, so
+/// GPU render-target allocation failure. Under host capture the host's output count bounds
+/// screens alone: a view backs no output of the host's. Only Create/Reposition placements are
+/// validated: a capture reconfigure (StartCapture on an existing output) resizes UNVALIDATED, so
 /// keeping a multi-step relayout overlap-free at every step is the caller's ordering
 /// responsibility.
 fn create_output_on(
@@ -5916,7 +5917,12 @@ fn create_output_on(
     // the host's count would exist but never receive a frame. Refuse it instead.
     if let Some(host) = state.host.as_ref() {
         let capacity = host.output_count();
-        if state.output_nodes.len() >= capacity {
+        let screens = state
+            .output_nodes
+            .iter()
+            .filter(|n| n.owner.is_none())
+            .count();
+        if screens >= capacity {
             eprintln!(
                 "[Wayland] CreateOutput {id}: rejected, the host compositor has {capacity} output(s) and all are backing displays."
             );
