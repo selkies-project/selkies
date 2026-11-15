@@ -4,8 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! Which backend the example container starts, given what the GPU probe found
-//! (`test_wayland_gpu_fallback.py`).
+//! Which backend the example container starts, given what the GPU probe found.
 //!
 //! The entrypoint decides, and it has to decide before anything derived from the backend: the
 //! display, the session type, and the toolkit defaults all follow it, so a late switch yields a
