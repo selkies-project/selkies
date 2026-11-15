@@ -110,7 +110,7 @@ SUITES: list = [
     {"path": RUST + "apps_gate.rs", "tier": "integration", "timeout": 600},
     {"path": RUST + "apps_local_repo.rs", "tier": "integration", "timeout": 300},
     {"path": "integration/test_relative_injection.py", "tier": "integration", "timeout": 600},
-    {"path": "integration/test_cursor_delivery.py", "tier": "integration", "timeout": 300},
+    {"path": RUST + "cursor_delivery.rs", "tier": "integration", "timeout": 300},
     {"path": RUST + "session_dpi_owner.rs", "tier": "integration", "timeout": 300},
     {"path": RUST + "dpi_startup_order.rs", "tier": "integration", "timeout": 300,
      "selectors": ["websockets", "webrtc"]},
