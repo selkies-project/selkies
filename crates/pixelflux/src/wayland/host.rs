@@ -392,6 +392,8 @@ struct CtrlState {
     has_ext_capture: bool,
     has_ext_source: bool,
     outputs: Vec<(wl_output::WlOutput, Option<String>)>,
+    /// The registry global of each entry of `outputs`, to forget a removed one.
+    output_globals: Vec<u32>,
     /// Current mode per output, registry-indexed and shared with the session:
     /// when the host keeps its own size (refused or unmanageable layout), the
     /// capture follows this instead of gating on the size it asked for.
@@ -445,6 +447,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for CtrlState {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
+        if let wl_registry::Event::GlobalRemove { name } = event {
+            forget_output(&state.output_globals, &mut state.outputs, name);
+            return;
+        }
         if let wl_registry::Event::Global {
             name,
             interface,
@@ -468,6 +474,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for CtrlState {
                     let idx = state.outputs.len();
                     let out = registry.bind(name, version.min(4), qh, idx);
                     state.outputs.push((out, None));
+                    state.output_globals.push(name);
                 }
                 "zwlr_output_manager_v1" => state.output_mgr = Some(registry.bind(name, 1, qh, ())),
                 _ => {}
@@ -1199,6 +1206,7 @@ impl HostSession {
                 names.len(),
                 PortalSession::virtual_available(),
                 crate::wayland::mutterclient::available(),
+                state.scales.iter().all(|s| *s <= 1),
             ) > names.len();
         if grow {
             println!("[HostCapture] one more display can grow on a portal virtual monitor.");
@@ -2916,9 +2924,26 @@ fn named_outputs(state: &CtrlState) -> usize {
 }
 
 /// How many displays a host backs: its outputs, and one more it grows on a virtual monitor
-/// when the portal serves virtual sources and an arranger can place the new monitor.
-fn host_capacity(real_outputs: usize, virtual_ok: bool, arranger_ok: bool) -> usize {
-    real_outputs + usize::from(virtual_ok && arranger_ok)
+/// when the portal serves virtual sources, an arranger can place the new monitor, and the
+/// host is unscaled (the arranger places a new monitor at scale 1, and a grown display's
+/// pointer goes by union-layout points, which equal logical ones only at scale 1).
+fn host_capacity(
+    real_outputs: usize,
+    virtual_ok: bool,
+    arranger_ok: bool,
+    unscaled: bool,
+) -> usize {
+    real_outputs + usize::from(virtual_ok && arranger_ok && unscaled)
+}
+
+/// Forget the name of the output the host removed (registry global `removed`): it no longer
+/// holds a rank, and the count of named outputs drops.
+fn forget_output<T>(globals: &[u32], outputs: &mut [(T, Option<String>)], removed: u32) {
+    if let Some(i) = globals.iter().position(|g| *g == removed)
+        && let Some(o) = outputs.get_mut(i)
+    {
+        o.1 = None;
+    }
 }
 
 /// The host output name of each display rank: ordered outputs first, then the outputs the
@@ -4160,17 +4185,49 @@ mod tests {
 
     #[test]
     fn capacity_adds_one_with_virtual_and_arranger() {
-        assert_eq!(host_capacity(1, true, true), 2);
+        assert_eq!(host_capacity(1, true, true, true), 2);
     }
 
     #[test]
     fn capacity_unchanged_without_arranger() {
-        assert_eq!(host_capacity(1, true, false), 1);
+        assert_eq!(host_capacity(1, true, false, true), 1);
     }
 
     #[test]
     fn capacity_unchanged_without_virtual() {
-        assert_eq!(host_capacity(1, false, true), 1);
+        assert_eq!(host_capacity(1, false, true, true), 1);
+    }
+
+    /// A scaled host is not grown: the arranger places a new virtual monitor at scale 1 and
+    /// the pointer reaches a grown display through union-layout points, both wrong there.
+    #[test]
+    fn capacity_unchanged_on_a_scaled_host() {
+        assert_eq!(host_capacity(1, true, true, false), 1);
+    }
+
+    /// A monitor the host removed (a closed grown display) gives up its name, so the next
+    /// grown monitor takes its rank and a close counts as a change of named outputs.
+    #[test]
+    fn a_removed_output_gives_up_its_rank() {
+        let mut outputs = vec![
+            ((), Some("Meta-0".to_string())),
+            ((), Some("Meta-1".to_string())),
+        ];
+        let globals = [10, 11];
+        forget_output(&globals, &mut outputs, 11);
+        let names: Vec<Option<String>> = outputs.iter().map(|(_, n)| n.clone()).collect();
+        assert_eq!(
+            rank_names(&[0], &names, 2),
+            vec![Some("Meta-0".to_string()), None]
+        );
+        outputs.push(((), Some("Meta-2".to_string())));
+        let names: Vec<Option<String>> = outputs.iter().map(|(_, n)| n.clone()).collect();
+        assert_eq!(
+            rank_names(&[0], &names, 2),
+            vec![Some("Meta-0".to_string()), Some("Meta-2".to_string())]
+        );
+        forget_output(&globals, &mut outputs, 99);
+        assert_eq!(outputs[0].1.as_deref(), Some("Meta-0"));
     }
 
     #[test]

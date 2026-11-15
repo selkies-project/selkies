@@ -97,6 +97,12 @@ pub fn needs_apply(current: &[MonitorState], config: &[MonitorState]) -> bool {
     })
 }
 
+/// Whether a layout request is worth applying: one display has nothing to arrange, and
+/// applying it would still re-place (and re-primary) a host's real monitors.
+pub fn worth_arranging(want: &[(String, i32, i32)]) -> bool {
+    want.len() >= 2
+}
+
 async fn connect() -> Result<Connection, String> {
     zbus::connection::Builder::session()
         .method_timeout(CALL_DEADLINE)
@@ -179,6 +185,9 @@ fn monitors_now(state: &CurrentState) -> Vec<MonitorState> {
 /// Arrange the host's monitors at `want` (`(connector, x, y)` in union-layout pixels, the
 /// primary first).
 pub fn apply(want: &[(String, i32, i32)]) -> Result<(), String> {
+    if !worth_arranging(want) {
+        return Ok(());
+    }
     zbus::block_on(async {
         let conn = connect().await?;
         let proxy = Proxy::new(&conn, DISPLAY_CONFIG, DISPLAY_CONFIG_PATH, DISPLAY_CONFIG)
@@ -278,6 +287,17 @@ mod tests {
         assert!(!needs_apply(&cur, &cfg));
         let moved = layout_config(&cur, &want(&[("Meta-0", 0, 0), ("Meta-1", 2556, 0)]));
         assert!(needs_apply(&cur, &moved));
+    }
+
+    /// One display has nothing to arrange: a host's real monitors (and its primary) stay
+    /// as the user set them.
+    #[test]
+    fn a_single_display_leaves_the_host_alone() {
+        assert!(!worth_arranging(&want(&[("Meta-0", 0, 0)])));
+        assert!(worth_arranging(&want(&[
+            ("Meta-0", 0, 1318),
+            ("Meta-1", 0, 0)
+        ])));
     }
 
     #[test]
