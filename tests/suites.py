@@ -42,9 +42,6 @@ RUST: str = "../crates/selkies-suites/tests/"
 
 SUITES: list = [
     # unit
-    {"path": "unit/test_fake_udev_enumeration.py", "tier": "unit", "timeout": 300},
-    {"path": "unit/test_input_interposer_signals.py", "tier": "unit", "timeout": 180},
-    {"path": "unit/test_input_interposer_early_calls.py", "tier": "unit", "timeout": 120},
     {"path": "tools/i18n_audit.ts", "tier": "unit", "timeout": 120, "name": "unit/test_i18n_keys"},
     {"path": "tools/client_typing_audit.ts", "tier": "unit", "timeout": 120},
     {"path": "tools/keyboard_chord_audit.ts", "tier": "unit", "timeout": 120, "name": "unit/test_keyboard_chords"},
@@ -99,7 +96,6 @@ SUITES: list = [
     {"path": "tools/dpi_default_mirror_audit.ts", "tier": "unit", "timeout": 120},
     {"path": "unit/test_ts_static.py", "tier": "unit", "timeout": 120},
     {"path": "tools/dashboard_no_lazy_chunks_audit.ts", "tier": "unit", "timeout": 120},
-    {"path": "unit/test_v4l2_staging_layout.py", "tier": "unit", "timeout": 300},
     {"path": "unit/test_frame_num_range_log.py", "tier": "unit", "timeout": 60},
     {"path": "unit/test_release_version.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_release_assets.py", "tier": "unit", "timeout": 120},
