@@ -433,7 +433,7 @@ fn uninstall(state: &mut AppState) {
     for node in &mut state.output_nodes {
         if let Some(cap) = node.capture.as_mut() {
             cap.needs_full_render = true;
-            cap.change_pending = true;
+            cap.note_change();
         }
     }
     state.wm = None;
@@ -1405,7 +1405,7 @@ pub fn mark_dirty(state: &mut AppState) {
     }
     for node in &mut state.output_nodes {
         if let Some(cap) = node.capture.as_mut() {
-            cap.change_pending = true;
+            cap.note_change();
         }
     }
 }

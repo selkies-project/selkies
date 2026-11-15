@@ -158,7 +158,9 @@ impl FramePace {
     /// frame then lands in a window already taken and waits as long again: any wait sustains
     /// itself, a source a hair faster than the cadence grows it to a period, and a 60 Hz
     /// application on its own clock under a 60 fps capture waited a median 6 ms a frame and up
-    /// to 15, and one keystroke during a 60 Hz animation held each of its frames 12.5 ms.
+    /// to 15, and one keystroke during a 60 Hz animation held each of its frames 12.5 ms. With
+    /// the reserve spent, such a change is held for the source's next frame instead of taking
+    /// the next window from it (`Self::merge_until`).
     pub fn windowed() -> Self {
         Self {
             windowed: true,
@@ -422,6 +424,39 @@ impl FramePace {
         self.last_tick.map_or(now, |last| {
             last + period.saturating_sub(self.budget(trigger, period, now))
         })
+    }
+
+    /// Paced in windows, until when a change found waiting as its pull comes is held for the
+    /// next frame of a source drawing at the cadence; None where it goes as it is.
+    ///
+    /// With the extra-frame reserve spent, a change landing in a window a frame already took (a
+    /// keystroke during an animation) can only take the next window, ahead of the source's own
+    /// frame there, which then waits for the window after, and so on: every frame of the source
+    /// runs late until an extra frame is left again, and typing faster than the reserve refills
+    /// (about two keys a second at 60 fps) keeps it spent. Such a change is held instead until
+    /// the source's next frame, which captures the screen whole and so carries the change too.
+    /// The source keeps its windows and the rate stays the cadence's; what it costs is a frame
+    /// of the source where a change took its window just ahead of it and the source's frame is
+    /// then the one held. In virtual time, a 60 Hz animation at 60 fps with a keystroke every
+    /// 0.15 s waited 0.07 ms a frame at the median where it waited 4.6 to 15.2 ms by phase, the
+    /// keystrokes 0 to 0.1 ms where they waited 10.6, and 92 % of the animation's frames reached
+    /// the screen where all of them did.
+    ///
+    /// A change is held only while the screen's frames have been coming at the cadence
+    /// (`damage_spacing`, `Self::input_paced`), as they do under a source drawing at it or
+    /// faster, never on a screen whose frames come further apart, and for no longer than
+    /// `PACED_INPUT_MAX_FRACTION` of a period after the last frame; the capture sends the held
+    /// change with the next change it sees, or at the time returned.
+    pub fn merge_until(&self, period: Duration, now: Instant) -> Option<Instant> {
+        if !self.windowed || self.extra_frames(now) >= 1.0 {
+            return None;
+        }
+        let end = self.window_end?;
+        let last = self.last_damage?;
+        if now >= end || !Self::input_paced(self.damage_spacing, period) {
+            return None;
+        }
+        Some(last + period.mul_f64(PACED_INPUT_MAX_FRACTION))
     }
 
     /// Paced in windows, when a change may take the window after the one the last frame
@@ -1368,6 +1403,121 @@ mod pacing_tests {
         assert!(
             (100..=104).contains(&frames),
             "{frames} frames in two seconds at 50 fps"
+        );
+    }
+
+    /// What a source drawing at `src_hz` and keystrokes every `key_every` seconds (each drawn
+    /// 2 ms later) get from a capture paced in windows at `cap_fps`, driven in 0.1 ms steps as
+    /// the X11 capture loop drives the pacer, a held change (`FramePace::merge_until`) going
+    /// out with the next change or at its deadline: the frames sent a second, and the median
+    /// wait of the source's frames and of the keystrokes, in milliseconds.
+    fn drive(src_hz: f64, cap_fps: f64, key_every: f64, phase: f64, secs: f64) -> (f64, f64, f64) {
+        let base = Instant::now();
+        let period = Duration::from_secs_f64(1.0 / cap_fps);
+        let mut pace = FramePace::windowed();
+        pace.record_tick(TickTrigger::Timer, period, base, true);
+        let (mut next_src, mut next_key) = (phase, if key_every > 0.0 { 0.2 } else { f64::MAX });
+        let (mut src, mut keys, mut drawn): (Vec<f64>, Vec<f64>, Vec<f64>) = Default::default();
+        let (mut src_wait, mut key_wait, mut frames) = (Vec::new(), Vec::new(), 0u32);
+        let mut hold: Option<(f64, Instant)> = None;
+        for i in 1..=(secs / 1e-4) as u32 {
+            let t = f64::from(i) * 1e-4;
+            let now = base + Duration::from_micros(100) * i;
+            while t >= next_src {
+                src.push(next_src);
+                next_src += 1.0 / src_hz;
+            }
+            while t >= next_key {
+                drawn.push(next_key + 0.002);
+                next_key += key_every;
+            }
+            drawn.retain(|&d| {
+                (t < d) || {
+                    keys.push(d);
+                    false
+                }
+            });
+            let pending = !src.is_empty() || !keys.is_empty();
+            let pulled = pending && now >= pace.pull_at(TickTrigger::Damage, period, now);
+            if pulled && hold.is_none() {
+                hold = pace.merge_until(period, now).map(|until| (t, until));
+            }
+            let held = hold.is_some_and(|(since, until)| {
+                now < until && !src.iter().chain(&keys).any(|&a| a > since)
+            });
+            let sent = if pulled && !held {
+                pace.record_tick(TickTrigger::Damage, period, now, true);
+                true
+            } else if now >= pace.next_due(period, now) {
+                pace.record_tick(TickTrigger::Timer, period, now, true);
+                pending
+            } else {
+                false
+            };
+            if sent {
+                hold = None;
+                frames += 1;
+                src_wait.extend(src.drain(..).map(|a| (t - a) * 1e3));
+                key_wait.extend(keys.drain(..).map(|k| (t - k) * 1e3));
+            }
+        }
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v.get(v.len() / 2).copied().unwrap_or(0.0)
+        };
+        (f64::from(frames) / secs, median(src_wait), median(key_wait))
+    }
+
+    /// Typing faster than the reserve refills over a 60 Hz animation at the cadence leaves the
+    /// animation on its own windows at every phase, the keystrokes going out with its frames,
+    /// and the rate within the refill of the cadence.
+    #[test]
+    fn fast_typing_over_an_animation_at_the_cadence_keeps_the_animation_on_its_windows() {
+        for phase in [0.0031, 0.008, 0.014] {
+            let (fps, src, key) = drive(60.0, 60.0, 0.15, phase, 10.0);
+            assert!(src < 1.0, "phase {phase}: the animation waited {src:.2} ms");
+            assert!(
+                key < 1.0,
+                "phase {phase}: the keystrokes waited {key:.2} ms"
+            );
+            let bound = 60.0 * (1.0 + EXTRA_REFILL) + EXTRA_CAP / 10.0 + 0.02;
+            assert!(fps <= bound, "phase {phase}: {fps:.2} fps");
+        }
+    }
+
+    /// The keystroke every 0.7 s `EXTRA_REFILL` was tuned with goes out on an extra frame as
+    /// before, and a source drawing faster than the cadence is held to it within the refill.
+    #[test]
+    fn slow_typing_and_a_source_faster_than_the_cadence_keep_their_pacing() {
+        let (_, src, key) = drive(60.0, 60.0, 0.7, 0.0031, 10.0);
+        assert!(src < 0.2 && key < 0.2, "{src:.2} and {key:.2} ms");
+        let (fps, _, _) = drive(60.0, 57.0, 0.0, 0.0031, 10.0);
+        let bound = 57.0 * (1.0 + EXTRA_REFILL) + EXTRA_CAP / 10.0 + 0.02;
+        assert!(fps <= bound, "{fps:.2} fps over a 57 fps lock");
+    }
+
+    /// A change in a window a source at the cadence took is held for the source's next frame
+    /// once the reserve is spent, and a change in an open window is not.
+    #[test]
+    fn only_a_change_beside_a_source_at_the_cadence_is_held() {
+        let base = Instant::now();
+        let mut pace = FramePace::windowed();
+        pace.record_tick(TickTrigger::Timer, PERIOD, base, true);
+        for k in 0..20 {
+            pace.record_tick(TickTrigger::Damage, PERIOD, at(base, 20 * k + 3), true);
+        }
+        for ms in [403, 413, 423, 433] {
+            pace.record_tick(TickTrigger::Damage, PERIOD, at(base, ms), true);
+        }
+        assert_eq!(
+            pace.merge_until(PERIOD, at(base, 435)),
+            Some(at(base, 433) + PERIOD.mul_f64(PACED_INPUT_MAX_FRACTION)),
+            "the source took this window and the extras went on the two before"
+        );
+        assert_eq!(
+            pace.merge_until(PERIOD, at(base, 441)),
+            None,
+            "an open window takes it"
         );
     }
 }

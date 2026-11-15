@@ -374,6 +374,47 @@ impl SharedFramebuffer {
         ready || self.drawn() || self.retired()
     }
 
+    /// The drawing count as it stands, odd while an operation runs.
+    pub(crate) fn drawing_count(&self) -> u64 {
+        self.framebuffer.word64(HEAD_SEQ).load(Ordering::Acquire)
+    }
+
+    /// Wait until `deadline` for a drawing operation to end after the count stood at `count`
+    /// (the one running then, if one was), or for the framebuffer to retire: true where one
+    /// did. Tiles drawn before it are left in the watch, so this waits on the count rather than
+    /// on the bitmap [`Self::wait`] reads.
+    pub(crate) fn wait_past(&self, count: u64, deadline: Instant) -> bool {
+        let ended = (count + 2) & !1;
+        loop {
+            self.watch.word(WATCH_ARMED).store(1, Ordering::SeqCst);
+            fence(Ordering::SeqCst);
+            if self.drawing_count() >= ended || self.retired() {
+                return true;
+            }
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            let mut poll = libc::pollfd {
+                fd: self.event.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let timeout = libc::timespec {
+                tv_sec: left.as_secs() as _,
+                tv_nsec: libc::c_long::from(left.subsec_nanos()),
+            };
+            // SAFETY: one pollfd for the duration of the call.
+            if unsafe { libc::ppoll(&mut poll, 1, &timeout, std::ptr::null()) } > 0 {
+                let mut drained = 0u64;
+                // SAFETY: an 8-byte read of the eventfd's counter into a u64; the fd is
+                // nonblocking.
+                unsafe {
+                    libc::read(self.event.as_raw_fd(), (&mut drained as *mut u64).cast(), 8);
+                }
+            }
+        }
+    }
+
     /// The drawing count once no operation runs, or `None` past `DRAW_WAIT`.
     fn settled_seq(&self) -> Option<u64> {
         let seq = self.framebuffer.word64(HEAD_SEQ);
