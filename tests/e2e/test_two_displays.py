@@ -8,7 +8,7 @@ disagree the compositor rejects the output as overlapping and the second screen
 never appears at all. Each combination here asserts the applied geometry.
 
 Pixel content is proven separately, without a browser, by
-integration/test_two_display_pixels.py.
+crates/selkies-suites/tests/two_display_pixels.rs.
 """
 import ast
 import os

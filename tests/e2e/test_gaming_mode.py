@@ -32,7 +32,7 @@ The `-two` selectors lay a second display beside the locked one and walk the
 remote pointer onto it, since a lock is one page's and the pointer is the whole
 desktop's: what has to hold is that the lock survives the crossing and the
 deltas keep going out, with the drawing side of it read off the pixels in
-tests/integration/test_locked_cursor_across_displays.py.
+crates/selkies-suites/tests/locked_cursor_across_displays.rs.
 
 The `x11-dashboards` selector serves each dashboard layout and enters the mode
 the way a user does there, by a click on its gaming mode button (the edge
@@ -331,7 +331,7 @@ def crossed(res: "H.Results", p: Any, desk: Desk, page: Any, wayland: bool,
     page has only deltas to send and sends them wherever they land, the server
     bounds the one pointer by the union of the display rectangles rather than
     by the locked page's own, and each capture draws the cursor from that one
-    position -- which test_locked_cursor_across_displays reads off the pixels
+    position -- which locked_cursor_across_displays.rs reads off the pixels
     each display is sent. The half a browser holds is what this checks: the
     lock does not break when the pointer it can no longer place leaves the
     display the page shows, and no absolute position goes out in place of the
