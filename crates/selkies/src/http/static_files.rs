@@ -22,7 +22,8 @@
 //!
 //! What a deployment brands is served from its settings rather than from a copy of the client
 //! it would otherwise have to keep: the manifest is the client's own with the installed app's
-//! name taken from `ui_title` ([`manifest`]), and an image `ui_icon` names is served as every
+//! name taken from `ui_title` where the operator set it ([`manifest`]), and an image `ui_icon`
+//! names is served as every
 //! icon the client links ([`ICONS`]), the manifest's included, so a single-application image
 //! needs no web server or client of its own to carry its name and icon.
 
@@ -227,10 +228,11 @@ const MANIFEST: &str = "manifest.json";
 /// `ui_icon` where that is set.
 pub const ICONS: [&str; 3] = ["icon.png", "icon-512.png", "favicon.ico"];
 
-/// The client's manifest with the installed app named after `ui_title` and, where `ui_icon`
-/// is set, that image as its one icon, sized as the file is: an installed app takes the
-/// deployment's name and icon rather than Selkies'. A client without a readable manifest gets
-/// the fields the client's own carries.
+/// The client's manifest with the installed app named after `ui_title` where the operator set
+/// it and, where `ui_icon` is set, that image as its one icon, sized as the file is: an
+/// installed app takes the deployment's name and icon rather than Selkies'. Left to its
+/// default, `ui_title` names nothing, and the manifest keeps the name its web root gave it. A
+/// client without a readable manifest gets the fields the client's own carries.
 pub async fn manifest(config: &super::HttpConfig, client: &WebClient) -> Response {
     let raw = match client {
         WebClient::Embedded(table) => table.read(MANIFEST).map(|b| b.to_vec()),
