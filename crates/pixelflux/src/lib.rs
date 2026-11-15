@@ -6084,7 +6084,8 @@ fn create_output_on(
 /// output is refused (false). As with `CreateOutput`, only the placement itself is
 /// validated: a capture reconfigure (StartCapture on an existing output) resizes
 /// UNVALIDATED, so keeping a multi-step relayout overlap-free at every step is the
-/// caller's ordering responsibility.
+/// caller's ordering responsibility. Under host capture the host's layout moves with the
+/// screen: a view captures under its own display id, so its entry is re-sent at its new position.
 fn reposition_output_on(state: &mut AppState, id: u32, x: i32, y: i32) -> bool {
     let Some(idx) = state.node_idx_for_id(id) else {
         return false;
@@ -6175,6 +6176,9 @@ fn reposition_output_on(state: &mut AppState, id: u32, x: i32, y: i32) -> bool {
     }
     if let Some(host) = state.host.as_ref() {
         host.set_layout(id, x, y);
+        for view in state.output_nodes.iter().filter(|n| n.owner == Some(id)) {
+            host.set_layout(view.id, view.pos.0, view.pos.1);
+        }
     }
     output.change_current_state(None, None, None, Some((x, y).into()));
     state.space.map_output(&output, (x, y));
