@@ -123,7 +123,7 @@ SUITES: list = [
     {"path": RUST + "state_stress.rs", "tier": "integration", "timeout": 900},
     {"path": RUST + "switch_stress.rs", "tier": "integration", "timeout": 600},
     {"path": "integration/test_webrtc_unix_socket.py", "tier": "integration", "timeout": 600},
-    {"path": "integration/test_gpu_probe.py", "tier": "integration", "timeout": 180},
+    {"path": RUST + "gpu_probe.rs", "tier": "integration", "timeout": 180},
     {"path": RUST + "missing_libraries.rs", "tier": "integration", "timeout": 900},
     {"path": RUST + "command_dispatch.rs", "tier": "integration", "timeout": 120},
     {"path": "integration/test_two_display_pixels.py", "tier": "integration", "timeout": 600},
@@ -321,7 +321,7 @@ def cases(tiers: Optional[Sequence[str]] = None) -> Iterator[tuple]:
 
 def name(path: str, tier: str) -> str:
     """The name a suite is selected and its logs are kept under, without its
-    selector: `integration/test_gpu_probe` for `integration/test_gpu_probe.py`,
+    selector: `integration/test_capture_demand` for `integration/test_capture_demand.py`,
     `integration/test_protocol` for the Rust target `protocol.rs` of that tier,
     and `unit/test_fit_frame` for the audit `tools/fit_frame_audit.ts`, so a
     suite keeps its name in whichever language it is written."""
