@@ -21,6 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
@@ -386,6 +387,17 @@ fn private_dirs(runtime: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// A block's scratch directory, numbered rather than named for its tag: the session's sockets
+/// sit beneath it, and a socket's path is held to the 108 bytes of `sun_path`.
+fn block_root() -> PathBuf {
+    static BLOCKS: AtomicUsize = AtomicUsize::new(0);
+    workdir().join(format!(
+        "session-{}-{}",
+        BLOCKS.fetch_add(1, Ordering::Relaxed),
+        std::process::id()
+    ))
+}
+
 /// One launcher run and what it must hold.
 struct Block<'a> {
     tag: &'a str,
@@ -398,11 +410,7 @@ struct Block<'a> {
 
 async fn block(checks: &mut Checks, b: Block<'_>) {
     let tag = b.tag;
-    let root = workdir().join(format!(
-        "session-{}-{}",
-        tag.trim_matches(['[', ']']).replace(' ', "-"),
-        std::process::id()
-    ));
+    let root = block_root();
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("the block's directory");
     let record = root.join("session.env");
