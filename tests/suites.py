@@ -96,7 +96,7 @@ SUITES: list = [
     {"path": "tools/cursor_scaling_audit.ts", "tier": "unit", "timeout": 120},
 
     # integration
-    {"path": "integration/test_stall_recovery.py", "tier": "integration", "timeout": 900,
+    {"path": RUST + "stall_recovery.rs", "tier": "integration", "timeout": 900,
      "selectors": ["h264enc", "jpeg"]},
     # The kernel block needs a writable /dev/uinput, which CI does not have:
     # run it by hand (`test_gamepad_rumble.py kernel`) where one is.
