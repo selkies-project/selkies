@@ -26,6 +26,8 @@
 //!   outputs, a selection owner that answers or does not, a window that keeps the screen changing.
 //! - [`displays`] is two displays on one X desktop read from the wire: the layout the server
 //!   calculated, each display's region painted on the root, its JPEG stripes decoded.
+//! - [`wayland`] is a Wayland client of the suite's own on the server's compositor (the
+//!   `wl-observer` and `wl-lock-probe` bins), its event lines kept for the test.
 //! - [`checks`] records a suite's checks, each named for the behavior it holds, and fails the test
 //!   once with every one that did not hold and the server's log.
 //!
@@ -41,6 +43,7 @@ pub mod client;
 pub mod displays;
 pub mod http;
 pub mod server;
+pub mod wayland;
 pub mod x11;
 pub mod xvfb;
 

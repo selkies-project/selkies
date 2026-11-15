@@ -38,7 +38,7 @@ x11rb = { version = "0.14", features = ["randr", "xf86vidmode"] }
 # A Wayland app owning a session's clipboard (src/bin/wl-clipboard-owner.rs), through the
 # data-control protocol, at pixelflux's versions; pure Rust, no libwayland.
 wayland-client = "0.31"
-wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
 
 [dev-dependencies]
 # What tests/fetch_verified.rs serves GitHub's answers with: a proxy that ends TLS for the hosts
