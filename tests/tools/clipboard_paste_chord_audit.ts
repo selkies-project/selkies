@@ -17,13 +17,15 @@
  */
 
 import type { ClipboardSync } from '../../web/selkies-web-core/lib/clipboard-sync.ts';
-import type { StandIn } from './stand_in.ts';
+import { type StandIn, standIn } from './stand_in.ts';
 
 /** A key listener as the stand-in window calls it. */
 type KeyListener = (event: StandIn<KeyboardEvent>) => void;
 
 /** A key event as the gestures read one, with what they did to it. */
 interface FakeKey {
+    /** The marks Guacamole's keyboard leaves on an event it handled, as the page's key events carry. */
+    [handled: `_GUAC_KEYBOARD_HANDLED_BY_${number}`]: boolean | undefined;
     type: string;
     code: string;
     key: string;
@@ -40,6 +42,8 @@ interface FakeKey {
 
 const listeners: Array<{ type: string; fn: KeyListener }> = [];
 const replayed: KeyboardEvent[] = [];
+/** Whether a dispatched event is a key event: the module replays what it held back as one. */
+const isKeyboardEvent = (ev: Event): ev is KeyboardEvent => 'code' in ev && 'key' in ev;
 const page: { activeElement: Pick<Element, 'id' | 'tagName'> | null } = { activeElement: null };
 Object.assign(globalThis, {
     window: {
@@ -48,7 +52,7 @@ Object.assign(globalThis, {
             const i = listeners.findIndex((l) => l.type === type && l.fn === fn);
             if (i >= 0) listeners.splice(i, 1);
         },
-        dispatchEvent: (ev: Event) => { replayed.push(ev as KeyboardEvent); },
+        dispatchEvent: (ev: Event) => { if (isKeyboardEvent(ev)) replayed.push(ev); },
     } satisfies StandIn<Window>,
     document: page satisfies StandIn<Document>,
     KeyboardEvent: class {
@@ -88,7 +92,7 @@ function keyEvent(type: string, code: string, init: Partial<FakeKey> = {}): Fake
 
 /** Hands a key event to the listeners of its type. */
 function press(ev: FakeKey | KeyboardEvent): void {
-    for (const l of listeners.filter((x) => x.type === ev.type)) l.fn(ev as StandIn<KeyboardEvent>);
+    for (const l of listeners.filter((x) => x.type === ev.type)) l.fn(ev);
 }
 
 /** Gestures wired on a fresh window, with a read that waits on `hold`. */
@@ -99,7 +103,7 @@ function wire({ isChromium = true, hold = null }: { isChromium?: boolean; hold?:
     const reads: number[] = [];
     const g = createClipboardGestures({
         isChromium,
-        clipboardSync: {} as ClipboardSync,
+        clipboardSync: standIn<ClipboardSync>({}),
         sendClipboardData: () => Promise.resolve(),
         canSync: () => true,
         canRead: () => true,

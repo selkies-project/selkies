@@ -26,6 +26,7 @@
  */
 
 import type { ClipboardDecodeStream, ClipboardWorkerBridge, DecodedClipboard } from './clipboard-worker-bridge.ts';
+import { errorName, fields, messageOf, stringOr } from './narrow.ts';
 
 export type LocalClipboardContent = { kind: 'text'; text: string } | { kind: 'image'; blob: Blob; mime: string } | { kind: 'flavours'; html: string; text: string };
 
@@ -213,10 +214,15 @@ export function packClipboardFlavours({ html, text }: { html: string; text?: str
     return new TextEncoder().encode(JSON.stringify(flavours)).buffer;
 }
 
+/** Decoded content as bytes; text, which a byte flavour never decodes to, as its UTF-8. */
+function bytesOf(result: string | ArrayBuffer): ArrayBuffer | Uint8Array<ArrayBuffer> {
+    return typeof result === 'string' ? new TextEncoder().encode(result) : result;
+}
+
 /** The flavours a wire payload carries, as `{html, text}`. */
 export function unpackClipboardFlavours(bytes: ArrayBuffer | Uint8Array): { html: string; text: string } {
-    const flavours = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, string | undefined>;
-    return { html: flavours['text/html'] || '', text: flavours['text/plain'] || '' };
+    const flavours = fields(JSON.parse(new TextDecoder().decode(bytes)));
+    return { html: stringOr(flavours['text/html']) || '', text: stringOr(flavours['text/plain']) || '' };
 }
 
 /**
@@ -258,7 +264,7 @@ export async function readLocalClipboard(binaryEnabled: boolean): Promise<LocalC
     try {
         items = await navigator.clipboard.read();
     } catch (err) {
-        if (err && (err as Error).name === 'DataError') return textFallback();
+        if (errorName(err) === 'DataError') return textFallback();
         throw err;
     }
     if (!items || items.length === 0) return null;
@@ -285,7 +291,7 @@ export async function readLocalClipboard(binaryEnabled: boolean): Promise<LocalC
             return text ? { kind: 'text', text } : null;
         }
     } catch (err) {
-        if (err && (err as Error).name === 'DataError') return textFallback();
+        if (errorName(err) === 'DataError') return textFallback();
         throw err;
     }
     return null;
@@ -579,9 +585,10 @@ export function createLocalClipboardSender({
                 if (skipped) return;
                 console.log(`Sent the local clipboard (${mime}) to the session`);
             } catch (err) {
-                if ((err as Error).name !== 'NotFoundError' && (err as Error).name !== 'DataError' && (err as Error).name !== 'NotAllowedError'
-                    && !((err as Error).message && (err as Error).message.includes('not focused'))) {
-                    console.warn(`Could not read clipboard: ${(err as Error).name} - ${(err as Error).message}`);
+                const name = errorName(err), message = messageOf(err);
+                if (name !== 'NotFoundError' && name !== 'DataError' && name !== 'NotAllowedError'
+                    && !(message && message.includes('not focused'))) {
+                    console.warn(`Could not read clipboard: ${String(name)} - ${String(message)}`);
                 }
             }
         })();
@@ -597,8 +604,7 @@ export function createLocalClipboardSender({
         clipboardSync.noteExplicit();
         await asSendInFlight((async (): Promise<void> => {
             try {
-                const payload = (data && typeof (data as Blob).arrayBuffer === 'function')
-                    ? await (data as Blob).arrayBuffer() : data as string | ArrayBuffer;
+                const payload = typeof data === 'string' || data instanceof ArrayBuffer ? data : await data.arrayBuffer();
                 await sendClipboardData(payload, mime, onSkip);
             } finally {
                 explicitRunning--;
@@ -1046,7 +1052,7 @@ export function createIncomingClipboard({
         let fresh: boolean;
         let content: LandingContent;
         if (t.kind === 'text') {
-            const text = decoded.result as string;
+            const text = typeof decoded.result === 'string' ? decoded.result : new TextDecoder().decode(decoded.result);
             fresh = clipboardSync.shouldSend(text, 'text/plain');
             clipboardSync.resolveServer(text, null, 'text/plain');
             sessionSecret = t.secret && text ? text : null;
@@ -1068,12 +1074,12 @@ export function createIncomingClipboard({
             const digest = digestedPayload(decoded.byteLength, decoded.hash!);
             fresh = clipboardSync.shouldSend(digest, t.mime);
             if (t.kind === 'flavours') {
-                const flavours = unpackClipboardFlavours(decoded.result as ArrayBuffer);
+                const flavours = unpackClipboardFlavours(bytesOf(decoded.result));
                 clipboardSync.resolveServer(flavours.text || flavours.html, null, t.mime, digest);
                 onPreview(flavours.text || flavours.html);
                 content = flavours;
             } else {
-                const blob = new Blob([decoded.result as ArrayBuffer], { type: t.mime });
+                const blob = new Blob([bytesOf(decoded.result)], { type: t.mime });
                 clipboardSync.resolveServer(undefined, blob, t.mime, digest);
                 content = { blob, mime: t.mime };
             }
@@ -1321,10 +1327,9 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
             for (let i = 0; i < text.length; i++) h = ((h << 5) + h + text.charCodeAt(i)) | 0;
             return { full: `t:${text.length}:${h}`, legacy: null };
         }
-        if (data && (data as ClipboardDigest).__clipDigest) {
+        if ('__clipDigest' in data) {
             const dm = mime || '';
-            return { full: `b:${dm}:${(data as ClipboardDigest).byteLength}:${(data as ClipboardDigest).hash}`,
-                     legacy: `b:${dm}:${(data as ClipboardDigest).byteLength}` };
+            return { full: `b:${dm}:${data.byteLength}:${data.hash}`, legacy: `b:${dm}:${data.byteLength}` };
         }
         let parts: Uint8Array[] | null = null;
         if (data instanceof Uint8Array) parts = [data];
@@ -1336,7 +1341,7 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
             for (const p of parts) { size += p.length; h = hashBytes(h, p); }
             return { full: `b:${m}:${size}:${h}`, legacy: `b:${m}:${size}` };
         }
-        const size = data && ((data as ArrayBuffer).byteLength !== undefined ? (data as ArrayBuffer).byteLength : (data as Blob).size);
+        const size = 'byteLength' in data ? data.byteLength : 'size' in data ? data.size : undefined;
         return { full: `b:${m}:${size}`, legacy: null };
     }
 
@@ -1558,7 +1563,7 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
             const ok = document.execCommand('copy');
             if (!ok) console.warn('execCommand("copy") fallback returned false.');
         } catch (err) {
-            console.warn(`execCommand("copy") fallback threw: ${err && (err as Error).name} - ${err && (err as Error).message}`);
+            console.warn(`execCommand("copy") fallback threw: ${String(err && errorName(err))} - ${String(err && messageOf(err))}`);
         } finally {
             document.body.removeChild(ta);
         }
@@ -1653,7 +1658,7 @@ export function createClipboardGestures({
         const ae = document.activeElement;
         return !!(ae && ae.id !== 'overlayInput' &&
             (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' ||
-             ae.tagName === 'SELECT' || (ae as HTMLElement).isContentEditable));
+             ae.tagName === 'SELECT' || ('isContentEditable' in ae && ae.isContentEditable === true)));
     }
 
     const heldPasteEvents: KeyboardEvent[] = [];
@@ -1799,7 +1804,7 @@ export function createClipboardGestures({
             try {
                 writePromise = navigator.clipboard.write([new ClipboardItem(items)]);
             } catch (err) {
-                console.warn(`navigator.clipboard.write unavailable on Ctrl+C, using execCommand: ${err && (err as Error).name}`);
+                console.warn(`navigator.clipboard.write unavailable on Ctrl+C, using execCommand: ${String(err && errorName(err))}`);
                 clipboardSync.copyViaExecCommand(textPromise);
             }
             if (writePromise && writePromise.catch) {

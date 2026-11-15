@@ -19,7 +19,7 @@
  * @module
  */
 
-import type { StandIn } from './stand_in.ts';
+import { type StandIn, freshModule, standIn } from './stand_in.ts';
 
 /** The module under audit, as each load of it is typed. */
 type WebcamModule = typeof import('../../web/selkies-web-core/lib/webcam-capture.ts');
@@ -103,7 +103,7 @@ async function load({ orientation, metadata }: { orientation: number | undefined
     });
     globalThis.URL.createObjectURL = () => 'blob:audit';
     globalThis.URL.revokeObjectURL = () => {};
-    return import(`${MODULE}?variant=${variant++}`) as Promise<WebcamModule>;
+    return freshModule<WebcamModule>(await import(`${MODULE}?variant=${variant++}`), ['WebcamCapture']);
 }
 
 /** One frame the capture sent, as the wire names it. */
@@ -135,7 +135,7 @@ function makeCapture(mod: WebcamModule, opts: { canSend?: () => boolean; fps?: n
     capture._deriveOrientation = true;
     for (const [angle, want] of [[-90, 0], [0, 90], [90, 180], [180, 270]]) {
         page.orientation = angle;
-        const got = capture._frameOrientation({} as VideoFrame);
+        const got = capture._frameOrientation(standIn<VideoFrame>({}));
         check(`window at ${angle} needs ${want} clockwise`,
               got.rotation === want && got.flip === false, JSON.stringify(got));
     }
@@ -145,9 +145,9 @@ function makeCapture(mod: WebcamModule, opts: { canSend?: () => boolean; fps?: n
     // only a size or a turn the frame itself carries may rebuild one.
     capture._encodedSize = { w: 640, h: 480, rotation: 0, flip: false };
     const encoder = { state: 'configured' as const, encodeQueueSize: 0, encoded: false, encode() { this.encoded = true; }, close() {} };
-    const configured = encoder as StandIn<VideoEncoder> as VideoEncoder;
+    const configured = standIn<VideoEncoder>(encoder);
     capture._encoder = configured;
-    capture._handleFrame({ displayWidth: 640, displayHeight: 480, close() {} } as StandIn<VideoFrame> as VideoFrame);
+    capture._handleFrame(standIn<VideoFrame>({ displayWidth: 640, displayHeight: 480, close() {} }));
     check('a derived turn keeps the encoder', capture._encoder === configured && encoder.encoded === true,
           `orientation ${JSON.stringify(capture._orientation)}`);
     check('the derived turn is what the chunk carries', capture._orientation.rotation === 180,
@@ -158,7 +158,7 @@ function makeCapture(mod: WebcamModule, opts: { canSend?: () => boolean; fps?: n
 {
     const mod = await load({ orientation: 0, metadata: false });
     const { capture } = makeCapture(mod);
-    const track = { clone: () => ({ stop() {} }) } as StandIn<MediaStreamTrack> as MediaStreamTrack;
+    const track = standIn<MediaStreamTrack>({ clone: () => ({ stop() {} }) });
     const source = await capture._openSource(track, capture._generation);
     check('a worker source on a mobile viewport derives', !!source && capture._deriveOrientation === true,
           `source ${!!source}, derive ${capture._deriveOrientation}`);
@@ -169,7 +169,7 @@ function makeCapture(mod: WebcamModule, opts: { canSend?: () => boolean; fps?: n
     const mod = await load({ orientation: undefined, metadata: false });
     const { capture } = makeCapture(mod);
     const source = await capture._openSource(
-        { clone: () => ({ stop() {} }) } as StandIn<MediaStreamTrack> as MediaStreamTrack, capture._generation);
+        standIn<MediaStreamTrack>({ clone: () => ({ stop() {} }) }), capture._generation);
     check('a desktop window never derives', !!source && capture._deriveOrientation === false,
           `derive ${capture._deriveOrientation}`);
 }
@@ -179,10 +179,12 @@ function makeCapture(mod: WebcamModule, opts: { canSend?: () => boolean; fps?: n
     const mod = await load({ orientation: 90, metadata: true });
     const { capture } = makeCapture(mod);
     const source = await capture._openSource(
-        { clone: () => ({ stop() {} }) } as StandIn<MediaStreamTrack> as MediaStreamTrack, capture._generation);
+        standIn<MediaStreamTrack>({ clone: () => ({ stop() {} }) }), capture._generation);
     check('frame metadata is not derived over', !!source && capture._deriveOrientation === false,
           `derive ${capture._deriveOrientation}`);
-    const got = capture._frameOrientation({ rotation: 270, flip: true } as StandIn<VideoFrame> as VideoFrame);
+    // A frame the engine turned and flipped: `rotation` and `flip` are its metadata.
+    const turned = { displayWidth: 640, displayHeight: 480, rotation: 270, flip: true };
+    const got = capture._frameOrientation(standIn<VideoFrame>(turned));
     check('frame metadata is relayed as it stands', got.rotation === 270 && got.flip === true,
           JSON.stringify(got));
 }
@@ -193,7 +195,7 @@ function makeCapture(mod: WebcamModule, opts: { canSend?: () => boolean; fps?: n
     const { capture, sent } = makeCapture(mod);
     capture._orientation = { rotation: 180, flip: true };
     capture._onChunk({ id: mod.WEBCAM_CODEC_H264 },
-                     { byteLength: 4, type: 'key', copyTo() {} } as StandIn<EncodedVideoChunk> as EncodedVideoChunk,
+                     standIn<EncodedVideoChunk>({ byteLength: 4, type: 'key', copyTo() {} }),
                      capture._generation);
     check('the chunk is stamped with the frame it came from',
           sent.length === 1 && sent[0].rotation === 180 && sent[0].flip === true, JSON.stringify(sent));

@@ -19,7 +19,7 @@ import {
     PALETTE_CHORDS, PALETTE_KEYS, chordEvents, formatChord, parseChord, readUserChords, writeUserChords,
 } from '../../web/selkies-web-core/lib/touch-controls.ts';
 import type { ChordEvent } from '../../web/selkies-web-core/lib/touch-controls.ts';
-import type { StandIn } from './stand_in.ts';
+import { type StandIn, bare, standIn } from './stand_in.ts';
 
 /** An `Input` that records what it would send. */
 type AuditedInput = Input & { sent: string[] };
@@ -45,7 +45,7 @@ function check(label: string, ok: boolean, detail: unknown = ''): void {
 
 /** An Input with only what the key handlers touch, capturing what it would send. */
 function makeInput(): AuditedInput {
-    const input = Object.create(Input.prototype) as AuditedInput;
+    const input = bare<AuditedInput>(Input);
     input.sent = [];
     input.send = (msg: string) => input.sent.push(msg);
     input._keyDownList = {};
@@ -66,13 +66,13 @@ function makeInput(): AuditedInput {
 /** Plays key events the way a dashboard dispatches them: constructed, not trusted. */
 function play(input: AuditedInput, events: ChordEvent[]): string[] {
     for (const { type, key, code, state } of events) {
-        const event = ({
+        const event = standIn<KeyboardEvent>({
             key, code, location: 0, keyCode: 0, isComposing: false, timeStamp: 0, isTrusted: false,
             altKey: !!state.Alt, ctrlKey: !!state.Control, metaKey: !!state.Meta, shiftKey: !!state.Shift,
-            target: { classList: { contains: () => false }, parentElement: null },
+            target: standIn<Element>({ classList: { contains: () => false }, parentElement: null }),
             getModifierState: (name: string) => !!state[name],
             preventDefault() {}, stopPropagation() {},
-        }) as StandIn<KeyboardEvent> as KeyboardEvent;
+        });
         if (type === 'keydown') input._handleKeyDown(event);
         else input._handleKeyUp(event);
     }
@@ -128,9 +128,9 @@ const XK = { Control_L: 65507, Alt_L: 65513, Shift_L: 65505, Super_L: 65515, Del
 // --- the user's own chords ---------------------------------------------------
 {
     const store = new Map<string, string>();
-    const storage = {
+    const storage = standIn<Storage>({
         getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => store.set(k, v),
-    } as StandIn<Storage> as Storage;
+    });
     writeUserChords(storage, 'x_user_chords', ['ctrl+shift+t', 'Ctrl+Shift+T', 'nonsense', 'Win+E']);
     const back = readUserChords(storage, 'x_user_chords');
     check('the user\'s chords come back written one way, without repeats or anything unreadable',

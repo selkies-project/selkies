@@ -17,7 +17,7 @@
  */
 
 import { Input } from '../../web/selkies-web-core/lib/input.ts';
-import type { StandIn } from './stand_in.ts';
+import { type StandIn, bare, standIn } from './stand_in.ts';
 
 /** An `Input` that records what it would send and how many keys it released. */
 type AuditedInput = Input & { sent: string[]; keysReleased: number };
@@ -47,8 +47,8 @@ function makeInput({ locked = false } = {}): AuditedInput {
         window: { devicePixelRatio: 1, requestAnimationFrame: () => {} } satisfies StandIn<Window>,
         document: page satisfies StandIn<Document>,
     });
-    const input = Object.create(Input.prototype) as AuditedInput;
-    input.element = element as HTMLElement;
+    const input = bare<AuditedInput>(Input);
+    input.element = standIn<HTMLElement>(element);
     input.buttonMask = 0;
     input.x = 0;
     input.y = 0;
@@ -125,9 +125,9 @@ function makeInput({ locked = false } = {}): AuditedInput {
 
 {
     const input = makeInput();
-    input._activeTouches.set(7, { identifier: 7 } as ActiveTouch);
+    input._activeTouches.set(7, standIn<ActiveTouch>({ identifier: 7 }));
     input._isTwoFingerGesture = true;
-    input._trackpadTouches.set(3, { id: 3 } as TrackpadTouch);
+    input._trackpadTouches.set(3, standIn<TrackpadTouch>({ id: 3 }));
     page.visibilityState = 'hidden';
     input._onVisibilityChange();
     check('a page hidden mid-touch forgets the touches and the gesture in progress',
@@ -136,13 +136,13 @@ function makeInput({ locked = false } = {}): AuditedInput {
 
 // A touch whose end went elsewhere stays tracked: Edge numbers each touch anew, so the next tap is a second
 // finger, a two-finger gesture that scrolls and never clicks.
-const touchstart = (ids: number[], changed: number[]): TouchEvent => ({
+const touchstart = (ids: number[], changed: number[]): TouchEvent => standIn<TouchEvent>({
     touches: ids.map((identifier) => ({ identifier })),
     changedTouches: changed.map((identifier) => ({ identifier })),
-}) as StandIn<TouchEvent> as TouchEvent;
+});
 {
     const input = makeInput();
-    input._activeTouches.set(11, { identifier: 11 } as ActiveTouch);
+    input._activeTouches.set(11, standIn<ActiveTouch>({ identifier: 11 }));
     input._activeTouchIdentifier = 11;
     input.buttonMask = 1;
     input.x = 300; input.y = 200;
@@ -153,7 +153,7 @@ const touchstart = (ids: number[], changed: number[]): TouchEvent => ({
 }
 {
     const input = makeInput();
-    input._activeTouches.set(21, { identifier: 21 } as ActiveTouch);
+    input._activeTouches.set(21, standIn<ActiveTouch>({ identifier: 21 }));
     input._isTwoFingerGesture = false;
     input._forgetLiftedTouches(input._activeTouches, touchstart([21, 22], [22]));
     check('a finger still down is kept: the second makes the two-finger gesture it should',
@@ -161,7 +161,7 @@ const touchstart = (ids: number[], changed: number[]): TouchEvent => ({
 }
 {
     const input = makeInput();
-    input._trackpadTouches.set(5, { id: 5 } as TrackpadTouch);
+    input._trackpadTouches.set(5, standIn<TrackpadTouch>({ id: 5 }));
     input._trackpadGestureMode = 'scroll';
     input._forgetLiftedTouches(input._trackpadTouches, touchstart([6], [6]));
     check("the trackpad's touches heal the same way", input._trackpadTouches.size === 0

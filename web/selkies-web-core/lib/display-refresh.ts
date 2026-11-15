@@ -39,6 +39,7 @@
  * reports it, its screen changed, or it entered or left full screen.
  * @module
  */
+import { instanceOr } from './narrow.ts';
 
 /** The stored frame rate that asks for the display's own. */
 export const FRAMERATE_DISPLAY = 'display';
@@ -298,11 +299,10 @@ export function watchDisplayRefresh(onRate: (rate: number) => void): DisplayRefr
     watchDensity();
     measure();
   };
-  const screen = window.screen as unknown as { addEventListener: (type: string, listener: () => void) => void; removeEventListener: (type: string, listener: () => void) => void } | undefined;
-  const screenEvents = !!(screen && typeof screen.addEventListener === 'function');
+  const screen = instanceOr(window.screen, EventTarget);
   document.addEventListener('visibilitychange', onVisibility);
   document.addEventListener('fullscreenchange', measure);
-  if (screenEvents) screen.addEventListener('change', measure);
+  screen?.addEventListener('change', measure);
   watchDensity();
   measure();
   return {
@@ -313,7 +313,7 @@ export function watchDisplayRefresh(onRate: (rate: number) => void): DisplayRefr
       measuring = false;
       document.removeEventListener('visibilitychange', onVisibility);
       document.removeEventListener('fullscreenchange', measure);
-      if (screenEvents) screen.removeEventListener('change', measure);
+      screen?.removeEventListener('change', measure);
       density!.removeEventListener('change', onDensity);
     },
   };

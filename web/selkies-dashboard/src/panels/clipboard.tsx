@@ -8,7 +8,7 @@ import { useState, useEffect, useRef } from "react";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { ActionButton, SwitchRow, Clip } from "@/panels/controls";
-import { computeRenderableSettings, getLastClipboardContent, getLastServerSettings, getPrefixedKey, onCoreMessage, type ServerSettings } from "@/utils";
+import { computeRenderableSettings, getLastClipboardContent, getLastServerSettings, getPrefixedKey, onCoreMessage, serverSettingsOf } from "@/utils";
 import { t } from "@/i18n";
 
 /**
@@ -127,18 +127,18 @@ export function Clipboard() {
 		}
 
 		if (message.type === 'serverSettings') {
-			const payload = message.payload as ServerSettings | null;
+			const payload = serverSettingsOf(message.payload);
 			setRenderableSettings(computeRenderableSettings(payload));
 			const s = payload?.enable_binary_clipboard;
 			if (s) {
 				const saved = localStorage.getItem(getPrefixedKey('enable_binary_clipboard'));
 				const final = s.locked ? s.value : (saved !== null ? saved === 'true' : s.value);
-				setEnableBinaryClipboard(final as boolean);
+				setEnableBinaryClipboard(final === true);
 			}
 			const seamless = payload?.clipboard_seamless;
 			if (seamless) {
-				setClipboardSeamless(seamless.locked ? seamless.value as boolean
-					: storedBool('clipboard_seamless', seamless.value as boolean));
+				setClipboardSeamless(seamless.locked ? seamless.value === true
+					: storedBool('clipboard_seamless', seamless.value === true));
 			}
 		}
 	}), []);

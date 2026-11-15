@@ -26,6 +26,7 @@ import { getRoutePrefix, getStorageAppName, isMobileClient, isMacDesktop } from 
 import { urlFragmentKeyword } from "../../selkies-web-core/lib/page-url.ts";
 import { hardwareKeyboard } from "../../selkies-web-core/lib/hardware-keyboard.ts";
 import type { ServerSettingEntry } from "../../selkies-web-core/lib/conditional-settings.ts";
+import { isRecord } from "../../selkies-web-core/lib/narrow.ts";
 
 export { isMobileClient, hardwareKeyboard, getRoutePrefix, getStorageAppName };
 
@@ -92,6 +93,20 @@ export interface ClipboardPreview { text: string; truncated: boolean; secret: bo
 export type CoreMessage = Record<string, unknown>;
 
 /**
+ * The server settings a core message carries.
+ * @param payload The message's `payload`.
+ * @returns The settings, each entry an object, or null where the payload is none.
+ */
+export function serverSettingsOf(payload: unknown): ServerSettings | null {
+  return isServerSettings(payload) ? payload : null;
+}
+
+/** Whether a payload is server settings: an object of setting entries, each an object. */
+function isServerSettings(payload: unknown): payload is ServerSettings {
+  return isRecord(payload) && Object.values(payload).every((entry: unknown): boolean => isRecord(entry));
+}
+
+/**
  * Hands `handler` every message the core posts to this window: from this
  * origin, and an object, which is what every message of the core's is.
  * @returns The unsubscribe, for an effect's cleanup.
@@ -114,17 +129,17 @@ const lastAudioDevices: { input: string | null; output: string | null } = { inpu
 if (typeof window !== 'undefined') {
   onCoreMessage((message) => {
     if (message.type === 'serverSettings') {
-      lastServerSettings = message.payload as ServerSettings | null;
+      lastServerSettings = serverSettingsOf(message.payload);
     } else if (message.type === 'clipboardContentUpdate' && typeof message.text === 'string') {
       lastClipboardContent = { text: message.text, truncated: message.truncated === true,
         secret: message.secret === true };
     } else if (message.type === 'effectiveCursorState' && typeof message.value === 'boolean') {
       lastEffectiveCursorState = message.value;
     } else if (message.type === 'audioDeviceSelected' && message.deviceId) {
-      if (message.context === 'input') lastAudioDevices.input = message.deviceId as string;
-      else if (message.context === 'output') lastAudioDevices.output = message.deviceId as string;
+      if (message.context === 'input') lastAudioDevices.input = String(message.deviceId);
+      else if (message.context === 'output') lastAudioDevices.output = String(message.deviceId);
     } else if (message.type === 'printDocument' && typeof message.url === 'string') {
-      printJobs = [...printJobs, { name: message.name as string, url: message.url as string }];
+      printJobs = [...printJobs, { name: String(message.name), url: message.url }];
       window.dispatchEvent(new Event('printJobsChanged'));
     }
   });
@@ -256,7 +271,8 @@ export function computeRenderableSettings(serverSettings: ServerSettings | null)
   r.gamepadToggle = isSettingRenderable(s.gamepad_enabled);
 
   r.enableRateControl = shown('enable_rate_control');
-  const transfers = s.file_transfers?.value as string[] | undefined;
+  const transferValue = s.file_transfers?.value;
+  const transfers = Array.isArray(transferValue) ? transferValue.filter((t): t is string => typeof t === 'string') : undefined;
   r.fileUpload = transfers !== undefined ? transfers.includes('upload') : true;
   r.fileDownload = transfers !== undefined ? transfers.includes('download') : true;
   // second_screen is effective availability (admin flag and backend capacity).

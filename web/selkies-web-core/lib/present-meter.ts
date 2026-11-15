@@ -137,13 +137,13 @@ export interface VideoWatch {
 export function watchVideo(video: HTMLVideoElement, meter: PresentMeter, delayOf: (metadata: VideoFrameCallbackMetadata) => number): VideoWatch {
   const quality = (): { totalVideoFrames: number; droppedVideoFrames: number } => (typeof video.getVideoPlaybackQuality === 'function'
     ? video.getVideoPlaybackQuality() : { totalVideoFrames: 0, droppedVideoFrames: 0 });
-  const follows = typeof (video as unknown as { requestVideoFrameCallback?: unknown }).requestVideoFrameCallback === 'function';
+  const follows = typeof video.requestVideoFrameCallback === 'function';
   const start = quality();
   let total = start.totalVideoFrames, dropped = start.droppedVideoFrames;
   let handle = 0, timer: ReturnType<typeof setTimeout> | number = 0, last = -1, handed = 0, handedRead = 0, reported = false, counted = false;
   const follow = (): void => {
     timer = 0;
-    handle = (video as HTMLVideoElement & { requestVideoFrameCallback: (cb: (now: number, metadata: VideoFrameCallbackMetadata) => void) => number }).requestVideoFrameCallback(onFrame);
+    handle = video.requestVideoFrameCallback(onFrame);
   };
   const onFrame = (_now: number, metadata: VideoFrameCallbackMetadata): void => {
     handed += last >= 0 && metadata.presentedFrames > last ? metadata.presentedFrames - last : 1;
@@ -159,7 +159,7 @@ export function watchVideo(video: HTMLVideoElement, meter: PresentMeter, delayOf
     reported: () => reported,
     stop: (): void => {
       clearTimeout(timer);
-      if (follows) (video as unknown as { cancelVideoFrameCallback: (h: number) => void }).cancelVideoFrameCallback(handle);
+      if (follows) video.cancelVideoFrameCallback(handle);
     },
     read(): VideoPlaybackRead {
       const now = quality();

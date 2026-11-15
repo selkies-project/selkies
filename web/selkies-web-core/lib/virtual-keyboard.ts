@@ -22,6 +22,7 @@
  * the field does.
  * @module
  */
+import { elementByTag } from './narrow.ts';
 
 /** The hidden field's id, which the input handler and the dashboards know it by. */
 export const ASSIST_ID = 'keyboard-input-assist';
@@ -31,7 +32,7 @@ export const ASSIST_ID = 'keyboard-input-assist';
  * @returns The field.
  */
 export function keyboardAssist(): HTMLInputElement {
-  let field: HTMLInputElement | null = document.getElementById(ASSIST_ID) as HTMLInputElement | null;
+  let field = elementByTag(ASSIST_ID, 'input');
   if (field) return field;
   field = document.createElement('input');
   field.type = 'search';
@@ -56,7 +57,7 @@ export function keyboardAssist(): HTMLInputElement {
  * @returns Whether the keyboard was asked for.
  */
 export function showVirtualKeyboard(overlay: Element | null): boolean {
-  const field = document.getElementById(ASSIST_ID) as HTMLInputElement | null;
+  const field = elementByTag(ASSIST_ID, 'input');
   if (!field) return false;
   const vk: { show?: () => void; hide?: () => void } | undefined =
     typeof navigator !== 'undefined' ? (navigator as Navigator & { virtualKeyboard?: { show?: () => void; hide?: () => void } }).virtualKeyboard : undefined;
@@ -67,7 +68,7 @@ export function showVirtualKeyboard(overlay: Element | null): boolean {
   field.focus({ preventScroll: true });
   if (manual && vk) {
     try {
-      (vk.show as () => void)();
+      vk.show?.();
     } catch (e) {
       console.warn('The on-screen keyboard was not shown:', e);
     }

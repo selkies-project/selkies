@@ -25,7 +25,7 @@ import {
     createHardwareKeyboardWatch, isKeyboardOnlyKeystroke, HARDWARE_KEYBOARD_IDLE_MS,
 } from '../../web/selkies-web-core/lib/hardware-keyboard.ts';
 import type { HardwareKeyboardWatch } from '../../web/selkies-web-core/lib/hardware-keyboard.ts';
-import type { StandIn } from './stand_in.ts';
+import { type StandIn, freshModule, standIn } from './stand_in.ts';
 
 let failed = 0;
 /** Prints one check's line and counts a failure. */
@@ -35,7 +35,7 @@ function check(label: string, ok: boolean, detail: unknown = ''): void {
 }
 
 const key = (code: string, extra: StandIn<KeyboardEvent> = {}): KeyboardEvent =>
-    ({ type: 'keydown', code, key: code, keyCode: 65, isTrusted: true, ...extra }) as StandIn<KeyboardEvent> as KeyboardEvent;
+    standIn<KeyboardEvent>({ type: 'keydown', code, key: code, keyCode: 65, isTrusted: true, ...extra });
 
 // An on-screen keyboard's keys, as Android's and iOS's report them.
 const onScreen = [
@@ -160,8 +160,8 @@ async function pageWatchOn(fine: boolean, maxTouchPoints: number, tag: string): 
     Object.defineProperty(globalThis, 'navigator', {
         value: { maxTouchPoints } satisfies StandIn<Navigator>, configurable: true, writable: true,
     });
-    const mod = await import(`../../web/selkies-web-core/lib/hardware-keyboard.ts?${tag}`) as
-        typeof import('../../web/selkies-web-core/lib/hardware-keyboard.ts');
+    const mod = freshModule<typeof import('../../web/selkies-web-core/lib/hardware-keyboard.ts')>(
+        await import(`../../web/selkies-web-core/lib/hardware-keyboard.ts?${tag}`), ['hardwareKeyboard']);
     const turn = (to: boolean): void => {
         pointer.matches = to;
         for (const fn of listeners) fn({ matches: to });

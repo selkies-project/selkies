@@ -40,6 +40,7 @@ import {
   sessionAuthHeaders,
   withSessionToken,
 } from "../../../selkies-web-core/lib/session-token.ts"
+import { fields, hasFields, messageOf, stringOr } from "../../../selkies-web-core/lib/narrow.ts"
 
 /** One entry of a directory listing, as the server's file-manager listing returns it. */
 type FileManagerItem = {
@@ -129,11 +130,17 @@ async function request(url: string, body?: unknown): Promise<ApiReply> {
         headers: sessionAuthHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify(body),
       })
-  const data = await (resp.json() as Promise<ApiReply | null>).catch(() => null)
-  if (!resp.ok || !data || data.status !== "ok") {
-    throw new Error((data && data.message) || `HTTP ${resp.status}`)
+  const reply: unknown = await resp.json().catch(() => null)
+  const data = fields(reply)
+  if (!resp.ok || data.status !== "ok") {
+    throw new Error(stringOr(data.message) || `HTTP ${resp.status}`)
   }
-  return data
+  return { status: "ok", entries: Array.isArray(data.entries) ? data.entries.filter(isFileItem) : undefined }
+}
+
+/** Whether a listed entry is one the pane can show. */
+function isFileItem(entry: unknown): entry is FileManagerItem {
+  return hasFields(entry, { name: "string", path: "string", is_dir: "boolean", size: ["number", "null"], mtime: "string" })
 }
 
 /**
@@ -229,7 +236,7 @@ export function FileManager({
 
   // An upload that ends shows in the listing without a manual refresh.
   React.useEffect(() => onCoreMessage((message) => {
-    if (message.type === "fileUpload" && (message.payload as { status?: string } | undefined)?.status === "end") {
+    if (message.type === "fileUpload" && fields(message.payload).status === "end") {
       refresh().catch((e: Error) => setError(e?.message || String(e)))
     }
   }), [refresh])
@@ -301,7 +308,7 @@ export function FileManager({
       await refresh()
       toast.success(t("files.folderCreated", { name }))
     } catch (e) {
-      toast.error(t("files.folderCreateFailed", { error: (e as Error)?.message || String(e) }))
+      toast.error(t("files.folderCreateFailed", { error: messageOf(e) || String(e) }))
     }
   }
 

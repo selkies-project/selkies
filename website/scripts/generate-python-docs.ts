@@ -27,6 +27,17 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as Python from 'fumadocs-python';
 import { writeHtml } from './python-reference-html.ts';
+import { isRecord } from '../../web/selkies-web-core/lib/narrow.ts';
+
+/**
+ * Whether the docs build's JSON is the package fumadocs-python converts: the
+ * script reads its `modules`, and the converter the rest of what griffe wrote.
+ * @param value What the JSON parsed to.
+ * @returns True for an object with a `modules` table.
+ */
+function isPythonPackage(value: unknown): value is Parameters<typeof Python.convert>[0] {
+  return isRecord(value) && isRecord(value.modules);
+}
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = join(root, '..');
@@ -88,7 +99,8 @@ if (!jsonPath) {
 // The JSON is resolved and refused where it holds a NUL or names a parent.
 jsonPath = resolve(jsonPath);
 if (!/^\/[^\0]*$/.test(jsonPath) || jsonPath.split('/').includes('..')) throw new Error(`generate-python-docs: ${jsonPath} is not a usable path`);
-const pkg = JSON.parse(await fs.readFile(jsonPath, 'utf8')) as Parameters<typeof Python.convert>[0];
+const pkg: unknown = JSON.parse(await fs.readFile(jsonPath, 'utf8'));
+if (!isPythonPackage(pkg)) throw new Error(`generate-python-docs: ${jsonPath} holds no package with modules`);
 for (const name of EXCLUDED_MODULES) delete pkg.modules[name];
 
 // groupBy 'none' keeps the pages at the root of the output directory, so a

@@ -23,6 +23,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { remote } from 'webdriverio';
+import { fields, numberOr } from '../../web/selkies-web-core/lib/narrow.ts';
 import * as stack from './stack.ts';
 
 type Mode = 'websockets' | 'webrtc';
@@ -116,6 +117,35 @@ interface State {
   play: boolean;
 }
 
+/** A number, or null where the page had none. */
+const numberOrNull = (value: unknown): number | null => numberOr(value) ?? null;
+/** A boolean, or null where the page had none. */
+const booleanOrNull = (value: unknown): boolean | null => typeof value === 'boolean' ? value : null;
+
+/**
+ * What STATE returned, checked field by field.
+ * @param value The script's result.
+ * @returns The page's state.
+ * @throws Error where the script returned no state.
+ */
+function readState(value: unknown): State {
+  const f = fields(value);
+  if (typeof f.secure !== 'boolean' || typeof f.decoder !== 'string' || typeof f.play !== 'boolean') {
+    throw new Error(`the page returned no state: ${JSON.stringify(value)}`);
+  }
+  const video = Array.isArray(f.video) ? f.video.map(numberOrNull) : null;
+  return {
+    secure: f.secure,
+    decoder: f.decoder,
+    chunks: numberOrNull(f.chunks),
+    fps: numberOr(f.fps) ?? 0,
+    video: video && video.length === 3 && video.every((n) => n !== null) ? [video[0], video[1], video[2]] : null,
+    paused: booleanOrNull(f.paused),
+    time: numberOrNull(f.time),
+    play: f.play,
+  };
+}
+
 interface Result {
   mode: Mode;
   platform: string;
@@ -159,7 +189,7 @@ async function runCase(mode: Mode, name: string, server: stack.Server, watcher: 
     ...platform.caps,
     acceptInsecureCerts: true,
     'bstack:options': {
-      ...(platform.caps['bstack:options'] as object),
+      ...platform.caps['bstack:options'],
       local: true,
       localIdentifier: ctx.id,
       projectName: 'selkies',
@@ -186,7 +216,7 @@ async function runCase(mode: Mode, name: string, server: stack.Server, watcher: 
     for (;;) {
       await pause(2000);
       prev = now;
-      now = (await browser.execute(STATE)) as State;
+      now = readState(await browser.execute(STATE));
       // Where the browser's autoplay policy holds playback for a gesture, the user's is a press
       // of the button the client shows for it
       if (now.play && !gesture) {
@@ -221,10 +251,11 @@ async function runCase(mode: Mode, name: string, server: stack.Server, watcher: 
     }
     const press = await watcher.wait(since, (e) => e.kind === 'ButtonPress' && (e.button === 1 || platform.touch), INPUT_MS);
     const size = await stack.screenSize(server.display);
-    const seen: { heldMs?: number; handledMs?: number } = JSON.parse((await browser.execute(INPUT_COUNTS)) as string);
+    const counts = fields(JSON.parse(String(await browser.execute(INPUT_COUNTS))));
+    const seen = { heldMs: numberOr(counts.heldMs), handledMs: numberOr(counts.handledMs) };
     const tap = platform.touch ? `, a tap held ${seen.heldMs} ms and handled ${seen.handledMs} ms apart` : '';
     if (!press) {
-      result.input = `no button press reached the display (${size[0]}x${size[1]}); the page got ${JSON.stringify(seen)}`;
+      result.input = `no button press reached the display (${size[0]}x${size[1]}); the page got ${JSON.stringify(counts)}`;
       return result;
     }
     if (!centered(press, size)) {
@@ -246,7 +277,7 @@ async function runCase(mode: Mode, name: string, server: stack.Server, watcher: 
       const key = await watcher.wait(typed, (e) => e.kind === 'KeyPress', INPUT_MS);
       if (!key || key.keysym !== 'q') {
         result.input += key ? `; typed q, the display got ${key.keysym}`
-          : `; typed q, no key reached the display; the page got ${await browser.execute(INPUT_COUNTS)}`;
+          : `; typed q, no key reached the display; the page got ${String(await browser.execute(INPUT_COUNTS))}`;
         return result;
       }
       result.input += '; key q';

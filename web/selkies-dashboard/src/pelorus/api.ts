@@ -17,6 +17,7 @@
  * listed sealed, and sent opened with each run and model listing.
  * @module
  */
+import { fields, hasFields, isRecord, stringOr, type FieldKind } from "../../../selkies-web-core/lib/narrow.ts";
 
 /** One model configuration as the server lists it. */
 export interface ModelConfig {
@@ -94,6 +95,64 @@ export type RunEvent =
   | { type: "done"; success: boolean; text: string }
   | { type: "error"; message: string };
 
+/** Each run event's fields, by its `type`. */
+const RUN_EVENT_FIELDS: Readonly<Record<RunEvent["type"], Readonly<Record<string, FieldKind | readonly FieldKind[]>>>> = {
+  start: { session: "string", model: "string" },
+  step: { number: "number" },
+  screen: { when: "string", image: "string" },
+  thinking: { text: "string" },
+  text: { text: "string" },
+  call: { name: "string", arguments: "object" },
+  result: { name: "string", text: "string", failed: "boolean", image: ["string", "null"] },
+  done: { success: "boolean", text: "string" },
+  error: { message: "string" },
+};
+
+/**
+ * Whether a streamed frame is a run event: a known `type` with its fields.
+ * @param value What the frame parsed to.
+ * @returns True for an event the panel shows.
+ */
+function isRunEvent(value: unknown): value is RunEvent {
+  if (!isRecord(value)) return false;
+  const kinds = Object.entries(RUN_EVENT_FIELDS).find(([type]) => type === value.type)?.[1];
+  return kinds !== undefined && hasFields(value, kinds)
+    && (value.type !== "screen" || value.when === "start" || value.when === "step" || value.when === "end");
+}
+
+/** Whether an answer is a saved model configuration. */
+function isModelConfig(value: unknown): value is ModelConfig {
+  return hasFields(value, { id: "string", name: "string", provider: "string", endpoint: "string", model: "string",
+    effort: "string", vision: "boolean", has_key: "boolean", sealed: "string", default: "boolean", editable: "boolean",
+    usable: "boolean" });
+}
+
+/** Whether an entry is a provider's defaults. */
+function isProviderDefaults(value: unknown): value is ProviderDefaults {
+  return hasFields(value, { name: "string", label: "string", endpoint: "string", model: "string", key: "string", local: "boolean" })
+    && (value.key === "required" || value.key === "optional" || value.key === "none");
+}
+
+/** Whether an answer is the model list. */
+function isModelList(value: unknown): value is ModelList {
+  return hasFields(value, { locked: "boolean", models: "object", providers: "object", efforts: "object", shell: "boolean",
+    windows: "boolean", max_steps: "number" })
+    && Array.isArray(value.models) && value.models.every(isModelConfig)
+    && Array.isArray(value.providers) && value.providers.every(isProviderDefaults)
+    && Array.isArray(value.efforts) && value.efforts.every((e: unknown): boolean => typeof e === "string");
+}
+
+/**
+ * Reads an answer of the shape a guard names, or refuses it.
+ * @param guard The shape's guard.
+ * @param what The shape, for the error.
+ * @returns The answer, typed.
+ */
+const read = <T>(guard: (value: unknown) => value is T, what: string) => (value: unknown): T => {
+  if (!guard(value)) throw new Error(`the agent answered with something other than ${what}`);
+  return value;
+};
+
 /** What a run is started with. */
 export interface RunRequest {
   prompt: string;
@@ -120,27 +179,28 @@ export interface RunRequest {
  * @returns The answer.
  * @throws With the server's message when the request is refused.
  */
-async function call<T>(base: string, path: string, method = "GET", body?: unknown): Promise<T> {
+async function call(base: string, path: string, method = "GET", body?: unknown): Promise<unknown> {
   const response = await fetch(`${base}/${path}`, {
     method,
     credentials: "same-origin",
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  const data = await (response.json() as Promise<{ message?: unknown }>).catch(() => ({} as { message?: unknown }));
-  if (!response.ok) throw new Error(typeof data?.message === "string" ? data.message : `HTTP ${response.status}`);
-  return data as T;
+  const data: unknown = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(stringOr(fields(data).message) ?? `HTTP ${response.status}`);
+  return data;
 }
 
 /** Lists the model configurations and what the session offers. */
-export const listModels = (base: string): Promise<ModelList> => call(base, "models");
+export const listModels = (base: string): Promise<ModelList> => call(base, "models").then(read(isModelList, "a model list"));
 
 /** Saves a new configuration. */
-export const createModel = (base: string, draft: ModelDraft): Promise<ModelConfig> => call(base, "models", "POST", draft);
+export const createModel = (base: string, draft: ModelDraft): Promise<ModelConfig> =>
+  call(base, "models", "POST", draft).then(read(isModelConfig, "a model configuration"));
 
 /** Changes a saved configuration. */
 export const updateModel = (base: string, id: string, draft: ModelDraft): Promise<ModelConfig> =>
-  call(base, `models/${encodeURIComponent(id)}`, "PUT", draft);
+  call(base, `models/${encodeURIComponent(id)}`, "PUT", draft).then(read(isModelConfig, "a model configuration"));
 
 /** Forgets a saved configuration. */
 export const deleteModel = (base: string, id: string): Promise<unknown> => call(base, `models/${encodeURIComponent(id)}`, "DELETE");
@@ -152,7 +212,8 @@ export const deleteModel = (base: string, id: string): Promise<unknown> => call(
  * @returns The model names, sorted.
  */
 export async function modelNames(base: string, probe: ModelDraft & { id?: string }): Promise<string[]> {
-  return (await call<{ models: string[] }>(base, "models/names", "POST", probe)).models;
+  const models = fields(await call(base, "models/names", "POST", probe)).models;
+  return Array.isArray(models) ? models.filter((name): name is string => typeof name === "string") : [];
 }
 
 /** Forgets a conversation on the server. */
@@ -176,8 +237,8 @@ export async function run(base: string, request: RunRequest, onEvent: (event: Ru
     signal,
   });
   if (!response.ok || !response.body) {
-    const data = await (response.json() as Promise<{ message?: unknown }>).catch(() => ({} as { message?: unknown }));
-    throw new Error(typeof data?.message === "string" ? data.message : `HTTP ${response.status}`);
+    const data: unknown = await response.json().catch(() => ({}));
+    throw new Error(stringOr(fields(data).message) ?? `HTTP ${response.status}`);
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -193,7 +254,8 @@ export async function run(base: string, request: RunRequest, onEvent: (event: Ru
       const data = frame.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
       if (data) {
         try {
-          onEvent(JSON.parse(data) as RunEvent);
+          const event: unknown = JSON.parse(data);
+          if (isRunEvent(event)) onEvent(event);
         } catch { /* a frame that is not an event (a keep-alive) is skipped */ }
       }
       end = buffered.indexOf("\n\n");

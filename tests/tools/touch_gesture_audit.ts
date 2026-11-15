@@ -16,7 +16,7 @@
  */
 
 import { Input } from '../../web/selkies-web-core/lib/input.ts';
-import type { StandIn, VirtualTimer } from './stand_in.ts';
+import { type StandIn, type VirtualTimer, standIn } from './stand_in.ts';
 
 let failed = 0;
 
@@ -108,6 +108,9 @@ interface Finger {
     touchType?: string;
 }
 
+/** The directions a scroll notch goes, as `Notches` names them. */
+const NOTCH_NAMES = ['down', 'up', 'left', 'right'] as const;
+
 /** Scroll notches per direction. */
 interface Notches {
     down: number;
@@ -119,7 +122,7 @@ interface Notches {
 /** A fresh Input in trackpad mode (or direct touch), recording what it sends. */
 function makeInput(trackpad = true): { input: Input; sent: Sent } {
     const sent: Sent = [];
-    const input = new Input(element as HTMLElement, (msg) => sent.push([now, msg]));
+    const input = new Input(standIn<HTMLElement>(element), (msg) => sent.push([now, msg]));
     input.sendMotion = (msg) => sent.push([now, msg]);
     input.inputAttached = true;
     input.setTrackpadMode(trackpad);
@@ -138,7 +141,7 @@ function fire(input: Input, type: string, changed: Finger[], live: Finger[], sta
         type, changedTouches: changed, touches: live, target: element, timeStamp: stamp,
         preventDefault() {}, stopPropagation() {},
     };
-    input._handleTouchEvent(event as StandIn<TouchEvent> as TouchEvent);
+    input._handleTouchEvent(standIn<TouchEvent>(event));
 }
 
 /** The left-button transitions on the wire, as [time, 'down'|'up'], from the mask each message carries. */
@@ -255,7 +258,8 @@ function notches(sent: Sent): Notches {
         const p = msg.split(',');
         if (p[0] !== 'm' && p[0] !== 'm2') continue;
         const mask = Number(p[3]);
-        for (const [name, bit] of Object.entries(bits) as Array<[keyof Notches, number]>) {
+        for (const name of NOTCH_NAMES) {
+            const bit = bits[name];
             if ((mask & bit) && !(prev & bit)) out[name] += Number(p[4]);
         }
         prev = mask;
@@ -421,8 +425,8 @@ function scrollThenLiftOne(input: Input): void {
             advance(4);
             const x = 300 + (frame - 1) * 20 + 5 * i;
             const before = sent.length;
-            input._handleRawPointerUpdate({ type: 'pointerrawupdate', pointerType: 'touch', isPrimary: true,
-                                            clientX: x, clientY: 300, target: element } as StandIn<PointerEvent> as PointerEvent);
+            input._handleRawPointerUpdate(standIn<PointerEvent>({ type: 'pointerrawupdate', pointerType: 'touch', isPrimary: true,
+                                            clientX: x, clientY: 300, target: element }));
             immediate.push(sent.length > before);
         }
         t = touch(1, 300 + frame * 20, 300);
@@ -511,9 +515,9 @@ for (const trackpad of [true, false]) {
 }
 
 /** A wheel event as the page receives it. */
-const wheel = (deltaY: number, ctrlKey: boolean, deltaMode = 0): WheelEvent => ({
+const wheel = (deltaY: number, ctrlKey: boolean, deltaMode = 0): WheelEvent => standIn<WheelEvent>({
     type: 'wheel', deltaY, deltaX: 0, deltaMode, ctrlKey, target: element, preventDefault() {},
-}) as StandIn<WheelEvent> as WheelEvent;
+});
 {
     // Chromium's touchpad pinch: Ctrl+wheel steps of -100 ln(scale).
     const { input, sent } = makeInput(false);
@@ -562,8 +566,8 @@ function accelSwipe(px: number, n: number, dt: number, speed?: number): number {
         input.setTrackpadSpeed(speed);
     }
     advance(1000);
-    const stamped = (type: string, t: Finger): TouchEvent => ({ type, changedTouches: [t], touches: type === 'touchend' ? [] : [t],
-        target: element, timeStamp: now, preventDefault() {}, stopPropagation() {} }) as StandIn<TouchEvent> as TouchEvent;
+    const stamped = (type: string, t: Finger): TouchEvent => standIn<TouchEvent>({ type, changedTouches: [t], touches: type === 'touchend' ? [] : [t],
+        target: element, timeStamp: now, preventDefault() {}, stopPropagation() {} });
     let t = touch(1, 100, 300);
     input._handleTouchEvent(stamped('touchstart', t));
     for (let i = 1; i <= n; i++) {
@@ -600,11 +604,11 @@ function accelSwipe(px: number, n: number, dt: number, speed?: number): number {
 // finger on the trackpad.
 
 /** A pen pointer event of `type` at (x, y), the tip down for a press and a move. */
-const pen = (type: string, x: number, y: number): PointerEvent => ({
+const pen = (type: string, x: number, y: number): PointerEvent => standIn<PointerEvent>({
     type, pointerType: 'pen', isPrimary: true, button: type === 'pointerup' ? 0 : (type === 'pointerdown' ? 0 : -1),
     buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: y, screenX: x, screenY: y,
     ctrlKey: false, shiftKey: false, target: element, timeStamp: now, preventDefault() {},
-}) as StandIn<PointerEvent> as PointerEvent;
+});
 const stylus = (id: number, x: number, y: number): Finger => ({ ...touch(id, x, y), touchType: 'stylus' });
 
 /** One Pencil tap at (x, y) as iPadOS reports it: the pen pointer events around the touch events. */

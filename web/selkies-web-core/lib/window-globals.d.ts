@@ -19,6 +19,11 @@ declare global {
   function clearTimeout(id: ReturnType<typeof setTimeout> | null): void;
   /** An interval handle the page cleared to null: the platform takes it as no timer. */
   function clearInterval(id: ReturnType<typeof setInterval> | null): void;
+  /** The page's own events: a dashboard asks the core for the file picker with `requestFileUpload`. */
+  interface WindowEventMap {
+    requestFileUpload: CustomEvent;
+  }
+
   /** The track an insertable-streams reader takes, which the worker typings leave out. */
   interface MediaStreamTrackProcessorInit {
     track: MediaStreamTrack;

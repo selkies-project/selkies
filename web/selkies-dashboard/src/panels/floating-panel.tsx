@@ -46,8 +46,8 @@ export function FloatingPanel({ initial, storageKey, className, children }: Floa
   });
 
   const onPointerDown = (event: React.PointerEvent) => {
-    const target = event.target as HTMLElement;
-    if (!target.closest("[data-drag-handle]") || target.closest("button, input, select, a")) return;
+    const target = event.target;
+    if (!(target instanceof Element) || !target.closest("[data-drag-handle]") || target.closest("button, input, select, a")) return;
     begin(event, position);
   };
 

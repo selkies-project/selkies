@@ -23,6 +23,7 @@
  */
 import * as React from "react";
 import { modelNames, type ModelDraft } from "@/pelorus/api";
+import { fields, isRecord } from "../../../selkies-web-core/lib/narrow.ts";
 
 /** One provider's models as last listed. */
 export interface Listing {
@@ -51,9 +52,12 @@ const asked = new Set<string>();
 
 try {
   const stored: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
-  if (stored && typeof stored === "object") {
-    for (const [key, value] of Object.entries(stored as Record<string, Listing>)) {
-      if (Array.isArray(value?.names)) listings.set(key, { names: value.names.filter((n) => typeof n === "string"), at: Number(value.at) || 0 });
+  if (isRecord(stored)) {
+    for (const [key, value] of Object.entries(stored)) {
+      const listing = fields(value);
+      if (Array.isArray(listing.names)) {
+        listings.set(key, { names: listing.names.filter((n): n is string => typeof n === "string"), at: Number(listing.at) || 0 });
+      }
     }
   }
 } catch { /* unreadable or refused: the page lists afresh */ }

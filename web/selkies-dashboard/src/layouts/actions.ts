@@ -142,6 +142,16 @@ export function useChromeEvents(events: ChromeEvents): void {
 /** How see-through the layout's panels are: solid, light, medium, or strong. */
 export type Translucency = 0 | 1 | 2 | 3;
 
+/** The grade after each, wrapping from strong back to solid. */
+const NEXT_TRANSLUCENCY: Record<Translucency, Translucency> = { 0: 1, 1: 2, 2: 3, 3: 0 };
+
+/**
+ * The translucency the button steps to.
+ * @param translucency The current grade.
+ * @returns The next one.
+ */
+export const nextTranslucency = (translucency: Translucency): Translucency => NEXT_TRANSLUCENCY[translucency];
+
 /** The two chrome preferences every bar layout shares, each kept per browser under its prefixed key. */
 export interface BarPrefs {
   /** The figures strip a bar's middle shows; false mounts nothing of it. */

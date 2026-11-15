@@ -141,7 +141,7 @@ function Fan({ dock, fabSize, anchorRef, bar, page, onPage, onClose }: FanProps)
 
   React.useEffect(() => {
     const onDown = (event: MouseEvent) => {
-      const target = event.target as Node;
+      const target = event.target instanceof Node ? event.target : null;
       const element = target instanceof Element ? target : null;
       if (anchorRef.current?.contains(target) || element?.closest("[data-edge-fan], [data-base-ui-portal]")) return;
       onClose();

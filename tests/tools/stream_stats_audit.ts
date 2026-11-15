@@ -24,7 +24,8 @@ import type {
 } from '../../web/selkies-web-core/lib/stream-stats.ts';
 import type { StreamRow, StreamTile, StreamWords } from '../../web/selkies-web-core/lib/stream-stats-view.ts';
 import type { PresentMeter, VideoWatch } from '../../web/selkies-web-core/lib/present-meter.ts';
-import type { StandIn } from './stand_in.ts';
+import { type StandIn, standIn } from './stand_in.ts';
+import { numberOr } from '../../web/selkies-web-core/lib/narrow.ts';
 
 let announced = 0;
 Object.assign(globalThis, { window: { dispatchEvent: () => { announced++; } } satisfies StandIn<Window> });
@@ -39,17 +40,20 @@ const { createPresentMeter, DELAY_SAMPLE_MS } = presentModule;
 
 // The checks name the evidence, the fields and the words each one is about and
 // leave the rest unset, as a page that has not learned them yet does.
-const webcodecsDecoder = statsModule.webcodecsDecoder as (evidence: Partial<WebcodecsEvidence>) => DecoderVerdict;
-const webrtcDecoder = statsModule.webrtcDecoder as (evidence: Partial<WebrtcEvidence>) => DecoderVerdict;
-const streamRows = viewModule.streamRows as (info: Partial<StreamInfo> | null, client: Partial<StreamClient> | null,
-  latest: StreamSample | null, words: Partial<StreamWords>) => StreamRow[];
-const streamReport = viewModule.streamReport as (info: Partial<StreamInfo> | null, client: Partial<StreamClient> | null,
-  latest: StreamSample | null) => string;
+const webcodecsDecoder = (evidence: Partial<WebcodecsEvidence>): DecoderVerdict =>
+  statsModule.webcodecsDecoder(standIn<WebcodecsEvidence>(evidence));
+const webrtcDecoder = (evidence: Partial<WebrtcEvidence>): DecoderVerdict => statsModule.webrtcDecoder(standIn<WebrtcEvidence>(evidence));
+const streamRows = (info: Partial<StreamInfo> | null, client: Partial<StreamClient> | null, latest: StreamSample | null,
+  words: Partial<StreamWords>): StreamRow[] =>
+  viewModule.streamRows(info && standIn<StreamInfo>(info), client && standIn<StreamClient>(client), latest, standIn<StreamWords>(words));
+const streamReport = (info: Partial<StreamInfo> | null, client: Partial<StreamClient> | null, latest: StreamSample | null): string =>
+  viewModule.streamReport(info && standIn<StreamInfo>(info), client && standIn<StreamClient>(client), latest);
 
 /** A frame callback as the stand-in `<video>` keeps it. */
 type FrameCallback = (now: number, metadata: StandIn<VideoFrameCallbackMetadata>) => void;
-const watchVideo = presentModule.watchVideo as (video: StandIn<HTMLVideoElement>, meter: PresentMeter,
-  delayOf: (metadata: StandIn<VideoFrameCallbackMetadata>) => number) => VideoWatch;
+const watchVideo = (video: StandIn<HTMLVideoElement>, meter: PresentMeter,
+  delayOf: (metadata: StandIn<VideoFrameCallbackMetadata>) => number): VideoWatch =>
+  presentModule.watchVideo(standIn<HTMLVideoElement>(video), meter, delayOf);
 
 let failed = 0;
 
@@ -86,7 +90,7 @@ stats.clientSample({ fps: 58 });
 const first = window.stream_stats!.latest!;
 check('a sample merges the server and the page', first.cpu_percent === 12 && first.fps === 58 && first.encoded_fps === 59,
   JSON.stringify(first));
-check('bandwidth is what arrived', (first.mbps as number) > 0, String(first.mbps));
+check('bandwidth is what arrived', (numberOr(first.mbps) ?? NaN) > 0, String(first.mbps));
 check('the round trip the latency graph plots comes straight from the server', first.rtt_ms === 8,
   String(first.rtt_ms));
 check('what arrived since the opening is counted as received', first.received_mb === 0.13, String(first.received_mb));
@@ -133,7 +137,7 @@ const info: Partial<StreamInfo> = {
   hardware: false, gpu_present: true, hardware_expected: true, encoder_reason: 'NVENC H264 did not open', codec: 'h264',
   fullcolor: false, striped: false, gpu: '', driver: '', encode_node: '',
 };
-stats.setInfo(info as StreamInfo);
+stats.setInfo(standIn<StreamInfo>(info));
 check('the description is published', window.stream_info === info);
 
 const words = { hardware: 'hardware', software: 'software', unknown: 'n/a', throttled: 'held back',
@@ -289,7 +293,7 @@ check('a host time carries its second\'s range where the server measured one, an
   timed[1].detail === '1.8\u20134.3' && timed[2].value === '2.1 ms' && timed[2].detail === '',
   JSON.stringify(timed.slice(1, 3)));
 const rate = (video: number, target: number | undefined): StreamTile => streamTiles(
-  { video_mbps: video, target_mbps: target, peak_mbps: 30 } as StreamSample, 'webrtc')
+  standIn<StreamSample>({ video_mbps: video, target_mbps: target, peak_mbps: 30 }), 'webrtc')
   .find((tile) => tile.key === 'video_mbps')!;
 check('the video rate reads against its CBR target, and a burst\'s peak beside it does not warn',
   rate(8.4, 8).value === '8.4 / 8 Mbps' && !rate(8.4, 8).warn && !rate(8.8, 8).warn, JSON.stringify(rate(8.4, 8)));

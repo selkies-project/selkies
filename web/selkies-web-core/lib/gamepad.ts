@@ -31,6 +31,7 @@
  * buttons 12 to 15.
  * @module
  */
+import { fields } from './narrow.ts';
 
 /** SDL control names to standard-layout indices, the target of every remap. */
 const STANDARD_LAYOUT: { buttons: Record<string, number>; axes: Record<string, number> } = {
@@ -80,12 +81,6 @@ const JSDB_PLATFORM: string = (() => {
     return 'linux';
 })();
 
-/** One raw-to-standard remap entry. */
-interface RemapEntry {
-  type: string;
-  index: number;
-}
-
 /** A raw-to-standard remap profile. */
 export interface RemapProfile {
   buttons: Record<number, number>;
@@ -103,12 +98,13 @@ export interface PadState {
 }
 
 /**
- * A pad's `vibrationActuator` as `GamepadManager.rumble` plays on it: the
- * Gamepad API's dual-rumble effect, with `reset` where the engine has it.
+ * A pad's `vibrationActuator` that a page builds itself, as the touch gamepad
+ * does: the Gamepad API's dual-rumble effect, with `reset` where it has one,
+ * each settling as the engine's do.
  */
 export interface RumbleActuator {
-  playEffect: (effect: string, params: Record<string, number>) => Promise<unknown>;
-  reset?: () => Promise<unknown>;
+  playEffect: (effect: string, params: Record<string, number>) => Promise<GamepadHapticsResult>;
+  reset?: () => Promise<GamepadHapticsResult>;
 }
 
 /** Called on every button change. */
@@ -244,12 +240,13 @@ export class GamepadManager {
                 return;
             }
 
-            const dbEntryMapping = await response.json() as Record<string, RemapEntry>;
+            const dbEntryMapping = fields(await response.json());
             console.log(`Successfully loaded and applying custom mapping for: ${gamepadId}`);
 
             const reverseMap: RemapProfile = { buttons: {}, axes: {} };
             for (const sdlName in dbEntryMapping) {
-                const raw = dbEntryMapping[sdlName];
+                const raw = fields(dbEntryMapping[sdlName]);
+                if (typeof raw.index !== 'number') continue;
                 if (raw.type === 'button') {
                     const standardIndex = STANDARD_LAYOUT.buttons[sdlName];
                     if (standardIndex !== undefined) {
@@ -439,7 +436,8 @@ export class GamepadManager {
             if (position < 0) {
                 let oldest = Infinity;
                 for (let p = 0; p < this.drivers.length; p++) {
-                    const used = this._usedAt[this.drivers[p] as number] || 0;
+                    const driver = this.drivers[p];
+                    const used = driver === null ? 0 : this._usedAt[driver] || 0;
                     if (!claimed.has(p) && used < oldest) {
                         oldest = used;
                         position = p;
@@ -624,7 +622,7 @@ export class GamepadManager {
         for (const pad of pads) {
             if (!pad || !pad.connected) continue;
             if (index !== null && pad.index !== index) continue;
-            const actuator = (pad as Gamepad & { vibrationActuator?: RumbleActuator }).vibrationActuator;
+            const actuator: GamepadHapticActuator | null | undefined = pad.vibrationActuator;
             if (actuator && typeof actuator.playEffect === 'function') {
                 const done = (off && typeof actuator.reset === 'function')
                     ? actuator.reset()

@@ -18,7 +18,7 @@
  * @module
  */
 
-import type { AppsSnapshot, ServerSettings } from '../../web/selkies-web-core/lib/app-commands.ts';
+import type { AppsSnapshot } from '../../web/selkies-web-core/lib/app-commands.ts';
 import type { StandIn } from './stand_in.ts';
 
 let failed = 0;
@@ -144,7 +144,8 @@ check('a runner that could not say what is installed leaves the last answer stan
 // from a proot-apps local repository lists that folder's catalog, served by the
 // server behind the session's own authentication, and never the remote one.
 const tokenize = (url: string): string => `${url}?token=t`;
-const remote = appsCatalog({ command_enabled: { value: true } } as ServerSettings, tokenize);
+const withoutRepo = { apps_local_repo: null, command_enabled: { value: true } };
+const remote = appsCatalog(withoutRepo, tokenize);
 check('without a local repository the catalog is the remote one',
       remote.local === false
       && remote.metadata === 'https://raw.githubusercontent.com/linuxserver/proot-apps/master/metadata/metadata.yml'

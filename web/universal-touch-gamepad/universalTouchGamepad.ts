@@ -247,6 +247,19 @@ interface TouchGamepad {
      * Wraps `navigator.getGamepads` to splice the synthetic pad, while
      * connected, into its slot or the first free one among the physical pads.
      */
+    /**
+     * The virtual pad where `getGamepads` hands out pads. It is a Gamepad but
+     * for one field: its actuator is null where the device cannot vibrate,
+     * which the Gamepad specification allows (`GamepadHapticActuator?`) and
+     * TypeScript's DOM types do not.
+     * @param pad The virtual pad.
+     * @returns The same object, typed as a Gamepad.
+     */
+    function asGamepad(pad: TouchGamepad): Gamepad;
+    function asGamepad(pad: unknown): unknown {
+        return pad;
+    }
+
     function overrideGamepadAPI() {
         navigator.getGamepads = function() {
             const nativeGamepads = originalGetGamepads();
@@ -269,7 +282,7 @@ interface TouchGamepad {
                     }
                 }
                 if(targetIndex >=0 && targetIndex < 4){
-                    allGamepads[targetIndex] = gamepadState as Gamepad;
+                    allGamepads[targetIndex] = asGamepad(gamepadState);
                     gamepadState.index = targetIndex;
                 }
             }

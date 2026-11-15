@@ -23,7 +23,7 @@
  */
 
 import { Input } from '../../web/selkies-web-core/lib/input.ts';
-import type { StandIn } from './stand_in.ts';
+import { type StandIn, bare, standIn } from './stand_in.ts';
 
 /** An `Input` that records what it would send. */
 type AuditedInput = Input & { sent: string[] };
@@ -80,8 +80,8 @@ function makeInput({ dpr = 1, sink = null }: { dpr?: number; sink?: Sink | null 
         } satisfies StandIn<Window>,
         document: page satisfies StandIn<Document>,
     });
-    const input = Object.create(Input.prototype) as AuditedInput;
-    input.element = {} as HTMLElement;
+    const input = bare<AuditedInput>(Input);
+    input.element = standIn<HTMLElement>({});
     input.isSharedMode = false;
     input.useCssScaling = false;
     input.buttonMask = 0;
@@ -194,13 +194,13 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
 {
     const sink = makeSink(1920, 1080, 960, 540);
     const input = makeInput({ dpr: 1, sink });
-    input._applySinkCoordinates(100, 50, sink as StandIn<HTMLCanvasElement> as HTMLCanvasElement, null);
+    input._applySinkCoordinates(100, 50, standIn<HTMLCanvasElement>(sink), null);
     check('a click maps through the stream box', input.x === 200 && input.y === 100,
           `${input.x},${input.y}`);
     const [dx, dy] = input._relativeToServer(100, 50);
     check('a delta of the same size covers the same ground',
           dx === 200 && dy === 100, `${dx},${dy}`);
-    input._applySinkCoordinates(5000, -20, sink as StandIn<HTMLCanvasElement> as HTMLCanvasElement, null);
+    input._applySinkCoordinates(5000, -20, standIn<HTMLCanvasElement>(sink), null);
     check('a click outside the box is clamped to the stream',
           input.x === 1920 && input.y === 0, `${input.x},${input.y}`);
 }
@@ -208,7 +208,7 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
 // --- the remainder does not outlive the lock ------------------------------
 {
     const input = makeInput({ dpr: 1.5 });
-    input.cursorDiv = { style: {} } as StandIn<HTMLCanvasElement> as HTMLCanvasElement;
+    input.cursorDiv = standIn<HTMLCanvasElement>({ style: {} });
     input.resetKeyboard = () => {};
     drive(input, [1], 1);
     check('a partial pixel is left over to carry', input._relCarryX !== 0,
@@ -263,8 +263,8 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
     // Rounding the frame-space coordinate before the device scale would make
     // odd server pixels unreachable at a device pixel ratio of 2.
     const input = makeInput({ dpr: 2 });
-    input._mouseButtonMovement({ type: 'mousemove', target: input.element,
-                                 clientX: 100.3, clientY: 0 } as StandIn<MouseEvent> as MouseEvent);
+    input._mouseButtonMovement(standIn<MouseEvent>({ type: 'mousemove', target: input.element,
+                                 clientX: 100.3, clientY: 0 }));
     input._flushCoalescedMouseMove();
     const last = input.sent[input.sent.length - 1];
     check('absolute motion reaches every server pixel at dpr 2',
@@ -277,12 +277,12 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
     // it ends has no position of its own unless it maps one.
     const input = makeInput({ dpr: 1 });
     page.pointerLockElement = input.element;
-    input._mouseButtonMovement({ type: 'mousemove', target: input.element,
-                                 movementX: 37, movementY: -21 } as StandIn<MouseEvent> as MouseEvent);
+    input._mouseButtonMovement(standIn<MouseEvent>({ type: 'mousemove', target: input.element,
+                                 movementX: 37, movementY: -21 }));
     page.pointerLockElement = null;
     input.buttonMask = 1;
-    input._mouseButtonMovement({ type: 'mouseup', target: input.element,
-                                 button: 0, clientX: 640, clientY: 360 } as StandIn<MouseEvent> as MouseEvent);
+    input._mouseButtonMovement(standIn<MouseEvent>({ type: 'mouseup', target: input.element,
+                                 button: 0, clientX: 640, clientY: 360 }));
     check('a button event after the lock ends carries its own position',
           input.sent[input.sent.length - 1] === 'm,640,360,0,0,2',
           `${input.sent[input.sent.length - 1]}`);
@@ -296,9 +296,9 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
     // `buttons` holds the primary alone, after a move stating that primary.
     const input = makeInput({ dpr: 1 });
     const at = { target: input.element, clientX: 10, clientY: 10, ctrlKey: true };
-    input._mouseButtonMovement({ type: 'mousemove', buttons: 1, ...at } as StandIn<MouseEvent> as MouseEvent);
-    input._mouseButtonMovement({ type: 'mousedown', button: 2, buttons: 1, ...at } as StandIn<MouseEvent> as MouseEvent);
-    input._mouseButtonMovement({ type: 'mouseup', button: 2, buttons: 0, ...at } as StandIn<MouseEvent> as MouseEvent);
+    input._mouseButtonMovement(standIn<MouseEvent>({ type: 'mousemove', buttons: 1, ...at }));
+    input._mouseButtonMovement(standIn<MouseEvent>({ type: 'mousedown', button: 2, buttons: 1, ...at }));
+    input._mouseButtonMovement(standIn<MouseEvent>({ type: 'mouseup', button: 2, buttons: 0, ...at }));
     const masks = input.sent.filter((m) => m.startsWith('m,')).map((m) => Number(m.split(',')[3]));
     check('a Control-click reported as the secondary button presses the primary alone',
           masks.every((m) => (m & ~1) === 0) && masks.includes(1), `${String(input.sent)}`);
@@ -307,9 +307,9 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
 {
     const input = makeInput({ dpr: 1 });
     const at = { target: input.element, clientX: 10, clientY: 10, ctrlKey: true };
-    input._mouseButtonMovement({ type: 'mousedown', button: 2, buttons: 2, ...at } as StandIn<MouseEvent> as MouseEvent);
+    input._mouseButtonMovement(standIn<MouseEvent>({ type: 'mousedown', button: 2, buttons: 2, ...at }));
     const held = input.buttonMask;
-    input._mouseButtonMovement({ type: 'mouseup', button: 2, buttons: 0, ...at } as StandIn<MouseEvent> as MouseEvent);
+    input._mouseButtonMovement(standIn<MouseEvent>({ type: 'mouseup', button: 2, buttons: 0, ...at }));
     check('a secondary button pressed under Control stays the secondary',
           held === 4 && input.buttonMask === 0, `${held} ${input.buttonMask}`);
 }

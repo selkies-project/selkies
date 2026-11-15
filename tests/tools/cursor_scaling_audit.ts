@@ -11,7 +11,7 @@
  * @module
  */
 import { Input } from '../../web/selkies-web-core/lib/input.ts';
-import type { StandIn } from './stand_in.ts';
+import { type StandIn, bare, standIn } from './stand_in.ts';
 
 /** A box in client coordinates. */
 interface Box {
@@ -68,7 +68,7 @@ function fixture({ dpr, manual, canvas = false, width = 3840, height = 2160,
         document: { getElementById: (id: string) => id === (canvas ? 'videoCanvas' : 'stream') ? sink : null,
             pointerLockElement: null } satisfies StandIn<Document>,
     });
-    const input = Object.create(Input.prototype) as Input;
+    const input = bare<Input>(Input);
     Object.assign(input, { element, isSharedMode: false, useCssScaling: false,
         _streamDensity: dpr, _cursorImageBitmap: { width: 48, height: 48 },
         _cursorBase64Data: 'fixture', _rawHotspotX: 12, _rawHotspotY: 6,
@@ -92,7 +92,7 @@ for (const canvas of [false, true]) {
                 width, height, boxWidth, boxHeight });
             const label = `${canvas ? 'WebSocket canvas' : 'WebRTC video'} ${mode} DPR ${dpr}`;
             for (const size of [24, 48, 96]) {
-                input._cursorImageBitmap = { width: size, height: size } as ImageBitmap;
+                input._cursorImageBitmap = standIn<ImageBitmap>({ width: size, height: size });
                 input._drawAndScaleCursor();
                 check(`${label}: ${size}px canvas cursor and hotspot`,
                     near(parseFloat(input.cursorDiv.style.width), size / density) &&
@@ -137,7 +137,7 @@ for (const canvas of [false, true]) {
     const { input } = fixture({ dpr: 1, manual: true });
     input.inputAttached = true;
     input.use_browser_cursors = true;
-    input._cursorBitmapFromBase64 = () => Promise.resolve({ width: 96, height: 96 } as ImageBitmap);
+    input._cursorBitmapFromBase64 = () => Promise.resolve(standIn<ImageBitmap>({ width: 96, height: 96 }));
     await input.updateServerCursor({ handle: 1, curdata: 'larger', hotx: 12, hoty: 6 });
     await input.setUseBrowserCursors(false);
     check('switching to canvas uses the latest application cursor size',

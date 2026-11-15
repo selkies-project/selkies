@@ -53,9 +53,20 @@ window.__pad = {
     axes: [0, 0, 0, 0],
 };
 window.__gpCalls = 0;
+/**
+ * The pad where the page takes a Gamepad: it holds the members the client
+ * reads, which no check can show is a whole Gamepad. A classic script imports
+ * nothing, so this is `standIn` of tests/tools/stand_in.ts written out.
+ * @param pad The stand-in.
+ * @returns The same object, typed as a Gamepad.
+ */
+function asGamepad(pad: StandIn<Gamepad>): Gamepad;
+function asGamepad(pad: unknown): unknown {
+    return pad;
+}
 navigator.getGamepads = (): (Gamepad | null)[] => {
     window.__gpCalls++;
-    return [window.__pad as StandIn<Gamepad> as Gamepad, null, null, null];
+    return [asGamepad(window.__pad), null, null, null];
 };
 window.__padPress = (i: number, v: number): void => {
     window.__pad.buttons[i] = { pressed: v > 0, touched: v > 0, value: v };
@@ -70,11 +81,13 @@ window.__timers = {};
 (() => {
     const SI = window.setInterval.bind(window), CI = window.clearInterval.bind(window);
     window.setInterval = function (handler: TimerHandler, ms?: number, ...rest: unknown[]): number {
-        // The pages pass functions; a string handler fails here as it did before the count.
-        const fn = handler as (...args: unknown[]) => unknown;
+        // The pages pass functions; a string handler fails when it fires, as it
+        // did before the count.
         const id = SI(function (this: unknown, ...args: unknown[]): unknown {
             window.__timers[id] = (window.__timers[id] || 0) + 1;
-            return fn.apply(this, args);
+            if (typeof handler !== 'function') throw new TypeError('a string timer handler is not counted');
+            const result: unknown = Reflect.apply(handler, this, args);
+            return result;
         }, ms, ...rest);
         window.__timers['created_' + id] = ms;
         return id;

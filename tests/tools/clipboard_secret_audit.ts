@@ -18,7 +18,8 @@
  * @module
  */
 
-import type { ClipboardWorkerBridge, DecodedClipboard } from '../../web/selkies-web-core/lib/clipboard-worker-bridge.ts';
+import type { ClipboardWorkerBridge } from '../../web/selkies-web-core/lib/clipboard-worker-bridge.ts';
+import { readDecoded, readDigest } from '../../web/selkies-web-core/lib/clipboard-replies.ts';
 import type { ClipboardSync, IncomingClipboard } from '../../web/selkies-web-core/lib/clipboard-sync.ts';
 import type { Waiter, WorkerReply, WorkerRequest, WorkerScope } from './clipboard_worker.ts';
 import type { StandIn } from './stand_in.ts';
@@ -48,8 +49,8 @@ function ask(action: string, payload: WorkerRequest['payload'], extra: Partial<W
     });
 }
 const worker: Pick<ClipboardWorkerBridge, 'decode' | 'hashBytes' | 'decodeStream'> = {
-    decode: (b64, mimeType) => ask('DECODE_FROM_B64', b64, { mimeType }) as Promise<DecodedClipboard>,
-    hashBytes: (buf) => ask('HASH_BYTES', buf) as Promise<{ byteLength: number; hash: number }>,
+    decode: (b64, mimeType) => ask('DECODE_FROM_B64', b64, { mimeType }).then(readDecoded),
+    hashBytes: (buf) => ask('HASH_BYTES', buf).then(readDigest),
     decodeStream() { throw new Error('no multipart here'); },
 };
 
@@ -119,7 +120,8 @@ Object.defineProperty(globalThis, 'navigator', {
                 calls.push('write');
                 if (!engine.focused) throw new DOMException('Document is not focused.', 'NotAllowedError');
                 // The module builds its items from the class installed above.
-                const item = items[0] as ClipboardItem & Pick<FakeClipboardItem, 'items'>;
+                const item = items[0];
+if (!(item instanceof FakeClipboardItem)) throw new Error('the module wrote an item of another class');
                 const blob = await item.items['text/plain'];
                 local.text = await blob.text();
             },

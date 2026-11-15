@@ -19,7 +19,7 @@
  */
 
 import { Input } from '../../web/selkies-web-core/lib/input.ts';
-import type { StandIn, VirtualTimer } from './stand_in.ts';
+import { type StandIn, type VirtualTimer, standIn } from './stand_in.ts';
 
 let failed = 0;
 
@@ -103,17 +103,17 @@ type Sent = Array<[at: number, message: string]>;
 /** An input recording what it sends, and when. */
 function makeInput(): { input: Input; sent: Sent } {
     const sent: Sent = [];
-    const input = new Input(element as HTMLElement, (msg) => sent.push([now, msg]));
+    const input = new Input(standIn<HTMLElement>(element), (msg) => sent.push([now, msg]));
     input.sendMotion = (msg) => sent.push([now, msg]);
     input.inputAttached = false;
     return { input, sent };
 }
 
 const motion = (sent: Sent): Sent => sent.filter(([, m]) => m.startsWith('m,') || m.startsWith('m2,'));
-const move = (type: string, x: number, extra: StandIn<PointerEvent> = {}): PointerEvent => ({
+const move = (type: string, x: number, extra: StandIn<PointerEvent> = {}): PointerEvent => standIn<PointerEvent>({
     type, target: element, clientX: x, clientY: 300, screenX: x, screenY: 300,
     buttons: 0, pointerType: 'mouse', movementX: 0, movementY: 0, timeStamp: now, ...extra,
-}) as StandIn<PointerEvent> as PointerEvent;
+});
 
 // --- a sample after a pause goes out as it arrives --------------------------
 {
@@ -303,8 +303,8 @@ function penStroke(input: Input, sent: Sent): { perSecond: number; err: number; 
         const before = Math.floor(total / 100);
         total += d;
         if (Math.floor(total / 100) > before) due.push(now);
-        input._mouseWheelWrapper({ type: 'wheel', deltaY: d, deltaX: 0, deltaMode: 0, ctrlKey: false,
-                                   target: element, preventDefault() {} } as StandIn<WheelEvent> as WheelEvent);
+        input._mouseWheelWrapper(standIn<WheelEvent>({ type: 'wheel', deltaY: d, deltaX: 0, deltaMode: 0, ctrlKey: false,
+                                   target: element, preventDefault() {} }));
     }
     advance(500);
     const rises: number[] = [];

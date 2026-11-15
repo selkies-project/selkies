@@ -54,6 +54,7 @@ import type { WebRTCSignaling } from './signaling.ts';
 import type { DisplayLayouts, Input } from './input.ts';
 import type { ServerSettingEntry } from './conditional-settings.ts';
 import type { StreamInfo, StreamSample } from './stream-stats.ts';
+import { fields, isRecord } from './narrow.ts';
 
 /**
  * Capture hints for `setWebcam`; the `codec` name is the `webcam_encoder`
@@ -93,6 +94,42 @@ export interface ClipboardChannelMessage {
 		/** The request this answers, `cr` for the connect-time fetch. */
 		reply_to?: string;
 	} | null;
+}
+
+/** A hotspot coordinate or cache handle, which the server sends as a number or a string. */
+const isNumberOrString = (value: unknown): boolean => typeof value === 'number' || typeof value === 'string';
+
+/**
+ * Whether a parsed message is a cursor the server sent.
+ * @param value What the message parsed to.
+ * @returns True where it carries an image, a hotspot and a handle.
+ */
+export function isCursorData(value: unknown): value is CursorData {
+	return isRecord(value) && typeof value.curdata === 'string' && isNumberOrString(value.hotx)
+		&& isNumberOrString(value.hoty) && isNumberOrString(value.handle);
+}
+
+/**
+ * Whether a parsed message is a display configuration the server sent.
+ * @param value What the message parsed to.
+ * @returns True where each field it carries has its type.
+ */
+export function isDisplayConfig(value: unknown): value is DisplayConfig {
+	if (!isRecord(value)) return false;
+	const { displays, layouts, wayland, finger_scroll } = value;
+	return (displays === undefined || (Array.isArray(displays) && displays.every((d: unknown): boolean => typeof d === 'string')))
+		&& (layouts === undefined || layouts === null || isRecord(layouts))
+		&& (wayland === undefined || typeof wayland === 'boolean')
+		&& (finger_scroll === undefined || typeof finger_scroll === 'boolean');
+}
+
+/**
+ * Whether a fetched peer configuration can be handed to RTCPeerConnection.
+ * @param value What the response parsed to.
+ * @returns True for an object whose `iceServers`, where it has them, are a list.
+ */
+export function isPeerConfig(value: unknown): value is PeerConfig {
+	return isRecord(value) && (value.iceServers === undefined || Array.isArray(value.iceServers));
 }
 
 /** The server's settings document: each setting's entry by name. */
@@ -140,6 +177,63 @@ export type DataChannelMessage =
 	| { type: 'display_config_update'; data: DisplayConfig }
 	| { type: 'print_document'; data: PrintDocument }
 	| { type: 'cc_rate'; data?: { kbps: number } | null };
+
+/** The messages the server sends whose `data` is an object. */
+const DATA_MESSAGES: readonly string[] = ['pipeline', 'stream_info', 'stream_stats', 'latency_measurement', 'server_settings',
+	'display_settings', 'display_config_update', 'print_document', 'cursor'];
+/** The messages whose `data` is an object, null, or left out. */
+const OPTIONAL_DATA_MESSAGES: readonly string[] = ['connection', 'system', 'cc_rate', 'ping', 'display_owner', 'page_visibility'];
+/** The clipboard's messages. */
+const CLIPBOARD_MESSAGES: readonly ClipboardChannelMessage['type'][] = ['clipboard-msg', 'clipboard-msg-start', 'clipboard-msg-data', 'clipboard-msg-end'];
+/** Every message type the server sends. */
+const KNOWN_MESSAGES: readonly string[] = [...DATA_MESSAGES, ...OPTIONAL_DATA_MESSAGES, ...CLIPBOARD_MESSAGES];
+
+/**
+ * Whether a parsed data channel message is one the server sends: a known
+ * `type`, with `data` an object where that type carries one (a cursor's may be
+ * null, as it is when the cursor is hidden). The handlers read the fields.
+ * @param value What the message parsed to.
+ * @returns True for a message `_routeDataChannelMessage` takes.
+ */
+function isDataChannelMessage(value: unknown): value is DataChannelMessage {
+	if (!isRecord(value) || typeof value.type !== 'string') return false;
+	const { type, data } = value;
+	if (type === 'cursor') return data === null || isRecord(data);
+	if (DATA_MESSAGES.includes(type)) return isRecord(data);
+	if (type === 'ping') return true;
+	if (OPTIONAL_DATA_MESSAGES.includes(type) || CLIPBOARD_MESSAGES.some((t) => t === type)) {
+		return data === undefined || data === null || isRecord(data);
+	}
+	return false;
+}
+
+/** Whether a message is the clipboard's. */
+function isClipboardMessage(msg: DataChannelMessage): msg is ClipboardChannelMessage {
+	return CLIPBOARD_MESSAGES.some((t) => t === msg.type);
+}
+
+/** The dictionary each `getStats` report is, by its `type` (W3C webrtc-stats). */
+interface StatsByType {
+	'transport': RTCTransportStats;
+	'candidate-pair': RTCIceCandidatePairStats;
+	'inbound-rtp': RTCInboundRtpStreamStats;
+	'outbound-rtp': RTCOutboundRtpStreamStats;
+	'data-channel': DataChannelStats;
+	'remote-candidate': CandidateStats;
+	'local-candidate': CandidateStats;
+	'codec': CodecStats;
+}
+
+/**
+ * Whether a report is the dictionary its `type` names, which is how the
+ * statistics API tells its reports apart.
+ * @param report One report of `getStats`.
+ * @param type The type it has to have.
+ * @returns True where the report has that type.
+ */
+function isStats<K extends keyof StatsByType>(report: StatsReport, type: K): report is StatsReport & StatsByType[K] {
+	return report.type === type;
+}
 
 /** A codec report, which the DOM typings leave out. */
 export interface CodecStats extends RTCStats {
@@ -592,7 +686,7 @@ export class WebRTCClient {
 					this._setDebug("Sending SDP answer");
 					const local = this.peerConnection!.localDescription!;
 					const surroundTaken = local.sdp !== plain && local.sdp.indexOf('multiopus') !== -1;
-					this.signaling.sendSDP(surroundTaken && !decodesSurround() ? ({ type: 'answer', sdp: plain } as unknown as RTCSessionDescription) : local);
+					this.signaling.sendSDP(surroundTaken && !decodesSurround() ? { type: 'answer', sdp: plain } : local);
 				}).catch((e: unknown): void => {
 					this._setError("Error setting local description: " + e);
 				});
@@ -954,9 +1048,9 @@ export class WebRTCClient {
 	 * @returns
 	 */
 	_parseDataChannelMessage(data: string): DataChannelMessage | null {
-		var msg: DataChannelMessage;
+		var parsed: unknown;
 		try {
-			msg = JSON.parse(data) as DataChannelMessage;
+			parsed = JSON.parse(data);
 		} catch (e) {
 			if (e instanceof SyntaxError) {
 				this._setError("error parsing data channel message as JSON: " + data);
@@ -965,6 +1059,14 @@ export class WebRTCClient {
 			}
 			return null;
 		}
+		if (!isDataChannelMessage(parsed)) {
+			const type = fields(parsed).type;
+			this._setError(typeof type === 'string' && !KNOWN_MESSAGES.includes(type)
+				? "Unhandled message received: " + type
+				: "malformed data channel message: " + data);
+			return null;
+		}
+		const msg = parsed;
 		this._setDebug("data channel message: " + data);
 		return msg;
 	}
@@ -990,9 +1092,9 @@ export class WebRTCClient {
 			if (this.onconnection !== null) {
 				this.onconnection(!!(msg.data && msg.data.poor));
 			}
-		} else if (typeof msg.type === 'string' && msg.type.startsWith('clipboard-msg')) {
+		} else if (isClipboardMessage(msg)) {
 			if (typeof this.onclipboardcontent === 'function') {
-				return this.onclipboardcontent(msg as ClipboardChannelMessage);
+				return this.onclipboardcontent(msg);
 			}
 		} else if (msg.type === 'cursor') {
 			if (this.oncursorchange !== null && msg.data !== null) {
@@ -1284,18 +1386,18 @@ export class WebRTCClient {
 
 				stats.forEach((report: StatsReport): void => {
 					allReports.push(report);
-					if (report.type === "transport") {
-						reports.transports[report.id] = report as RTCTransportStats;
-					} else if (report.type === "candidate-pair") {
-						reports.candidatePairs[report.id] = report as RTCIceCandidatePairStats;
+					if (isStats(report, "transport")) {
+						reports.transports[report.id] = report;
+					} else if (isStats(report, "candidate-pair")) {
+						reports.candidatePairs[report.id] = report;
 						if (report.selected === true) {
 							reports.selectedCandidatePairId = report.id;
 						}
-					} else if (report.type === "inbound-rtp") {
+					} else if (isStats(report, "inbound-rtp")) {
 						if (report.kind === "video") {
-							reports.videoRTP = report as RTCInboundRtpStreamStats;
+							reports.videoRTP = report;
 						} else if (report.kind === "audio") {
-							reports.audioRTP = report as RTCInboundRtpStreamStats;
+							reports.audioRTP = report;
 						}
 					} else if (report.type === "track") {
 						if (report.kind === "video") {
@@ -1303,16 +1405,16 @@ export class WebRTCClient {
 						} else if (report.kind === "audio") {
 							reports.audioTrack = report;
 						}
-					} else if (report.type === "data-channel") {
-						reports.dataChannel = report as DataChannelStats;
-					} else if (report.type === "remote-candidate") {
-						reports.remoteCandidates[report.id] = report as CandidateStats;
-					} else if (report.type === "local-candidate") {
-						reports.localCandidates[report.id] = report as CandidateStats;
-					} else if (report.type === "outbound-rtp") {
-						reports.outbound[report.kind!] = report as RTCOutboundRtpStreamStats;
-					} else if (report.type === "codec") {
-						reports.codecs[report.id] = report as CodecStats;
+					} else if (isStats(report, "data-channel")) {
+						reports.dataChannel = report;
+					} else if (isStats(report, "remote-candidate")) {
+						reports.remoteCandidates[report.id] = report;
+					} else if (isStats(report, "local-candidate")) {
+						reports.localCandidates[report.id] = report;
+					} else if (isStats(report, "outbound-rtp")) {
+						reports.outbound[report.kind] = report;
+					} else if (isStats(report, "codec")) {
+						reports.codecs[report.id] = report;
 					}
 				});
 
@@ -1395,10 +1497,7 @@ export class WebRTCClient {
 					connectionDetails.audio.jitterBufferEmittedCount = reports.audioRTP.jitterBufferEmittedCount!;
 				}
 
-				connectionDetails.reports = reports;
-				connectionDetails.allReports = allReports;
-
-				resolve(connectionDetails as ConnectionStats);
+				resolve({ ...connectionDetails, reports, allReports });
 			}).catch( (e: unknown): void => reject(e));
 		});
 	}

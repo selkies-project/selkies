@@ -33,6 +33,7 @@
  * sources.
  * @module
  */
+import { asError, isRecord } from "./narrow.ts";
 
 /** Codec id of independent JPEG frames, as the server's webcam module numbers them. */
 export const WEBCAM_CODEC_MJPEG = 0;
@@ -208,8 +209,28 @@ export function createLagGauge(fps: number): { budgetMs: number; sent: (...args:
  * nothing to close.
  * @param frame
  */
+/**
+ * The transform an engine put on a frame: `rotation` and `flip` are metadata
+ * the DOM's typings do not carry yet, so each is read only where it is there.
+ * @param frame The frame.
+ * @returns Its rotation and flip, each absent where the engine set none.
+ */
+const orientationOf = (frame: VideoFrame): { rotation?: number; flip?: boolean } => ({
+  ...("rotation" in frame && typeof frame.rotation === "number" ? { rotation: frame.rotation } : {}),
+  ...("flip" in frame && typeof frame.flip === "boolean" ? { flip: frame.flip } : {}),
+});
+
+/**
+ * Whether a stream chunk is a video frame, read from the members the capture
+ * uses, since the track reader's typings carry no chunk type.
+ * @param chunk What the reader read.
+ * @returns True for a frame.
+ */
+const isVideoFrame = (chunk: unknown): chunk is VideoFrame =>
+  isRecord(chunk) && typeof chunk.close === "function" && typeof chunk.timestamp === "number";
+
 const closeFrame = (frame: VideoFrame | HTMLVideoElement): void => {
-  if (frame && typeof (frame as VideoFrame).close === "function") (frame as VideoFrame).close();
+  if (frame && "close" in frame && typeof frame.close === "function") frame.close();
 };
 /** Frames the worker source may have in flight to the page before it drops. */
 const WORKER_MAX_IN_FLIGHT = 2;
@@ -807,7 +828,7 @@ export class WebcamCapture {
       stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
     } catch (error) {
       if (this._generation === asked) {
-        this._onError(error as Error);
+        this._onError(asError(error));
       }
       return;
     }
@@ -1230,7 +1251,7 @@ export class WebcamCapture {
       try {
         const processor = new MediaStreamTrackProcessor({ track });
         this._logPath("capture: MediaStreamTrackProcessor on the page");
-        return this._readerSource((processor.readable as ReadableStream<VideoFrame>).getReader(), generation);
+        return this._readerSource(processor.readable.getReader(), generation);
       } catch (error) {
         /* fall through to the other sources */
       }
@@ -1264,20 +1285,21 @@ export class WebcamCapture {
    * @param generation
    * @returns
    */
-  _readerSource(reader: ReadableStreamDefaultReader<VideoFrame>, generation: number): { close: () => void } {
+  _readerSource(reader: ReadableStreamDefaultReader<unknown>, generation: number): { close: () => void } {
     const loop = async (): Promise<void> => {
       for (;;) {
-        let result: ReadableStreamReadValueResult<VideoFrame> | ReadableStreamReadDoneResult<VideoFrame>;
+        let result: ReadableStreamReadResult<unknown>;
         try {
           result = await reader.read();
         } catch (error) {
           break;
         }
+        const frame = isVideoFrame(result.value) ? result.value : null;
         if (result.done || this._generation !== generation) {
-          if (result.value) result.value.close();
+          if (frame) frame.close();
           break;
         }
-        this._handleFrame(result.value);
+        if (frame) this._handleFrame(frame);
       }
     };
     loop();
@@ -1498,11 +1520,13 @@ export class WebcamCapture {
       this._encodeJpeg(frame);
       return;
     }
-    // Reaching here means a VideoFrame: the `<video>` element only arrives
-    // on the JPEG rung, left above. `rotation`/`flip` are engine-exposed
-    // transform metadata the DOM lib does not type yet.
-    const vf = frame as VideoFrame;
-    const oriented = vf as VideoFrame & { rotation?: number; flip?: boolean };
+    // The `<video>` element only arrives on the JPEG rung, left above.
+    if ("videoWidth" in frame) {
+      this._encodeJpeg(frame);
+      return;
+    }
+    const vf = frame;
+    const oriented = orientationOf(vf);
     const w = vf.displayWidth || vf.codedWidth;
     const h = vf.displayHeight || vf.codedHeight;
     const latched = { rotation: oriented.rotation || 0, flip: !!oriented.flip };
@@ -1552,8 +1576,7 @@ export class WebcamCapture {
     if (this._deriveOrientation) {
       return { rotation: deriveRotation(), flip: false };
     }
-    // `rotation`/`flip`: transform metadata the DOM lib does not type yet.
-    const oriented = frame as VideoFrame & { rotation?: number; flip?: boolean };
+    const oriented = "videoWidth" in frame ? {} : orientationOf(frame);
     return { rotation: oriented.rotation || 0, flip: !!oriented.flip };
   }
 
@@ -1590,7 +1613,7 @@ export class WebcamCapture {
         this._forceKeyframe = false;
       }
     } catch (error) {
-      this._onEncoderFailure(error as Error);
+      this._onEncoderFailure(asError(error));
     }
     frame.close();
   }
@@ -1748,8 +1771,8 @@ export class WebcamCapture {
     }
     const turn = this._deriveOrientation ? deriveRotation() : 0;
     const sideways = turn % 180 === 90;
-    const dw = (frame as VideoFrame).displayWidth || (frame as VideoFrame).codedWidth || (frame as HTMLVideoElement).videoWidth;
-    const dh = (frame as VideoFrame).displayHeight || (frame as VideoFrame).codedHeight || (frame as HTMLVideoElement).videoHeight;
+    const dw = "videoWidth" in frame ? frame.videoWidth : frame.displayWidth || frame.codedWidth;
+    const dh = "videoHeight" in frame ? frame.videoHeight : frame.displayHeight || frame.codedHeight;
     const w = sideways ? dh : dw;
     const h = sideways ? dw : dh;
     if (!this._canvas) {
@@ -1785,9 +1808,13 @@ export class WebcamCapture {
     this._jpegBusy = true;
     const generation = this._generation;
     const canvas = this._canvas;
-    const jpeg: Promise<Blob> = (canvas as OffscreenCanvas).convertToBlob
-      ? (canvas as OffscreenCanvas).convertToBlob({ type: "image/jpeg", quality: this.quality })
-      : new Promise((resolve: (value: Blob) => void, reject: (reason: Error) => void): void => (canvas as HTMLCanvasElement).toBlob(
+    if (!canvas) {
+      this._jpegBusy = false;
+      return;
+    }
+    const jpeg: Promise<Blob> = "convertToBlob" in canvas
+      ? canvas.convertToBlob({ type: "image/jpeg", quality: this.quality })
+      : new Promise((resolve: (value: Blob) => void, reject: (reason: Error) => void): void => canvas.toBlob(
         (blob: Blob | null): void => (blob ? resolve(blob) : reject(new Error("the canvas gave no JPEG"))), "image/jpeg", this.quality));
     jpeg
       .then((blob: Blob): Promise<ArrayBuffer> => blob.arrayBuffer())

@@ -31,8 +31,11 @@ if (start === -1 || end === -1) {
     console.log('FAIL  [file-index-footer] processDirectoryListing not found in ' + process.argv[2]);
     process.exit(1);
 }
-const listing = compileFunction(source.slice(start, end) + '\nprocessDirectoryListing();', ['window', 'document']) as
-    (window: { location: Pick<Location, 'pathname' | 'search'> }, document: ListingDocument) => void;
+const compiled = compileFunction(source.slice(start, end) + '\nprocessDirectoryListing();', ['window', 'document']);
+/** Runs the footer's listing over a page. */
+const listing = (window: { location: Pick<Location, 'pathname' | 'search'> }, document: ListingDocument): void => {
+    Reflect.apply(compiled, undefined, [window, document]);
+};
 
 let failed = 0;
 

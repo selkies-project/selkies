@@ -96,7 +96,7 @@ import { installAuthGuard } from './lib/auth-guard.ts';
 import { getSessionToken, installSessionCookie, sessionAuthHeaders } from './lib/session-token.ts';
 import { urlFragmentKeyword } from './lib/page-url.ts';
 import { titleFromSettings } from './lib/page-title.ts';
-import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.ts';
+import { storageKeyForServerKey, resolveSpec, resolveBoolean, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.ts';
 import { getRoutePrefix, getStorageAppName, canDecodeFullColor, canDecodeTenBit, tenBitFormat, canReceiveEncoder, isCaptureRefusal, isMacDesktop, displayLabel, entryPageTag, serverAnswers, rememberCcStart, forgetCcStart } from './lib/util.ts';
 import { keyboardAssist, showVirtualKeyboard } from './lib/virtual-keyboard.ts';
 import { codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit } from './lib/wire-codecs.ts';
@@ -114,9 +114,12 @@ import type { PrintJobs } from './lib/print-jobs.ts';
 import type { StreamInfo, StreamSample } from './lib/stream-stats.ts';
 import type { VideoWatch } from './lib/present-meter.ts';
 import type { CandidateStats, CodecStats, ConnectionStats, PeerConfig } from './lib/webrtc.ts';
+import { isPeerConfig } from './lib/webrtc.ts';
 import type { DisplayLayouts, RoleVerdict } from './lib/input.ts';
+import { isRoleVerdict } from './lib/input.ts';
 import type { FramerateSpan } from './lib/display-refresh.ts';
 import type { ServerSettingEntry } from './lib/conditional-settings.ts';
+import { errorName, messageOf, stringOr } from './lib/narrow.ts';
 
 installAuthGuard();
 installSessionCookie();
@@ -824,8 +827,8 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 	 * @returns
 	 */
 	function resolvedRawPointerMotion(serverSettings: Record<string, ServerSettingEntry>): boolean {
-		return resolveSpec(RAW_POINTER_MOTION_SPEC, serverSettings, { macDesktop: isMacDesktop() },
-			(key: string): string | null => getStringParam(key, null)) as boolean;
+		return resolveBoolean(RAW_POINTER_MOTION_SPEC, serverSettings, { macDesktop: isMacDesktop() },
+			(key: string): string | null => getStringParam(key, null));
 	}
 
 	/**
@@ -836,8 +839,8 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 	 * @returns
 	 */
 	function resolvedMacCmdAsCtrl(serverSettings: Record<string, ServerSettingEntry>): boolean {
-		return resolveSpec(MAC_CMD_AS_CTRL_SPEC, serverSettings, { macDesktop: isMacDesktop() },
-			(key: string): string | null => getStringParam(key, null)) as boolean;
+		return resolveBoolean(MAC_CMD_AS_CTRL_SPEC, serverSettings, { macDesktop: isMacDesktop() },
+			(key: string): string | null => getStringParam(key, null));
 	}
 
 	/**
@@ -857,7 +860,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 		const hidpi = resolveSpec(HIDPI_SPEC, serverSettings,
 			{ manualActive: !!window.manual_resolution || window.manual_width! > 0 },
 			(): string | null => (explicit ? window.localStorage.getItem(key) : null));
-		return HIDPI_SPEC.toServer(hidpi) as boolean;
+		return HIDPI_SPEC.toServer(hidpi) === true;
 	}
 
 	/**
@@ -889,7 +892,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 				});
 				console.log('Screen Wake Lock is active.');
 			} catch (err) {
-				console.warn(`Could not acquire Wake Lock: ${(err as Error).name}, ${(err as Error).message}`);
+				console.warn(`Could not acquire Wake Lock: ${String(errorName(err))}, ${String(messageOf(err))}`);
 			}
 		} else {
 			console.warn('Wake Lock API is not supported by this browser.');
@@ -1049,7 +1052,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			await videoElement.setSinkId(preferredOutputDeviceId);
 			console.log(`Playback output set to device: ${preferredOutputDeviceId}`);
 		} catch (err) {
-			console.error(`Failed to set audio output device: ${(err as Error).name}, ${(err as Error).message}`);
+			console.error(`Failed to set audio output device: ${String(errorName(err))}, ${String(messageOf(err))}`);
 		}
 	}
 
@@ -1140,7 +1143,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			const wasUnset = window.localStorage.getItem(finalKey) === null;
 
 			if (setting.min !== undefined && setting.max !== undefined) {
-				const clientValue = getFloatParam(storeKey, setting.default as number);
+				const clientValue = getFloatParam(storeKey, Number(setting.default));
 				if (wasUnset) {
 					window[key] = clientValue;
 				} else if (clientValue < setting.min || clientValue > setting.max) {
@@ -1155,20 +1158,20 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			else if (setting.allowed !== undefined) {
 				const isNumericEnum = !isNaN(parseFloat(setting.allowed[0]));
 				const clientValueStr = isNumericEnum
-					? getIntParam(storeKey, parseInt(setting.value as string, 10))!.toString()
+					? getIntParam(storeKey, parseInt(String(setting.value), 10))!.toString()
 					: getStringParam(storeKey, setting.value);
-				const applyRuntime = (val: unknown): void => { window[key] = isNumericEnum ? parseInt(val as string, 10) : val; };
+				const applyRuntime = (val: unknown): void => { window[key] = isNumericEnum ? parseInt(String(val), 10) : val; };
 				if (wasUnset) {
 					applyRuntime(setting.value);
-				} else if (!setting.allowed.includes(clientValueStr as string)) {
+				} else if (!(typeof clientValueStr === 'string' && setting.allowed.includes(clientValueStr))) {
 					console.log(`Sanitizing '${key}': stored "${clientValueStr}" not in allowed [${setting.allowed.join(', ')}]. Reverting to server default "${setting.value}".`);
 					window.localStorage.removeItem(finalKey);
 					applyRuntime(setting.value);
 					changes[key] = setting.value;
 				} else {
 					applyRuntime(clientValueStr);
-					if (isNumericEnum) setIntParam(storeKey, parseInt(clientValueStr as string, 10));
-					else setStringParam(storeKey, clientValueStr as string);
+					if (isNumericEnum) setIntParam(storeKey, parseInt(String(clientValueStr), 10));
+					else setStringParam(storeKey, clientValueStr);
 				}
 			}
 			else if (typeof setting.value === 'boolean') {
@@ -1460,7 +1463,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 		// session left: asking for it again would undo the fallback the server
 		// settled when the answer declined that codec, and the page would hold a
 		// stream it paints nothing of. The value stays stored for that transport.
-		if (settingsToSend['encoder'] !== undefined && !canReceiveEncoder(settingsToSend['encoder'] as string)) {
+		if (settingsToSend['encoder'] !== undefined && !canReceiveEncoder(String(settingsToSend['encoder']))) {
 			console.log(`Not asking for ${settingsToSend['encoder']}: this browser receives no such WebRTC codec.`);
 			delete settingsToSend['encoder'];
 		}
@@ -2006,8 +2009,8 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 					console.log("setManualResolution ignored: the server keeps this display's size (enable_resize=false).");
 					break;
 				}
-				const width = parseInt(message.width as string, 10);
-				const height = parseInt(message.height as string, 10);
+				const width = parseInt(String(message.width), 10);
+				const height = parseInt(String(message.height), 10);
 				if (isNaN(width) || width <= 0 || isNaN(height) || height <= 0) {
 					console.error('Received invalid width/height for setManualResolution:', message);
 					break;
@@ -2232,7 +2235,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			}
 			case 'setSynth':
 				if (input && typeof input.setSynth === 'function') {
-					input.setSynth(message.value as boolean);
+					input.setSynth(message.value === true);
 				}
 				break;
 			case 'showVirtualKeyboard': {
@@ -2341,7 +2344,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			}
 		}
 		if (settings.debug !== undefined) {
-			debug = settings.debug as boolean;
+			debug = settings.debug === true;
 			// Persisted even from the server: the reload only settles once the flag is in storage.
 			setBoolParam('debug', debug);
 			console.log(`Applied debug setting: ${debug}. Reloading...`);
@@ -2353,41 +2356,41 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 		if (settings.video_10bit !== undefined) passthrough.video_10bit = !!settings.video_10bit;
 		if (settings.video_streaming_mode !== undefined) passthrough.video_streaming_mode = !!settings.video_streaming_mode;
 		if (settings.use_paint_over_quality !== undefined) passthrough.use_paint_over_quality = !!settings.use_paint_over_quality;
-		if (settings.video_paintover_crf !== undefined) passthrough.video_paintover_crf = parseInt(settings.video_paintover_crf as string, 10);
-		if (settings.video_paintover_burst_frames !== undefined) passthrough.video_paintover_burst_frames = parseInt(settings.video_paintover_burst_frames as string, 10);
+		if (settings.video_paintover_crf !== undefined) passthrough.video_paintover_crf = parseInt(String(settings.video_paintover_crf), 10);
+		if (settings.video_paintover_burst_frames !== undefined) passthrough.video_paintover_burst_frames = parseInt(String(settings.video_paintover_burst_frames), 10);
 		if (settings.force_aligned_resolution !== undefined) passthrough.force_aligned_resolution = !!settings.force_aligned_resolution;
 		if (settings.use_cpu !== undefined) passthrough.use_cpu = !!settings.use_cpu;
 		if (settings.cpu_encode_threading !== undefined) passthrough.cpu_encode_threading = !!settings.cpu_encode_threading;
 		if (settings.encoder !== undefined) passthrough.encoder = settings.encoder;
 	if (settings.displayPosition !== undefined) passthrough.displayPosition = settings.displayPosition;
 		if (settings.video_bitrate !== undefined) {
-			videoBitRate = parseInt(settings.video_bitrate as string, 10);
+			videoBitRate = parseInt(String(settings.video_bitrate), 10);
 			webrtc!.sendDataChannelMessage(`vb,${videoBitRate}`);
 			storeInt('video_bitrate', videoBitRate);
 			if (!fromServer) forgetCcStart(storageDisplayId);
 		}
 		if (settings.framerate !== undefined) {
 			const followsDisplay = settings.framerate === FRAMERATE_DISPLAY;
-			storeString('framerate', followsDisplay ? FRAMERATE_DISPLAY : String(parseFloat(settings.framerate as string)));
-			const rate = followsDisplay ? requestedStreamFramerate() : parseFloat(settings.framerate as string);
-			if (Number.isFinite(rate)) {
-				videoFramerate = framerateAsked = rate as number;
+			storeString('framerate', followsDisplay ? FRAMERATE_DISPLAY : String(parseFloat(String(settings.framerate))));
+			const rate = followsDisplay ? requestedStreamFramerate() : parseFloat(String(settings.framerate));
+			if (typeof rate === 'number' && Number.isFinite(rate)) {
+				videoFramerate = framerateAsked = rate;
 				webrtc!.sendDataChannelMessage(`_arg_fps,${rate}`);
 			}
 		}
 		if (settings.audio_bitrate !== undefined) {
-			audioBitRate = parseInt(settings.audio_bitrate as string);
+			audioBitRate = parseInt(String(settings.audio_bitrate));
 			webrtc!.sendDataChannelMessage(`ab,${audioBitRate}`);
 			storeInt('audio_bitrate', audioBitRate);
 		}
 		if (settings.encoder !== undefined) {
 			// The pipeline restart rides the passthrough; tracked here for the decode path.
-			encoder = settings.encoder as string;
+			encoder = String(settings.encoder);
 			storeString('encoder', encoder);
 			console.log("Encoder switched to:", encoder);
 		}
 		if (settings.scaling_dpi !== undefined) {
-			const dpi = parseInt(settings.scaling_dpi as string, 10);
+			const dpi = parseInt(String(settings.scaling_dpi), 10);
 			if (!isNaN(dpi) && dpi > 0) {
 				// Not persisted: the pin belongs to the dashboard's explicit slider pick; pinning
 				// every post would freeze the DPI across displays of different devicePixelRatio.
@@ -2410,7 +2413,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			applyKeyboardShortcuts();
 		}
 		if (settings.print_auto !== undefined && printJobs) {
-			printJobs.setAutomatic(settings.print_auto as boolean);
+			printJobs.setAutomatic(settings.print_auto === true);
 			storeBool('print_auto', !!settings.print_auto);
 		}
 		if (settings.clipboard_seamless !== undefined) {
@@ -2448,14 +2451,14 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			applyMacCmdAsCtrl();
 		}
 		if (settings.rate_control_mode !== undefined) {
-			rateControlMode = settings.rate_control_mode as string;
+			rateControlMode = String(settings.rate_control_mode);
 			webrtc!.sendDataChannelMessage(`_rc,${rateControlMode}`);
 			sendRespectiveRCvalue(rateControlMode);
 			storeString('rate_control_mode', rateControlMode);
 			console.log(`Rate control mode set to ${rateControlMode}`);
 		}
 		if (settings.video_crf !== undefined) {
-			crf = parseInt(settings.video_crf as string, 10);
+			crf = parseInt(String(settings.video_crf), 10);
 			webrtc!.sendDataChannelMessage(`_crf,${crf}`);
 			storeInt('video_crf', crf);
 			console.log(`Video CRF set to ${crf}`);
@@ -2502,12 +2505,12 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 		if (Object.keys(changed).length === 0) return;
 		console.log('[display] Streaming with what the display does:', changed);
 		for (const [name, value] of Object.entries(changed)) window[name] = value;
-		if (changed.encoder !== undefined) encoder = changed.encoder as string;
-		if (changed.video_crf !== undefined) crf = parseInt(changed.video_crf as string, 10);
-		if (changed.video_bitrate !== undefined) videoBitRate = parseInt(changed.video_bitrate as string, 10);
-		if (changed.audio_bitrate !== undefined) audioBitRate = parseInt(changed.audio_bitrate as string, 10);
-		if (changed.rate_control_mode !== undefined) rateControlMode = changed.rate_control_mode as string;
-		const rate = parseFloat(changed.framerate as string);
+		if (changed.encoder !== undefined) encoder = String(changed.encoder);
+		if (changed.video_crf !== undefined) crf = parseInt(String(changed.video_crf), 10);
+		if (changed.video_bitrate !== undefined) videoBitRate = parseInt(String(changed.video_bitrate), 10);
+		if (changed.audio_bitrate !== undefined) audioBitRate = parseInt(String(changed.audio_bitrate), 10);
+		if (changed.rate_control_mode !== undefined) rateControlMode = String(changed.rate_control_mode);
+		const rate = parseFloat(String(changed.framerate));
 		if (Number.isFinite(rate)) videoFramerate = framerateAsked = rate;
 		if (lastServerSettings) {
 			window.postMessage({ type: 'serverSettings', payload: { ...lastServerSettings } }, window.location.origin);
@@ -2543,8 +2546,8 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 	function readDecodedFrame(key: string): void {
 		if (decodedFrame.reading || (decodedFrame.current && decodedFrame.key === key)) return;
 		const element = webrtc && webrtc.element;
-		const track = element && element.srcObject && (element.srcObject as MediaStream).getVideoTracks()[0];
-		if (!track || track.readyState !== 'live') return;
+		const track = element && element.srcObject instanceof MediaStream ? element.srcObject.getVideoTracks()[0] : undefined;
+		if (!element || !track || track.readyState !== 'live') return;
 		if (key !== decodedFrame.key) decodedFrame = { key, track: undefined, element: undefined, current: false, reading: false };
 		try {
 			const frame = new VideoFrame(element);
@@ -2988,7 +2991,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			clipboardSync.markSynced(subject, mimeType);
 		} catch (err) {
 			console.error("Error sending clipboard data:", err);
-			skip('send failed: ' + (err && (err as Error).message ? (err as Error).message : err),
+			skip('send failed: ' + (messageOf(err) || String(err)),
 				'clipboardSkipSendFailed');
 		}
 	}
@@ -3127,7 +3130,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 
 			if (!isSharedMode) {
 				window.addEventListener("message", handleMessage);
-				window.addEventListener('requestFileUpload', handleRequestFileUpload as EventListener);
+				window.addEventListener('requestFileUpload', handleRequestFileUpload);
 				overlayInput.addEventListener('dragover', handleDragOver);
 				overlayInput.addEventListener('drop', handleDrop);
 			}
@@ -3613,7 +3616,9 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 					const verdict = action.slice(action.indexOf(',') + 1);
 					let perms: RoleVerdict;
 					try {
-						perms = JSON.parse(verdict) as RoleVerdict;
+						const parsed: unknown = JSON.parse(verdict);
+if (!isRoleVerdict(parsed)) throw new Error(`not a role verdict: ${verdict}`);
+perms = parsed;
 					} catch (e) {
 						console.error('Failed to parse role verdict:', e);
 						return;
@@ -3768,10 +3773,10 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 				tenBitLocked = !!(tbEntry && tbEntry.locked);
 				if (tbEntry) declineUndecodableTenBit();
 				const wce = obj.settings && obj.settings.webcam_encoder;
-				if (wce && WEBCAM_ENCODER_PREFERENCES.includes(wce.value as string)) {
-					const stored = getStringParam('webcam_encoder', wce.value as string);
-					webcamEncoderPreference = (wce.locked || !WEBCAM_ENCODER_PREFERENCES.includes(stored)
-						? wce.value : stored) as string;
+				const wceValue = wce ? stringOr(wce.value) : undefined;
+				if (wce && wceValue !== undefined && WEBCAM_ENCODER_PREFERENCES.includes(wceValue)) {
+					const stored = getStringParam('webcam_encoder', wceValue);
+					webcamEncoderPreference = wce.locked || !WEBCAM_ENCODER_PREFERENCES.includes(stored) ? wceValue : stored;
 					if (webrtc && isWebcamActive) webrtc.setWebcamCodec(webcamEncoderPreference).catch((): void => {});
 				}
 				const ce = obj.settings && obj.settings.command_enabled;
@@ -3813,8 +3818,8 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 				}
 				if (obj.settings.manual_resolution && obj.settings.manual_resolution.value === true) {
 					console.log("Server settings payload confirms manual mode. Switching to manual resize handlers.");
-					const serverWidth = obj.settings.manual_width ? parseInt(obj.settings.manual_width.value as string, 10) : 0;
-					const serverHeight = obj.settings.manual_height ? parseInt(obj.settings.manual_height.value as string, 10) : 0;
+					const serverWidth = obj.settings.manual_width ? parseInt(String(obj.settings.manual_width.value), 10) : 0;
+					const serverHeight = obj.settings.manual_height ? parseInt(String(obj.settings.manual_height.value), 10) : 0;
 					if (serverWidth > 0 && serverHeight > 0) {
 						console.log(`Applying server-enforced manual resolution: ${serverWidth}x${serverHeight}`);
 						window.manualResolution = true;
@@ -3869,7 +3874,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 				}
 
 				if (config.iceServers && config.iceServers.length > 1) {
-						pushCapped(debugEntries, applyTimestamp("using TURN servers: " + (config.iceServers[1].urls as string[]).join(", ")));
+						pushCapped(debugEntries, applyTimestamp("using TURN servers: " + [config.iceServers[1].urls].flat().join(", ")));
 				} else {
 						pushCapped(debugEntries, applyTimestamp("no TURN servers found."));
 				}
@@ -3882,7 +3887,10 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 					if (!response.ok) {
 						throw new Error(`Status: ${response.status}`);
 					}
-					return response.json() as Promise<PeerConfig>;
+					return response.json().then((config: unknown): PeerConfig => {
+	if (!isPeerConfig(config)) throw new Error('the TURN service answered with no peer configuration');
+	return config;
+});
 				})
 				.then((config: PeerConfig): void => {
 					applyRtcConfigAndConnect(config);
@@ -3903,7 +3911,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 
 			window.removeEventListener("message", handleMessage);
 			window.removeEventListener("resize", resizeStart);
-			window.removeEventListener("requestFileUpload", handleRequestFileUpload as EventListener);
+			window.removeEventListener("requestFileUpload", handleRequestFileUpload);
 			window.removeEventListener("focus", handleWindowFocus);
 			window.removeEventListener("blur", handleWindowBlur);
 			document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -3914,7 +3922,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			try {
 				clipboardWorker!.terminate();
 			} catch (error) {
-				if ((error as Error).name === 'AbortError') return;
+				if (errorName(error) === 'AbortError') return;
 				console.error(error);
 			}
 			clipboardWorker = null;

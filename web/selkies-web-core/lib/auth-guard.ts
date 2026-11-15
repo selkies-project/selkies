@@ -29,6 +29,7 @@
  * through `location.reload()`.
  * @module
  */
+import { fields, isRecord } from './narrow.ts';
 
 declare global {
   interface Window {
@@ -44,6 +45,10 @@ interface ReloadStamp {
   at: number;
   n: number;
 }
+
+/** Whether a stored value is a stamp `reloadOnce` left. */
+const isStamp = (value: unknown): value is ReloadStamp =>
+  isRecord(value) && typeof value.at === 'number' && typeof value.n === 'number';
 
 /**
  * Installs the fetch wrapper and the probe once per page.
@@ -62,12 +67,12 @@ export function installAuthGuard(): void {
   const MAX_CHAIN = 2;
   const readStamp = (): ReloadStamp | null => {
     try {
-      const s = JSON.parse(sessionStorage.getItem(STAMP_KEY) || 'null') as ReloadStamp | null;
-      if (s) return s;
+      const s: unknown = JSON.parse(sessionStorage.getItem(STAMP_KEY) || 'null');
+      if (isStamp(s)) return s;
     } catch (_) { /* storage blocked */ }
     try {
-      const h = window.history.state as Record<string, ReloadStamp> | null;
-      if (h && typeof h === 'object' && h[STAMP_KEY]) return h[STAMP_KEY];
+      const h = fields(window.history.state)[STAMP_KEY];
+      if (isStamp(h)) return h;
     } catch (_) { /* history unavailable */ }
     return null;
   };
@@ -79,7 +84,7 @@ export function installAuthGuard(): void {
     } catch (_) { /* storage blocked */ }
     if (stored) return;
     try {
-      const h = window.history.state as Record<string, unknown> | null;
+      const h: unknown = window.history.state;
       if (h == null || (typeof h === 'object' && !Array.isArray(h))) {
         window.history.replaceState(
           Object.assign({}, h || {}, { [STAMP_KEY]: stamp }), '');

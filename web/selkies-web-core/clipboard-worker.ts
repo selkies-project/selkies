@@ -29,6 +29,7 @@
  * on an OffscreenCanvas rather than on the page's own.
  * @module
  */
+import { errorMessage } from './lib/narrow.ts';
 
 /** Bytes per `String.fromCharCode.apply` call, keeping its argument list bounded. */
 const CHUNK_SIZE = 0x8000;
@@ -43,6 +44,39 @@ interface WorkerRequest {
     payload?: ArrayBuffer | string | Blob;
     mimeType?: string;
     hash?: number;
+}
+
+/**
+ * A request's payload as the text its action takes.
+ * @param request The request.
+ * @returns The payload.
+ * @throws Error where the payload is no text, which the dispatcher replies with.
+ */
+function textOf(request: WorkerRequest): string {
+    if (typeof request.payload !== 'string') throw new Error(`${request.action} takes text`);
+    return request.payload;
+}
+
+/**
+ * A request's payload as the bytes its action takes.
+ * @param request The request.
+ * @returns The payload.
+ * @throws Error where the payload is no ArrayBuffer.
+ */
+function bufferOf(request: WorkerRequest): ArrayBuffer {
+    if (!(request.payload instanceof ArrayBuffer)) throw new Error(`${request.action} takes an ArrayBuffer`);
+    return request.payload;
+}
+
+/**
+ * A request's payload as the image its action takes.
+ * @param request The request.
+ * @returns The payload.
+ * @throws Error where the payload is no Blob.
+ */
+function blobOf(request: WorkerRequest): Blob {
+    if (!(request.payload instanceof Blob)) throw new Error(`${request.action} takes a Blob`);
+    return request.payload;
 }
 
 /** A multipart download in progress: decoded parts, the undecodable tail, and the running digest. */
@@ -80,7 +114,7 @@ function stringToBase64(text: string): string {
     let binString = "";
     for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
         const chunk = bytes.subarray(i, i + CHUNK_SIZE);
-        binString += String.fromCharCode.apply(null, chunk as unknown as number[]);
+        binString += String.fromCharCode(...chunk);
     }
     return btoa(binString);
 }
@@ -121,7 +155,7 @@ function bytesToBase64(bytes: Uint8Array): string {
     let binString = "";
     for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
         const chunk = bytes.subarray(i, i + CHUNK_SIZE);
-        binString += String.fromCharCode.apply(null, chunk as unknown as number[]);
+        binString += String.fromCharCode(...chunk);
     }
     return btoa(binString);
 }
@@ -186,7 +220,7 @@ async function reencodeToPng(id: number, blob: Blob): Promise<void> {
         self.postMessage({ id, success: true, result: png, mimeType: 'image/png',
                            byteLength: png!.size });
     } catch (err) {
-        self.postMessage({ id, success: false, error: (err as Error).message });
+        self.postMessage({ id, success: false, error: errorMessage(err) });
     } finally {
         if (bmp) bmp.close();
     }
@@ -194,7 +228,7 @@ async function reencodeToPng(id: number, blob: Blob): Promise<void> {
 
 /** Dispatches one bridge request and posts its reply. */
 self.onmessage = function(e: MessageEvent<WorkerRequest>): void {
-    const { id, action, payload, mimeType } = e.data;
+    const { id, action, mimeType } = e.data;
 
     try {
         if (action === 'DECODE_BEGIN') {
@@ -203,7 +237,7 @@ self.onmessage = function(e: MessageEvent<WorkerRequest>): void {
         }
         if (action === 'DECODE_CHUNK') {
             const stream = streams.get(id);
-            if (stream) feedStream(stream, payload as string);
+            if (stream) feedStream(stream, textOf(e.data));
             return;
         }
         if (action === 'DECODE_ABORT') {
@@ -232,32 +266,32 @@ self.onmessage = function(e: MessageEvent<WorkerRequest>): void {
             return;
         }
         if (action === 'HASH_BYTES') {
-            const bytes = new Uint8Array(payload as ArrayBuffer);
+            const bytes = new Uint8Array(bufferOf(e.data));
             self.postMessage({ id, success: true, byteLength: bytes.byteLength,
                                hash: hashBytes(HASH_SEED, bytes) });
             return;
         }
         if (action === 'REENCODE_PNG') {
-            reencodeToPng(id, payload as Blob);
+            reencodeToPng(id, blobOf(e.data));
             return;
         }
         if (action === 'ENCODE_BINARY_TO_B64') {
-            const bytes = new Uint8Array(payload as ArrayBuffer);
+            const bytes = new Uint8Array(bufferOf(e.data));
             const base64 = bytesToBase64(bytes);
             self.postMessage({ id, success: true, result: base64,
                                byteLength: bytes.byteLength,
                                hash: hashBytes(e.data.hash === undefined ? HASH_SEED : e.data.hash, bytes) });
         }
         else if (action === 'ENCODE_TEXT_TO_B64') {
-            const base64 = stringToBase64(payload as string);
+            const base64 = stringToBase64(textOf(e.data));
             self.postMessage({ id, success: true, result: base64 });
         }
         else if (action === 'DECODE_FROM_B64') {
             if (mimeType === 'text/plain') {
-                const { text, byteLength } = base64ToString(payload as string);
+                const { text, byteLength } = base64ToString(textOf(e.data));
                 self.postMessage({ id, success: true, result: text, mimeType, byteLength });
             } else {
-                const bytes = base64ToBytes(payload as string);
+                const bytes = base64ToBytes(textOf(e.data));
                 self.postMessage(
                     { id, success: true, result: bytes.buffer, mimeType,
                       byteLength: bytes.byteLength, hash: hashBytes(HASH_SEED, bytes) },
@@ -268,6 +302,6 @@ self.onmessage = function(e: MessageEvent<WorkerRequest>): void {
             self.postMessage({ id, success: false, error: `Unknown action: ${action}` });
         }
     } catch (err) {
-        self.postMessage({ id, success: false, error: (err as Error).message });
+        self.postMessage({ id, success: false, error: errorMessage(err) });
     }
 };

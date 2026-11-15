@@ -34,6 +34,7 @@
  * @module
  */
 import { sessionAuthHeaders } from './session-token.ts';
+import { elementByTag, isTag, messageOf } from './narrow.ts';
 
 const UPLOAD_CHUNK_BYTES = 64 * 1024 * 1024;
 
@@ -57,20 +58,11 @@ export interface FileUploaderOptions {
   canUpload?: () => boolean;
 }
 
-/** A filesystem entry, as the drop API hands it over. */
-interface FileSystemLikeEntry {
-  name: string;
-  fullPath?: string;
-  isFile: boolean;
-  isDirectory: boolean;
-  file: (success: (file: File) => void, error: (error: DOMException) => void) => void;
-  createReader: () => FileSystemDirectoryReaderLike;
-}
+/** Whether a dropped entry is a file, which the entry says of itself. */
+const isFileEntry = (entry: FileSystemEntry): entry is FileSystemFileEntry => entry.isFile;
 
-/** A directory reader, as the drop API hands it over. */
-interface FileSystemDirectoryReaderLike {
-  readEntries: (success: (entries: FileSystemLikeEntry[]) => void, error: (error: DOMException) => void) => void;
-}
+/** Whether a dropped entry is a directory, which the entry says of itself. */
+const isDirectoryEntry = (entry: FileSystemEntry): entry is FileSystemDirectoryEntry => entry.isDirectory;
 
 /**
  * Creates the upload handlers a core wires to its page.
@@ -180,14 +172,13 @@ export function createFileUploader({ canUpload = () => true }: FileUploaderOptio
             report('progress', { progress: 100 });
             report('end');
         } catch (error) {
-            const errorAsError = error as Error | undefined;
-            const msg = (errorAsError && errorAsError.message) ? errorAsError.message : `error during upload of ${pathToSend}: ${String(error)}`;
+            const msg = messageOf(error) || `error during upload of ${pathToSend}: ${String(error)}`;
             report('error', { message: msg });
             throw error;
         }
     }
 
-    function getFileFromEntry(fileEntry: FileSystemLikeEntry): Promise<File> {
+    function getFileFromEntry(fileEntry: FileSystemFileEntry): Promise<File> {
         return new Promise<File>((resolve, reject) => fileEntry.file(resolve, reject));
     }
 
@@ -198,7 +189,7 @@ export function createFileUploader({ canUpload = () => true }: FileUploaderOptio
      * @param entry The dropped entry.
      * @param basePathFallback Parent path when `fullPath` is absent.
      */
-    async function handleDroppedEntry(entry: FileSystemLikeEntry, basePathFallback = ""): Promise<void> {
+    async function handleDroppedEntry(entry: FileSystemEntry, basePathFallback = ""): Promise<void> {
         let pathToSend: string;
         if (entry.fullPath && typeof entry.fullPath === 'string' && entry.fullPath !== entry.name &&
             (entry.fullPath.includes('/') || entry.fullPath.includes('\\'))) {
@@ -210,20 +201,19 @@ export function createFileUploader({ canUpload = () => true }: FileUploaderOptio
             pathToSend = basePathFallback ? `${basePathFallback}/${entry.name}` : entry.name;
         }
 
-        if (entry.isFile) {
+        if (isFileEntry(entry)) {
             try {
                 const file = await getFileFromEntry(entry);
                 await uploadFileObject(file, pathToSend);
             } catch (err) {
-                const errWithMessage = err as { message?: string } | undefined;
                 console.error(`Error processing file ${pathToSend}: ${String(err)}`);
-                post({ status: 'error', fileName: pathToSend, message: `Error processing file: ${errWithMessage?.message || String(errWithMessage || err)}` });
+                post({ status: 'error', fileName: pathToSend, message: `Error processing file: ${messageOf(err) || String(err)}` });
             }
-        } else if (entry.isDirectory) {
+        } else if (isDirectoryEntry(entry)) {
             const dirReader = entry.createReader();
-            let entries: FileSystemLikeEntry[];
+            let entries: FileSystemEntry[];
             do {
-                entries = await new Promise<FileSystemLikeEntry[]>((resolve, reject) => dirReader.readEntries(resolve, reject));
+                entries = await new Promise<FileSystemEntry[]>((resolve, reject) => dirReader.readEntries(resolve, reject));
                 for (const subEntry of entries) {
                     await handleDroppedEntry(subEntry, pathToSend);
                 }
@@ -239,7 +229,7 @@ export function createFileUploader({ canUpload = () => true }: FileUploaderOptio
         const detail = (event as CustomEvent<Record<string, unknown>> | undefined)?.detail as { directory?: unknown } | undefined;
         const directory = detail?.directory;
         pickerDirectory = typeof directory === 'string' ? directory.replace(/^\/+|\/+$/g, '') : '';
-        const hiddenInput = document.getElementById('globalFileInput') as HTMLInputElement | null;
+        const hiddenInput = elementByTag('globalFileInput', 'input');
         if (!hiddenInput) {
             console.error("Global file input not found!");
             return;
@@ -248,7 +238,8 @@ export function createFileUploader({ canUpload = () => true }: FileUploaderOptio
     }
 
     async function handleFileInputChange(event: Event): Promise<void> {
-        const target = event.target as HTMLInputElement;
+        const target = event.target;
+        if (!isTag(target, 'input')) return;
         const files = target.files;
         const directory = pickerDirectory;
         pickerDirectory = '';
@@ -267,8 +258,7 @@ export function createFileUploader({ canUpload = () => true }: FileUploaderOptio
                 await uploadFileObject(file, directory ? `${directory}/${file.name}` : file.name);
             }
         } catch (error) {
-            const errorWithMessage = error as { message?: string };
-            const errorMsg = `An error occurred during the file input upload process: ${errorWithMessage.message || String(errorWithMessage || error)}`;
+            const errorMsg = `An error occurred during the file input upload process: ${messageOf(error) || String(error)}`;
             console.error(errorMsg);
             post({ status: 'error', fileName: 'N/A', message: errorMsg });
         } finally {
@@ -293,16 +283,13 @@ export function createFileUploader({ canUpload = () => true }: FileUploaderOptio
             return;
         }
         try {
-            const entriesToProcess: FileSystemLikeEntry[] = [];
+            const entriesToProcess: FileSystemEntry[] = [];
             const transfer = ev.dataTransfer!;
             if (transfer.items) {
                 for (let i = 0; i < transfer.items.length; i++) {
                     const item = transfer.items[i];
                     if (item.kind !== 'file') continue;
-                    let entry: FileSystemLikeEntry | null = null;
-                    const dataTransferItemWithEntry = item as unknown as { webkitGetAsEntry?: () => FileSystemLikeEntry; getAsEntry?: () => FileSystemLikeEntry };
-                    if (typeof dataTransferItemWithEntry.webkitGetAsEntry === 'function') entry = dataTransferItemWithEntry.webkitGetAsEntry();
-                    else if (typeof dataTransferItemWithEntry.getAsEntry === 'function') entry = dataTransferItemWithEntry.getAsEntry();
+                    const entry = typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null;
                     if (entry) entriesToProcess.push(entry);
                 }
             } else if (transfer.files.length > 0) {
@@ -314,8 +301,7 @@ export function createFileUploader({ canUpload = () => true }: FileUploaderOptio
             try {
                 for (const entry of entriesToProcess) await handleDroppedEntry(entry);
             } catch (error) {
-                const errorWithMessage = error as { message?: string };
-                const errorMsg = `Error during sequential upload: ${errorWithMessage.message || String(errorWithMessage || error)}`;
+                const errorMsg = `Error during sequential upload: ${messageOf(error) || String(error)}`;
                 post({ status: 'error', fileName: 'N/A', message: errorMsg });
             }
         } finally {

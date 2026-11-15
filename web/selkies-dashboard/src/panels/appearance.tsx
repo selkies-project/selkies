@@ -17,7 +17,7 @@
 import { useEffect } from "react";
 import { Blend, Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useBarPrefs, type Translucency } from "@/layouts/actions";
+import { nextTranslucency, useBarPrefs } from "@/layouts/actions";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useTheme } from "@/components/ui/theme-provider";
@@ -98,7 +98,7 @@ export function TranslucencyToggle({ className }: { className?: string }) {
     <Tooltip>
       <TooltipTrigger render={
         <Button variant="outline" size="icon-sm" className={cn("translucency-button", grade, className)} aria-label={label} aria-pressed={translucency > 0}
-          onClick={() => setTranslucency(((translucency + 1) % 4) as Translucency)} />
+          onClick={() => setTranslucency(nextTranslucency(translucency))} />
       }>
         <Blend className="size-3.5" />
       </TooltipTrigger>

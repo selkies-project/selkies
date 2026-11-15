@@ -189,7 +189,9 @@ function workerSource(text: string, name: string): string {
     });
     // The module holds this as a template literal, so its `\$` and backtick
     // escapes are the outer template's; evaluating one resolves them exactly.
-    body = vm.runInThisContext('`' + body + '`') as string;
+    const resolved: unknown = vm.runInThisContext('`' + body + '`');
+    if (typeof resolved !== 'string') throw new Error(`${name} does not evaluate to text`);
+    body = resolved;
     return values.reduce((out, value, i) => out.replace(`__SPLICE${i}__`, () => value), body);
 }
 

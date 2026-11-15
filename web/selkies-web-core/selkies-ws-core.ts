@@ -130,7 +130,7 @@ import { installAuthGuard } from './lib/auth-guard.ts';
 import { getSessionToken, installSessionCookie, sessionAuthHeaders, sessionTokenProtocols } from './lib/session-token.ts';
 import { urlFragmentKeyword } from './lib/page-url.ts';
 import { titleFromSettings } from './lib/page-title.ts';
-import { storageKeyForServerKey, resolveSpec, tenBitStream, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.ts';
+import { storageKeyForServerKey, resolveSpec, resolveBoolean, isEncoderBackends, tenBitStream, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.ts';
 import { CRASH_SAFE_SETTINGS, holdKeys, holdDisplaySettings, releaseHeldSettings, restoreHeldPicks } from './lib/held-settings.ts';
 import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, canDecodeTenBit, tenBitDecoded, DECODER_PROBE_TIMEOUT_MS, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, isSkiaWebKit, displayLabel, entryPageTag, pageTabId, serverAnswers, rememberCcStart, recalledCcStart, forgetCcStart } from './lib/util.ts';
 import { keyboardAssist, showVirtualKeyboard } from './lib/virtual-keyboard.ts';
@@ -158,10 +158,13 @@ import type { ClipboardDigest, ClipboardSkip, LocalClipboardSender } from './lib
 import type { DisplayRefreshWatch } from './lib/display-refresh.ts';
 import type { PresentFigures, VideoWatch } from './lib/present-meter.ts';
 import type { DisplayLayouts, RoleVerdict } from './lib/input.ts';
+import { isRoleVerdict } from './lib/input.ts';
 import type { EncoderBackends, ServerSettingEntry } from './lib/conditional-settings.ts';
 import type { FramerateSpan } from './lib/display-refresh.ts';
 import type { StreamInfo, StreamSample } from './lib/stream-stats.ts';
-import type { CursorData, DisplayConfig, PrintDocument } from './lib/webrtc.ts';
+import type { PrintDocument } from './lib/webrtc.ts';
+import { isCursorData, isDisplayConfig } from './lib/webrtc.ts';
+import { asError, elementByTag, errorName, fields, isRecord, messageOf, stringOr } from './lib/narrow.ts';
 
 installAuthGuard();
 installSessionCookie();
@@ -291,6 +294,46 @@ interface SocketClose {
 }
 
 /** A JSON message from the server on the session socket, by its `type`. */
+/** The JSON messages the server sends over the socket, by `type`. */
+const SERVER_MESSAGE_TYPES: readonly string[] = ['stream_info', 'stream_stats', 'display_settings', 'server_settings',
+  'server_apps', 'print_document', 'pipeline_status', 'stream_resolution'];
+
+/**
+ * Whether a parsed socket message is one the server sends: a known `type`
+ * with the fields that type's handler reads.
+ * @param value What the message parsed to.
+ * @returns True for a message the dispatcher takes.
+ */
+function isServerMessage(value: unknown): value is ServerMessage {
+  if (!isRecord(value) || typeof value.type !== 'string') return false;
+  const dimension = (v: unknown): boolean => typeof v === 'number' || typeof v === 'string';
+  switch (value.type) {
+    case 'stream_info': return isRecord(value.info);
+    case 'stream_stats': return isRecord(value.stats);
+    case 'display_settings':
+    case 'server_settings': return isRecord(value.settings);
+    case 'server_apps':
+    case 'pipeline_status': return true;
+    case 'print_document': return typeof value.name === 'string' && typeof value.size_bytes === 'number';
+    case 'stream_resolution': return dimension(value.width) && dimension(value.height);
+    default: return false;
+  }
+}
+
+/**
+ * The page's own WebSocket where the core holds a session socket. Every
+ * handler the core installs takes what a MessageEvent, CloseEvent or Event
+ * carries, so a WebSocket is a SessionSocket; the DOM's handler properties are
+ * typed for their own events, which TypeScript cannot match to the socket
+ * worker's narrower ones.
+ * @param socket The WebSocket.
+ * @returns The same socket, typed as a SessionSocket.
+ */
+function asSessionSocket(socket: WebSocket): SessionSocket;
+function asSessionSocket(socket: unknown): unknown {
+  return socket;
+}
+
 type ServerMessage =
   | { type: 'stream_info'; info: StreamInfo }
   | { type: 'stream_stats'; stats: StreamSample }
@@ -1729,7 +1772,7 @@ function resolvedCssScaling(serverSettings: Record<string, ServerSettingEntry>):
   const hidpi = resolveSpec(HIDPI_SPEC, serverSettings,
     { manualActive: !!window.manual_resolution || manual_width! > 0 },
     (): string | null => (explicit ? window.localStorage.getItem(key) : null));
-  return HIDPI_SPEC.toServer(hidpi) as boolean;
+  return HIDPI_SPEC.toServer(hidpi) === true;
 }
 
 /**
@@ -1741,8 +1784,8 @@ function resolvedCssScaling(serverSettings: Record<string, ServerSettingEntry>):
  * @returns
  */
 function resolvedRawPointerMotion(serverSettings: Record<string, ServerSettingEntry>): boolean {
-  return resolveSpec(RAW_POINTER_MOTION_SPEC, serverSettings, { macDesktop: isMacDesktop() },
-    (key: string): string | null => getStringParam(key, null)) as boolean;
+  return resolveBoolean(RAW_POINTER_MOTION_SPEC, serverSettings, { macDesktop: isMacDesktop() },
+    (key: string): string | null => getStringParam(key, null));
 }
 
 /**
@@ -1753,8 +1796,8 @@ function resolvedRawPointerMotion(serverSettings: Record<string, ServerSettingEn
  * @returns
  */
 function resolvedMacCmdAsCtrl(serverSettings: Record<string, ServerSettingEntry>): boolean {
-  return resolveSpec(MAC_CMD_AS_CTRL_SPEC, serverSettings, { macDesktop: isMacDesktop() },
-    (key: string): string | null => getStringParam(key, null)) as boolean;
+  return resolveBoolean(MAC_CMD_AS_CTRL_SPEC, serverSettings, { macDesktop: isMacDesktop() },
+    (key: string): string | null => getStringParam(key, null));
 }
 
 function sanitizeAndStoreSettings(serverSettings: Record<string, ServerSettingEntry>): Record<string, unknown> {
@@ -1775,7 +1818,7 @@ function sanitizeAndStoreSettings(serverSettings: Record<string, ServerSettingEn
     const wasUnset = window.localStorage.getItem(finalKey) === null;
 
     if (setting.min !== undefined && setting.max !== undefined) {
-      const clientValue = getFloatParam(storeKey, setting.default as number);
+      const clientValue = getFloatParam(storeKey, Number(setting.default));
       if (wasUnset) {
         window[key] = clientValue;
       } else if (clientValue < setting.min || clientValue > setting.max) {
@@ -1790,20 +1833,20 @@ function sanitizeAndStoreSettings(serverSettings: Record<string, ServerSettingEn
     else if (setting.allowed !== undefined) {
       const isNumericEnum = !isNaN(parseFloat(setting.allowed[0]));
       const clientValueStr = isNumericEnum
-        ? getIntParam(storeKey, parseInt(setting.value as string, 10))!.toString()
+        ? getIntParam(storeKey, parseInt(String(setting.value), 10))!.toString()
         : getStringParam(storeKey, setting.value);
-      const applyRuntime = (val: unknown): void => { window[key] = isNumericEnum ? parseInt(val as string, 10) : val; };
+      const applyRuntime = (val: unknown): void => { window[key] = isNumericEnum ? parseInt(String(val), 10) : val; };
       if (wasUnset) {
         applyRuntime(setting.value);
-      } else if (!setting.allowed.includes(clientValueStr as string)) {
+      } else if (!(typeof clientValueStr === 'string' && setting.allowed.includes(clientValueStr))) {
         console.log(`Sanitizing '${key}': stored "${clientValueStr}" not in allowed [${setting.allowed.join(', ')}]. Reverting to server default "${setting.value}".`);
         window.localStorage.removeItem(finalKey);
         applyRuntime(setting.value);
         changes[key] = setting.value;
       } else {
         applyRuntime(clientValueStr);
-        if (isNumericEnum) setIntParam(storeKey, parseInt(clientValueStr as string, 10));
-        else setStringParam(storeKey, clientValueStr as string);
+        if (isNumericEnum) setIntParam(storeKey, parseInt(String(clientValueStr), 10));
+        else setStringParam(storeKey, clientValueStr);
       }
     }
     else if (typeof setting.value === 'boolean') {
@@ -3106,9 +3149,9 @@ function activateWorkerSinkDisplay(): boolean {
     if (videoWorkerMode === 'vtg') {
       // It was started while hidden, which a browser may refuse or pause.
       playSinkVideo();
-      if (typeof (target as HTMLVideoElement).requestVideoFrameCallback === 'function') {
+      if ('requestVideoFrameCallback' in target && typeof target.requestVideoFrameCallback === 'function') {
         const gen = ++sinkRevealGen;
-        (target as HTMLVideoElement).requestVideoFrameCallback((): void => {
+        target.requestVideoFrameCallback((): void => {
           if (gen !== sinkRevealGen || !videoWorkerActive) return;
           videoWorkerRendered = true;
           if (canvas) canvas.style.display = 'none';
@@ -3736,7 +3779,7 @@ keyboardLayoutProbe.then((layout: string | null): void => {
  * @returns
  */
 function currentDisplayScale(dpr: number): number {
-    const canvas = document.getElementById('videoCanvas') as HTMLCanvasElement | null;
+    const canvas = elementByTag('videoCanvas', 'canvas');
     let css = null;
     for (const id of ['videoCanvas', 'videoStream', 'videoWorkerCanvas']) {
         const el = document.getElementById(id);
@@ -4179,7 +4222,7 @@ function updateUIForSharedMode(): void {
         console.log("Shared mode: Added 'shared-user-mode' class to video container.");
     }
 
-    const globalFileInput = document.getElementById('globalFileInput') as HTMLInputElement | null;
+    const globalFileInput = elementByTag('globalFileInput', 'input');
     if (globalFileInput) {
         globalFileInput.disabled = true;
         console.log("Shared mode: Disabled globalFileInput.");
@@ -4199,7 +4242,7 @@ const initializeUI = (): void => {
   injectCSS();
   setRealViewportHeight();
   window.addEventListener('resize', setRealViewportHeight);
-  window.addEventListener('requestFileUpload', handleRequestFileUpload as EventListener);
+  window.addEventListener('requestFileUpload', handleRequestFileUpload);
   const appDiv = document.getElementById('app');
   if (!appDiv) {
     console.error("FATAL: Could not find #app element.");
@@ -4226,7 +4269,7 @@ const initializeUI = (): void => {
   overlayInput.id = 'overlayInput';
   videoContainer.appendChild(overlayInput);
 
-  canvas = document.getElementById('videoCanvas') as HTMLCanvasElement | null;
+  canvas = elementByTag('videoCanvas', 'canvas');
   if (!canvas) {
     canvas = document.createElement('canvas');
     canvas.id = 'videoCanvas';
@@ -4253,7 +4296,7 @@ const initializeUI = (): void => {
   }
 
   if (supportsWindowMSTG || USE_OFFSCREEN_WORKER) {
-    videoElement = document.getElementById('videoStream') as HTMLVideoElement | null;
+    videoElement = elementByTag('videoStream', 'video');
     if (!videoElement) {
       videoElement = document.createElement('video');
       videoElement.id = 'videoStream';
@@ -4271,7 +4314,7 @@ const initializeUI = (): void => {
   }
 
   if (USE_OFFSCREEN_WORKER) {
-    videoWorkerCanvas = document.getElementById('videoWorkerCanvas') as HTMLCanvasElement | null;
+    videoWorkerCanvas = elementByTag('videoWorkerCanvas', 'canvas');
     if (!videoWorkerCanvas) {
       videoWorkerCanvas = document.createElement('canvas');
       videoWorkerCanvas.id = 'videoWorkerCanvas';
@@ -4746,7 +4789,7 @@ const requestWakeLock = async (): Promise<void> => {
       });
       console.log('Screen Wake Lock is active.');
     } catch (err) {
-      console.warn(`Could not acquire Wake Lock: ${(err as Error).name}, ${(err as Error).message}`);
+      console.warn(`Could not acquire Wake Lock: ${String(errorName(err))}, ${String(messageOf(err))}`);
     }
   } else {
     console.warn('Wake Lock API is not supported by this browser.');
@@ -5191,7 +5234,7 @@ async function applyOutputDevice(): Promise<void> {
       await outputRoute.element.play();
       console.log(`Playback output set to device: ${preferredOutputDeviceId} (through a media element)`);
     } catch (err) {
-      console.error(`Error routing playback to output device (ID: ${preferredOutputDeviceId}): ${(err as Error).name}`, err);
+      console.error(`Error routing playback to output device (ID: ${preferredOutputDeviceId}): ${String(errorName(err))}`, err);
       if (audioContext && audioGainNode) {
         audioGainNode.disconnect();
         audioGainNode.connect(audioContext.destination);
@@ -5210,7 +5253,7 @@ async function applyOutputDevice(): Promise<void> {
         await audioContext.setSinkId(preferredOutputDeviceId!);
         console.log(`Playback AudioContext output set to device: ${preferredOutputDeviceId}`);
       } catch (err) {
-        console.error(`Error setting sinkId on Playback AudioContext (ID: ${preferredOutputDeviceId}): ${(err as Error).name}`, err);
+        console.error(`Error setting sinkId on Playback AudioContext (ID: ${preferredOutputDeviceId}): ${String(errorName(err))}`, err);
       }
     } else {
       console.warn(`Playback AudioContext not running (state: ${audioContext.state}), cannot set sinkId yet.`);
@@ -5382,7 +5425,7 @@ function receiveMessage(event: Pick<MessageEvent<DashboardMessage>, 'origin' | '
       break;
     case 'setSynth':
       if (window.webrtcInput && typeof window.webrtcInput.setSynth === 'function') {
-        window.webrtcInput.setSynth(message.value as boolean);
+        window.webrtcInput.setSynth(message.value === true);
       }
       break;
     case 'showVirtualKeyboard': {
@@ -5503,8 +5546,8 @@ function receiveMessage(event: Pick<MessageEvent<DashboardMessage>, 'origin' | '
         console.log("setManualResolution ignored: the server keeps this display's size (enable_resize=false).");
         break;
       }
-      const width = parseInt(message.width as string, 10);
-      const height = parseInt(message.height as string, 10);
+      const width = parseInt(String(message.width), 10);
+      const height = parseInt(String(message.height), 10);
       if (isNaN(width) || width <= 0 || isNaN(height) || height <= 0) {
         console.error('Received invalid width/height for setManualResolution:', message);
         break;
@@ -5977,9 +6020,9 @@ function handleSettingsMessage(settings: Record<string, unknown>, fromServer?: b
       if (videoWorker) videoWorker.postMessage({ type: 'decodePaceReset' });
       if (decodePace !== null) followDecodePace(null);
     }
-    storeString('framerate', followsDisplay ? FRAMERATE_DISPLAY : String(parseFloat(settings.framerate as string)));
-    const rate = followsDisplay ? requestedStreamFramerate() : parseFloat(settings.framerate as string);
-    if (Number.isFinite(rate)) framerate = rate as number;
+    storeString('framerate', followsDisplay ? FRAMERATE_DISPLAY : String(parseFloat(String(settings.framerate))));
+    const rate = followsDisplay ? requestedStreamFramerate() : parseFloat(String(settings.framerate));
+    if (typeof rate === 'number' && Number.isFinite(rate)) framerate = rate;
     settingsChanged = true;
   }
   if (settings.webcam_encoder !== undefined) {
@@ -5994,19 +6037,19 @@ function handleSettingsMessage(settings: Record<string, unknown>, fromServer?: b
     }
   }
   if (settings.encoder !== undefined) {
-    let newEncoderSetting = settings.encoder;
+    let newEncoderSetting = String(settings.encoder);
     // A server-authored value is applied as announced and the settings echo
     // runs the refusal ladder for it; a dashboard's is the user's pick, and
     // one this engine cannot decode takes the ladder's fallback at once.
-    if (!fromServer) storeEncoderPick(newEncoderSetting as string);
-    if (!fromServer && !canDecodeEncoder(newEncoderSetting as string)) {
-      const fallback = fallbackEncoder(newEncoderSetting as string);
+    if (!fromServer) storeEncoderPick(newEncoderSetting);
+    if (!fromServer && !canDecodeEncoder(newEncoderSetting)) {
+      const fallback = fallbackEncoder(newEncoderSetting);
       console.warn(`This browser has no decoder for ${newEncoderSetting}; using the ${fallback} encoder.`);
       newEncoderSetting = fallback;
       storeFallbackEncoder(fallback, `no decoder for ${settings.encoder}`);
     }
     if (currentEncoderMode !== newEncoderSetting) {
-        currentEncoderMode = newEncoderSetting as string;
+        currentEncoderMode = newEncoderSetting;
         updateVideoDivert();
         storeString('encoder', currentEncoderMode);
         settingsChanged = true;
@@ -6023,7 +6066,7 @@ function handleSettingsMessage(settings: Record<string, unknown>, fromServer?: b
     }
   }
   if (settings.video_crf !== undefined) {
-    video_crf = parseInt(settings.video_crf as string, 10);
+    video_crf = parseInt(String(settings.video_crf), 10);
     storeInt('video_crf', video_crf);
     settingsChanged = true;
   }
@@ -6044,12 +6087,12 @@ function handleSettingsMessage(settings: Record<string, unknown>, fromServer?: b
     settingsChanged = true;
   }
   if (settings.jpeg_quality !== undefined) {
-    jpeg_quality = parseInt(settings.jpeg_quality as string, 10);
+    jpeg_quality = parseInt(String(settings.jpeg_quality), 10);
     storeInt('jpeg_quality', jpeg_quality);
     settingsChanged = true;
   }
   if (settings.paint_over_jpeg_quality !== undefined) {
-    paint_over_jpeg_quality = parseInt(settings.paint_over_jpeg_quality as string, 10);
+    paint_over_jpeg_quality = parseInt(String(settings.paint_over_jpeg_quality), 10);
     storeInt('paint_over_jpeg_quality', paint_over_jpeg_quality);
     settingsChanged = true;
   }
@@ -6066,12 +6109,12 @@ function handleSettingsMessage(settings: Record<string, unknown>, fromServer?: b
     settingsChanged = true;
   }
   if (settings.video_paintover_crf !== undefined) {
-    video_paintover_crf = parseInt(settings.video_paintover_crf as string, 10);
+    video_paintover_crf = parseInt(String(settings.video_paintover_crf), 10);
     storeInt('video_paintover_crf', video_paintover_crf);
     settingsChanged = true;
   }
   if (settings.video_paintover_burst_frames !== undefined) {
-    video_paintover_burst_frames = parseInt(settings.video_paintover_burst_frames as string, 10);
+    video_paintover_burst_frames = parseInt(String(settings.video_paintover_burst_frames), 10);
     storeInt('video_paintover_burst_frames', video_paintover_burst_frames);
     settingsChanged = true;
   }
@@ -6082,7 +6125,7 @@ function handleSettingsMessage(settings: Record<string, unknown>, fromServer?: b
     settingsChanged = true;
   }
   if (settings.scaling_dpi !== undefined) {
-    scalingDPI = parseInt(settings.scaling_dpi as string, 10);
+    scalingDPI = parseInt(String(settings.scaling_dpi), 10);
     // Not stored: the localStorage pin is the dashboard's explicit slider pick;
     // the payload builder rides the live value either way.
     settingsChanged = true;
@@ -6106,7 +6149,7 @@ function handleSettingsMessage(settings: Record<string, unknown>, fromServer?: b
     storeBool('clipboard_seamless', clipboard_seamless);
   }
   if (settings.print_auto !== undefined) {
-    printJobs.setAutomatic(settings.print_auto as boolean);
+    printJobs.setAutomatic(settings.print_auto === true);
     storeBool('print_auto', !!settings.print_auto);
   }
   if (settings.clipboard_in_enabled !== undefined) {
@@ -6139,7 +6182,7 @@ function handleSettingsMessage(settings: Record<string, unknown>, fromServer?: b
     applyMacCmdAsCtrl();
   }
   if (settings.debug !== undefined) {
-    debug = settings.debug as boolean;
+    debug = settings.debug === true;
     // Persisted even when server-authored: the reload settles on the stored flag.
     setBoolParam('debug', debug);
     console.log(`Applied debug setting: ${debug}. Reloading...`);
@@ -6147,19 +6190,19 @@ function handleSettingsMessage(settings: Record<string, unknown>, fromServer?: b
     return;
   }
   if (settings.rate_control_mode !== undefined) {
-    rateControlMode = settings.rate_control_mode as string;
+    rateControlMode = String(settings.rate_control_mode);
     storeString('rate_control_mode', rateControlMode);
     fetchLatestRCvalue(rateControlMode);
     settingsChanged = true;
   }
   if (settings.video_bitrate !== undefined) {
-    videoBitrate = parseInt(settings.video_bitrate as string, 10);
+    videoBitrate = parseInt(String(settings.video_bitrate), 10);
     storeInt('video_bitrate', videoBitrate);
     if (!fromServer) forgetCcStart(displayId);
     settingsChanged = true;
   }
   if (settings.audio_bitrate !== undefined) {
-    audio_bitrate = parseInt(settings.audio_bitrate as string, 10);
+    audio_bitrate = parseInt(String(settings.audio_bitrate), 10);
     storeInt('audio_bitrate', audio_bitrate);
     settingsChanged = true;
   }
@@ -6188,7 +6231,7 @@ function followDisplaySettings(values: Record<string, unknown>): void {
   console.log('[display] Streaming with what the display does:', changed);
   for (const [name, value] of Object.entries(changed)) window[name] = value;
   handleSettingsMessage(changed, true, false);
-  if (changed.encoder !== undefined) settleServerEncoder(changed.encoder as string, lastServerSettings && lastServerSettings.encoder);
+  if (changed.encoder !== undefined) settleServerEncoder(String(changed.encoder), lastServerSettings && lastServerSettings.encoder);
   if (lastServerSettings) window.postMessage({ type: 'serverSettings', payload: { ...lastServerSettings } }, window.location.origin);
 }
 
@@ -7735,7 +7778,7 @@ class WorkerWebSocket {
       // then runs here, where a busy thread costs audio its cadence, which is
       // still better than no session.
       if (socketWorkerEnabled) console.warn('[websockets] socket worker unavailable, reading on the page:', e);
-      websocket = new WebSocket(websocketEndpointURL.href, tokenProtocols) as SessionSocket;
+      websocket = asSessionSocket(new WebSocket(websocketEndpointURL.href, tokenProtocols));
       websocket!.binaryType = 'arraybuffer';
     }
     // The socket itself is in a worker, so this handle is what page-side
@@ -8339,7 +8382,7 @@ class WorkerWebSocket {
                     try {
                         decoderInfo.decoder.decode(chunk);
                     } catch (e) {
-                        initiateFallback(e as Error, `stripe_decode_Y=${vncStripeYStart}`);
+                        initiateFallback(asError(e), `stripe_decode_Y=${vncStripeYStart}`);
                     }
                 } else if (decoderInfo.decoder.state === "unconfigured" || (decoderInfo.decoder.state as string) === "configuring") {
                     // A mismatched geometry is a straggler from the previous encoder
@@ -8401,7 +8444,9 @@ class WorkerWebSocket {
         let permissions: RoleVerdict;
         try {
           const payloadStr = event.data.substring(13);
-          permissions = JSON.parse(payloadStr) as RoleVerdict;
+          const parsed: unknown = JSON.parse(payloadStr);
+          if (!isRoleVerdict(parsed)) throw new Error(`not a role verdict: ${payloadStr}`);
+          permissions = parsed;
         } catch (e) {
           console.error("Failed to parse AUTH_SUCCESS message:", e);
           return;
@@ -8477,7 +8522,9 @@ class WorkerWebSocket {
         let newPermissions: RoleVerdict;
         try {
           const payloadStr = event.data.substring(12);
-          newPermissions = JSON.parse(payloadStr) as RoleVerdict;
+          const parsed: unknown = JSON.parse(payloadStr);
+          if (!isRoleVerdict(parsed)) throw new Error(`not a role verdict: ${payloadStr}`);
+          newPermissions = parsed;
         } catch (e) {
           console.error("Failed to parse ROLE_UPDATE message:", e);
           return;
@@ -8613,13 +8660,19 @@ class WorkerWebSocket {
       }
       else if (clientMode === 'websockets') {
         if (event.data.startsWith('{')) {
-          let obj: ServerMessage;
+          let parsed: unknown;
           try {
-            obj = JSON.parse(event.data) as ServerMessage;
+            parsed = JSON.parse(event.data);
           } catch (e) {
             console.error('Error parsing JSON:', e);
             return;
           }
+          if (!isServerMessage(parsed)) {
+            const type = fields(parsed).type;
+            if (typeof type === 'string' && SERVER_MESSAGE_TYPES.includes(type)) console.warn('Unreadable server message:', event.data.slice(0, 200));
+            return;
+          }
+          const obj = parsed;
           if (obj.type === 'stream_info') {
             streamStats.setInfo(obj.info);
             noteSessionRange(obj.info);
@@ -8652,8 +8705,8 @@ class WorkerWebSocket {
                   clearAllVncStripeDecoders();
                   cleanupJpegStripeQueue();
               }
-              if (Number.isFinite(parseFloat(window['framerate'] as string))) {
-                  framerate = parseFloat(window['framerate'] as string);
+              if (Number.isFinite(parseFloat(String(window['framerate'])))) {
+                  framerate = parseFloat(String(window['framerate']));
               }
               const fr = obj.settings.framerate;
               framerateSpan = fr && fr.min !== undefined ? { min: fr.min, max: fr.max! } : null;
@@ -8710,10 +8763,10 @@ class WorkerWebSocket {
                 enable_binary_clipboard = ebc.locked ? ebc.value : getBoolParam('enable_binary_clipboard', ebc.value);
               }
               const wce = obj.settings && obj.settings.webcam_encoder;
-              if (wce && WEBCAM_ENCODER_PREFERENCES.includes(wce.value as string)) {
-                const stored = getStringParam('webcam_encoder', wce.value as string);
-                webcamEncoderPreference = (wce.locked || !WEBCAM_ENCODER_PREFERENCES.includes(stored)
-                  ? wce.value : stored) as string;
+              const wceValue = wce ? stringOr(wce.value) : undefined;
+              if (wce && wceValue !== undefined && WEBCAM_ENCODER_PREFERENCES.includes(wceValue)) {
+                const stored = getStringParam('webcam_encoder', wceValue);
+                webcamEncoderPreference = wce.locked || !WEBCAM_ENCODER_PREFERENCES.includes(stored) ? wceValue : stored;
               }
               const cssScaling = resolvedCssScaling(obj.settings);
               if (cssScaling !== useCssScaling) {
@@ -8738,15 +8791,18 @@ class WorkerWebSocket {
                   console.log('Client settings were sanitized by server rules. Sending updates back to server:', changes);
                   handleSettingsMessage(changes, true);
               }
-              if (obj.settings.encoder_backends) encoderBackends = (obj.settings.encoder_backends.value || null) as EncoderBackends | null;
+              if (obj.settings.encoder_backends) {
+                const backends = obj.settings.encoder_backends.value;
+                encoderBackends = isEncoderBackends(backends) ? backends : null;
+              }
               if (typeof window['encoder'] === 'string') settleServerEncoder(window['encoder'], obj.settings.encoder);
               const serverForcesManual = obj.settings && obj.settings.manual_resolution && obj.settings.manual_resolution.value === true;
 
               if (serverForcesManual || window.manual_resolution) {
                   console.log(`Manual resolution mode active (Server forced: ${serverForcesManual}, Client pref: ${window.manual_resolution}). Switching to manual resize handlers.`);
                   if (serverForcesManual) {
-                      const serverWidth = obj.settings.manual_width ? parseInt(obj.settings.manual_width.value as string, 10) : 0;
-                      const serverHeight = obj.settings.manual_height ? parseInt(obj.settings.manual_height.value as string, 10) : 0;
+                      const serverWidth = obj.settings.manual_width ? parseInt(String(obj.settings.manual_width.value), 10) : 0;
+                      const serverHeight = obj.settings.manual_height ? parseInt(String(obj.settings.manual_height.value), 10) : 0;
                       if (serverWidth > 0 && serverHeight > 0) {
                           console.log(`Applying server-enforced manual resolution: ${serverWidth}x${serverHeight}`);
                           window.manual_resolution = true;
@@ -8818,8 +8874,8 @@ class WorkerWebSocket {
              if (sharedClientState === 'error' || sharedClientState === 'idle') {
                console.log(`Shared mode: Received stream_resolution while in state '${sharedClientState}'. Ignoring.`);
              } else {
-               const physicalNewWidth = parseInt(obj.width as string, 10);
-               const physicalNewHeight = parseInt(obj.height as string, 10);
+               const physicalNewWidth = parseInt(String(obj.width), 10);
+               const physicalNewHeight = parseInt(String(obj.height), 10);
 
                if (physicalNewWidth > 0 && physicalNewHeight > 0) {
                  // Shared-mode sizing works in physical stream pixels; the
@@ -8848,8 +8904,8 @@ class WorkerWebSocket {
                }
              }
            } else {
-             const appliedWidth = parseInt(obj.width as string, 10);
-             const appliedHeight = parseInt(obj.height as string, 10);
+             const appliedWidth = parseInt(String(obj.width), 10);
+             const appliedHeight = parseInt(String(obj.height), 10);
              if (appliedWidth > 0 && appliedHeight > 0) {
                // The realized resolution can differ from the request (encoder
                // alignment, RandR cell snapping, a rejected mode-set); canvas,
@@ -8890,7 +8946,8 @@ class WorkerWebSocket {
           }
         } else if (event.data.startsWith('cursor,')) {
           try {
-            const cursorData = JSON.parse(event.data.substring(7)) as CursorData;
+            const cursorData: unknown = JSON.parse(event.data.substring(7));
+            if (!isCursorData(cursorData)) throw new Error('not a cursor');
             if (window.webrtcInput && typeof window.webrtcInput.updateServerCursor === 'function') {
                 window.webrtcInput.updateServerCursor(cursorData);
             }
@@ -8921,7 +8978,7 @@ class WorkerWebSocket {
             incomingClipboard.single('text/plain', event.data.substring(10), consumeInitClipboardFetch());
         } else if (event.data.startsWith('system,')) {
           try {
-            const systemMsg = JSON.parse(event.data.substring(7)) as { action?: string };
+            const systemMsg = fields(JSON.parse(event.data.substring(7)));
             if (systemMsg.action === 'reload') window.location.reload();
             else if (typeof systemMsg.action === 'string' &&
                 systemMsg.action.startsWith('command_error,') && !isSharedMode) {
@@ -8983,7 +9040,8 @@ class WorkerWebSocket {
         else if (event.data.startsWith('DISPLAY_CONFIG_UPDATE,')) {
             try {
                 const jsonPayload = event.data.substring(event.data.indexOf(',') + 1);
-                const payload = JSON.parse(jsonPayload) as DisplayConfig;
+                const payload: unknown = JSON.parse(jsonPayload);
+                if (!isDisplayConfig(payload)) throw new Error('not a display configuration');
 
                 latestDisplayLayouts = payload.layouts || null;
                 serverWayland = !!payload.wayland;
@@ -9422,7 +9480,7 @@ const MULTIOPUS_CLIENT_LAYOUTS: Record<number, { streams: number; coupled: numbe
  * @returns 1, 2, 6, or 8; 2 when unset or unknown.
  */
 function getAudioChannelCount(): number {
-  const ch = parseInt(window.audio_channels as string, 10);
+  const ch = parseInt(String(window.audio_channels), 10);
   return (ch === 1 || ch === 2 || ch === 6 || ch === 8) ? ch : 2;
 }
 
@@ -10137,7 +10195,7 @@ async function startMicrophoneCapture(askedByServer: boolean = false): Promise<v
       // An engine that cannot resample a stream into a context of another
       // rate (Firefox before 148) refuses it at 24 kHz; at its default rate the
       // context runs at the stream's, and the capture worklet resamples.
-      if ((e as Error).name !== 'NotSupportedError') throw e;
+      if (errorName(e) !== 'NotSupportedError') throw e;
       await micAudioContext.close();
       micAudioContext = new AudioContext();
       micSourceNode = micAudioContext.createMediaStreamSource(micStream);
@@ -10186,7 +10244,7 @@ async function startMicrophoneCapture(askedByServer: boolean = false): Promise<v
     postSidebarButtonUpdate();
   } catch (error) {
     console.error('Failed to start microphone capture:', error);
-    if (!askedByServer && !pending.withdrawn) alert(`Microphone error: ${(error as Error).name} - ${(error as Error).message}`);
+    if (!askedByServer && !pending.withdrawn) alert(`Microphone error: ${String(errorName(error))} - ${String(messageOf(error))}`);
     else if (isCaptureRefusal(error)) micDemandRefused = true;
     stopMicrophoneCapture();
     // A refused request leaves the stop above nothing to release.

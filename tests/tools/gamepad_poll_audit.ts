@@ -22,7 +22,7 @@
  */
 
 import type { RumbleActuator } from '../../web/selkies-web-core/lib/gamepad.ts';
-import type { StandIn } from './stand_in.ts';
+import { type StandIn, standIn } from './stand_in.ts';
 
 let failed = 0;
 
@@ -72,7 +72,7 @@ const pad = (mapping: GamepadMappingType, axes: number[], buttons = 17): FakePad
     axes, buttons: Array.from({ length: buttons }, () => ({ pressed: false, touched: false, value: 0 })),
 });
 let pads: Array<FakePad | null> = [null, null, null, null];
-navigator.getGamepads = () => pads as Array<StandIn<Gamepad> | null> as Array<Gamepad | null>;
+navigator.getGamepads = () => pads.map((pad) => pad && standIn<Gamepad>(pad));
 
 const { GamepadManager } = await import('../../web/selkies-web-core/lib/gamepad.ts');
 

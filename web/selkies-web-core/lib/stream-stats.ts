@@ -335,7 +335,9 @@ export class StreamStats {
   /** @param description What the core learned of its own side. */
   setClient(description: Partial<StreamClient>): void {
     const client = this._client;
-    if (Object.keys(description).every((key) => (client as unknown as Record<string, unknown>)[key] === (description as unknown as Record<string, unknown>)[key])) return;
+    const had: Partial<Record<string, unknown>> = { ...client };
+    const told: Partial<Record<string, unknown>> = { ...description };
+    if (Object.keys(told).every((key) => had[key] === told[key])) return;
     Object.assign(client, description);
     this._changed();
   }

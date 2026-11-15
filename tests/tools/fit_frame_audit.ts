@@ -16,6 +16,7 @@
  */
 
 import { createFrameFit } from '../../web/selkies-web-core/lib/fit-frame.ts';
+import { standIn } from './stand_in.ts';
 
 let failed = 0;
 
@@ -143,7 +144,11 @@ type Fit = (frame: FakeFrame, width: number, height: number) => FakeFrame;
  */
 function frameFit(drawsCrop?: boolean): Fit {
   const fit = createFrameFit(drawsCrop);
-  return (frame, width, height) => fit(frame as FrameLike as VideoFrame, width, height) as FrameLike as FakeFrame;
+  return (frame, width, height) => {
+    const out = fit(standIn<VideoFrame>(frame), width, height);
+    if (!(out instanceof FakeFrame)) throw new Error('the fit returned a frame the audit did not make');
+    return out;
+  };
 }
 
 const decoded = (coded: number[], visible: number[], display?: number[]): FakeFrame => new FakeFrame({

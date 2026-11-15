@@ -28,6 +28,7 @@
  * under `api/apps/`, so the panel lists exactly what the runner can install.
  * @module
  */
+import { fields } from "./narrow.ts";
 
 const REMOTE_CATALOG_BASE = "https://raw.githubusercontent.com/linuxserver/proot-apps/master/metadata/";
 // Page-relative, like the file browser's `api/files/`, so a subfolder
@@ -195,7 +196,7 @@ export function applyAppsEvent(snapshot: AppsSnapshot, kind: string, payload: un
     const body = payload as { installed?: unknown; jobs?: unknown };
     const installed = Array.isArray(body.installed) ? strings(body.installed) : snapshot.installed;
     const jobs = (Array.isArray(body.jobs) ? body.jobs : [])
-      .map((job) => jobFrom(job as JobPayload))
+      .map((job) => jobFrom(fields(job)))
       .filter((job): job is AppJob => job !== null);
     return { installed, jobs };
   }
@@ -230,8 +231,8 @@ const listeners = new Set<() => void>();
  */
 const onAppsEvent = (event: MessageEvent): void => {
   if (event.source !== window || event.origin !== window.location.origin) return;
-  const data = event.data as { type?: string; kind?: unknown; payload?: unknown } | null;
-  if (!data || data.type !== APPS_EVENT || typeof data.kind !== "string") return;
+  const data = fields(event.data);
+  if (data.type !== APPS_EVENT || typeof data.kind !== "string") return;
   const next = applyAppsEvent(snapshot, data.kind, data.payload);
   if (next === snapshot) return;
   snapshot = next;

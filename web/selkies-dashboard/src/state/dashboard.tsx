@@ -32,8 +32,9 @@ import { showVirtualKeyboard as raiseVirtualKeyboard } from "../../../selkies-we
 import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY, USER_CHORDS_KEY, chordEvents,
   formatChord, parseChord, readUserChords, writeUserChords, type ChordEvent } from "../../../selkies-web-core/lib/touch-controls.ts";
 import { computeRenderableSettings, getLastServerSettings, getPrefixedKey, getPrintJobs, hardwareKeyboard,
-  isMobileClient, isSecondaryDisplay, isViewerUrlMode, onCoreMessage, type Renderable, type ServerSettings } from "@/utils";
+  isMobileClient, isSecondaryDisplay, isViewerUrlMode, onCoreMessage, serverSettingsOf, type Renderable, type ServerSettings } from "@/utils";
 import { LAYOUTS, layoutById, resolveLayout, storeLayout, type LayoutSpec } from "@/layouts";
+import { errorName, stringOr } from "../../../selkies-web-core/lib/narrow.ts";
 
 declare global {
   /** One screen of the Window Management API, with its place on the desktop. */
@@ -227,7 +228,7 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
   const layout = React.useMemo(() => {
     const serverValue = layoutSetting?.value ?? window.__SELKIES_UI_LAYOUT__ ?? null;
     if (layoutPick && layoutChoices.some((choice) => choice.id === layoutPick)) return layoutById(layoutPick);
-    return resolveLayout(serverValue as string, layoutAllowed);
+    return resolveLayout(stringOr(serverValue) ?? null, layoutAllowed);
   }, [layoutSetting, layoutPick, layoutChoices, layoutAllowed]);
   const setLayout = React.useCallback((id: string) => {
     storeLayout(id);
@@ -266,19 +267,19 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
     const offMessages = onCoreMessage((message) => {
       switch (message.type) {
         case "serverSettings":
-          setServerSettings(message.payload as ServerSettings | null);
+          setServerSettings(serverSettingsOf(message.payload));
           break;
         case "clientRoleUpdate":
           setIsViewer(message.role === "viewer");
           break;
         case "pipelineStatusUpdate":
         case "sidebarButtonStatusUpdate":
-          if (message.video !== undefined) setVideo(message.video as boolean);
-          if (message.audio !== undefined) setAudio(message.audio as boolean);
-          if (message.microphone !== undefined) setMicrophone(message.microphone as boolean);
-          if (message.webcam !== undefined) setWebcam(message.webcam as boolean);
+          if (message.video !== undefined) setVideo(message.video === true);
+          if (message.audio !== undefined) setAudio(message.audio === true);
+          if (message.microphone !== undefined) setMicrophone(message.microphone === true);
+          if (message.webcam !== undefined) setWebcam(message.webcam === true);
           if (message.gamepad !== undefined) {
-            setGamepad(message.gamepad as boolean);
+            setGamepad(message.gamepad === true);
             // Gamepad input off takes the touch overlay down with it: its presses would go nowhere.
             if (message.gamepad === false) hideTouchGamepad();
           }
@@ -487,7 +488,7 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
       }
     } catch (err) {
       // A refused permission is an ordinary outcome: the arrows still ask.
-      if (!(err && (err as Error).name === "NotAllowedError")) console.error("Error with Window Management API:", err);
+      if (errorName(err) !== "NotAllowedError") console.error("Error with Window Management API:", err);
       setPlacements(ANY_SIDE);
     }
   }, [launchWindow]);
@@ -495,7 +496,7 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
   const state: DashboardState = {
     serverSettings,
     renderable,
-    uiTitle: (serverSettings?.ui_title?.value ?? "Selkies") as string,
+    uiTitle: String(serverSettings?.ui_title?.value ?? "Selkies"),
     uiShowLogo: serverSettings?.ui_show_logo?.value !== false,
     isViewer,
     isSecondaryDisplay,

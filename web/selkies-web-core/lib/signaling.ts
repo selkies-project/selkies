@@ -49,6 +49,7 @@
  */
 
 import { pageTabId, recalledCcStart } from './util.ts';
+import { type Fields, fields, isRecord, numberOr, oneOf, stringOr } from './narrow.ts';
 
 /** A secret naming the page's session to the server, which resumes it after a cut. */
 function newResumeKey(): string {
@@ -57,6 +58,8 @@ function newResumeKey(): string {
 
 /** First signaling retry after a failure, doubled per failure up to RETRY_MAX_MS. */
 const RETRY_FIRST_MS = 400;
+/** The description types a peer sends. */
+const SDP_TYPES: readonly RTCSdpType[] = ['offer', 'answer', 'pranswer', 'rollback'];
 const RETRY_MAX_MS = 1000;
 
 /**
@@ -346,7 +349,11 @@ export class WebRTCSignaling {
      * @param event
      */
     _onServerMessage(event: MessageEvent): void {
-        const data = event.data as string;
+        if (typeof event.data !== 'string') {
+            this._setError("server message is not text");
+            return;
+        }
+        const data = event.data;
         this._setDebug("server message: " + data);
 
         if (data === "HELLO") {
@@ -385,9 +392,9 @@ export class WebRTCSignaling {
             return;
         }
 
-        let msg: { sdp?: RTCSessionDescriptionInit; ice?: RTCIceCandidateInit };
+        let msg: Fields;
         try {
-            msg = JSON.parse(data.substring(data.indexOf(' ') + 1)) as { sdp?: RTCSessionDescriptionInit; ice?: RTCIceCandidateInit };
+            msg = fields(JSON.parse(data.substring(data.indexOf(' ') + 1)));
         } catch (e) {
             if (e instanceof SyntaxError) {
                 this._setError("error parsing message as JSON: " + data);
@@ -397,10 +404,18 @@ export class WebRTCSignaling {
             return;
         }
 
-        if (msg.sdp != null) {
-            this._setSDP(new RTCSessionDescription(msg.sdp));
-        } else if (msg.ice != null) {
-            const icecandidate = new RTCIceCandidate(msg.ice);
+        const sdp = fields(msg.sdp);
+        const sdpType = oneOf(sdp.type, SDP_TYPES);
+        if (msg.sdp != null && sdpType) {
+            this._setSDP(new RTCSessionDescription({ type: sdpType, sdp: stringOr(sdp.sdp) }));
+        } else if (msg.ice != null && isRecord(msg.ice)) {
+            const ice = msg.ice;
+            const icecandidate = new RTCIceCandidate({
+                candidate: stringOr(ice.candidate),
+                sdpMid: stringOr(ice.sdpMid),
+                sdpMLineIndex: numberOr(ice.sdpMLineIndex),
+                usernameFragment: stringOr(ice.usernameFragment),
+            });
             this._setICE(icecandidate);
         } else {
             this._setError("unhandled JSON message: " + msg);
@@ -466,12 +481,12 @@ export class WebRTCSignaling {
         this._ws_conn = new WebSocket(this._server);
         let live = true;
         this._forget_socket = () => { live = false; };
-        const own = (handler: (event: Event) => void) => (event: Event): void => { if (live) handler.call(this, event); };
+        const own = <E extends Event>(handler: (event: E) => void) => (event: E): void => { if (live) handler.call(this, event); };
 
         this._ws_conn.addEventListener('open', own(this._onServerOpen as (event: Event) => void));
         this._ws_conn.addEventListener('error', own(this._onServerError as (event: Event) => void));
         this._ws_conn.onmessage = (event: MessageEvent): void => { if (live) this._onServerMessage(event); };
-        this._ws_conn.addEventListener('close', own(this._onServerClose as (event: Event) => void));
+        this._ws_conn.addEventListener('close', own(this._onServerClose));
     }
 
     /**
@@ -516,7 +531,7 @@ export class WebRTCSignaling {
      * Sends the local description (the answer) to the server peer.
      * @param sdp
      */
-    sendSDP(sdp: RTCSessionDescription): void {
+    sendSDP(sdp: RTCSessionDescriptionInit): void {
         this._setDebug("sending local sdp: " + JSON.stringify(sdp));
         this._send(`${this.server_peer_id} ${JSON.stringify({ 'sdp': sdp })}`);
     }

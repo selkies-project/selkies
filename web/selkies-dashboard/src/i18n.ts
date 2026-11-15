@@ -13,6 +13,7 @@
  * @module
  */
 import { translations, type Dictionary } from "./translations.ts";
+import { isRecord } from "../../selkies-web-core/lib/narrow.ts";
 
 /**
  * The dictionary key a browser language tag reads: its base language, so
@@ -37,8 +38,8 @@ const dict: Dictionary = translations[locale] || translations.en;
 function lookup(table: Dictionary, key: string): string | undefined {
     let node: unknown = table;
     for (const part of key.split(".")) {
-        if (!node || typeof node !== "object" || !Object.prototype.hasOwnProperty.call(node, part)) return undefined;
-        node = (node as Dictionary)[part];
+        if (!isRecord(node) || !Object.prototype.hasOwnProperty.call(node, part)) return undefined;
+        node = node[part];
     }
     return typeof node === "string" ? node : undefined;
 }

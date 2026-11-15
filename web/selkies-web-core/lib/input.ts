@@ -77,6 +77,7 @@
 
 import { GamepadManager } from './gamepad.ts';
 import { Queue, isMacDesktop } from './util.ts';
+import { elementByTag, isElement, isRecord, isTag, nodeOr } from './narrow.ts';
 
 /** One relative move sent past the last pointer echo: its sequence number and its deltas. */
 type EchoDelta = [seq: number, dx: number, dy: number];
@@ -377,6 +378,18 @@ function trackpadGain(speed: number): number {
 export interface RoleVerdict {
     role: string;
     slot?: number | number[] | null;
+}
+
+/**
+ * Whether a parsed server verdict is a role verdict.
+ * @param value What the verdict parsed to.
+ * @returns True where it names a role, and a slot only as a number or numbers.
+ */
+export function isRoleVerdict(value: unknown): value is RoleVerdict {
+    if (!isRecord(value) || typeof value.role !== 'string') return false;
+    const { slot } = value;
+    return slot === undefined || slot === null || typeof slot === 'number'
+        || (Array.isArray(slot) && slot.every((s: unknown): boolean => typeof s === 'number'));
 }
 
 /**
@@ -2006,7 +2019,7 @@ export class Input {
         this._chordKeySent = false;
         /** Last textInput commit, so a compositionend carrying the same text right after stays clear-only (Blink chains both). */
         this._lastTextInputCommit = null;
-        this.keyboardInputAssist = document.getElementById('keyboard-input-assist') as HTMLInputElement | null;
+        this.keyboardInputAssist = elementByTag('keyboard-input-assist', 'input');
         /** The assist field's value as last typed on the server. */
         this._assistTyped = "";
         /** Whether the composition in progress is in the assist field. */
@@ -2145,7 +2158,7 @@ export class Input {
 
     /** Hides the page-drawn cursor when a press lands outside the stream. */
     _handleOutsideClick(event: MouseEvent | TouchEvent): void {
-        if (!this.use_browser_cursors && !this._trackpadMode && !this.element.contains(event.target as Node | null)) {
+        if (!this.use_browser_cursors && !this._trackpadMode && !this.element.contains(nodeOr(event.target))) {
             this.cursorDiv.style.display = 'none';
         }
     }
@@ -2352,7 +2365,7 @@ export class Input {
         if (!el || typeof el.focus !== 'function') return;
         const active = document.activeElement;
         if (active && active !== document.body && active !== el &&
-            (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || (active as HTMLElement).isContentEditable)) {
+            (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || ('isContentEditable' in active && active.isContentEditable === true))) {
             return;
         }
         try { el.focus({ preventScroll: true }); } catch (e) { /* detached element */ }
@@ -2964,8 +2977,8 @@ export class Input {
         setTimeout((): void => {
             if (this.isComposing) return;
             const el = this.element;
-            if (el && el.tagName === 'INPUT' && (el as HTMLInputElement).value) {
-                (el as HTMLInputElement).value = '';
+            if (isTag(el, 'input') && el.value) {
+                el.value = '';
             }
             this._resetAssist();
         }, 0);
@@ -2996,7 +3009,7 @@ export class Input {
         }
         this.isComposing = false;
         this._assistComposing = false;
-        this._assistTyped = this._streamTextDiff(this._assistTyped, (event.target as HTMLInputElement).value || "");
+        this._assistTyped = this._streamTextDiff(this._assistTyped, (isTag(event.target, 'input') ? event.target.value : "") || "");
         this._clearCompositionHostSoon();
     }
 
@@ -3203,7 +3216,8 @@ export class Input {
      * then a no-op, and a composition end erases what a cancel left.
      */
     _handleMobileInput(event: InputEvent): void {
-        const field = event.target as HTMLInputElement;
+        const field = event.target;
+        if (!isTag(field, 'input')) return;
         if (this._chordEchoPending()) {
             this._resetAssist();
             return;
@@ -3293,8 +3307,8 @@ export class Input {
         var mtype: 'm' | 'm2' = "m";
         let relX = 0;
         let relY = 0;
-        let canvas = document.getElementById('videoCanvas') as HTMLCanvasElement | null;
-        let videoEle = document.getElementById("stream") as HTMLVideoElement | null;
+        let canvas = elementByTag('videoCanvas', 'canvas');
+        let videoEle = elementByTag('stream', 'video');
         if (event.type === 'mousedown' || event.type === 'mouseup' || event.type === 'pointerdown' || event.type === 'pointerup' || event.type === 'pointercancel') {
             if (event.button === 1) { 
                 event.preventDefault(); 
@@ -3306,8 +3320,8 @@ export class Input {
             }
         }
         if (down && event.button === 0 && event.ctrlKey && event.shiftKey && this.shortcutsEnabled) {
-            const targetElement = this._streamLockTargets().includes(event.target as Element)
-                ? event.target as Element : this.element;
+            const eventTarget = event.target;
+            const targetElement = this._streamLockTargets().find((el: Element): boolean => el === eventTarget) ?? this.element;
             const lock = (): void => this._requestPointerLock(targetElement, lock,
                 (err: Error): void => console.error("Pointer lock failed:", err));
             lock();
@@ -3507,8 +3521,8 @@ export class Input {
         const message = fields.join(",") + "," + this._pointerSeq;
         ((motion && this.sendMotion) || this.send)(message);
         if (this._trackpadMode && !this._echoComposited && fields[0] === "m2" &&
-            (fields[1] !== 0 || fields[2] !== 0)) {
-            this._echoDeltas.push([this._pointerSeq, fields[1] as number, fields[2] as number]);
+            typeof fields[1] === "number" && typeof fields[2] === "number" && (fields[1] !== 0 || fields[2] !== 0)) {
+            this._echoDeltas.push([this._pointerSeq, fields[1], fields[2]]);
             if (this._echoDeltas.length > POINTER_ECHO_DELTAS_MAX) {
                 const [, dx, dy] = this._echoDeltas.shift()!;
                 if (this._echo) [this._echo.x, this._echo.y] = this._echoStep(this._echo.x, this._echo.y, dx, dy);
@@ -3616,9 +3630,9 @@ export class Input {
             for (const touch of this._trackpadTouches.values()) {
                 if (!touch.moved) {
                     // A finger that reported nothing carries no client position, so its travel is NaN and it stays unmoved.
-                    const currentTouch = (Array.from(changedTouches).find((t: Touch): boolean => t.identifier === touch.id) || touch) as { clientX?: number; clientY?: number };
-                    const dx = currentTouch.clientX! - touch.startX;
-                    const dy = currentTouch.clientY! - touch.startY;
+                    const reported = Array.from(changedTouches).find((t: Touch): boolean => t.identifier === touch.id);
+                    const dx = (reported ? reported.clientX : NaN) - touch.startX;
+                    const dy = (reported ? reported.clientY : NaN) - touch.startY;
                     if (dx * dx + dy * dy > this._TAP_THRESHOLD_DISTANCE_SQ) {
                         touch.moved = true;
                     }
@@ -3800,8 +3814,7 @@ export class Input {
         const sink = ((measureCursor || window.manual_resolution || this.isSharedMode || window.streamResolutionDiverged) && canvas)
             ? canvas
             : ((measureCursor || window.manualResolution || window.streamResolutionDiverged) && videoEle) ? videoEle : null;
-        if (!sink || (measureCursor && sink.tagName === 'VIDEO' &&
-            !((sink as HTMLVideoElement).videoWidth > 0 && (sink as HTMLVideoElement).videoHeight > 0))) {
+        if (!sink || (measureCursor && isTag(sink, 'video') && !(sink.videoWidth > 0 && sink.videoHeight > 0))) {
             return null;
         }
         let rect = sink.getBoundingClientRect();
@@ -3826,8 +3839,8 @@ export class Input {
         if (!(rect.width > 0 && rect.height > 0) && this._lastSinkRect) {
             rect = this._lastSinkRect;
         }
-        const sinkW = (sink as HTMLVideoElement).videoWidth || (sink as HTMLCanvasElement).width;
-        const sinkH = (sink as HTMLVideoElement).videoHeight || (sink as HTMLCanvasElement).height;
+        const sinkW = ('videoWidth' in sink ? sink.videoWidth : 0) || sink.width;
+        const sinkH = ('videoHeight' in sink ? sink.videoHeight : 0) || sink.height;
         if (rect.width > 0 && rect.height > 0 && sinkW > 0 && sinkH > 0) {
             this._lastSinkRect = rect;
             let boxLeft = rect.left, boxTop = rect.top, boxW = rect.width, boxH = rect.height;
@@ -3889,8 +3902,8 @@ export class Input {
      * @returns The box, or null where none applies.
      */
     _streamBox(): { left: number; top: number; width: number; height: number; scaleX: number; scaleY: number } | null {
-        const box = this._sinkBox(document.getElementById('videoCanvas') as HTMLCanvasElement | null,
-                                  document.getElementById('stream') as HTMLVideoElement | null);
+        const box = this._sinkBox(elementByTag('videoCanvas', 'canvas'),
+                                  elementByTag('stream', 'video'));
         if (box) {
             return { left: box.boxLeft, top: box.boxTop, width: box.boxW, height: box.boxH,
                      scaleX: box.sinkW / box.boxW, scaleY: box.sinkH / box.boxH };
@@ -4173,8 +4186,8 @@ export class Input {
      * @returns
      */
     _cursorDensity(): number {
-        const box = this._sinkBox(document.getElementById('videoCanvas') as HTMLCanvasElement | null,
-                                  document.getElementById('stream') as HTMLVideoElement | null, true);
+        const box = this._sinkBox(elementByTag('videoCanvas', 'canvas'),
+                                  elementByTag('stream', 'video'), true);
         if (box) return Math.max(box.sinkW / box.boxW, box.sinkH / box.boxH);
         if (this._streamDensity) {
             return this._streamDensity;
@@ -4304,8 +4317,8 @@ export class Input {
         this._latestMouseX = touchPoint.clientX;
         this._latestMouseY = touchPoint.clientY;
         const dpr_for_input_coords = this._inputDpr();
-        let canvas = document.getElementById('videoCanvas') as HTMLCanvasElement | null;
-        let videoEle = document.getElementById('stream') as HTMLVideoElement | null;
+        let canvas = elementByTag('videoCanvas', 'canvas');
+        let videoEle = elementByTag('stream', 'video');
 
         if (this._applySinkCoordinates(touchPoint.clientX, touchPoint.clientY, canvas, videoEle,
                                        touchPoint.screenX, touchPoint.screenY)) {
@@ -4585,7 +4598,7 @@ export class Input {
         }
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
         if (_stylusTouches(event.changedTouches)) {
-            if (this.element.contains(event.target as Node | null)) event.preventDefault();
+            if (this.element.contains(nodeOr(event.target))) event.preventDefault();
             return;
         }
         if (!this._guac_markEvent(event)) return;
@@ -4769,7 +4782,7 @@ export class Input {
                 }
             }
         }
-        if (preventDefault && this.element.contains(event.target as Node | null)) {
+        if (preventDefault && this.element.contains(nodeOr(event.target))) {
             event.preventDefault();
         }
     }
@@ -4898,12 +4911,12 @@ export class Input {
         let notches = Math.trunc(carry / TOUCH_SCROLL_NOTCH_PX);
         if (notches === 0) return carry;
         const rest = carry - notches * TOUCH_SCROLL_NOTCH_PX;
-        const direction = vertical ? (notches > 0 ? 'down' : 'up') : (notches > 0 ? 'right' : 'left');
+        const forward = notches > 0;
         notches = Math.abs(notches);
         while (notches > 0) {
             const burst = Math.min(notches, this._scrollMagnitude);
-            if (vertical) this._triggerMouseWheel(direction as 'up' | 'down', burst);
-            else this._triggerHorizontalMouseWheel(direction as 'left' | 'right', burst);
+            if (vertical) this._triggerMouseWheel(forward ? 'down' : 'up', burst);
+            else this._triggerHorizontalMouseWheel(forward ? 'right' : 'left', burst);
             notches -= burst;
         }
         return rest;
@@ -5327,7 +5340,7 @@ export class Input {
 
     /** Suppresses the native context menu over the stream. */
     _contextMenu(event: MouseEvent): void {
-        if (this.element.contains(event.target as Node | null)) {
+        if (this.element.contains(nodeOr(event.target))) {
             event.preventDefault();
         }
     }
@@ -5342,7 +5355,7 @@ export class Input {
         const targets = ['videoCanvas', 'videoWorkerCanvas', 'videoStream', 'stream']
             .map((id: string): HTMLElement | null => document.getElementById(id));
         targets.push(this.element);
-        return targets.filter((el: HTMLElement | null): boolean => el != null) as Element[];
+        return targets.filter((el: HTMLElement | null): el is HTMLElement => el != null);
     }
 
     /**
@@ -5675,7 +5688,7 @@ export class Input {
      * @returns
      */
     _targetHasClass(target: EventTarget | null, className: string): boolean {
-        let element = target as Element | null;
+        let element: Element | null = isElement(target) ? target : null;
         while (element && element.classList) {
             if (element.classList.contains(className)) return true;
             element = element.parentElement;
@@ -6050,8 +6063,8 @@ export class Input {
         const el = this.element;
         if (!el || typeof el.focus !== 'function') return;
         const active = document.activeElement;
-        if (active && active !== el && active !== document.body && typeof (active as HTMLElement).blur === 'function') {
-            (active as HTMLElement).blur();
+        if (active && active !== el && active !== document.body && isBlurrable(active)) {
+            active.blur();
         }
         try { el.focus({ preventScroll: true }); } catch (e) { /* detached element */ }
     }
@@ -6165,6 +6178,24 @@ function _stylusTouches(touches: TouchList | (Touch)[]): boolean {
     return true;
 }
 
+/** Whether an element can give up focus, as every HTML element can. */
+function isBlurrable(el: Element): el is HTMLElement {
+    return 'blur' in el && typeof el.blur === 'function';
+}
+
+/**
+ * A handler for one kind of event where the DOM takes a listener for any. The
+ * event's name decides which kind arrives, which the DOM's string-keyed
+ * `addEventListener` does not carry, so this is where a handler typed for its
+ * event becomes an `EventListener`.
+ * @param handler The handler.
+ * @returns The same function, typed as an `EventListener`.
+ */
+function listenerOf<E>(handler: (event: E) => void): EventListener;
+function listenerOf(handler: unknown): unknown {
+    return handler;
+}
+
 /**
  * Adds a listener bound to `ctx`, with `passive: false` so the handler keeps
  * `preventDefault()`.
@@ -6175,7 +6206,7 @@ function addListener<E>(obj: EventTarget | null, name: string, func: (this: Inpu
         console.error("addListener: Invalid target object", obj);
         return null;
     }
-    const newFunc = (ctx ? func.bind(ctx) : func) as EventListener;
+    const newFunc = listenerOf(ctx ? func.bind(ctx) : func);
     const options = { capture: useCapture, passive: false };
     obj.addEventListener(name, newFunc, options);
     return [obj, name, newFunc, options];

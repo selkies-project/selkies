@@ -31,15 +31,8 @@ import { computeRenderableSettings, getLastServerSettings, isMobileClient, isVie
 import { switchStreamMode } from "../../../selkies-web-core/lib/mode-switch.ts";
 import { STATS_EVENT } from "../../../selkies-web-core/lib/stream-stats.ts";
 import { t } from "@/i18n";
+import { fields, numberOr, stringOr } from "../../../selkies-web-core/lib/narrow.ts";
 
-/** The progress of one upload, as the core reports it. */
-interface FileUploadPayload {
-  status: string;
-  fileName: string;
-  progress: number;
-  message?: string;
-  code?: string;
-}
 
 const TRANSPORT_TOAST_ID = "transport-advice";
 
@@ -55,7 +48,7 @@ export function Toaster() {
         error: <OctagonX className="size-4" />,
         loading: <Loader2 className="size-4 animate-spin" />,
       }}
-      style={{ "--normal-bg": "var(--popover)", "--normal-text": "var(--popover-foreground)", "--normal-border": "var(--border)", "--border-radius": "var(--radius)" } as React.CSSProperties}
+      style={{ "--normal-bg": "var(--popover)", "--normal-text": "var(--popover-foreground)", "--normal-border": "var(--border)", "--border-radius": "var(--radius)" }}
     />
   );
 }
@@ -98,7 +91,7 @@ export function Notices() {
             <Button variant="outline" size="sm" nativeButton={false} render={<a href={url} target="_blank" onClick={() => toast.dismiss(url)} />}>
               {t('sections.printing.openButton')}
             </Button>
-            <span className="min-w-0 flex-1 truncate" title={message.name as string}>{message.name as string}</span>
+            <span className="min-w-0 flex-1 truncate" title={String(message.name)}>{String(message.name)}</span>
             <Printer className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
           </div>,
           { id: url, duration: Infinity, classNames: { content: 'min-w-0 flex-1', title: 'w-full' } },
@@ -106,7 +99,9 @@ export function Notices() {
         return;
       }
       if (message.type !== 'fileUpload') return;
-      const { status, fileName, progress, message: errMsg, code } = message.payload as FileUploadPayload;
+      const upload = fields(message.payload);
+const status = stringOr(upload.status), fileName = stringOr(upload.fileName) ?? '', progress = numberOr(upload.progress) ?? 0;
+const errMsg = stringOr(upload.message), code = stringOr(upload.code);
       if (status === 'start') {
         toast.loading(t('uploads.uploadingFile', { fileName }), { id: fileName });
       } else if (status === 'progress') {

@@ -14,6 +14,7 @@
  */
 
 import { H264_ANNEXB_SAMPLE, PROBE_CODEC_STRINGS, PROBE_FULLCOLOR_STRINGS, TEN_BIT_SAMPLES, codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit, codecStringFor } from './wire-codecs.ts';
+import { isRecord } from "./narrow.ts";
 export { codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit };
 
 /** A FIFO queue over an array. */
@@ -125,10 +126,10 @@ export const DECODER_PROBE_TIMEOUT_MS = 10000;
  */
 async function decoderAccepts(codec: string, width: number, height: number): Promise<boolean | null> {
     if (typeof VideoDecoder === "undefined") return false;
-    for (const accel of [undefined, "prefer-software"] as Array<string | undefined>) {
+    for (const accel of [undefined, "prefer-software"] as const) {
         try {
             const config = { codec, codedWidth: width, codedHeight: height } as VideoDecoderConfig;
-            if (accel) config.hardwareAcceleration = accel as NonNullable<VideoDecoderConfig["hardwareAcceleration"]>;
+            if (accel) config.hardwareAcceleration = accel;
             const support = await Promise.race([
                 VideoDecoder.isConfigSupported(config),
                 new Promise<undefined>((resolve) => setTimeout(resolve, DECODER_PROBE_TIMEOUT_MS)),
@@ -194,7 +195,7 @@ export const h264FramingReady: Promise<string> = (async () => {
         const timer = setTimeout(() => settle("annexb"), 5000);
         try {
             worker = new Worker(URL.createObjectURL(new Blob([probe], { type: "text/javascript" })));
-            worker.onmessage = (e: MessageEvent) => { clearTimeout(timer); settle(e.data as string); };
+            worker.onmessage = (e: MessageEvent) => { clearTimeout(timer); settle(String(e.data)); };
             worker.onerror = () => { clearTimeout(timer); settle("annexb"); };
             worker.postMessage(sample.buffer, [sample.buffer as ArrayBuffer]);
         } catch (err) {
@@ -497,12 +498,6 @@ export function rememberCcStart(displayId: string | null | undefined, kbps: numb
   } catch (e) { /* no storage: every start is the configured rate */ }
 }
 
-/** A remembered start rate. */
-interface CcStart {
-  kbps: number;
-  at: number;
-}
-
 /**
  * The display's remembered start rate, or null: none kept, a day old, or unreadable.
  * @param displayId
@@ -510,8 +505,9 @@ interface CcStart {
  */
 export function recalledCcStart(displayId: string | null | undefined): number | null {
   try {
-    const kept = JSON.parse(window.localStorage.getItem(ccStartKey(displayId)) || 'null') as CcStart | null;
-    if (kept && Number.isFinite(kept.kbps) && kept.kbps > 0 && Date.now() - kept.at < CC_START_TTL_MS) {
+    const kept: unknown = JSON.parse(window.localStorage.getItem(ccStartKey(displayId)) || 'null');
+    if (isRecord(kept) && typeof kept.kbps === 'number' && Number.isFinite(kept.kbps) && kept.kbps > 0
+        && typeof kept.at === 'number' && Date.now() - kept.at < CC_START_TTL_MS) {
       return kept.kbps;
     }
   } catch (e) { /* unreadable reads as none */ }

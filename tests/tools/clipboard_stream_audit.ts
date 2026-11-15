@@ -66,7 +66,8 @@ const encoded = base64(payload);
 
 /** The bytes a reply carries. */
 function bytesOf(reply: WorkerReply): Uint8Array {
-    return new Uint8Array(reply.result as ArrayBuffer);
+    if (!(reply.result instanceof ArrayBuffer)) throw new Error(`the reply carries no bytes: ${String(reply.result)}`);
+    return new Uint8Array(reply.result);
 }
 
 /** Whether two byte runs are equal. */

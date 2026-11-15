@@ -6,7 +6,7 @@
 
 import { useState, useEffect } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { computeRenderableSettings, getLastServerSettings, isViewerUrlMode, onCoreMessage, type ServerSettings } from "@/utils";
+import { computeRenderableSettings, getLastServerSettings, isViewerUrlMode, onCoreMessage, serverSettingsOf } from "@/utils";
 import { t } from "@/i18n";
 import { FileManager } from "@/panels/file-manager";
 
@@ -40,7 +40,7 @@ export function FilesDialog({ open, onOpenChange }: FilesDialogProps) {
 
     useEffect(() => onCoreMessage((message) => {
         if (message.type === 'serverSettings') {
-            setRenderableSettings(computeRenderableSettings(message.payload as ServerSettings | null));
+            setRenderableSettings(computeRenderableSettings(serverSettingsOf(message.payload)));
         }
     }), []);
 

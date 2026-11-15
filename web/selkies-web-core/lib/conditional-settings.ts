@@ -23,6 +23,7 @@
  */
 
 import { codecOfEncoder } from './wire-codecs.ts';
+import { isRecord } from "./narrow.ts";
 
 /** One side's backend description. */
 export interface CodecBackends {
@@ -34,6 +35,18 @@ export interface CodecBackends {
 
 /** The server's `encoder_backends` payload entry, keyed by codec name. */
 export type EncoderBackends = Record<string, CodecBackends>;
+
+/**
+ * Whether a setting's value is an `encoder_backends` table.
+ * @param value The setting's value.
+ * @returns True where every codec names its hardware and software backend (or null).
+ */
+export function isEncoderBackends(value: unknown): value is EncoderBackends {
+  const side = (v: unknown): boolean => v === null || typeof v === "string";
+  return isRecord(value) && Object.values(value).every((b: unknown): boolean => isRecord(b) && side(b.hardware)
+    && side(b.software) && (b.fullcolor === undefined || isRecord(b.fullcolor))
+    && (b.ten_bit === undefined || isRecord(b.ten_bit)));
+}
 
 /** A setting's IO for `propagate`. */
 export interface SettingIO {
@@ -201,6 +214,32 @@ export function resolveSpec(spec: SettingSpec, serverSettings: Record<string, Se
 }
 
 /**
+ * A boolean setting resolved: `resolveSpec` for a spec whose values are
+ * booleans, read as the boolean it is.
+ * @param spec The setting.
+ * @param serverSettings The `server_settings` payload.
+ * @param ctx State the spec's conditional and validator read.
+ * @param readStored localStorage reader.
+ * @returns True where the resolved value is true.
+ */
+export function resolveBoolean(spec: SettingSpec, serverSettings: Record<string, ServerSettingEntry> | null, ctx: Record<string, unknown>, readStored: (key: string) => string | null): boolean {
+    return resolveSpec(spec, serverSettings, ctx, readStored) === true;
+}
+
+/**
+ * A string setting resolved: `resolveSpec` for a spec whose values are strings.
+ * @param spec The setting.
+ * @param serverSettings The `server_settings` payload.
+ * @param ctx State the spec's conditional and validator read.
+ * @param readStored localStorage reader.
+ * @returns The resolved value, or the empty string where it is no string.
+ */
+export function resolveString(spec: SettingSpec, serverSettings: Record<string, ServerSettingEntry> | null, ctx: Record<string, unknown>, readStored: (key: string) => string | null): string {
+    const value = resolveSpec(spec, serverSettings, ctx, readStored);
+    return typeof value === 'string' ? value : '';
+}
+
+/**
  * Whether a setting is explicitly pinned, so a dependency change must not
  * re-derive it: the client stored a choice, or the operator overrode or
  * locked it.
@@ -237,7 +276,7 @@ export const RATE_CONTROL_SPEC: SettingSpec = {
     id: "rate_control_mode",
     serverKey: "rate_control_mode",
     storageKey: "rate_control_mode",
-    isValid: (v, ctx) => (ctx.allowedRateControl as string[]).includes(v as string),
+    isValid: (v, ctx) => Array.isArray(ctx.allowedRateControl) && ctx.allowedRateControl.includes(v),
     fallback: "cbr",
     propagate: (mode, _ctx, io) => io.postSetting({ rate_control_mode: mode }),
 };

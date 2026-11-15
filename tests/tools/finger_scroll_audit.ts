@@ -19,7 +19,7 @@
  */
 
 import { Input } from '../../web/selkies-web-core/lib/input.ts';
-import type { StandIn, VirtualTimer } from './stand_in.ts';
+import { type StandIn, type VirtualTimer, standIn } from './stand_in.ts';
 
 let failed = 0;
 
@@ -106,7 +106,7 @@ Object.assign(globalThis, {
 /** A page recording what it sends, with the session taking a finger's scroll or not. */
 function makeInput(finger: boolean): { input: Input; sent: string[] } {
     const sent: string[] = [];
-    const input = new Input(element as HTMLElement, (msg) => sent.push(msg));
+    const input = new Input(standIn<HTMLElement>(element), (msg) => sent.push(msg));
     input.sendMotion = (msg) => sent.push(msg);
     input.inputAttached = true;
     input.setFingerScroll(finger);
@@ -118,8 +118,8 @@ function wheel(input: Input, deltaY: number, { deltaX = 0, deltaMode = 0, ms = 1
     wheelDeltaX = undefined, wheelDeltaY = undefined }: { deltaX?: number; deltaMode?: number; ms?: number;
         shiftKey?: boolean; wheelDeltaX?: number; wheelDeltaY?: number } = {}): void {
     advance(ms);
-    input._mouseWheelWrapper({ type: 'wheel', deltaY, deltaX, deltaMode, ctrlKey: false, shiftKey,
-                               wheelDeltaX, wheelDeltaY, preventDefault() {} } as StandIn<WheelEvent> as WheelEvent);
+    input._mouseWheelWrapper(standIn<WheelEvent>({ type: 'wheel', deltaY, deltaX, deltaMode, ctrlKey: false, shiftKey,
+                               wheelDeltaX, wheelDeltaY, preventDefault() {} }));
 }
 
 const pulses = (sent: string[]): string[] => sent.filter((m) => m.startsWith('m,') || m.startsWith('m2,'));

@@ -23,10 +23,12 @@
  * @module
  */
 
-import type { ClipboardWorkerBridge, DecodedClipboard } from '../../web/selkies-web-core/lib/clipboard-worker-bridge.ts';
+import type { ClipboardWorkerBridge } from '../../web/selkies-web-core/lib/clipboard-worker-bridge.ts';
+import { readDecoded, readDigest } from '../../web/selkies-web-core/lib/clipboard-replies.ts';
 import type { ClipboardSync, IncomingClipboard } from '../../web/selkies-web-core/lib/clipboard-sync.ts';
 import type { Waiter, WorkerReply, WorkerRequest, WorkerScope } from './clipboard_worker.ts';
 import type { StandIn } from './stand_in.ts';
+import { fields } from '../../web/selkies-web-core/lib/narrow.ts';
 
 const pending = new Map<number, Waiter>();
 let nextId = 0;
@@ -53,8 +55,8 @@ function ask(action: string, payload: WorkerRequest['payload'], extra: Partial<W
     });
 }
 const worker: Pick<ClipboardWorkerBridge, 'decode' | 'hashBytes' | 'decodeStream'> = {
-    decode: (b64, mimeType) => ask('DECODE_FROM_B64', b64, { mimeType }) as Promise<DecodedClipboard>,
-    hashBytes: (buf) => ask('HASH_BYTES', buf) as Promise<{ byteLength: number; hash: number }>,
+    decode: (b64, mimeType) => ask('DECODE_FROM_B64', b64, { mimeType }).then(readDecoded),
+    hashBytes: (buf) => ask('HASH_BYTES', buf).then(readDigest),
     decodeStream(mimeType) {
         const id = ++nextId;
         workerScope.onmessage!({ data: { id, action: 'DECODE_BEGIN', mimeType } });
@@ -63,7 +65,7 @@ const worker: Pick<ClipboardWorkerBridge, 'decode' | 'hashBytes' | 'decodeStream
             finish: () => new Promise<WorkerReply>((resolve, reject) => {
                 pending.set(id, { resolve, reject });
                 workerScope.onmessage!({ data: { id, action: 'DECODE_END' } });
-            }) as Promise<DecodedClipboard>,
+            }).then(readDecoded),
             abort: () => workerScope.onmessage!({ data: { id, action: 'DECODE_ABORT' } }),
         };
     },
@@ -108,7 +110,8 @@ Object.defineProperty(globalThis, 'navigator', {
                     throw new DOMException('Document is not focused.', 'NotAllowedError');
                 }
                 // The module builds its items from the class installed above.
-                const item = items[0] as ClipboardItem & Pick<FakeClipboardItem, 'items'>;
+                const item = items[0];
+if (!(item instanceof FakeClipboardItem)) throw new Error('the module wrote an item of another class');
                 const values: Record<string, Blob> = {};
                 try {
                     for (const type of item.types) values[type] = await item.items[type];
@@ -154,8 +157,8 @@ function bytesOf(seed: number, length: number): Uint8Array {
 
 /** The image on the local clipboard, or null where it holds none. */
 async function localBytes(): Promise<Uint8Array | null> {
-    const blob = local.value && (local.value as Record<string, Blob | undefined>)['image/png'];
-    return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+    const blob = fields(local.value)['image/png'];
+    return blob instanceof Blob ? new Uint8Array(await blob.arrayBuffer()) : null;
 }
 
 /** Whether two byte runs are there and equal. */
@@ -306,8 +309,8 @@ async function multipart(incoming: IncomingClipboard, mime: string, bytes: Uint8
     writes.length = 0;
     incoming.single('text/plain', base64(new TextEncoder().encode('from the session')), false);
     await tick();
-    const blob = local.value && (local.value as Record<string, Blob | undefined>)['text/plain'];
-    const text = blob ? await blob.text() : null;
+    const blob = fields(local.value)['text/plain'];
+    const text = blob instanceof Blob ? await blob.text() : null;
     check('session text lands, and a read of it afterwards is no local change',
           text === 'from the session'
           && clipboardSync.noteLocal(clipboardSync.sig('from the session')) === false, text);

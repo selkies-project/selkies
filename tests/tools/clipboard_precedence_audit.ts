@@ -21,7 +21,7 @@
 // Set before the module loads: it reads neither at import, but the sender
 // closes over them per call and a missing global would read as "no clipboard".
 import type { ClipboardSync, LocalClipboardSender } from '../../web/selkies-web-core/lib/clipboard-sync.ts';
-import type { StandIn } from './stand_in.ts';
+import { type StandIn, standIn } from './stand_in.ts';
 
 /** A clipboard item: its types and the blob of each. */
 interface FakeItem {
@@ -145,9 +145,9 @@ clipboard.text = 'what the user copied before';
     const held = gate();
     const { sender: s, sent } = sender();
     // Text stands for the bytes: the transport takes either, and the check's line prints it.
-    const bytes = 'image bytes' as string | ArrayBuffer as ArrayBuffer;
+    const bytes = standIn<ArrayBuffer>('image bytes');
     const blob = { arrayBuffer: async () => { await held.promise; return bytes; } };
-    const push = s.sendExplicit(blob as StandIn<Blob> as Blob, 'image/png');
+    const push = s.sendExplicit(standIn<Blob>(blob), 'image/png');
     const read = s.readAndSend();
     held.release();
     await Promise.all([push, read]);

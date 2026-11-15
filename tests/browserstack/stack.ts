@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { fields, oneOf, stringOr } from '../../web/selkies-web-core/lib/narrow.ts';
 
 const run = promisify(execFile);
 export const ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -159,7 +160,7 @@ export class XWatcher {
   }
 
   private parse(text: string): void {
-    const kind = /^(KeyPress|ButtonPress) event/.exec(text)?.[1] as XEvent['kind'] | undefined;
+    const kind = oneOf(/^(KeyPress|ButtonPress) event/.exec(text)?.[1], ['KeyPress', 'ButtonPress'] as const);
     const root = /root:\((-?\d+),(-?\d+)\)/.exec(text);
     if (!kind || !root) return;
     const keysym = /\(keysym 0x[0-9a-f]+, ([^)]+)\)/.exec(text)?.[1];
@@ -191,8 +192,10 @@ export async function tunnel(binary: string, key: string, id: string, ports: num
   try {
     const { stdout } = await run(binary, ['--config-file', config, '--local-identifier', id, '--only', only,
       '--disable-dashboard', '--log-file', join(dir, 'tunnel.log'), '--daemon', 'start'], { timeout: 120_000 });
-    const state = JSON.parse(stdout.trim().split('\n').pop() ?? '{}');
-    if (state.state !== 'connected') throw new Error(`the tunnel did not connect: ${state.message?.message ?? stdout}`);
+    const state = fields(JSON.parse(stdout.trim().split('\n').pop() ?? '{}'));
+    if (state.state !== 'connected') {
+      throw new Error(`the tunnel did not connect: ${stringOr(fields(state.message).message) ?? stdout}`);
+    }
   } finally {
     rmSync(config, { force: true });
   }

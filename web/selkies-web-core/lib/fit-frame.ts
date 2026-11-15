@@ -38,7 +38,8 @@ export function createFrameFit(drawsCrop?: boolean): (frame: VideoFrame, width: 
   const probe = (): boolean => {
     try {
       const source = new OffscreenCanvas(2, 4);
-      const sx = source.getContext('2d') as unknown as CanvasRenderingContext2D;
+      const sx = source.getContext('2d');
+      if (!sx) return true;
       sx.fillStyle = '#000';
       sx.fillRect(0, 0, 2, 2);
       sx.fillStyle = '#fff';
@@ -46,7 +47,8 @@ export function createFrameFit(drawsCrop?: boolean): (frame: VideoFrame, width: 
       const whole = new VideoFrame(source, { timestamp: 0 });
       const top = new VideoFrame(whole, { visibleRect: { x: 0, y: 0, width: 2, height: 2 } });
       whole.close();
-      const out = new OffscreenCanvas(2, 2).getContext('2d', { willReadFrequently: true }) as unknown as CanvasRenderingContext2D;
+      const out = new OffscreenCanvas(2, 2).getContext('2d', { willReadFrequently: true });
+      if (!out) return true;
       out.drawImage(top, 0, 0);
       top.close();
       return out.getImageData(0, 1, 1, 1).data[0] < 128;
@@ -66,7 +68,8 @@ export function createFrameFit(drawsCrop?: boolean): (frame: VideoFrame, width: 
         });
       } else {
         if (!pad || pad.width !== width || pad.height !== height) pad = new OffscreenCanvas(width, height);
-        const padContext = pad.getContext('2d') as unknown as CanvasRenderingContext2D;
+        const padContext = pad.getContext('2d');
+        if (!padContext) return frame;
         padContext.drawImage(frame, 0, 0, frame.displayWidth, frame.displayHeight);
         fit = new VideoFrame(pad, { timestamp: frame.timestamp, ...(frame.duration ? { duration: frame.duration } : {}) });
       }

@@ -14,6 +14,9 @@
  * @module
  */
 import ClipboardWorker from '../clipboard-worker.ts?worker&inline';
+import { readDecoded, readDigest, readEncoded, sized, type ClipboardDigest, type DecodedClipboard, type EncodedClipboard, type WorkerReply, type WorkerResult } from './clipboard-replies.ts';
+
+export type { ClipboardDigest, DecodedClipboard, EncodedClipboard, WorkerResult } from './clipboard-replies.ts';
 
 /**
  * Request/response bridge to the clipboard worker.
@@ -21,36 +24,11 @@ import ClipboardWorker from '../clipboard-worker.ts?worker&inline';
  * The worker is created lazily on the first request and every call resolves
  * with `{ result, mimeType, byteLength }` from the worker's reply.
  */
-/** What the worker answers a request with; the fields beyond `id` and `success` depend on the action. */
-interface WorkerReply {
-    /** The request's id. */
-    id: number;
-    /** Whether the action succeeded. */
-    success: boolean;
-    /** The encoded or decoded content. */
-    result?: string | ArrayBuffer | Blob;
-    /** Why the action failed. */
-    error?: string;
-    /** The content's MIME type. */
+/** A request to the worker, less the id the bridge gives it. */
+interface BridgeRequest {
+    action: string;
+    payload?: string | ArrayBuffer | Blob;
     mimeType?: string;
-    /** The raw content's size in bytes. */
-    byteLength?: number;
-    /** The djb2 digest of the raw content. */
-    hash?: number;
-}
-
-/** A successful reply as a request resolves with it. */
-type WorkerResult = Pick<WorkerReply, 'result' | 'mimeType' | 'byteLength' | 'hash'>;
-
-/** Clipboard content decoded from base64: text for `text/plain`, bytes for anything else. */
-export interface DecodedClipboard {
-    /** The decoded content. */
-    result: string | ArrayBuffer;
-    /** The content's MIME type. */
-    mimeType: string;
-    /** The decoded size in bytes. */
-    byteLength: number;
-    /** The djb2 digest of the decoded bytes; text carries none. */
     hash?: number;
 }
 
@@ -110,16 +88,26 @@ export class ClipboardWorkerBridge {
     }
 
     /**
-     * @param text UTF-8 text to encode.
-     * @returns
+     * Posts one request and waits for its reply.
+     * @param message The request; its `id` is filled in.
+     * @param transfer Buffers handed over with it.
+     * @returns The successful reply.
      */
-    async encodeText(text: string): Promise<{ result: string; mimeType: string; byteLength: number }> {
+    private request(message: BridgeRequest, transfer: Transferable[] = []): Promise<WorkerResult> {
         this.init();
         return new Promise((resolve: (value: WorkerResult) => void, reject: (reason: Error) => void): void => {
             const id = ++this.msgId;
             this.callbacks.set(id, { resolve, reject });
-            this.worker!.postMessage({ id, action: 'ENCODE_TEXT_TO_B64', payload: text });
-        }) as Promise<{ result: string; mimeType: string; byteLength: number }>;
+            this.worker!.postMessage({ id, ...message }, transfer);
+        });
+    }
+
+    /**
+     * @param text UTF-8 text to encode.
+     * @returns
+     */
+    async encodeText(text: string): Promise<EncodedClipboard> {
+        return readEncoded(await this.request({ action: 'ENCODE_TEXT_TO_B64', payload: text }));
     }
 
     /**
@@ -131,16 +119,9 @@ export class ClipboardWorkerBridge {
      *     chunks is digested as the one payload it is.
      * @returns
      */
-    async encodeBinary(arrayBuffer: ArrayBuffer, hash: number | undefined): Promise<{ result: string; mimeType: string; byteLength: number; hash: number }> {
-        this.init();
-        return new Promise((resolve: (value: WorkerResult) => void, reject: (reason: Error) => void): void => {
-            const id = ++this.msgId;
-            this.callbacks.set(id, { resolve, reject });
-            this.worker!.postMessage(
-                { id, action: 'ENCODE_BINARY_TO_B64', payload: arrayBuffer, hash },
-                [arrayBuffer]
-            );
-        }) as Promise<{ result: string; mimeType: string; byteLength: number; hash: number }>;
+    async encodeBinary(arrayBuffer: ArrayBuffer, hash: number | undefined): Promise<EncodedClipboard & ClipboardDigest> {
+        const reply = await this.request({ action: 'ENCODE_BINARY_TO_B64', payload: arrayBuffer, hash }, [arrayBuffer]);
+        return { ...readEncoded(reply), ...readDigest(reply) };
     }
 
     /**
@@ -148,13 +129,8 @@ export class ClipboardWorkerBridge {
      * @param arrayBuffer Bytes to digest; unusable afterwards.
      * @returns
      */
-    async hashBytes(arrayBuffer: ArrayBuffer): Promise<{ byteLength: number; hash: number }> {
-        this.init();
-        return new Promise((resolve: (value: WorkerResult) => void, reject: (reason: Error) => void): void => {
-            const id = ++this.msgId;
-            this.callbacks.set(id, { resolve, reject });
-            this.worker!.postMessage({ id, action: 'HASH_BYTES', payload: arrayBuffer }, [arrayBuffer]);
-        }) as Promise<{ byteLength: number; hash: number }>;
+    async hashBytes(arrayBuffer: ArrayBuffer): Promise<ClipboardDigest> {
+        return readDigest(await this.request({ action: 'HASH_BYTES', payload: arrayBuffer }, [arrayBuffer]));
     }
 
     /**
@@ -163,12 +139,9 @@ export class ClipboardWorkerBridge {
      * @returns
      */
     async reencodePng(blob: Blob): Promise<{ result: Blob; mimeType: string; byteLength: number }> {
-        this.init();
-        return new Promise((resolve: (value: WorkerResult) => void, reject: (reason: Error) => void): void => {
-            const id = ++this.msgId;
-            this.callbacks.set(id, { resolve, reject });
-            this.worker!.postMessage({ id, action: 'REENCODE_PNG', payload: blob });
-        }) as Promise<{ result: Blob; mimeType: string; byteLength: number }>;
+        const reply = await this.request({ action: 'REENCODE_PNG', payload: blob });
+        if (!(reply.result instanceof Blob)) throw new Error("the clipboard worker's re-encode reply carries no image");
+        return { result: reply.result, ...sized(reply, 're-encode') };
     }
 
     /**
@@ -177,12 +150,7 @@ export class ClipboardWorkerBridge {
      * @returns
      */
     async decode(base64String: string, mimeType: string): Promise<DecodedClipboard> {
-        this.init();
-        return new Promise((resolve: (value: WorkerResult) => void, reject: (reason: Error) => void): void => {
-            const id = ++this.msgId;
-            this.callbacks.set(id, { resolve, reject });
-            this.worker!.postMessage({ id, action: 'DECODE_FROM_B64', payload: base64String, mimeType });
-        }) as Promise<DecodedClipboard>;
+        return readDecoded(await this.request({ action: 'DECODE_FROM_B64', payload: base64String, mimeType }));
     }
 
     /**
@@ -211,7 +179,7 @@ export class ClipboardWorkerBridge {
                 }
                 this.callbacks.set(id, { resolve, reject });
                 this.worker.postMessage({ id, action: 'DECODE_END' });
-            }) as Promise<DecodedClipboard>,
+            }).then(readDecoded),
             abort: (): void => {
                 if (this.worker) this.worker.postMessage({ id, action: 'DECODE_ABORT' });
             },
@@ -244,7 +212,7 @@ export async function encodeClipboardChunk(worker: ClipboardWorkerBridge, bytes:
         console.warn('Clipboard worker encode failed; falling back to main thread:', e);
         let s = '';
         for (let i = 0; i < bytes.length; i += 0x8000) {
-            s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000) as unknown as number[]);
+            s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
         }
         return { b64: btoa(s), hash: undefined };
     }

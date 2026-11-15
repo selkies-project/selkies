@@ -27,6 +27,7 @@
  */
 import { sessionAuthHeaders } from './session-token.ts';
 import { isMobileClient } from './util.ts';
+import { errorMessage } from './narrow.ts';
 
 /** The blob URLs of the documents this page fetched, the only ones it prints. */
 const fetchedDocuments = new Set<string>();
@@ -59,7 +60,8 @@ export function printDocument(url: string): void {
     const frame = document.createElement('iframe');
     frame.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
     frame.addEventListener('load', () => {
-        const target = frame.contentWindow as Window & { print: () => void };
+        const target = frame.contentWindow;
+        if (!target) return;
         target.addEventListener('afterprint', () => frame.remove(), { once: true });
         try {
             target.focus();
@@ -112,7 +114,7 @@ export function createPrintJobs({ automatic }: PrintJobsOptions): PrintJobs {
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
                 blob = await response.blob();
             } catch (e) {
-                console.warn(`Printed document ${name} (${sizeBytes} bytes) was not fetched: ${(e as Error).message}`);
+                console.warn(`Printed document ${name} (${sizeBytes} bytes) was not fetched: ${errorMessage(e)}`);
                 return;
             }
             const objectUrl = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' }));

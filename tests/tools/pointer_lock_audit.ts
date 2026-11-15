@@ -31,7 +31,7 @@
 import { Input } from '../../web/selkies-web-core/lib/input.ts';
 import { RAW_POINTER_MOTION_SPEC, resolveSpec } from '../../web/selkies-web-core/lib/conditional-settings.ts';
 import type { ServerSettingEntry } from '../../web/selkies-web-core/lib/conditional-settings.ts';
-import type { StandIn } from './stand_in.ts';
+import { type StandIn, bare, freshModule, standIn } from './stand_in.ts';
 
 /** How a stand-in engine answers a lock request. */
 type Outcome = 'ok' | 'refuse-option' | 'fail' | 'no-promise';
@@ -100,12 +100,12 @@ function makeElement(outcome: Outcome): HTMLElement & { calls: string[] } {
             return Promise.resolve();
         },
     };
-    return element as StandIn<HTMLElement> as HTMLElement & { calls: string[] };
+    return standIn<HTMLElement & { calls: string[] }>(element);
 }
 
 /** An Input with only what the pointer lock paths touch. */
 function makeInput(element: HTMLElement, gaming = true, attached = true): Input {
-    const input = Object.create(Input.prototype) as Input;
+    const input = bare<Input>(Input);
     input.element = element;
     input.isSharedMode = false;
     input.inputAttached = attached;
@@ -192,8 +192,8 @@ function reset(element: object): void {
     let seq = 0;
     const loadUnder = async (nav: StandIn<Navigator>): Promise<boolean> => {
         setNavigator(nav);
-        const mod = await import(`../../web/selkies-web-core/lib/input.ts?platform=${seq++}`) as
-            typeof import('../../web/selkies-web-core/lib/input.ts');
+        const mod = freshModule<typeof import('../../web/selkies-web-core/lib/input.ts')>(
+            await import(`../../web/selkies-web-core/lib/input.ts?platform=${seq++}`), ['Input']);
         return mod.Input.rawPointerMotion;
     };
     try {
@@ -382,10 +382,10 @@ function stage(ids: string[], locked: object | null = null): Record<string, Stag
         _releaseDesyncedModifiers: () => {}, _focusCompositionHost: () => {},
         _inputDpr: () => 1,
     });
-    const click = (target: object): void => input._mouseButtonMovement({
-        type: 'mousedown', button: 0, ctrlKey: true, shiftKey: true, target,
+    const click = (target: StandIn<Element>): void => input._mouseButtonMovement(standIn<MouseEvent>({
+        type: 'mousedown', button: 0, ctrlKey: true, shiftKey: true, target: standIn<Element>(target),
         clientX: 4, clientY: 4, preventDefault: () => {},
-    } as StandIn<MouseEvent> as MouseEvent);
+    }));
     click(overlay);
     click(made.stream);
     click(made.sidebar);

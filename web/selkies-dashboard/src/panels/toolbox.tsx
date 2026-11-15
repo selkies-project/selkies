@@ -212,7 +212,7 @@ export function SettingsPopup({ open, onClose, barRef, style, className }: Setti
   React.useEffect(() => {
     if (!open) return undefined;
     const onDown = (event: MouseEvent) => {
-      const target = event.target as Node;
+      const target = event.target instanceof Node ? event.target : null;
       const element = target instanceof Element ? target : null;
       if (barRef.current?.contains(target) || panelRef.current?.contains(target) || element?.closest("[data-base-ui-portal]")) return;
       onClose();

@@ -12,6 +12,7 @@
  * @module
  */
 import * as React from "react";
+import { hasFields } from "../../../selkies-web-core/lib/narrow.ts";
 
 /** A place in the room the window leaves an element, each axis 0 to 1. */
 export interface Fraction { x: number; y: number }
@@ -77,8 +78,9 @@ export function fractionOf(point: Point, viewport: Size, size: Size, margin = 0)
 
 /** Whether `value` is a stored fraction, both axes within 0 to 1. */
 export function isFraction(value: unknown): value is Fraction {
-  const v = value as Fraction | null;
-  return !!v && Number.isFinite(v.x) && Number.isFinite(v.y) && v.x >= 0 && v.x <= 1 && v.y >= 0 && v.y <= 1;
+  if (!hasFields(value, { x: 'number', y: 'number' })) return false;
+  const { x, y } = value;
+  return typeof x === 'number' && typeof y === 'number' && Number.isFinite(x) && Number.isFinite(y) && x >= 0 && x <= 1 && y >= 0 && y <= 1;
 }
 
 /**

@@ -28,6 +28,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Minimatch } from 'minimatch';
 import { Application, TSConfigReader } from 'typedoc';
+import { fields, stringOr } from '../../web/selkies-web-core/lib/narrow.ts';
 
 // TypeDoc 0.28 walks its entry points with Minimatch#matchOne, which minimatch
 // 11 dropped; 11.0.1 is the first release without GHSA-g3hv-75wg-m249, so the
@@ -144,7 +145,9 @@ for (const pkg of PACKAGES) {
 const metaPath = join(referenceDir, 'meta.json');
 let meta = { title: 'Developer Reference', pages: ['index'] };
 try {
-  meta = JSON.parse(await fs.readFile(metaPath, 'utf8')) as typeof meta;
+  const stored = fields(JSON.parse(await fs.readFile(metaPath, 'utf8')));
+  meta = { ...stored, title: stringOr(stored.title) ?? meta.title,
+    pages: Array.isArray(stored.pages) ? stored.pages.filter((p): p is string => typeof p === 'string') : meta.pages };
 } catch {}
 const webPages = ['---Web client---', ...PACKAGES.map((a) => a.dir)];
 meta.pages = [...meta.pages.filter((p) => !webPages.includes(p)), ...webPages];

@@ -16,7 +16,7 @@
  */
 
 
-import type { StandIn } from './stand_in.ts';
+import { type StandIn, standIn } from './stand_in.ts';
 
 let failed = 0;
 
@@ -102,8 +102,8 @@ check('a verdict of several slots targets the first of them, as one of a single 
     const b = pad('Pad B', 1);
     pads = [a, b, null, null];
     const sent: string[] = [];
-    const input = new Input(element as HTMLElement, (msg) => sent.push(msg), false, 0, false, [3, 4]);
-    input._gamepadConnected({ gamepad: a } as StandIn<GamepadEvent> as GamepadEvent);
+    const input = new Input(standIn<HTMLElement>(element), (msg) => sent.push(msg), false, 0, false, [3, 4]);
+    input._gamepadConnected(standIn<GamepadEvent>({ gamepad: a }));
     input.gamepadManager!._poll();
     check('each pad is announced on its own slot, pad 0 on slot 3 and pad 1 on slot 4',
           JSON.stringify(gamepadSends(sent)) === JSON.stringify(['js,c,2', 'js,c,3']), JSON.stringify(sent));
@@ -141,8 +141,8 @@ check('a verdict of several slots targets the first of them, as one of a single 
     const a = pad('Pad A', 0);
     pads = [a, null, null, null];
     const sent: string[] = [];
-    const input = new Input(element as HTMLElement, (msg) => sent.push(msg), false, 0, false, 2);
-    input._gamepadConnected({ gamepad: a } as StandIn<GamepadEvent> as GamepadEvent);
+    const input = new Input(standIn<HTMLElement>(element), (msg) => sent.push(msg), false, 0, false, 2);
+    input._gamepadConnected(standIn<GamepadEvent>({ gamepad: a }));
     input.gamepadManager!._poll();
     press(a, 0, 1);
     input.gamepadManager!._poll();

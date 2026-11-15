@@ -18,6 +18,8 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Dictionary } from "../../web/selkies-dashboard/src/translations.ts";
+import { type Fields, isRecord } from "../../web/selkies-web-core/lib/narrow.ts";
+import { freshModule } from "./stand_in.ts";
 
 // The web directory, resolved, and refused where it holds a NUL or names a parent.
 const WEB = resolve(process.argv[2] ?? join(import.meta.dirname, "..", "..", "web"));
@@ -45,40 +47,39 @@ function walk(dir: string, out: string[] = []): string[] {
 }
 
 // The modules are those of the web directory named, so they are imported by its path.
-const statsView = await import(pathToFileURL(resolve(`${WEB}/selkies-web-core/lib/stream-stats-view.ts`)).href) as
-  typeof import("../../web/selkies-web-core/lib/stream-stats-view.ts");
-const { resolveLocale } = await import(pathToFileURL(resolve(`${DASHBOARD}/src/i18n.ts`)).href) as
-  typeof import("../../web/selkies-dashboard/src/i18n.ts");
-const { translations } = await import(pathToFileURL(resolve(`${DASHBOARD}/src/translations.ts`)).href) as
-  typeof import("../../web/selkies-dashboard/src/translations.ts");
+const statsView = freshModule<typeof import("../../web/selkies-web-core/lib/stream-stats-view.ts")>(
+  await import(pathToFileURL(resolve(`${WEB}/selkies-web-core/lib/stream-stats-view.ts`)).href), ["streamTiles"]);
+const { resolveLocale } = freshModule<typeof import("../../web/selkies-dashboard/src/i18n.ts")>(
+  await import(pathToFileURL(resolve(`${DASHBOARD}/src/i18n.ts`)).href), ["resolveLocale"]);
+const { translations } = freshModule<typeof import("../../web/selkies-dashboard/src/translations.ts")>(
+  await import(pathToFileURL(resolve(`${DASHBOARD}/src/translations.ts`)).href), ["translations"]);
 const dict = Object.fromEntries(LOCALES.map((l) => [l, translations[l]]));
 
-/** A dictionary, or what one of its keys holds; a list is walked by its indices like a dictionary. */
-type Entry = Dictionary[string] | undefined;
-
+/** Whether a dotted key names something in a dictionary; a list is walked by its indices like a dictionary. */
 const has = (table: Dictionary, key: string): boolean => {
-  let o: Entry = table;
+  let o: unknown = table;
   for (const k of key.split(".")) {
-    if (!o || typeof o !== "object" || !Object.prototype.hasOwnProperty.call(o, k)) return false;
-    o = (o as Dictionary)[k];
+    if (!isRecord(o) || !Object.prototype.hasOwnProperty.call(o, k)) return false;
+    o = o[k];
   }
   return typeof o === "string";
 };
 
-const read = (table: Dictionary, key: string): Entry => {
-  let o: Entry = table;
+/** What a dotted key holds in a dictionary, or undefined. */
+const read = (table: Dictionary, key: string): unknown => {
+  let o: unknown = table;
   for (const k of key.split(".")) {
-    if (!o || typeof o !== "object") return undefined;
-    o = (o as Dictionary)[k];
+    if (!isRecord(o)) return undefined;
+    o = o[k];
   }
   return o;
 };
 
-const trailingColon = (value: Entry): boolean => typeof value === "string" && /[:：]\s*$/.test(value);
+const trailingColon = (value: unknown): boolean => typeof value === "string" && /[:：]\s*$/.test(value);
 
-const flatten = (table: Dictionary, prefix = "", out: string[] = []): string[] => {
-  for (const [k, v] of Object.entries(table || {})) {
-    if (v && typeof v === "object") flatten(v as Dictionary, prefix + k + ".", out);
+const flatten = (table: Fields, prefix = "", out: string[] = []): string[] => {
+  for (const [k, v] of Object.entries(table)) {
+    if (isRecord(v)) flatten(v, prefix + k + ".", out);
     else out.push(prefix + k);
   }
   return out;

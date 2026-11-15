@@ -110,8 +110,8 @@ export async function unseal(sealed: string): Promise<string | undefined> {
   const id = keyId(sealed);
   if (!id || !canSeal()) return undefined;
   try {
-    const key = await withStore<CryptoKey | undefined>("readonly", (store) => store.get(id) as IDBRequest<CryptoKey | undefined>);
-    if (!key) return undefined;
+    const key = await withStore<unknown>("readonly", (store) => store.get(id));
+    if (!(key instanceof CryptoKey)) return undefined;
     const [, , iv, data] = sealed.split(".");
     const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: fromBase64(iv) }, key, fromBase64(data));
     return new TextDecoder().decode(plain);

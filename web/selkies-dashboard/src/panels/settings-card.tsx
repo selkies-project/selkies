@@ -32,7 +32,7 @@ function CardAccordion({ cards }: { cards: PanelCard[] }) {
   const open = picked?.filter((value) => cards.some((card) => card.value === value)) ?? [];
   const value = picked && (open.length > 0 || picked.length === 0) ? open : [cards[0].value];
   return (
-    <SectionAccordion value={value} onValueChange={(next) => setPicked(next as string[])}>
+    <SectionAccordion value={value} onValueChange={(next) => setPicked([next].flat().filter((v): v is string => typeof v === "string"))}>
       {cards.map(({ value: card, title, Body }) => (
         <SectionItem key={card} value={card} title={t(title)}><Body /></SectionItem>
       ))}

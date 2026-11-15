@@ -138,7 +138,7 @@ export function RangeSlider({ value, onValueChange, min = 0, max = 100, classNam
       max={max}
       value={value}
       onChange={(event) => onValueChange(Number(event.target.value))}
-      style={{ "--range-fill": `${percent}%` } as React.CSSProperties}
+      style={{ "--range-fill": `${percent}%` }}
       className={cn("range-slider w-full", className)}
     />
   );

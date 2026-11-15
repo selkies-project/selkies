@@ -24,7 +24,7 @@
 import * as React from "react";
 import { Activity, Blend, Command, Settings2 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useActions, useBarPrefs, type Action, type BarState, type Translucency } from "@/layouts/actions";
+import { nextTranslucency, useActions, useBarPrefs, type Action, type BarState } from "@/layouts/actions";
 import { PANELS, shownFloats, usePanelContext } from "@/panels/catalog";
 import { useDashboard } from "@/state/dashboard";
 import { t } from "@/i18n";
@@ -90,7 +90,7 @@ export function useTranslucencyTool(): ToolSpec {
   const grade = translucency === 1 ? "bg-primary/35 hover:bg-primary/55" : translucency === 2 ? "bg-primary/60 hover:bg-primary/85" : translucency === 3 ? "bg-primary hover:bg-primary" : "";
   return {
     key: "translucency", label: t('topMenu.translucentPanels'), tip: `${t('topMenu.translucentPanels')}: ${translucency + 1}/4`, active: translucency > 0,
-    className: cn("translucency-button", grade), icon: <Blend className="size-4" />, run: () => setTranslucency(((translucency + 1) % 4) as Translucency),
+    className: cn("translucency-button", grade), icon: <Blend className="size-4" />, run: () => setTranslucency(nextTranslucency(translucency)),
   };
 }
 

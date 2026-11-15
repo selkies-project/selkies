@@ -24,6 +24,7 @@ import { ActionButton, SwitchRow, Clip } from "@/panels/controls";
 import { useDashboard } from "@/state/dashboard";
 import { getPrefixedKey, isMobileClient, onCoreMessage } from "@/utils";
 import { t } from "@/i18n";
+import { numberOr } from "../../../selkies-web-core/lib/narrow.ts";
 
 /** Button value above which a button is drawn as pressed. */
 const PRESS_THRESHOLD = 0.1;
@@ -84,12 +85,15 @@ function GamepadPreview() {
   const [pads, setPads] = React.useState<Record<string, PadState>>({});
   React.useEffect(() => onCoreMessage((message) => {
     if (message.type !== "gamepadButtonUpdate" && message.type !== "gamepadAxisUpdate") return;
-    const index = message.gamepadIndex as number | null | undefined;
-    if (index === undefined || index === null) return;
+    const index = numberOr(message.gamepadIndex);
+    if (index === undefined) return;
     setPads((previous) => {
       const pad: PadState = { buttons: { ...(previous[index]?.buttons || {}) }, axes: { ...(previous[index]?.axes || {}) } };
-      if (message.type === "gamepadButtonUpdate") pad.buttons[message.buttonIndex as number] = (message.value || 0) as number;
-      else pad.axes[message.axisIndex as number] = Math.max(-1, Math.min(1, (message.value || 0) as number));
+      const value = numberOr(message.value) || 0;
+      const slot = numberOr(message.type === "gamepadButtonUpdate" ? message.buttonIndex : message.axisIndex);
+      if (slot === undefined) return pad;
+      if (message.type === "gamepadButtonUpdate") pad.buttons[slot] = value;
+      else pad.axes[slot] = Math.max(-1, Math.min(1, value));
       return { ...previous, [index]: pad };
     });
   }), []);

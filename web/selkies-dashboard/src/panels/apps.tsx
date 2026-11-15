@@ -19,7 +19,7 @@ import {
 import type { LucideIcon } from "lucide-react";
 import * as yaml from "js-yaml";
 import { t } from "@/i18n";
-import { getLastServerSettings, onCoreMessage, type ServerSettings } from "@/utils";
+import { getLastServerSettings, onCoreMessage, serverSettingsOf } from "@/utils";
 import { withSessionToken } from "../../../selkies-web-core/lib/session-token.ts";
 import {
     appsCatalog,
@@ -30,6 +30,7 @@ import {
     subscribeApps,
     type AppJob,
 } from "../../../selkies-web-core/lib/app-commands.ts";
+import { fields, hasFields } from "../../../selkies-web-core/lib/narrow.ts";
 
 /**
  * The apps modal: the proot-apps catalog by category, with install, remove,
@@ -79,6 +80,12 @@ interface App {
     category?: string;
     /** Listed but not installable. */
     disabled?: boolean;
+}
+
+/** Whether a catalog entry is an app the panel can list. */
+function isApp(entry: unknown): entry is App {
+    return hasFields(entry, { name: 'string', full_name: 'string', description: 'string', icon: 'string',
+        category: ['string', 'undefined'], disabled: ['boolean', 'undefined'] });
 }
 
 /** The icon of each category proot-apps files apps under; another gets a generic one. */
@@ -340,7 +347,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
     }, [selectedApp]);
 
     useEffect(() => onCoreMessage((message) => {
-        if (message.type === 'serverSettings') setServerSettings(message.payload as ServerSettings | null);
+        if (message.type === 'serverSettings') setServerSettings(serverSettingsOf(message.payload));
     }), []);
     const commandsKnown = serverSettings != null;
     const commandsAvailable = serverSettings?.command_enabled?.value === true;
@@ -380,7 +387,9 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
                 const yamlText = await response.text();
-                const parsedData = yaml.load(yamlText) as { include: App[] };
+                const loaded: unknown = yaml.load(yamlText);
+const listed = fields(loaded).include;
+const parsedData = { include: Array.isArray(listed) ? listed.filter(isApp) : [] };
                 if (!active) return;
                 cachedAppData = parsedData;
                 cachedCatalogUrl = catalog.metadata;

@@ -27,6 +27,7 @@
     "../eslint.config.mts",
     "../../eslint.config.mts",
     "../selkies-web-core/lib/gamepad.ts",
+    "../selkies-web-core/lib/narrow.ts",
     "../universal-touch-gamepad/universalTouchGamepad.ts"
   ]
 }

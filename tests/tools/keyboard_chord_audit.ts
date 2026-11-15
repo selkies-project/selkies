@@ -25,7 +25,7 @@
  */
 
 import { Input } from '../../web/selkies-web-core/lib/input.ts';
-import type { StandIn } from './stand_in.ts';
+import { type StandIn, bare, standIn } from './stand_in.ts';
 
 /** An `Input` that records what it would send. */
 type AuditedInput = Input & { sent: string[] };
@@ -79,6 +79,9 @@ interface KeyArg {
     alt?: boolean;
     composing?: boolean;
 }
+
+/** A step's text: a composition and a text input carry text, which a key step names as its key. */
+const textOf = (arg: string | KeyArg): string => (typeof arg === 'string' ? arg : arg.key);
 
 /** One recorded event of a composition: a key event, or the text of a composition or text event. */
 type ComposeStep = ['keydown' | 'keyup', KeyArg]
@@ -164,7 +167,7 @@ function setPlatform(engine: Engine): void {
 
 /** An Input with only what the key handlers touch, capturing what it would send. */
 function makeInput(): AuditedInput {
-    const input = Object.create(Input.prototype) as AuditedInput;
+    const input = bare<AuditedInput>(Input);
     input.sent = [];
     input.send = (msg: string) => input.sent.push(msg);
     input._keyDownList = {};
@@ -214,19 +217,19 @@ function wire(engineName: string, steps: Step[], opts: { synth?: boolean } = {})
             : ((engine.key && engine.key[code]) || MOD_CODES[code] || code);
         const state: Record<string, boolean | undefined> = { Alt: flags.alt, Control: flags.ctrl, Meta: flags.meta,
                         Shift: flags.shift, AltGraph: flags.altGraph };
-        const event = {
+        const event: StandIn<KeyboardEvent> = {
             key, code, location: LOCATION[code] || 0, keyCode: 0, isComposing: false,
             timeStamp: 0, repeat: !!repeat,
             isTrusted: physical === true || (!replay && engine.trusted !== false),
             altKey: flags.alt, ctrlKey: flags.ctrl, metaKey: flags.meta, shiftKey: flags.shift,
-            target: { classList: { contains: (name: string) => !!native && name === 'allow-native-input' },
-                      parentElement: null },
+            target: standIn<Element>({ classList: { contains: (name: string) => !!native && name === 'allow-native-input' },
+                      parentElement: null }),
             getModifierState: (name: string) => !!state[name],
             preventDefault() {}, stopPropagation() {},
-        } as StandIn<KeyboardEvent>;
+        };
         if (replay) event.__selkiesClipReplay = true;
-        if (action === 'down') input._handleKeyDown(event as KeyboardEvent);
-        else input._handleKeyUp(event as KeyboardEvent);
+        if (action === 'down') input._handleKeyDown(standIn<KeyboardEvent>(event));
+        else input._handleKeyUp(standIn<KeyboardEvent>(event));
     }
     clearTimeout(input._momentaryChordModsTimer);
     return input.sent.join(' ');
@@ -527,19 +530,19 @@ async function compose(engineName: string, steps: ComposeStep[]): Promise<string
     input._pendingChord = null;
     input._chordKeySent = false;
     input._clearCompositionHostSoon = () => {};
-    const target = { classList: { contains: () => false }, parentElement: null };
+    const target = standIn<Element>({ classList: { contains: () => false }, parentElement: null });
     for (const [type, arg] of steps) {
         const base = { type, target, isTrusted: true, timeStamp: 0, preventDefault() {}, stopPropagation() {} };
         if (type === 'keydown' || type === 'keyup') {
-            const event = { ...base, key: arg.key, code: arg.code, location: LOCATION[arg.code] || 0,
+            const event = standIn<KeyboardEvent>({ ...base, key: arg.key, code: arg.code, location: LOCATION[arg.code] || 0,
                             keyCode: arg.keyCode || 0, isComposing: !!arg.composing, repeat: false,
                             altKey: !!arg.alt, ctrlKey: false, metaKey: false, shiftKey: false,
-                            getModifierState: (name: string) => name === 'Alt' && !!arg.alt } as StandIn<KeyboardEvent> as KeyboardEvent;
+                            getModifierState: (name: string) => name === 'Alt' && !!arg.alt });
             if (type === 'keydown') input._handleKeyDown(event); else input._handleKeyUp(event);
-        } else if (type === 'compositionstart') input._compositionStart({ ...base, data: arg } as StandIn<CompositionEvent> as CompositionEvent);
-        else if (type === 'compositionupdate') input._compositionUpdate({ ...base, data: arg } as StandIn<CompositionEvent> as CompositionEvent);
-        else if (type === 'compositionend') input._compositionEnd({ ...base, data: arg } as StandIn<CompositionEvent> as CompositionEvent);
-        else input._handleTextInput({ ...base, data: arg } as StandIn<InputEvent> as InputEvent);
+        } else if (type === 'compositionstart') input._compositionStart(standIn<CompositionEvent>({ ...base, data: textOf(arg) }));
+        else if (type === 'compositionupdate') input._compositionUpdate(standIn<CompositionEvent>({ ...base, data: textOf(arg) }));
+        else if (type === 'compositionend') input._compositionEnd(standIn<CompositionEvent>({ ...base, data: textOf(arg) }));
+        else input._handleTextInput(standIn<InputEvent>({ ...base, data: textOf(arg) }));
     }
     // The chord a composition held back goes out on a timer once it ends.
     await new Promise((resolve) => { setTimeout(resolve, 10); });

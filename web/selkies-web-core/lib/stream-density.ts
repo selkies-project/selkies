@@ -43,7 +43,7 @@ export interface StreamDensityPage {
 export function streamDensity(page: StreamDensityPage): number {
   const { useCssScaling, localScale, manual, displayId, layouts, shared, wayland } = page;
   const dpr = window.devicePixelRatio || 1;
-  const stretch = (Number.isFinite(localScale) && (localScale as number) > 0) ? (localScale as number) : 1;
+  const stretch = typeof localScale === 'number' && Number.isFinite(localScale) && localScale > 0 ? localScale : 1;
   const own = (useCssScaling && !manual) ? dpr / stretch : dpr;
   if (wayland || shared || manual || !displayId || displayId === 'primary') return own;
   const primary = Number(layouts && layouts.primary && layouts.primary.scale);

@@ -35,6 +35,7 @@
  */
 
 import type { StreamClient, StreamInfo, StreamSample } from './stream-stats.ts';
+import { numberOr } from './narrow.ts';
 
 /** One status row. */
 export interface StreamRow {
@@ -111,18 +112,29 @@ function captureRow(info: StreamInfo | null): StreamRow {
  * @param words
  * @returns
  */
+/**
+ * The phrase a key names in the words, where the words have one.
+ * @param words The phrases, in the page's language.
+ * @param key A decoder verdict or reason, which may name none of them.
+ * @returns The phrase, or undefined.
+ */
+function wordFor(words: StreamWords, key: string): string | undefined {
+  const table: Partial<Record<string, string>> = { ...words };
+  return table[key];
+}
+
 function decoderRow(client: StreamClient | null, words: StreamWords): StreamRow {
   const decoder = client ? client.decoder : 'unknown';
   const fell = decoder === 'software' && !!client?.hardware_expected;
   return {
     key: 'decoder',
     status: decoder === 'hardware' ? 'good' : fell ? 'warn' : 'neutral',
-    value: (words as unknown as Record<string, string>)[decoder] || words.unknown,
+    value: wordFor(words, decoder) || words.unknown,
     detail: client
       ? joined([client.decoder_evidence, codecName(client.codec), client.resolution,
         client.decode_path, client.sink])
       : '',
-    reason: fell && client ? ((words as unknown as Record<string, string>)[client.decoder_reason] || sentence(client.decoder_reason)) : '',
+    reason: fell && client ? (wordFor(words, client.decoder_reason) || sentence(client.decoder_reason)) : '',
   };
 }
 
@@ -332,13 +344,14 @@ export function streamMeters(latest: StreamSample | null): StreamMeter[] {
     detail: `${Math.round(share(gotten, total))}%`,
     bar: false,
   });
-  const meters: StreamMeter[] = [used('cpu', Math.min(100, latest.cpu_percent as number))];
+  const meters: StreamMeter[] = [used('cpu', Math.min(100, latest.cpu_percent ?? NaN))];
   if (typeof latest.gpu_percent === 'number') {
-    meters.push(used('gpu', Math.min(100, latest.gpu_percent as number)));
+    meters.push(used('gpu', Math.min(100, latest.gpu_percent)));
   }
-  meters.push(amounts('mem', latest.mem_used as number, latest.mem_total as number));
-  if (typeof latest.gpu_percent === 'number' && (latest.gpu_mem_total as number) > 0) {
-    meters.push(amounts('gpumem', latest.gpu_mem_used as number, latest.gpu_mem_total as number));
+  meters.push(amounts('mem', numberOr(latest.mem_used) ?? NaN, numberOr(latest.mem_total) ?? NaN));
+  const gpuTotal = numberOr(latest.gpu_mem_total) ?? NaN;
+  if (typeof latest.gpu_percent === 'number' && gpuTotal > 0) {
+    meters.push(amounts('gpumem', numberOr(latest.gpu_mem_used) ?? NaN, gpuTotal));
   }
   return meters;
 }

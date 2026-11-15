@@ -15,7 +15,7 @@
  */
 
 import { Input } from '../../web/selkies-web-core/lib/input.ts';
-import type { StandIn } from './stand_in.ts';
+import { bare, standIn } from './stand_in.ts';
 
 /** An `Input` that records what it would send. */
 type AuditedInput = Input & { sent: string[] };
@@ -32,7 +32,7 @@ function check(label: string, ok: boolean, detail: unknown = ''): void {
 
 /** An Input with only what the text paths touch, capturing what it would send. */
 function makeInput(): AuditedInput {
-    const input = Object.create(Input.prototype) as AuditedInput;
+    const input = bare<AuditedInput>(Input);
     input.sent = [];
     input.send = (msg: string) => input.sent.push(msg);
     input._momentaryChordMods = new Set();
@@ -49,17 +49,17 @@ function pressed(sent: string[]): number[] {
 }
 
 /** Types `text` through the soft-input field. */
-function typeMobile(text: string, input = makeInput()): { sent: string[]; target: { value: string } } {
-    const target = { value: text };
-    input.keyboardInputAssist = target as StandIn<HTMLInputElement> as HTMLInputElement;
-    input._handleMobileInput({ target } as StandIn<InputEvent> as InputEvent);
+function typeMobile(text: string, input = makeInput()): { sent: string[]; target: { tagName: string; value: string } } {
+    const target = { tagName: 'INPUT', value: text };
+    input.keyboardInputAssist = standIn<HTMLInputElement>(target);
+    input._handleMobileInput(standIn<InputEvent>({ target: standIn<HTMLInputElement>(target) }));
     return { sent: input.sent, target };
 }
 
 /** Types `text` through the text-echo path. */
 function typeText(text: string): { sent: string[] } {
     const input = makeInput();
-    input._handleTextInput({ data: text } as StandIn<InputEvent> as InputEvent);
+    input._handleTextInput(standIn<InputEvent>({ data: text }));
     return { sent: input.sent };
 }
 

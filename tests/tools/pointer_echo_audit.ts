@@ -15,7 +15,7 @@
  */
 
 import { Input } from '../../web/selkies-web-core/lib/input.ts';
-import type { StandIn, VirtualTimer } from './stand_in.ts';
+import { type StandIn, type VirtualTimer, standIn } from './stand_in.ts';
 
 let failed = 0;
 
@@ -89,10 +89,10 @@ const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolv
 /** A page in trackpad mode with a cursor image, recording what it sends. */
 async function makeInput(): Promise<{ input: Input; sent: string[] }> {
     const sent: string[] = [];
-    const input = new Input(element as HTMLElement, (msg) => sent.push(msg));
+    const input = new Input(standIn<HTMLElement>(element), (msg) => sent.push(msg));
     input.sendMotion = (msg) => sent.push(msg);
     input.inputAttached = true;
-    input._cursorImageBitmap = { width: 16, height: 16 } as ImageBitmap;
+    input._cursorImageBitmap = standIn<ImageBitmap>({ width: 16, height: 16 });
     input.setTrackpadMode(true);
     input.resumePointerEcho();
     await settle();
@@ -148,7 +148,7 @@ const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.str
     input.onPointerEcho('pointer,primary,1279,40,1,7');
     check('until an echo names this display again', same(cursorAt(input), [1279, 40]), cursorAt(input));
 
-    input._mouseButtonMovement({ type: 'mousemove', clientX: 5, clientY: 5, target: element } as StandIn<MouseEvent> as MouseEvent);
+    input._mouseButtonMovement(standIn<MouseEvent>({ type: 'mousemove', clientX: 5, clientY: 5, target: element }));
     check('a mouse over the page does not move the trackpad cursor',
           same(cursorAt(input), [1279, 40]), cursorAt(input));
 
