@@ -1186,8 +1186,20 @@ impl HostSession {
                 .join(", ")
         );
 
+        let grow = portal.is_some()
+            && !native_capture
+            && host_capacity(
+                names.len(),
+                PortalSession::virtual_available(),
+                crate::wayland::mutterclient::available(),
+            ) > names.len();
+        if grow {
+            println!("[HostCapture] one more display can grow on a portal virtual monitor.");
+        }
         let mut outputs = Vec::new();
-        for (i, name) in names.iter().cloned().enumerate() {
+        for i in 0..names.len() + usize::from(grow) {
+            let name = names.get(i).cloned().flatten();
+            let grown = i >= names.len();
             let (wake_rd, wake_wr) = wake_pipe()?;
             let (to_thread, from_main) = std::sync::mpsc::channel::<ToHost>();
             let (frame_tx, frames) = std::sync::mpsc::channel::<HostFrame>();
@@ -1202,9 +1214,20 @@ impl HostSession {
             let expect = name.clone();
             let gbm_path = gbm_path.clone();
             let alive = alive.clone();
-            let portal_ctl = portal.clone().filter(|_| !native_capture);
-            let (dma_formats, cursor_tx, geoms) =
-                (dma_formats.clone(), cursor_tx.clone(), geoms.clone());
+            let portal_ctl = if grown {
+                Some(PortalCtl::spawn_virtual())
+            } else {
+                portal.clone().filter(|_| !native_capture)
+            };
+            let (dma_formats, cursor_tx, geoms) = (
+                dma_formats.clone(),
+                cursor_tx.clone(),
+                if grown {
+                    vec![OutputGeom::default()]
+                } else {
+                    geoms.clone()
+                },
+            );
             std::thread::Builder::new()
                 .name(format!("pf-host-cap{i}"))
                 .spawn(move || {
@@ -2277,6 +2300,9 @@ struct PortalInner {
     restore_token: Option<String>,
     dead: Option<String>,
     closed: bool,
+    /// Whether a session should be open: always for a host's monitors, only while its
+    /// display captures for a virtual monitor.
+    wanted: bool,
 }
 
 /// Session-wide portal state: the session thread opens (and, when the cursor mode changes,
@@ -2286,15 +2312,31 @@ pub(crate) struct PortalCtl {
     changed: Condvar,
     capture: bool,
     devices: u32,
+    /// The session selects one virtual monitor, which exists only while the session does.
+    virtual_src: bool,
 }
 
 impl PortalCtl {
     fn spawn(capture: bool, devices: u32) -> Arc<Self> {
+        Self::spawn_with(capture, devices, false)
+    }
+
+    /// A controller for a grown display: its session opens on the display's first Start and
+    /// closes when the display goes idle, taking its virtual monitor with it.
+    fn spawn_virtual() -> Arc<Self> {
+        Self::spawn_with(true, 0, true)
+    }
+
+    fn spawn_with(capture: bool, devices: u32, virtual_src: bool) -> Arc<Self> {
         let ctl = Arc::new(PortalCtl {
-            inner: Mutex::new(PortalInner::default()),
+            inner: Mutex::new(PortalInner {
+                wanted: !virtual_src,
+                ..PortalInner::default()
+            }),
             changed: Condvar::new(),
             capture,
             devices,
+            virtual_src,
         });
         let worker = ctl.clone();
         let _ = std::thread::Builder::new()
@@ -2311,6 +2353,20 @@ impl PortalCtl {
             inner.paint = Some(paint);
             self.changed.notify_all();
         }
+    }
+
+    /// Open (`true`) or close the session; closing drops the live one at once.
+    fn set_wanted(&self, on: bool) {
+        let old = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.wanted == on {
+                return;
+            }
+            inner.wanted = on;
+            self.changed.notify_all();
+            if on { None } else { inner.live.take() }
+        };
+        drop(old);
     }
 
     pub(crate) fn live(&self) -> Option<Arc<PortalLive>> {
@@ -2350,7 +2406,8 @@ fn portal_thread(ctl: Arc<PortalCtl>) {
                 if inner.closed || inner.dead.is_some() {
                     return;
                 }
-                if let Some(p) = inner.paint
+                if inner.wanted
+                    && let Some(p) = inner.paint
                     && inner.live.as_ref().is_none_or(|l| l.paint != p)
                 {
                     break (
@@ -2374,16 +2431,19 @@ fn portal_thread(ctl: Arc<PortalCtl>) {
             portal::CURSOR_EMBEDDED
         };
         let open = |devices: u32| {
-            PortalSession::open(ctl.capture, devices, cursor_mode, token.as_deref()).and_then(
-                |session| {
-                    let core = if ctl.capture {
-                        Some(PwCore::connect(session.open_pipewire_remote()?)?)
-                    } else {
-                        None
-                    };
-                    Ok((session, core))
-                },
-            )
+            (if ctl.virtual_src {
+                PortalSession::open_virtual(cursor_mode, token.as_deref())
+            } else {
+                PortalSession::open(ctl.capture, devices, cursor_mode, token.as_deref())
+            })
+            .and_then(|session| {
+                let core = if ctl.capture {
+                    Some(PwCore::connect(session.open_pipewire_remote()?)?)
+                } else {
+                    None
+                };
+                Ok((session, core))
+            })
         };
         // A host that grants the screen but refuses the input devices answers the whole request as
         // a refusal, so asking again for capture alone is what turns that into a session with
@@ -2449,6 +2509,10 @@ fn portal_thread(ctl: Arc<PortalCtl>) {
                     ei,
                 }));
             }
+            Err(e) if ctl.virtual_src => {
+                eprintln!("[HostCapture] virtual monitor session failed: {e}");
+                inner.wanted = false;
+            }
             Err(e) => {
                 eprintln!("[HostCapture] portal session failed: {e}");
                 inner.dead = Some(e);
@@ -2494,6 +2558,8 @@ fn portal_capture_loop(
     dma_formats: Vec<(u32, Vec<u64>)>,
     geoms: Vec<OutputGeom>,
 ) -> Result<(), String> {
+    let grown = ctl.virtual_src;
+    let rank = if grown { 0 } else { index };
     let mut want: Option<Want> = None;
     let mut origin = (0, 0);
     let mut stream: Option<(PwStream, u64)> = None;
@@ -2525,6 +2591,10 @@ fn portal_capture_loop(
                         s.release_all();
                         s.set_active(false);
                     }
+                    if grown {
+                        stream = None;
+                        ctl.set_wanted(false);
+                    }
                 }
                 ToHost::Start {
                     width,
@@ -2541,6 +2611,10 @@ fn portal_capture_loop(
                         paint_cursor,
                         fps_milli,
                     });
+                    if grown {
+                        ctl.set_paint(paint_cursor);
+                        ctl.set_wanted(true);
+                    }
                 }
             }
         }
@@ -2573,6 +2647,7 @@ fn portal_capture_loop(
                     .or_else(|| geoms.get(index).map(|g| g.logical))
                     .unwrap_or((0, 0)),
             },
+            exact_size: grown,
         };
         match &stream {
             Some((s, _)) => {
@@ -2585,7 +2660,7 @@ fn portal_capture_loop(
             }
             None => {
                 let Some(si) = assign_streams(&live.session.streams, &geoms)
-                    .get(index)
+                    .get(rank)
                     .copied()
                     .flatten()
                 else {
@@ -2632,6 +2707,8 @@ fn control_loop(
     ledger: Arc<Mutex<LayoutLedger>>,
 ) {
     let qh = queue.handle();
+    let mut last_slots: Option<Vec<LayoutSlot>> = None;
+    let mut named = named_outputs(&state);
     loop {
         let mut pending: Option<(u64, Vec<LayoutSlot>)> = None;
         loop {
@@ -2644,9 +2721,20 @@ fn control_loop(
         if let Some((epoch, slots)) = pending {
             let realized = apply_layout(&conn, &mut queue, &mut state, &qh, &slots);
             ledger.lock().unwrap().decide(epoch, realized);
+            last_slots = Some(slots);
         }
         if queue.dispatch_pending(&mut state).is_err() {
             return;
+        }
+        let now_named = named_outputs(&state);
+        if now_named != named {
+            named = now_named;
+            if state.output_mgr.is_none()
+                && let Some(slots) = &last_slots
+            {
+                let slots = slots.clone();
+                apply_layout(&conn, &mut queue, &mut state, &qh, &slots);
+            }
         }
         let _ = queue.flush();
         if let Some(guard) = conn.prepare_read() {
@@ -2769,20 +2857,49 @@ fn apply_layout(
     false
 }
 
+/// How many host outputs have announced their name: a monitor the host adds later (a
+/// grown display's) is arranged once it can be named.
+fn named_outputs(state: &CtrlState) -> usize {
+    state.outputs.iter().filter(|(_, n)| n.is_some()).count()
+}
+
+/// How many displays a host backs: its outputs, and one more it grows on a virtual monitor
+/// when the portal serves virtual sources and an arranger can place the new monitor.
+fn host_capacity(real_outputs: usize, virtual_ok: bool, arranger_ok: bool) -> usize {
+    real_outputs + usize::from(virtual_ok && arranger_ok)
+}
+
+/// The host output name of each display rank: ordered outputs first, then the outputs the
+/// host announced and named after the session started (a grown display's virtual monitor),
+/// in registry order.
+fn rank_names(order: &[usize], outputs: &[Option<String>], ranks: usize) -> Vec<Option<String>> {
+    let late = (0..outputs.len()).filter(|i| !order.contains(i) && outputs[*i].is_some());
+    order
+        .iter()
+        .copied()
+        .chain(late)
+        .take(ranks)
+        .map(|i| outputs.get(i).cloned().flatten())
+        .chain(std::iter::repeat(None))
+        .take(ranks)
+        .collect()
+}
+
 /// Every active output's host name and union-layout position, the primary first.
 fn layout_request(state: &CtrlState, slots: &[LayoutSlot]) -> Vec<(String, i32, i32)> {
+    let names: Vec<Option<String>> = state.outputs.iter().map(|(_, n)| n.clone()).collect();
+    let ranks = rank_names(&state.order, &names, slots.len());
     slots
         .iter()
+        .zip(ranks)
         .enumerate()
-        .filter(|(_, s)| s.active)
-        .map(|(i, slot)| {
-            let name = state
-                .order
-                .get(i)
-                .and_then(|&oi| state.outputs.get(oi))
-                .and_then(|(_, n)| n.clone())
-                .unwrap_or_else(|| format!("#{i}"));
-            (name, slot.pos.0, slot.pos.1)
+        .filter(|(_, (s, _))| s.active)
+        .map(|(i, (slot, name))| {
+            (
+                name.unwrap_or_else(|| format!("#{i}")),
+                slot.pos.0,
+                slot.pos.1,
+            )
         })
         .collect()
 }
@@ -3945,6 +4062,34 @@ mod tests {
         let mut dst = vec![0u8; 8];
         convert_shm_row(&src, &mut dst, 4, true);
         assert_eq!(dst, vec![2, 1, 0, 3, 6, 5, 4, 7]);
+    }
+
+    #[test]
+    fn capacity_adds_one_with_virtual_and_arranger() {
+        assert_eq!(host_capacity(1, true, true), 2);
+    }
+
+    #[test]
+    fn capacity_unchanged_without_arranger() {
+        assert_eq!(host_capacity(1, true, false), 1);
+    }
+
+    #[test]
+    fn capacity_unchanged_without_virtual() {
+        assert_eq!(host_capacity(1, false, true), 1);
+    }
+
+    #[test]
+    fn rank_names_take_late_outputs_after_the_ordered_ones() {
+        let outputs = [Some("Meta-0".to_string()), None, Some("Meta-1".to_string())];
+        assert_eq!(
+            rank_names(&[0], &outputs, 2),
+            [Some("Meta-0".to_string()), Some("Meta-1".to_string())]
+        );
+        assert_eq!(
+            rank_names(&[0], &outputs[..1], 2),
+            [Some("Meta-0".to_string()), None]
+        );
     }
 
     #[test]

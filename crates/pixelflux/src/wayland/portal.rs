@@ -440,6 +440,23 @@ impl PortalSession {
         Ok(())
     }
 
+    /// Whether the ScreenCast portal offers virtual monitors (`AvailableSourceTypes`).
+    pub fn virtual_available() -> bool {
+        zbus::block_on(async {
+            let Ok(conn) = Connection::session().await else {
+                return false;
+            };
+            let Ok(screencast) = Proxy::new(&conn, DESKTOP, DESKTOP_PATH, SCREENCAST_IFACE).await
+            else {
+                return false;
+            };
+            screencast
+                .get_property::<u32>("AvailableSourceTypes")
+                .await
+                .is_ok_and(|t| t & SOURCE_VIRTUAL != 0)
+        })
+    }
+
     /// Whether a ScreenCast portal answers on the session bus; the error says which step
     /// did not, since a bus nobody listens on and a portal without a backend read the same.
     pub fn probe() -> Result<(), String> {

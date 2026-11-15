@@ -163,6 +163,9 @@ pub struct StreamConfig {
     /// Where the stream's cursor metas land in the union layout (`HOST_POINTER`). Not a
     /// format matter: a change alone never renegotiates.
     pub place: CursorPlace,
+    /// Ask for `expect` exactly, renegotiating when it changes: a virtual monitor takes its
+    /// size from the format its stream is consumed at.
+    pub exact_size: bool,
 }
 
 /// Where a stream's output sits for its cursor metas: the display's origin in the union layout
@@ -338,7 +341,11 @@ fn enum_format_pod(spa_format: u32, modifiers: Option<&[u64]>, cfg: &StreamConfi
         }
         let (w, h) = (cfg.expect.0.max(1) as u32, cfg.expect.1.max(1) as u32);
         prop(p, SPA_FORMAT_VIDEO_SIZE, |v| {
-            pod_choice_rect(v, SPA_CHOICE_RANGE, &[(w, h), (1, 1), (16384, 16384)])
+            if cfg.exact_size {
+                pod_choice_rect(v, SPA_CHOICE_NONE, &[(w, h)])
+            } else {
+                pod_choice_rect(v, SPA_CHOICE_RANGE, &[(w, h), (1, 1), (16384, 16384)])
+            }
         });
         prop(p, SPA_FORMAT_VIDEO_FRAMERATE, |v| pod_frac(v, 0, 1));
         let fps = (cfg.fps_milli.max(1000), 1000);
@@ -426,7 +433,7 @@ fn renegotiates(cur: &StreamConfig, new: &StreamConfig, negotiated: bool) -> boo
         place: cur.place,
         ..new.clone()
     } == *cur;
-    !size_only || !negotiated
+    !size_only || !negotiated || (new.exact_size && new.expect != cur.expect)
 }
 
 /// A `Meta` param asking for one metadata type of the given size (a plain or ranged Int).
@@ -1294,6 +1301,28 @@ mod tests {
         assert!(seen.first(StampRefusal::Stale));
     }
 
+    #[test]
+    fn exact_size_renegotiates_on_a_size_change() {
+        let cur = StreamConfig {
+            exact_size: true,
+            ..cfg(false)
+        };
+        let resized = StreamConfig {
+            expect: (2544, 1318),
+            ..cur.clone()
+        };
+        assert!(renegotiates(&cur, &resized, true));
+        let host_sized = StreamConfig {
+            exact_size: false,
+            ..resized
+        };
+        let cur_host = StreamConfig {
+            exact_size: false,
+            ..cur
+        };
+        assert!(!renegotiates(&cur_host, &host_sized, true));
+    }
+
     fn cfg(zero_copy: bool) -> StreamConfig {
         StreamConfig {
             zero_copy,
@@ -1308,6 +1337,7 @@ mod tests {
                 size: (1920, 1080),
                 logical: (1920, 1080),
             },
+            exact_size: false,
         }
     }
 
