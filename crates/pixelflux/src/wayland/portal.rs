@@ -224,7 +224,7 @@ async fn next_message<S: Stream + Unpin>(stream: &mut S) -> Option<S::Item> {
 }
 
 /// Whether `name` has an owner on the bus `conn` is on.
-async fn name_owned(conn: &Connection, name: &str) -> bool {
+pub(crate) async fn name_owned(conn: &Connection, name: &str) -> bool {
     let Ok(bus) = zbus::fdo::DBusProxy::new(conn).await else {
         return false;
     };

@@ -29,6 +29,8 @@ pub mod kdeclient;
 pub mod kdeproto;
 /// Seat keymap ownership: base layout plus batched overlay keysym binding.
 pub mod keymap;
+/// Mutter host arranger placing a GNOME host's monitors through DisplayConfig.
+pub mod mutterclient;
 /// Output-management client scaling a nested app compositor's screens.
 pub mod outclient;
 /// xdg-desktop-portal RemoteDesktop/ScreenCast session: streams and input for hosts without

@@ -2686,6 +2686,13 @@ fn apply_layout(
     slots: &[LayoutSlot],
 ) -> bool {
     let Some(mgr) = state.output_mgr.clone() else {
+        if crate::wayland::mutterclient::available() {
+            let want = layout_request(state, slots);
+            match crate::wayland::mutterclient::apply(&want) {
+                Ok(()) => eprintln!("[HostCapture] arranged the Mutter host's monitors: {want:?}."),
+                Err(e) => eprintln!("[HostCapture] Mutter refused the layout: {e}."),
+            }
+        }
         eprintln!(
             "[HostCapture] host lacks zwlr_output_manager_v1; capture follows the host's own size."
         );
@@ -2760,6 +2767,24 @@ fn apply_layout(
         return true;
     }
     false
+}
+
+/// Every active output's host name and union-layout position, the primary first.
+fn layout_request(state: &CtrlState, slots: &[LayoutSlot]) -> Vec<(String, i32, i32)> {
+    slots
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.active)
+        .map(|(i, slot)| {
+            let name = state
+                .order
+                .get(i)
+                .and_then(|&oi| state.outputs.get(oi))
+                .and_then(|(_, n)| n.clone())
+                .unwrap_or_else(|| format!("#{i}"));
+            (name, slot.pos.0, slot.pos.1)
+        })
+        .collect()
 }
 
 /// One bounded dispatch step for the control connection (false = connection died).
