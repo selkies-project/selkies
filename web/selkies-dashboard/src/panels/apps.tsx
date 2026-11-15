@@ -356,17 +356,23 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
         }
     };
 
+    // Entering a fetch (opening without the catalog, a Retry, another catalog)
+    // shows it loading from the render that starts it.
+    const fetchKey = isOpen && !appData ? `${fetchAttempt} ${catalog.metadata}` : null;
+    const [fetchingFor, setFetchingFor] = useState<string | null>(null);
+    if (fetchKey !== fetchingFor) {
+        setFetchingFor(fetchKey);
+        if (fetchKey !== null) {
+            setIsLoading(true);
+            setError(null);
+        }
+    }
     useEffect(() => {
         if (!isOpen || appData) return;
         const controller = new AbortController();
         const timeoutId = window.setTimeout(() => controller.abort(), METADATA_FETCH_TIMEOUT_MS);
         // Suppresses any setState landing after cleanup.
         let active = true;
-        // Not derivable during render: this is the transition into a fetch,
-        // and a Retry has to re-enter it.
-        // eslint-disable-next-line react-hooks/set-state-in-effect
-        setIsLoading(true);
-        setError(null);
         (async () => {
             try {
                 const response = await fetch(catalog.metadata, { signal: controller.signal });

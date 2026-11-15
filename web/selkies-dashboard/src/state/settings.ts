@@ -34,7 +34,7 @@
  * them, and an unmarked stored echo is dropped once the ladder moves on.
  * @module
  */
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useEffectEvent, useCallback, useMemo, useRef } from "react";
 import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, canDecodeTenBit, tenBitFormat,
     codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit, isMacDesktop } from "../../../selkies-web-core/lib/util.ts";
 import { switchStreamMode } from "../../../selkies-web-core/lib/mode-switch.ts";
@@ -145,22 +145,24 @@ const readExplicitStored = (spec: SettingSpec) => (key: string) => (isExplicitCh
 
 /**
  * Drives a conditional setting: lazy init, then a re-resolve whenever the
- * server settings or any dependency in `deps` changes (server sync and a
- * dependency's re-derivation alike). The resolver honors explicit choices, so
- * a re-resolve never clobbers a pinned value. Re-resolving writes state rather
- * than deriving during render because the caller edits the value afterwards.
+ * server settings change, against the context as it is then. The resolver
+ * honors explicit choices, so a re-resolve never clobbers a pinned value.
+ * Re-resolving writes state rather than deriving during render because the
+ * caller edits the value afterwards.
  * @param spec Conditional-setting spec from `conditional-settings.ts`.
  * @param serverSettings The last server settings payload, or null before one arrives.
  * @param ctx Resolution context the spec reads (stream mode, encoder, ...).
- * @param deps Dependencies whose change triggers a re-resolve.
  * @param read Storage reader; the explicit-choice reader for settings that are also derived.
  * @returns A `[value, setValue]` pair.
  */
-function useConditionalSetting<T = boolean>(spec: SettingSpec, serverSettings: ServerSettings | null, ctx: Record<string, unknown>, deps: React.DependencyList, read: ((key: string) => string | null) = readStored) {
+function useConditionalSetting<T = boolean>(spec: SettingSpec, serverSettings: ServerSettings | null, ctx: Record<string, unknown>, read: ((key: string) => string | null) = readStored) {
     const compute = () => resolveSpec(spec, serverSettings, ctx, read) as T;
     const [value, setValue] = useState<T>(compute);
-    // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
-    useEffect(() => { setValue(compute()); }, deps);
+    const [resolvedFor, setResolvedFor] = useState(serverSettings);
+    if (resolvedFor !== serverSettings) {
+        setResolvedFor(serverSettings);
+        setValue(compute());
+    }
     return [value, setValue] as const;
 }
 
@@ -311,8 +313,8 @@ export function useStreamSettings() {
         spec.propagate!(spec.toServer ? spec.toServer(uiValue) : uiValue, conditionalCtx, conditionalIo);
     };
 
-    const [hidpiEnabled, setHidpiEnabled] = useConditionalSetting(HIDPI_SPEC, serverSettings, conditionalCtx, [serverSettings], readHidpiStored);
-    const [rateControlMode, setRateControlMode] = useConditionalSetting<string>(RATE_CONTROL_SPEC, serverSettings, conditionalCtx, [serverSettings], readRateControlStored);
+    const [hidpiEnabled, setHidpiEnabled] = useConditionalSetting(HIDPI_SPEC, serverSettings, conditionalCtx, readHidpiStored);
+    const [rateControlMode, setRateControlMode] = useConditionalSetting<string>(RATE_CONTROL_SPEC, serverSettings, conditionalCtx, readRateControlStored);
     /**
      * With rate control disabled the server ignores rate_control_mode and
      * keeps the encoder's built-in default, so the dashboard neither pushes a
@@ -322,7 +324,7 @@ export function useStreamSettings() {
     // Stale-echo rule (module docblock): a stored mode without an explicit
     // pick echoes a value a dashboard derived, and is dropped once it stops
     // matching the ladder, which resolves to the server's own value.
-    useEffect(() => {
+    const dropStaleRateControl = useEffectEvent(() => {
         if (!serverSettings) return;
         if (serverSettings.enable_rate_control?.value === false) return;
         const rcKey = RATE_CONTROL_SPEC.storageKey;
@@ -330,13 +332,13 @@ export function useStreamSettings() {
         if (!isExplicitChoice(RATE_CONTROL_SPEC) && readStored(rcKey) !== null && readStored(rcKey) !== resolved) {
             localStorage.removeItem(getPrefixedKey(rcKey));
         }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [serverSettings]);
+    });
+    useEffect(() => { dropStaleRateControl(); }, [serverSettings]);
     // Same stale-echo rule for HiDPI, or a derived pick outlives its resolution
     // mode, and a push of the resolved value: the core starts from its own
     // stored default, so a deployment that configures a resolution would stream
     // pixel-perfect on every load with the toggle reading off.
-    useEffect(() => {
+    const syncHidpi = useEffectEvent(() => {
         if (!serverSettings) return;
         const key = HIDPI_SPEC.storageKey;
         const resolved = resolveSpec(HIDPI_SPEC, serverSettings, conditionalCtx, readHidpiStored);
@@ -349,9 +351,9 @@ export function useStreamSettings() {
         if (serverValue !== undefined && HIDPI_SPEC.toServer(resolved) !== serverValue) {
             writeConditional(HIDPI_SPEC, resolved as boolean, setHidpiEnabled, { persist: false });
         }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [serverSettings]);
-    const [videoFullColor, setVideoFullColor] = useConditionalSetting(VIDEO_FULLCOLOR_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    });
+    useEffect(() => { syncHidpi(); }, [serverSettings]);
+    const [videoFullColor, setVideoFullColor] = useConditionalSetting(VIDEO_FULLCOLOR_SPEC, serverSettings, conditionalCtx);
     // Full color is 4:4:4; where the decoder has no such profile the core
     // turns it off, so offering the switch would offer nothing.
     const [fullColorDecodable, setFullColorDecodable] = useState(true);
@@ -361,15 +363,15 @@ export function useStreamSettings() {
         canDecodeFullColor(fullColorCodec).then((ok: boolean) => { if (live) setFullColorDecodable(ok); });
         return () => { live = false; };
     }, [fullColorCodec]);
-    const [videoStreamingMode, setVideoStreamingMode] = useConditionalSetting(VIDEO_STREAMING_MODE_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    const [videoStreamingMode, setVideoStreamingMode] = useConditionalSetting(VIDEO_STREAMING_MODE_SPEC, serverSettings, conditionalCtx);
     // Pre-settings fallbacks mirror the server defaults (the settings table).
     const [jpegQuality, setJpegQuality] = useState(() => parseInt(readStored("jpeg_quality") ?? "", 10) || 40);
     const [paintOverJpegQuality, setPaintOverJpegQuality] = useState(() => parseInt(readStored("paint_over_jpeg_quality") ?? "", 10) || 90);
     const [videoPaintoverCRF, setVideoPaintoverCRF] = useState(() => parseInt(readStored("video_paintover_crf") ?? "", 10) || 18);
     const [videoPaintoverBurstFrames, setVideoPaintoverBurstFrames] = useState(() => parseInt(readStored("video_paintover_burst_frames") ?? "", 10) || 5);
-    const [usePaintOverQuality, setUsePaintOverQuality] = useConditionalSetting(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, [serverSettings], readPaintOverStored);
+    const [usePaintOverQuality, setUsePaintOverQuality] = useConditionalSetting(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, readPaintOverStored);
     // Push the resolved paint-over value so the encoder agrees.
-    useEffect(() => {
+    const syncPaintOver = useEffectEvent(() => {
         if (!serverSettings) return;
         const key = USE_PAINT_OVER_QUALITY_SPEC.storageKey;
         const resolved = resolveSpec(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, readPaintOverStored);
@@ -382,22 +384,22 @@ export function useStreamSettings() {
         if (resolved !== undefined && serverValue !== undefined && resolved !== serverValue) {
             writeConditional(USE_PAINT_OVER_QUALITY_SPEC, resolved as boolean, setUsePaintOverQuality, { persist: false });
         }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [serverSettings]);
+    });
+    useEffect(() => { syncPaintOver(); }, [serverSettings]);
     // A later encoder or Turbo change re-derives paint-over where nothing pins it.
-    useEffect(() => {
+    const rederivePaintOver = useEffectEvent(() => {
         if (!serverSettings || isSettingPinned(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, readPaintOverStored)) return;
         const resolved = resolveSpec(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, readPaintOverStored);
         if (resolved !== usePaintOverQuality) {
             writeConditional(USE_PAINT_OVER_QUALITY_SPEC, resolved as boolean, setUsePaintOverQuality, { persist: false });
         }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [encoder, videoStreamingMode]);
-    const [useCpu, setUseCpu] = useConditionalSetting(USE_CPU_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    });
+    useEffect(() => { rederivePaintOver(); }, [encoder, videoStreamingMode]);
+    const [useCpu, setUseCpu] = useConditionalSetting(USE_CPU_SPEC, serverSettings, conditionalCtx);
     // The server's value is what the display's encoder runs with unless the user chose
     // (single-threaded for VP8): only an explicit pick read back from storage outranks it.
-    const [cpuEncodeThreading, setCpuEncodeThreading] = useConditionalSetting(CPU_ENCODE_THREADING_SPEC, serverSettings, conditionalCtx, [serverSettings], readCpuThreadingStored);
-    const [video10Bit, setVideo10Bit] = useConditionalSetting(VIDEO_10BIT_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    const [cpuEncodeThreading, setCpuEncodeThreading] = useConditionalSetting(CPU_ENCODE_THREADING_SPEC, serverSettings, conditionalCtx, readCpuThreadingStored);
+    const [video10Bit, setVideo10Bit] = useConditionalSetting(VIDEO_10BIT_SPEC, serverSettings, conditionalCtx);
     /** 10-bit is offered only where this engine shows a 10-bit picture of the stream's format. */
     const [tenBitAnswer, setTenBitAnswer] = useState({ format: "", ok: false });
     const tenBitOffered = tenBitStream(encoder, conditionalCtx.encoderBackends as EncoderBackends | null | undefined, useCpu, videoFullColor);
@@ -417,16 +419,16 @@ export function useStreamSettings() {
         const saved = readStored("antiAliasingEnabled");
         return saved !== null ? saved === "true" : true;
     });
-    const [useBrowserCursors, setUseBrowserCursors] = useConditionalSetting(USE_BROWSER_CURSORS_SPEC, serverSettings, conditionalCtx, [serverSettings]);
-    const [rawPointerMotion, setRawPointerMotion] = useConditionalSetting(RAW_POINTER_MOTION_SPEC, serverSettings, conditionalCtx, [serverSettings]);
-    const [macCmdAsCtrl, setMacCmdAsCtrl] = useConditionalSetting(MAC_CMD_AS_CTRL_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    const [useBrowserCursors, setUseBrowserCursors] = useConditionalSetting(USE_BROWSER_CURSORS_SPEC, serverSettings, conditionalCtx);
+    const [rawPointerMotion, setRawPointerMotion] = useConditionalSetting(RAW_POINTER_MOTION_SPEC, serverSettings, conditionalCtx);
+    const [macCmdAsCtrl, setMacCmdAsCtrl] = useConditionalSetting(MAC_CMD_AS_CTRL_SPEC, serverSettings, conditionalCtx);
     /**
      * The cursor mode the core reports as actually in effect (multi-monitor
      * forces browser cursors on), null until reported; the toggle shows it
      * over the stored preference so it never lies about the live state.
      */
     const [effectiveCursor, setEffectiveCursor] = useState<boolean | null>(getLastEffectiveCursorState);
-    const [forceAlignedResolution, setForceAlignedResolution] = useConditionalSetting(FORCE_ALIGNED_RESOLUTION_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    const [forceAlignedResolution, setForceAlignedResolution] = useConditionalSetting(FORCE_ALIGNED_RESOLUTION_SPEC, serverSettings, conditionalCtx);
 
     const [audioInputDevices, setAudioInputDevices] = useState<AudioDevice[]>([]);
     const [audioOutputDevices, setAudioOutputDevices] = useState<AudioDevice[]>([]);
@@ -453,8 +455,14 @@ export function useStreamSettings() {
 
     // Seeding and re-clamping write state rather than deriving in render:
     // every value stays editable afterwards, so recomputing would discard edits.
-    /* eslint-disable react-hooks/set-state-in-effect */
-    useEffect(() => {
+    // They run as the render that brings new server settings or a new
+    // transport does, before anything reads the values they replace.
+    const [seededFor, setSeededFor] = useState<readonly [ServerSettings | null, string, boolean] | null>(null);
+    if (!seededFor || seededFor[0] !== serverSettings || seededFor[1] !== streamMode || seededFor[2] !== isWebrtc) {
+        setSeededFor([serverSettings, streamMode, isWebrtc]);
+        seed();
+    }
+    function seed(): void {
         if (!serverSettings) return;
         const getStoredInt = (key: string) => parseInt(readStored(key) ?? "", 10);
         const clamped = (setting: ServerSetting, key: string): number => {
@@ -501,12 +509,18 @@ export function useStreamSettings() {
             const storedAllowed = s_scaling_dpi.allowed!.includes(String(stored));
             const serverVal = parseInt(s_scaling_dpi.value as string, 10);
             const derived = deriveDpi(manualResolution(serverSettings));
-            const willPostDerived = !storedAllowed && !s_scaling_dpi.overridden && derived !== serverVal;
             setSelectedDpi(s_scaling_dpi.overridden ? serverVal : storedAllowed ? stored : derived);
-            if (willPostDerived) debouncedPostSetting({ scaling_dpi: derived });
         }
+    }
+    // The DPI the seed derived goes to the server where nothing chose one.
+    useEffect(() => {
+        const s_scaling_dpi = serverSettings?.scaling_dpi;
+        if (!serverSettings || !s_scaling_dpi) return;
+        const storedAllowed = s_scaling_dpi.allowed!.includes(String(parseInt(readStored("scaling_dpi") ?? "", 10)));
+        const serverVal = parseInt(s_scaling_dpi.value as string, 10);
+        const derived = deriveDpi(manualResolution(serverSettings));
+        if (!storedAllowed && !s_scaling_dpi.overridden && derived !== serverVal) debouncedPostSetting({ scaling_dpi: derived });
     }, [serverSettings, streamMode, debouncedPostSetting, isWebrtc]);
-    /* eslint-enable react-hooks/set-state-in-effect */
 
     const audioDevicesRequested = useRef(false);
     /**

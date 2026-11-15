@@ -212,7 +212,8 @@ export function useStatsGraphs(snapshot: Snapshot | null, framerate: number): Re
   const history = snapshot ? snapshot.history : null;
   const length = snapshot ? snapshot.length : 0;
   return React.useMemo(() => {
-    const samples = history || [];
+    // The history array is appended to in place, so what changes is its length.
+    const samples = (history || []).slice(0, length);
     const fps = seriesOf(samples, "fps");
     const encoded = seriesOf(samples, "encoded_fps");
     const mbps = seriesOf(samples, "mbps");
@@ -228,8 +229,6 @@ export function useStatsGraphs(snapshot: Snapshot | null, framerate: number): Re
       mbps: { series: [{ name: "", values: mbps }], max: axisTop(1, mbps) },
       rtt: { series: [{ name: "", values: rtt }], max: axisTop(20, rtt) },
     };
-    // The history array is appended to in place; its length is what changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [history, length, framerate]);
 }
 
