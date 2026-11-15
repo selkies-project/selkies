@@ -131,7 +131,7 @@ SUITES: list = [
      "timeout": 600},
     {"path": "integration/test_lone_display_crtc_follows.py", "tier": "integration", "timeout": 300},
     {"path": RUST + "xvfb_vidmode.rs", "tier": "integration", "timeout": 120},
-    {"path": "integration/test_capture_demand.py", "tier": "integration", "timeout": 300},
+    {"path": RUST + "capture_demand.rs", "tier": "integration", "timeout": 300},
     {"path": "integration/test_session_launcher.py", "tier": "integration", "timeout": 600},
 
     # e2e
@@ -321,7 +321,7 @@ def cases(tiers: Optional[Sequence[str]] = None) -> Iterator[tuple]:
 
 def name(path: str, tier: str) -> str:
     """The name a suite is selected and its logs are kept under, without its
-    selector: `integration/test_capture_demand` for `integration/test_capture_demand.py`,
+    selector: `integration/test_session_launcher` for `integration/test_session_launcher.py`,
     `integration/test_protocol` for the Rust target `protocol.rs` of that tier,
     and `unit/test_fit_frame` for the audit `tools/fit_frame_audit.ts`, so a
     suite keeps its name in whichever language it is written."""
