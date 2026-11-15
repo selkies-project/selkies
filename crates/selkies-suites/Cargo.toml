@@ -35,3 +35,9 @@ x11rb = { version = "0.14", features = ["randr", "xf86vidmode"] }
 # data-control protocol, at pixelflux's versions; pure Rust, no libwayland.
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+
+[dev-dependencies]
+# What tests/fetch_verified.rs serves GitHub's answers with: a proxy that ends TLS for the hosts
+# the helper asks, under a certificate authority made for the run, at the server's versions.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }

@@ -3676,6 +3676,8 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "rcgen",
+ "rustls",
  "serde_json",
  "tokio",
  "tokio-websockets",
