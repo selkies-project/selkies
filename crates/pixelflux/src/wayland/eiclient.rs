@@ -202,6 +202,24 @@ struct Device {
     scroll: Option<ei::Scroll>,
     keyboard: Option<ei::Keyboard>,
     keymap: Option<KeymapPolicy>,
+    /// The logical rectangles (x, y, w, h) this device's absolute motion may land in; none
+    /// means anywhere.
+    regions: Vec<Rect>,
+}
+
+type Rect = (u32, u32, u32, u32);
+
+/// The resumed absolute device for a point: the one whose region holds it, else the first
+/// resumed one. Mutter gives each screencast stream its own absolute device and drops motion
+/// outside a device's regions, so a second monitor needs its own device picked.
+fn abs_target(devices: &[(bool, Vec<Rect>)], x: f32, y: f32) -> Option<usize> {
+    let holds = |r: &Rect| {
+        x >= r.0 as f32 && y >= r.1 as f32 && x < (r.0 + r.2) as f32 && y < (r.1 + r.3) as f32
+    };
+    devices
+        .iter()
+        .position(|(up, regions)| *up && regions.iter().any(holds))
+        .or_else(|| devices.iter().position(|(up, _)| *up))
 }
 
 struct Worker {
@@ -378,6 +396,11 @@ impl Worker {
                     scroll: device.interface(),
                     keyboard: device.interface(),
                     keymap,
+                    regions: device
+                        .regions()
+                        .iter()
+                        .map(|r| (r.x, r.y, r.width, r.height))
+                        .collect(),
                     device: device.device().clone(),
                     resumed: false,
                     emulating: false,
@@ -427,7 +450,14 @@ impl Worker {
     fn emit(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::MotionAbsolute { x, y } => {
-                if let Some(i) = self.ready_index(|d| d.pointer_abs.is_some()) {
+                let abs: Vec<usize> = (0..self.devices.len())
+                    .filter(|&i| self.devices[i].pointer_abs.is_some())
+                    .collect();
+                let views: Vec<(bool, Vec<Rect>)> = abs
+                    .iter()
+                    .map(|&i| (self.devices[i].resumed, self.devices[i].regions.clone()))
+                    .collect();
+                if let Some(i) = abs_target(&views, x, y).map(|k| abs[k]) {
                     self.start(i);
                     self.devices[i]
                         .pointer_abs
@@ -637,6 +667,20 @@ fn key_state(pressed: bool) -> ei::keyboard::KeyState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mutter gives each screencast stream its own absolute device, and drops motion
+    /// outside a device's regions: a point goes to the device whose region holds it.
+    #[test]
+    fn absolute_motion_goes_to_the_device_whose_region_holds_it() {
+        let top = vec![(0, 0, 2544, 1318)];
+        let bottom = vec![(0, 1318, 2556, 1302)];
+        let devices = [(true, top), (true, bottom.clone()), (false, bottom)];
+        assert_eq!(abs_target(&devices, 100.0, 1400.0), Some(1));
+        assert_eq!(abs_target(&devices, 100.0, 100.0), Some(0));
+        assert_eq!(abs_target(&devices, 9000.0, 9000.0), Some(0));
+        assert_eq!(abs_target(&[(true, vec![])], 5.0, 5.0), Some(0));
+        assert_eq!(abs_target(&[(false, vec![])], 5.0, 5.0), None);
+    }
     use crate::wayland::keymap::compile_rmlvo;
 
     /// A base keysym present in the compositor keymap resolves to that keymap's keycode with the
