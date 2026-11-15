@@ -8,7 +8,9 @@
 //!
 //! A suite drives a built `selkies` as a black box, over its command line, its HTTP routes, its
 //! WebSocket and its log, so the crate depends on no crate of the workspace: it builds in seconds
-//! beside a server a wheel installed, and what it tests is the binary that ships.
+//! beside a server a wheel installed, and what it tests is the binary that ships. The C code the
+//! server ships beside itself (the input and V4L2 interposers, fake libudev) is tested here the
+//! same way: built off the tree and run under `LD_PRELOAD` as a host process meets it.
 //!
 //! - [`server`] starts that binary from an environment built from nothing, on a free port, under a
 //!   home and a runtime directory of the run's own, and ends its process group when the test
@@ -25,7 +27,8 @@
 //! - [`checks`] records a suite's checks, each named for the behavior it holds, and fails the test
 //!   once with every one that did not hold and the server's log.
 //!
-//! Every test is `#[ignore]`d with what it needs, as the tests that need a GPU or an X server are:
+//! Every test that needs a server or a display is `#[ignore]`d with what it needs, as the tests that
+//! need a GPU or an X server are; those that need only the C compiler and make run with the rest:
 //! `cargo test --workspace` builds them and runs none, and a run that names a suite
 //! (`cargo test -p selkies-suites --test protocol -- --include-ignored`) fails, never skips, where
 //! the server or the display is missing. A wait is a condition with a bound, never a sleep, and a

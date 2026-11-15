@@ -4,7 +4,7 @@
 
 [package]
 name = "selkies-suites"
-description = "The integration suites that drive a built selkies server as a black box, and the harness they share."
+description = "The integration suites that drive a built selkies server as a black box, the tests of the C code it ships beside itself, and the harness they share."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
