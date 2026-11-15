@@ -27,10 +27,10 @@ import suites
 TESTS = os.path.dirname(os.path.abspath(__file__))
 
 CASES: list = [
-    pytest.param(path, selector, timeout, suites.name(path, tier),
+    pytest.param(path, selector, timeout, name,
                  marks=getattr(pytest.mark, tier),
-                 id=suites.name(path, tier).replace("/", ":") + (f"-{selector}" if selector else ""))
-    for path, selector, tier, timeout in suites.cases()
+                 id=name.replace("/", ":") + (f"-{selector}" if selector else ""))
+    for path, selector, tier, timeout, name in suites.cases()
 ]
 
 
@@ -101,6 +101,9 @@ def run(cmd: list, timeout: int, env: dict) -> subprocess.CompletedProcess:
 @pytest.mark.parametrize("path,selector,timeout,name", CASES)
 def test_suite(path: str, selector: Optional[str], timeout: int, name: str) -> None:
     """Run one suite as a subprocess and map its exit protocol onto pytest."""
+    if path.endswith(".ts") and not shutil.which("node"):
+        # Reported as a skip, never as a pass: the audit is the whole suite.
+        pytest.skip(f"{path}: node not found, so the audit cannot run")
     cmd = suites.command(path, selector)
     # A minute short of the kill, so what a stalled suite says lands in the
     # output that is kept: a Python suite dumps every thread's stack, a Rust
@@ -138,6 +141,12 @@ def test_suite(path: str, selector: Optional[str], timeout: int, name: str) -> N
     # names no test of the target, not a suite that passed.
     assert not path.endswith(".rs") or proc.returncode or "running 0 tests" not in proc.stdout, (
         f"{path} {selector or ''} ran no test")
+    # An audit that stopped before its first check exits as Node does on a
+    # throw, which is non-zero; one that exits 0 having checked nothing has
+    # tested nothing.
+    assert not path.endswith(".ts") or any(
+        line.startswith(("PASS", "FAIL")) for line in proc.stdout.splitlines()), (
+        f"{path} printed no check\n{proc.stderr[-2000:]}")
     failed = [line for line in proc.stdout.splitlines() if line.startswith("FAIL")]
     # A suite that died rather than failing checks reports through stderr, so
     # the traceback is what the message has to carry; a Rust one's panic is in

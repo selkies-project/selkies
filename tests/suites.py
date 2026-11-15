@@ -12,6 +12,14 @@ naming the tests of the target to run:
 
     cargo test -p selkies-suites --test protocol -- --include-ignored
 
+A suite whose path ends in `.ts` is a Node audit under `tools/`, run with the
+types stripped:
+
+    node tests/tools/fit_frame_audit.ts
+
+A suite is selected and its logs kept under the name `name()` gives its path,
+or under the `name` its entry carries.
+
 test_suites.py turns this table into pytest cases, one per selector, and CI
 selects tiers from it. Tiers describe what a suite needs:
 
@@ -24,6 +32,7 @@ selects tiers from it. Tiers describe what a suite needs:
     image        a published desktop image through the release checklist, run on request
 """
 import os
+import shutil
 import sys
 from typing import Iterator, Optional, Sequence
 
@@ -307,7 +316,7 @@ TIERS: tuple = ("unit", "integration", "e2e", "perf", "soak", "image")
 
 
 def cases(tiers: Optional[Sequence[str]] = None) -> Iterator[tuple]:
-    """Yield `(path, selector, tier, timeout)` for every runnable case.
+    """Yield `(path, selector, tier, timeout, name)` for every runnable case.
 
     Args:
         tiers: Restrict to these tiers; None yields every suite. A suite with
@@ -317,17 +326,21 @@ def cases(tiers: Optional[Sequence[str]] = None) -> Iterator[tuple]:
         if tiers and suite["tier"] not in tiers:
             continue
         for selector in suite.get("selectors", [None]):
-            yield suite["path"], selector, suite["tier"], suite["timeout"]
+            yield (suite["path"], selector, suite["tier"], suite["timeout"],
+                   suite.get("name") or name(suite["path"], suite["tier"]))
 
 
 def name(path: str, tier: str) -> str:
     """The name a suite is selected and its logs are kept under, without its
     selector: `integration/test_gpu_probe` for `integration/test_gpu_probe.py`,
-    and `integration/test_protocol` for the Rust target `protocol.rs` of that
-    tier, so a suite keeps its name in whichever language it is written."""
+    `integration/test_protocol` for the Rust target `protocol.rs` of that tier,
+    and `unit/test_fit_frame` for the audit `tools/fit_frame_audit.ts`, so a
+    suite keeps its name in whichever language it is written."""
     stem = os.path.splitext(path)[0]
     if path.endswith(".rs"):
         return f"{tier}/test_{os.path.basename(stem)}"
+    if path.endswith(".ts"):
+        return f"{tier}/test_{os.path.basename(stem).removesuffix('_audit')}"
     return stem
 
 
@@ -339,4 +352,6 @@ def command(path: str, selector: Optional[str]) -> list:
         # here: `cargo test --workspace` runs on hosts with no display.
         return ["cargo", "test", "--locked", "--package", "selkies-suites", "--test", target,
                 "--", "--include-ignored"] + ([selector] if selector else [])
+    if path.endswith(".ts"):
+        return [shutil.which("node") or "node", os.path.join(TESTS, path)] + ([selector] if selector else [])
     return [sys.executable, os.path.join(TESTS, path)] + ([selector] if selector else [])
