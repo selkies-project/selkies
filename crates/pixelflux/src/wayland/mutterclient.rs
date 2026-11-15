@@ -86,6 +86,17 @@ pub fn layout_config(current: &[MonitorState], want: &[(String, i32, i32)]) -> V
     out
 }
 
+/// Whether `config` places any monitor differently from `current`: re-applying an identical
+/// layout still makes Mutter reconfigure, which pauses every stream it carries.
+pub fn needs_apply(current: &[MonitorState], config: &[MonitorState]) -> bool {
+    config.iter().any(|c| {
+        current
+            .iter()
+            .find(|m| m.connector == c.connector)
+            .is_none_or(|m| (m.x, m.y, m.primary) != (c.x, c.y, c.primary))
+    })
+}
+
 async fn connect() -> Result<Connection, String> {
     zbus::connection::Builder::session()
         .method_timeout(CALL_DEADLINE)
@@ -177,7 +188,11 @@ pub fn apply(want: &[(String, i32, i32)]) -> Result<(), String> {
             .call("GetCurrentState", &())
             .await
             .map_err(|e| format!("GetCurrentState: {e}"))?;
-        let config = layout_config(&monitors_now(&state), want);
+        let now = monitors_now(&state);
+        let config = layout_config(&now, want);
+        if !needs_apply(&now, &config) {
+            return Ok(());
+        }
         let logical: Vec<LogicalConfig<'_>> = config
             .iter()
             .map(|m| {
@@ -254,6 +269,15 @@ mod tests {
         let cur = [mon("Meta-0", 0, 0, 1.0), mon("Meta-2", 2556, 0, 1.0)];
         let cfg = layout_config(&cur, &want(&[("Meta-0", 0, 0)]));
         assert_eq!(places(&cfg), want(&[("Meta-0", 0, 0), ("Meta-2", 2556, 0)]));
+    }
+
+    #[test]
+    fn an_unchanged_layout_needs_no_apply() {
+        let cur = [mon("Meta-0", 0, 1318, 1.0), mon("Meta-1", 0, 0, 1.0)];
+        let cfg = layout_config(&cur, &want(&[("Meta-0", 0, 1318), ("Meta-1", 0, 0)]));
+        assert!(!needs_apply(&cur, &cfg));
+        let moved = layout_config(&cur, &want(&[("Meta-0", 0, 0), ("Meta-1", 2556, 0)]));
+        assert!(needs_apply(&cur, &moved));
     }
 
     #[test]
