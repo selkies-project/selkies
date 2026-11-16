@@ -270,7 +270,7 @@ SUITES: list = [
     # A layout's contrast walk takes about nine minutes on an idle host (the suite's docstring).
     {"path": "e2e/test_dashboard_look.py", "tier": "e2e", "timeout": 1800,
      "selectors": ["contrast-default", "contrast-wish", "contrast-edge", "spacing"]},
-    {"path": "e2e/test_dashboard_matrix.py", "tier": "e2e", "timeout": 1800,
+    {"path": "e2e/dashboard_matrix.spec.ts", "tier": "e2e", "timeout": 1800,
      "selectors": ["wish-webrtc-x11", "wish-ws-wl", "wish-webrtc-wl",
                    "edge-webrtc-x11", "edge-ws-wl", "edge-webrtc-wl",
                    "gates-webrtc-x11", "gates-ws-wl", "gates-webrtc-wl"]},
