@@ -203,6 +203,76 @@ fn a_restart_reads_the_density_the_home_persists() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "run by a_density_no_session_could_take_stays_in_effect, in a process of its own"]
+async fn a_density_no_session_could_take_in_its_process() {
+    if !isolated() {
+        return;
+    }
+    crate::settings::install(crate::settings::Settings::parse(&[], &|_| None));
+    let channel = in_home(".config").join(XFCONF_XSETTINGS);
+    std::fs::create_dir_all(channel.parent().expect("a parent")).expect("channel directory");
+    std::fs::write(
+        &channel,
+        "<channel name=\"xsettings\" version=\"1.0\">\n  <property name=\"Xft\" type=\"empty\">\n    <property name=\"DPI\" type=\"int\" value=\"192\"/>\n  </property>\n</channel>\n",
+    )
+    .expect("channel");
+    let written = PathBuf::from(std::env::var("DENSITY_WRITTEN").expect("the record"));
+
+    assert_eq!(
+        (restore_dpi(144, true).await, applied_dpi()),
+        (144, None),
+        "an operator's density no session could be given is settled on, and is not the desktop's"
+    );
+    assert_eq!(
+        restore_dpi(96, false).await,
+        192,
+        "a client-driven desktop keeps the density xfconf persists"
+    );
+    assert_eq!(
+        (runs(&written), applied_dpi()),
+        (Vec::new(), Some(192)),
+        "with no session to write it through, it is still the one a page is compared against"
+    );
+}
+
+/// A server started ahead of the XFCE session finds the density the home keeps and no bus to
+/// write it through.
+#[test]
+fn a_density_no_session_could_take_stays_in_effect() {
+    let home = Scratch::new("density-home");
+    let stub_bin = home.path("stub-bin");
+    std::fs::create_dir_all(&stub_bin).expect("stub-bin");
+    let written = home.path("written");
+    script(
+        &stub_bin.join("xfconf-query"),
+        &format!(
+            "echo \"xfconf-query $DBUS_SESSION_BUS_ADDRESS $*\" >> \"{}\"",
+            written.display()
+        ),
+    );
+    let path = format!(
+        "{}:{}",
+        stub_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    run_isolated(
+        "display::dpi::session_density::a_density_no_session_could_take_in_its_process",
+        &[
+            ("HOME", &home.text()),
+            (
+                "XDG_CONFIG_HOME",
+                &home.path(".config").display().to_string(),
+            ),
+            ("XDG_CURRENT_DESKTOP", "XFCE"),
+            ("DESKTOP_SESSION", ""),
+            ("DISPLAY", ""),
+            ("PATH", &path),
+            ("DENSITY_WRITTEN", &written.display().to_string()),
+        ],
+    );
+}
+
 /// The tool runs the stand-ins recorded since the last call, as `tool bus args`.
 fn runs(written: &Path) -> Vec<String> {
     if !super::sound_path(written) {

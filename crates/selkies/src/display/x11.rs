@@ -91,12 +91,13 @@ fn move_flags() -> u32 {
 /// The DPI the last `set_dpi` applied; resizes size the pane in millimeters from it.
 static APPLIED_DPI: Mutex<Option<i32>> = Mutex::new(None);
 
-/// The density the last `set_dpi` gave the desktop; `None` before the first.
+/// The density the last `set_dpi` gave the desktop, or the one startup found a client-driven
+/// desktop keeping where it could not be written again; `None` before either.
 pub fn applied_dpi() -> Option<i32> {
     *APPLIED_DPI.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Record the density the desktop was given.
+/// Record the density the desktop was given, or keeps.
 pub(crate) fn set_applied_dpi(dpi: i32) {
     *APPLIED_DPI.lock().unwrap_or_else(|e| e.into_inner()) = Some(dpi);
 }
