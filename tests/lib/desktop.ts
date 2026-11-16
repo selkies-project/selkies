@@ -6,13 +6,15 @@
 
 /**
  * The desktop side the suites drive through command-line tools: the sound
- * server's modules (`pactl`) and the Wayland compositor's selection
- * (`wl-clipboard`).
+ * server's modules (`pactl`), the Wayland compositor's selection
+ * (`wl-clipboard`), and the X display's window manager and windows
+ * (`openbox`, `wmctrl`).
  * @module
  */
 
-import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 
 import { sleep, WORKDIR } from './env.ts';
 
@@ -92,4 +94,63 @@ export async function wlCopy(socket: string, text: string, timeoutS = 10): Promi
         await sleep(1000);
     }
     return false;
+}
+
+/**
+ * The first executable named `name` on PATH.
+ * @param name The program.
+ * @returns Its path, or null.
+ */
+export function onPath(name: string): string | null {
+    for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+        if (dir && existsSync(join(dir, name))) return join(dir, name);
+    }
+    return null;
+}
+
+/** The test X display, from `E2E_DISPLAY`. */
+function testDisplay(): string {
+    const display = process.env.E2E_DISPLAY;
+    if (!display) throw new Error('E2E_DISPLAY is not set: point it at a throwaway X server for the suites to drive');
+    return display;
+}
+
+/** A program the suite started, and whether it has exited. */
+export interface Started {
+    child: ChildProcess;
+    /** @returns Its exit code or signal, null while it runs. */
+    exited: () => number | string | null;
+    /** End it, if it still runs. */
+    stop: () => void;
+}
+
+/**
+ * Start `argv` on the test X display, its output dropped.
+ * @param argv The program and its arguments.
+ * @returns The running program.
+ */
+export function startOnDisplay(argv: readonly string[]): Started {
+    const [program, ...args] = argv;
+    const child = spawn(program, args, { env: { ...process.env, DISPLAY: testDisplay() }, stdio: 'ignore' });
+    let ended: number | string | null = null;
+    child.on('exit', (code, signal) => { ended = signal ?? code ?? 0; });
+    child.on('error', () => { ended = 'error'; });
+    return { child, exited: () => ended, stop: () => { if (ended === null) child.kill('SIGTERM'); } };
+}
+
+/**
+ * The geometry of the session's pcmanfm-qt desktop window on the test X
+ * display, through `wmctrl`.
+ * @returns `[x, y, w, h]`, or null when no such window runs.
+ */
+export function desktopWindow(): [number, number, number, number] | null {
+    const listing = spawnSync('wmctrl', ['-l', '-G', '-x'], { encoding: 'utf8', env: { ...process.env, DISPLAY: testDisplay() } }).stdout ?? '';
+    for (const line of listing.split('\n')) {
+        const cols = line.split(/\s+/).filter(Boolean);
+        if (cols.length >= 7 && cols[6].startsWith('pcmanfm-qt')) {
+            const [x, y, w, h] = cols.slice(2, 6).map(Number);
+            return [x, y, w, h];
+        }
+    }
+    return null;
 }

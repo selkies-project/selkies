@@ -28,6 +28,7 @@
 //! | `x11.key_held` | `keysym`, `display` | `held`: whether its key is down, null without a keycode |
 //! | `x11.pointer` | `display` | `at`: `[x, y]` on the root |
 //! | `x11.root_size` | `display` | `size`: `[width, height]` |
+//! | `x11.window_manager` | `display` | `manager`: its `pid` (0 unknown) and `name`, null for none |
 //! | `x11.clipboard` | `timeout_ms`, `display` | `text`: CLIPBOARD's text, null when none comes |
 //! | `x11.own_clipboard` | `payload`, `display` | `handle` of an owner serving `payload` |
 //! | `wl.observe` | `socket`, `env` | `handle` of a `wl-observer` on the server's compositor |
@@ -159,6 +160,10 @@ impl Host {
                 Ok(json!({ "held": x11::key_held(&display(request)?, keysym) }))
             }
             "x11.pointer" => Ok(json!({ "at": x11::pointer(&display(request)?) })),
+            "x11.window_manager" => Ok(json!({
+                "manager": x11::window_manager(&display(request)?)
+                    .map(|(pid, name)| json!({ "pid": pid, "name": name })),
+            })),
             "x11.root_size" => Ok(json!({ "size": x11::root_size(&display(request)?) })),
             "x11.clipboard" => {
                 let within = timeout(request, Duration::from_secs(8));

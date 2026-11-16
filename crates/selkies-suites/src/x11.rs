@@ -18,6 +18,7 @@ use std::time::Duration;
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::Event;
 use x11rb::protocol::randr::{self, ConnectionExt as _};
+use x11rb::protocol::res::ConnectionExt as _;
 use x11rb::protocol::xf86vidmode::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{
     AtomEnum, ConnectionExt as _, CreateGCAux, CreateWindowAux, EventMask, PropMode, Rectangle,
@@ -448,4 +449,56 @@ pub fn read_clipboard(display: &str, timeout: Duration) -> Option<String> {
         }
     }
     None
+}
+
+/// The window manager managing `display`: its process id, 0 when none is known, and the name it
+/// advertises, as its check window (`_NET_SUPPORTING_WM_CHECK`) carries them. A manager that sets
+/// no `_NET_WM_PID` (Openbox) is found through what the X-Resource extension knows of the client
+/// owning that window. `None` when no manager runs or the display does not answer.
+pub fn window_manager(display: &str) -> Option<(u32, String)> {
+    let (connection, root) = open(display)?;
+    let atom = |name: &[u8]| -> Option<u32> {
+        Some(connection.intern_atom(false, name).ok()?.reply().ok()?.atom)
+    };
+    let property = |window: Window, name: u32, kind: u32| {
+        connection
+            .get_property(false, window, name, kind, 0, 1024)
+            .ok()?
+            .reply()
+            .ok()
+    };
+    let check = property(
+        root,
+        atom(b"_NET_SUPPORTING_WM_CHECK")?,
+        AtomEnum::ANY.into(),
+    )?
+    .value32()?
+    .next()?;
+    let named = property(check, atom(b"_NET_WM_NAME")?, atom(b"UTF8_STRING")?)
+        .map(|reply| String::from_utf8_lossy(&reply.value).into_owned())
+        .unwrap_or_default();
+    let pid = property(check, atom(b"_NET_WM_PID")?, AtomEnum::ANY.into())
+        .and_then(|reply| reply.value32()?.next())
+        .filter(|pid| *pid != 0)
+        .or_else(|| {
+            connection
+                .extension_information(x11rb::protocol::res::X11_EXTENSION_NAME)
+                .ok()??;
+            let mask = x11rb::protocol::res::ClientIdMask::LOCAL_CLIENT_PID;
+            let reply = connection
+                .res_query_client_ids(&[x11rb::protocol::res::ClientIdSpec {
+                    client: check,
+                    mask,
+                }])
+                .ok()?
+                .reply()
+                .ok()?;
+            reply
+                .ids
+                .iter()
+                .find(|id| u32::from(id.spec.mask) & u32::from(mask) != 0)
+                .and_then(|id| id.value.first().copied())
+        })
+        .unwrap_or(0);
+    Some((pid, named))
 }

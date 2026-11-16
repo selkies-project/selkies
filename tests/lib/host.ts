@@ -197,6 +197,15 @@ export class Host {
     }
 
     /**
+     * The running server's log from a mark on.
+     * @param from A mark; 0 reads the whole log.
+     * @returns The text.
+     */
+    async log(from = 0): Promise<string> {
+        return stringOr(fields(await this.request('server.log', { from })).text) ?? '';
+    }
+
+    /**
      * Whether `needle` reaches the running server's log past `from` within
      * `timeoutS`.
      * @param needle The text.
@@ -222,6 +231,13 @@ export class Host {
     /** @returns Where the X pointer is on the root, or null. */
     async pointer(): Promise<[number, number] | null> {
         return pair(fields(await this.request('x11.pointer')).at);
+    }
+
+    /** @returns The X display's window manager, its pid 0 when unknown; null for none. */
+    async windowManager(): Promise<{ pid: number; name: string } | null> {
+        const manager = fields(await this.request('x11.window_manager')).manager;
+        if (!isRecord(manager)) return null;
+        return { pid: numberOr(manager.pid) ?? 0, name: stringOr(manager.name) ?? '' };
     }
 
     /** @returns The X root's size, read on a fresh connection, or null. */
