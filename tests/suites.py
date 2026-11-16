@@ -288,7 +288,7 @@ SUITES: list = [
                    "ws-x11-collab", "wr-x11-collab"]},
     {"path": "e2e/test_gaming_mode.py", "tier": "e2e", "timeout": 600,
      "selectors": ["x11", "wl", "x11-two", "wl-two", "x11-dashboards"]},
-    {"path": "e2e/test_keyboard_layout.py", "tier": "e2e", "timeout": 600,
+    {"path": "e2e/keyboard_layout.spec.ts", "tier": "e2e", "timeout": 600,
      "selectors": ["ws-x11", "wr-x11", "ws-wl", "wr-wl"]},
     {"path": "e2e/encoders.spec.ts", "tier": "e2e", "timeout": 900,
      "selectors": ["ws-x11", "wr-x11", "ws-wl", "wr-wl"]},
