@@ -4,7 +4,7 @@ Every suite here is a standalone program. It prints one `PASS`/`FAIL` line per
 check, a count at the end, and exits non-zero if anything failed:
 
 ```bash
-python3 tests/e2e/test_matrix.py ws-x11
+python3 tests/e2e/test_encoders.py ws-x11
 ```
 
 `tests/test_suites.py` runs each of them as a pytest case, so the same suites

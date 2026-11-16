@@ -4,7 +4,7 @@
 Every suite is a standalone program that prints one PASS/FAIL line per check and
 exits non-zero if any of them failed, so it can be run directly:
 
-    python3 tests/e2e/test_matrix.py ws-x11
+    python3 tests/e2e/test_encoders.py ws-x11
 
 A suite whose path ends in `.rs` is a test target of `crates/selkies-suites`,
 which drives the server from Rust; it runs as `command()` gives it, a selector
@@ -146,7 +146,7 @@ SUITES: list = [
     {"path": "e2e/test_wayland_popups.py", "tier": "e2e", "timeout": 300,
      "selectors": ["layer", "window"]},
     {"path": "e2e/test_cc_start_rate.py", "tier": "e2e", "timeout": 600},
-    {"path": "e2e/test_matrix.py", "tier": "e2e", "timeout": 1200,
+    {"path": "e2e/matrix.spec.ts", "tier": "e2e", "timeout": 1200,
      "selectors": ["ws-x11", "wr-x11", "ws-wl", "wr-wl"]},
     {"path": "e2e/test_scroll.py", "tier": "e2e", "timeout": 900,
      "selectors": ["websockets-x11", "webrtc-x11", "websockets-wl", "webrtc-wl"]},
@@ -327,7 +327,7 @@ def cases(tiers: Optional[Sequence[str]] = None) -> Iterator[tuple]:
 
 def name(path: str, tier: str) -> str:
     """The name a suite is selected and its logs are kept under, without its
-    selector: `e2e/test_matrix` for `e2e/test_matrix.py`,
+    selector: `e2e/test_encoders` for `e2e/test_encoders.py`,
     `integration/test_protocol` for the Rust target `protocol.rs` of that tier,
     `integration/test_gamepad_switch` for the Playwright suite
     `integration/gamepad_switch.spec.ts`, and `unit/test_fit_frame` for the
