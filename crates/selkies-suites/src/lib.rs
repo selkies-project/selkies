@@ -42,6 +42,7 @@ pub mod checks;
 pub mod client;
 pub mod displays;
 pub mod http;
+pub mod scene;
 pub mod server;
 pub mod wayland;
 pub mod x11;

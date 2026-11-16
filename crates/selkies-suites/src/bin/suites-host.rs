@@ -32,8 +32,9 @@
 //! | `x11.clipboard` | `timeout_ms`, `display` | `text`: CLIPBOARD's text, null when none comes |
 //! | `x11.own_clipboard` | `payload`, `display` | `handle` of an owner serving `payload` |
 //! | `x11.paint` | `paints`, `flicker`, `display` | `handle` of solid windows: each `[x, y, w, h, rgb]`, the flicker `{paint, second, period_ms}` |
-//! | `wl.observe` | `socket`, `env` | `handle` of a `wl-observer` on the server's compositor |
+//! | `wl.observe` | `socket`, `env`, `program` | `handle` of a client on the server's compositor: `wl-observer`, or the crate's `program` |
 //! | `wl.wait` | `handle`, `kind`, `match`, `timeout_ms` | `event`: the first of `kind` matching, or null |
+//! | `wl.output` | `handle` | `lines`: what the client printed that was no event |
 //! | `release` | `handle` | an owner or observer ended |
 //!
 //! `display` defaults to `E2E_DISPLAY`, the display the servers capture.
@@ -215,9 +216,16 @@ impl Host {
             }
             "wl.observe" => {
                 let socket = text(request, "socket").ok_or("wl.observe takes a socket")?;
+                let program = text(request, "program").unwrap_or("wl-observer");
+                if !program
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                {
+                    return Err(format!("{program} is no program of this crate"));
+                }
                 let bin = std::env::current_exe()
                     .map_err(|e| format!("this program's path: {e}"))?
-                    .with_file_name("wl-observer");
+                    .with_file_name(program);
                 let env: Vec<(String, String)> = request
                     .get("env")
                     .and_then(Value::as_object)
@@ -247,6 +255,14 @@ impl Host {
                     .unwrap_or_default();
                 let within = timeout(request, Duration::from_secs(8));
                 Ok(json!({ "event": observer.wait_for_match(kind, &want, within).await }))
+            }
+            "wl.output" => {
+                let handle = whole(request, "handle").ok_or("wl.output takes a handle")?;
+                let observer = self
+                    .observers
+                    .get(&handle)
+                    .ok_or_else(|| format!("no observer {handle}"))?;
+                Ok(json!({ "lines": observer.output() }))
             }
             "release" => {
                 let handle = whole(request, "handle").ok_or("release takes a handle")?;

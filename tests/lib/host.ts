@@ -97,6 +97,8 @@ export interface Observer extends Held {
      * @returns The event, or null.
      */
     wait: (kind: string, timeoutS?: number, match?: Record<string, unknown>) => Promise<Fields | null>;
+    /** @returns What it printed that was no event line (an error). */
+    output: () => Promise<string[]>;
     /**
      * Whether its surface mapped.
      * @param timeoutS How long to wait.
@@ -292,18 +294,24 @@ export class Host {
     }
 
     /**
-     * Run `wl-observer` on the server's compositor at `socket`.
+     * Run `wl-observer`, or another Wayland client of the crate, on the
+     * server's compositor at `socket`.
      * @param socket The compositor's socket name.
-     * @param env Added to the observer's environment.
+     * @param env Added to the client's environment.
+     * @param program The client (`wl-motion-scene`).
      * @returns The observer.
      */
-    async observe(socket: string, env: Record<string, string> = {}): Promise<Observer> {
-        const held = this.held(await this.request('wl.observe', { socket, env: { WLOBS_DURATION: '60', ...env } }));
+    async observe(socket: string, env: Record<string, string> = {}, program = 'wl-observer'): Promise<Observer> {
+        const held = this.held(await this.request('wl.observe', { socket, program, env: { WLOBS_DURATION: '60', ...env } }));
         return {
             ...held,
             wait: async (kind, timeoutS = 8, match = {}) => {
                 const event = fields(await this.request('wl.wait', { handle: held.handle, kind, match, timeout_ms: Math.round(timeoutS * 1000) })).event;
                 return isRecord(event) ? event : null;
+            },
+            output: async () => {
+                const lines = fields(await this.request('wl.output', { handle: held.handle })).lines;
+                return Array.isArray(lines) ? lines.filter((l): l is string => typeof l === 'string') : [];
             },
             ready: async (timeoutS = 10) => {
                 const event = fields(await this.request('wl.wait', { handle: held.handle, kind: 'mapped', timeout_ms: Math.round(timeoutS * 1000) })).event;

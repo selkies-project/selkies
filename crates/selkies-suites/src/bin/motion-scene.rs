@@ -33,96 +33,10 @@ use x11rb::protocol::xproto::{
 };
 use x11rb::rust_connection::RustConnection;
 
-const CODE_BITS: u32 = 16;
-const CODE_SIZE: i16 = 48;
-const CODE_GAP: i16 = 8;
-const CODE_X: i16 = 16;
-const CODE_Y: i16 = 16;
-const BAND_Y: i16 = 96;
-const BAND_H: u16 = 64;
-const CHECK: u32 = 16;
-const BAND_STEP: u32 = 4;
-const BAR_W: u32 = 160;
-const BAR_STEP: u32 = 12;
-const NOISE_H: u16 = 240;
-const NOISE_IMAGES: usize = 4;
-const BACKGROUND: u32 = 0x001e_2878;
-const BAR: u32 = 0x00dc_3c28;
-const WHITE: u32 = 0x00ff_ffff;
-const BLACK: u32 = 0;
-
-/// MT19937, seeded as CPython seeds `random.Random(n)` for a small `n`: `init_by_array([n])`.
-struct Twister {
-    state: [u32; 624],
-    index: usize,
-}
-
-impl Twister {
-    fn python(seed: u32) -> Twister {
-        let mut state = [0u32; 624];
-        state[0] = 19_650_218;
-        for i in 1..624 {
-            let prev = state[i - 1];
-            state[i] = 1_812_433_253u32
-                .wrapping_mul(prev ^ (prev >> 30))
-                .wrapping_add(u32::try_from(i).unwrap_or(0));
-        }
-        let key = [seed];
-        let (mut i, mut j) = (1usize, 0usize);
-        for _ in 0..624.max(key.len()) {
-            let prev = state[i - 1];
-            state[i] = (state[i] ^ (prev ^ (prev >> 30)).wrapping_mul(1_664_525))
-                .wrapping_add(key[j])
-                .wrapping_add(u32::try_from(j).unwrap_or(0));
-            i += 1;
-            j += 1;
-            if i >= 624 {
-                state[0] = state[623];
-                i = 1;
-            }
-            if j >= key.len() {
-                j = 0;
-            }
-        }
-        for _ in 0..623 {
-            let prev = state[i - 1];
-            state[i] = (state[i] ^ (prev ^ (prev >> 30)).wrapping_mul(1_566_083_941))
-                .wrapping_sub(u32::try_from(i).unwrap_or(0));
-            i += 1;
-            if i >= 624 {
-                state[0] = state[623];
-                i = 1;
-            }
-        }
-        state[0] = 0x8000_0000;
-        Twister { state, index: 624 }
-    }
-
-    fn next_u32(&mut self) -> u32 {
-        if self.index >= 624 {
-            for k in 0..624 {
-                let y = (self.state[k] & 0x8000_0000) | (self.state[(k + 1) % 624] & 0x7fff_ffff);
-                let mut next = self.state[(k + 397) % 624] ^ (y >> 1);
-                if y & 1 != 0 {
-                    next ^= 0x9908_b0df;
-                }
-                self.state[k] = next;
-            }
-            self.index = 0;
-        }
-        let mut y = self.state[self.index];
-        self.index += 1;
-        y ^= y >> 11;
-        y ^= (y << 7) & 0x9d2c_5680;
-        y ^= (y << 15) & 0xefc6_0000;
-        y ^ (y >> 18)
-    }
-
-    /// `getrandbits(24)`: the top 24 bits of the next word.
-    fn bits24(&mut self) -> u32 {
-        self.next_u32() >> 8
-    }
-}
+use selkies_suites::scene::{
+    BACKGROUND, BAND_H, BAND_STEP, BAND_Y, BAR, BAR_STEP, BAR_W, BLACK, CHECK, CODE_BITS, CODE_GAP,
+    CODE_SIZE, CODE_X, CODE_Y, NOISE_H, NOISE_IMAGES, Twister, WHITE,
+};
 
 /// Upload `pixels` (0x00RRGGBB, row by row) into `pixmap`, in as many requests as the server's
 /// request size needs.
