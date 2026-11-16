@@ -36,6 +36,10 @@ pub struct SteerTick {
     /// Whether the transport's pacer dropped video over the tick. What it dropped never reached
     /// the path, so the tick's feedback covers less than the stream produced.
     pub pacer_dropped: bool,
+    /// The rate the transport's pacer paced at when the tick was taken, where it has one. Under
+    /// the target, where an overflow's brake or a target rising faster than the pace recovers
+    /// leaves it, the wire carries the pace at most.
+    pub pace_bps: Option<f64>,
 }
 
 /// The steer of one display's rate over congestion ticks: a CBR display's target, and a CRF
@@ -69,7 +73,9 @@ pub struct SteerTick {
 /// pacer dropped video in (`pacer_dropped`): the path was not asked to carry what the pacer
 /// dropped, so a clean reading of the rest shows no room for more. A still screen the
 /// transport padded up to the target ([`PathProbe`], `probed`) has nothing to show but the
-/// path, and climbs `PROBE_STEP` a second until the first queue ends the probe.
+/// path, and climbs `PROBE_STEP` a second until the first queue ends the probe. Padding
+/// that left while the pacer paced under the target (`pace_bps`) shows the pace and not the
+/// path, and is not read as filling the tick.
 ///
 /// A stall is not a slower path, and interrupts a rate the path was carrying, one in force
 /// through `CARRIED_S` of ticks that read no queue: before any there is none to restore. A
@@ -177,6 +183,7 @@ impl CongestionSteer {
             capacity_bps,
             probed,
             pacer_dropped,
+            pace_bps,
         } = tick;
         let dt = match self.tick_at {
             None => 1.0,
@@ -309,6 +316,7 @@ impl CongestionSteer {
             None => current * Self::STEP.powf(dt),
         };
         let filled = !pacer_dropped
+            && !(probed && pace_bps.is_some_and(|pace| pace < current * 1_000.0))
             && offered_bps.is_some_and(|o| o >= current * 1_000.0 * Self::APP_LIMITED);
         if probed && filled {
             raised = raised.max(current * Self::PROBE_STEP.powf(dt));
@@ -349,7 +357,9 @@ impl CongestionSteer {
 /// the steer climbs or backs off as on a moving screen. A queue on a tick that followed padding
 /// ends the probe, the path found: the next one waits `QUIET_S`, doubling to `QUIET_MAX_S`
 /// while probes keep ending that way, and back to `QUIET_S` once a target reaches the ceiling.
-/// A tick that measured no delay pads nothing. A CRF display is never padded: its cap is a
+/// A tick that measured no delay pads nothing, nor does the transport pad while its pacer
+/// paces under the target: the padding would leave at the pace, so the probe starts once the
+/// pace is over the target again. A CRF display is never padded: its cap is a
 /// peak, which a still screen's rate factor spends under whatever it is, so there is no picture
 /// a probed headroom would restore; its cap climbs back once motion fills it.
 #[derive(Clone, Debug)]
@@ -760,6 +770,7 @@ pub(crate) mod tests {
             capacity_bps,
             probed: false,
             pacer_dropped: false,
+            pace_bps: None,
         }
     }
 
@@ -2415,6 +2426,35 @@ pub(crate) mod tests {
             1000.0,
             "a probed tick the padding did not fill holds as a trickle does"
         );
+    }
+
+    /// Padding the pacer let out while it paced under the target is the pace's rate, not the
+    /// path's. Half the target of it reads as a filled tick, and with no capacity known a filled
+    /// tick takes a full step.
+    #[test]
+    fn padding_sent_under_a_braked_pace_does_not_fill_its_tick() {
+        let padded = |pace_bps: Option<f64>| {
+            let mut steer = CongestionSteer {
+                congested: true,
+                ..Default::default()
+            };
+            steer.target(SteerTick {
+                probed: true,
+                pace_bps,
+                ..tick_of(
+                    [1400.0, CEILING, FLOOR, 1_000_000.0, 0.0, 0.0],
+                    [Some(0.0), Some(1_000_000.0), None, None],
+                )
+            })
+        };
+        let cases = [
+            (None, 2100.0, "no pacer"),
+            (Some(3_500_000.0), 2100.0, "a pace over the target"),
+            (Some(1_000_000.0), 1400.0, "a pace under it"),
+        ];
+        for (pace_bps, target, case) in cases {
+            assert_eq!(padded(pace_bps).round(), target, "{case}");
+        }
     }
 
     #[test]

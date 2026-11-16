@@ -823,7 +823,7 @@ impl WebRtcService {
                     bucket.rooms.push(room);
                 }
                 if let Some(pace) = tick.pace_bps {
-                    bucket.paces.push(CLEANUP_PACE_SHARE * pace as f64);
+                    bucket.paces.push(pace as f64);
                 }
                 bucket.peers.push(handle.clone());
                 bucket.sent_bps = bucket
@@ -886,6 +886,9 @@ impl WebRtcService {
                 }
             });
             let now = clock::monotonic();
+            // The least any of the display's peers paces at: under the target, that peer's wire
+            // carries the pace at most.
+            let least_pace = bucket.paces.iter().copied().reduce(f64::min);
             let probed = !capped
                 && self
                     .st
@@ -910,6 +913,7 @@ impl WebRtcService {
                         capacity_bps: None,
                         probed,
                         pacer_dropped: bucket.pacer_dropped,
+                        pace_bps: least_pace,
                     })
                     .round();
                 // A target cut by a queue the path showed (the steer holds the capacity it
@@ -949,7 +953,7 @@ impl WebRtcService {
             // rate only on clean ticks it actually fills. A crowded moving stream or a trickle's
             // under-filled window must not masquerade as spare path capacity.
             let room = bucket.rooms.iter().copied().reduce(f64::min);
-            let pace = bucket.paces.iter().copied().reduce(f64::min);
+            let pace = least_pace.map(|pace| CLEANUP_PACE_SHARE * pace);
             let filled = !crowded
                 && room.is_some_and(|bps| bps > 0.0)
                 && self
@@ -1009,8 +1013,11 @@ impl WebRtcService {
             // the padded windows measure stops it. A capped CRF display is never padded
             // (`PathProbe`).
             // A display whose bridge dropped most of the tick's frames for the budget is not a
-            // still screen, however little it sent.
-            let content = (!crowded).then(|| (bucket.sent_bps - bucket.padding_bps).max(0.0));
+            // still screen, however little it sent. Nor is one padded while a peer's pacer paces
+            // under the target: the padding would leave at the pace and test nothing of the path.
+            let paced_under = least_pace.is_some_and(|pace| pace < target * 1000.0);
+            let content =
+                (!crowded && !paced_under).then(|| (bucket.sent_bps - bucket.padding_bps).max(0.0));
             let pad = if capped {
                 0.0
             } else {
@@ -1070,7 +1077,18 @@ impl WebRtcService {
             };
             let ceiling = self.rate_ceiling(&did, cc_on, lo, hi);
             let now = clock::monotonic();
-            let pad = self.probe_rate(&did, pipeline.video_bitrate(), ceiling, Some(0.0), 0.0, now);
+            let target = pipeline.video_bitrate();
+            // No tick read these peers' paces, and a pace under the target pads nothing here
+            // either.
+            let mut paced_under = false;
+            for (_, peer) in padded.get(&did).map_or(&[][..], Vec::as_slice) {
+                paced_under |= peer
+                    .pace()
+                    .await
+                    .is_some_and(|pace| (pace as f64) < target * 1000.0);
+            }
+            let content = (!paced_under).then_some(0.0);
+            let pad = self.probe_rate(&did, target, ceiling, content, 0.0, now);
             self.pad_display(
                 &did,
                 padded.get(&did).map_or(&[][..], Vec::as_slice),
