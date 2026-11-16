@@ -356,6 +356,7 @@ jobs:
             pulseaudio pulseaudio-utils \
             dbus pipewire pipewire-pulse wireplumber xdg-desktop-portal xdg-desktop-portal-kde qtwayland5 qt6-wayland \
             mutter python3-gi libgtk-3-dev libxrandr-dev \
+            pkg-config libx11-dev libxkbcommon-dev x11-xkb-utils \
             libudev-dev libpipewire-0.3-dev ffmpeg v4l-utils \
             libxcb-shm0 libxcb-xfixes0 libxcb-randr0 libxcb-dri3-0 \
             libxkbcommon0 libxdamage1 libxfixes3 libxtst6 \

@@ -100,6 +100,12 @@ export interface Observer extends Held {
     /** @returns What it printed that was no event line (an error). */
     output: () => Promise<string[]>;
     /**
+     * Its event lines.
+     * @param from The first one wanted.
+     * @returns The lines from it on.
+     */
+    lines: (from?: number) => Promise<Fields[]>;
+    /**
      * Whether its surface mapped.
      * @param timeoutS How long to wait.
      * @returns True once it did.
@@ -294,6 +300,18 @@ export class Host {
     }
 
     /**
+     * A private Xvfb of the suite's own, until released.
+     * @param width Its screen's width, which Xvfb fixes as its largest.
+     * @param height Its screen's height.
+     * @param extra Further Xvfb arguments.
+     * @returns Its display and its handle.
+     */
+    async xvfb(width = 1280, height = 720, extra: readonly string[] = []): Promise<Held & { display: string }> {
+        const answer = await this.request('xvfb.start', { width, height, extra });
+        return { ...this.held(answer), display: stringOr(fields(answer).display) ?? '' };
+    }
+
+    /**
      * Run `wl-observer`, or another Wayland client of the crate, on the
      * server's compositor at `socket`.
      * @param socket The compositor's socket name.
@@ -308,6 +326,10 @@ export class Host {
             wait: async (kind, timeoutS = 8, match = {}) => {
                 const event = fields(await this.request('wl.wait', { handle: held.handle, kind, match, timeout_ms: Math.round(timeoutS * 1000) })).event;
                 return isRecord(event) ? event : null;
+            },
+            lines: async (from = 0) => {
+                const lines = fields(await this.request('wl.lines', { handle: held.handle, from })).lines;
+                return Array.isArray(lines) ? lines.map(fields) : [];
             },
             output: async () => {
                 const lines = fields(await this.request('wl.output', { handle: held.handle })).lines;

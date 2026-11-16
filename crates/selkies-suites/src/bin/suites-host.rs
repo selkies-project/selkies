@@ -35,6 +35,8 @@
 //! | `wl.observe` | `socket`, `env`, `program` | `handle` of a client on the server's compositor: `wl-observer`, or the crate's `program` |
 //! | `wl.wait` | `handle`, `kind`, `match`, `timeout_ms` | `event`: the first of `kind` matching, or null |
 //! | `wl.output` | `handle` | `lines`: what the client printed that was no event |
+//! | `wl.lines` | `handle`, `from` | `lines`: its event lines from index `from` on |
+//! | `xvfb.start` | `width`, `height`, `extra` | `display` and `handle` of a private Xvfb |
 //! | `release` | `handle` | an owner or observer ended |
 //!
 //! `display` defaults to `E2E_DISPLAY`, the display the servers capture.
@@ -50,6 +52,7 @@ use std::time::Duration;
 
 use selkies_suites::wayland::WlObserver;
 use selkies_suites::x11::{self, SelectionOwner};
+use selkies_suites::xvfb::Xvfb;
 use selkies_suites::{Server, private_dir, server};
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -64,6 +67,8 @@ struct Host {
     observers: HashMap<u64, WlObserver>,
     /// Painted windows, by the handle given out for them.
     paintings: HashMap<u64, x11::Painting>,
+    /// Private X servers, by the handle given out for them.
+    servers: HashMap<u64, Xvfb>,
     next: u64,
 }
 
@@ -264,11 +269,48 @@ impl Host {
                     .ok_or_else(|| format!("no observer {handle}"))?;
                 Ok(json!({ "lines": observer.output() }))
             }
+            "wl.lines" => {
+                let handle = whole(request, "handle").ok_or("wl.lines takes a handle")?;
+                let observer = self
+                    .observers
+                    .get(&handle)
+                    .ok_or_else(|| format!("no observer {handle}"))?;
+                let from = whole(request, "from")
+                    .and_then(|f| usize::try_from(f).ok())
+                    .unwrap_or(0);
+                Ok(json!({ "lines": observer.lines_from(from) }))
+            }
+            "xvfb.start" => {
+                let size = |field: &str, default: u32| {
+                    whole(request, field)
+                        .and_then(|v| u32::try_from(v).ok())
+                        .unwrap_or(default)
+                };
+                let (width, height) = (size("width", 1280), size("height", 720));
+                let extra: Vec<String> = request
+                    .get("extra")
+                    .and_then(Value::as_array)
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
+                // The harness panics where no server comes up; here that is this request's failure.
+                let xvfb = std::panic::catch_unwind(|| Xvfb::start(width, height, &extra))
+                    .map_err(|_| "no private X server came up".to_owned())?;
+                let display = xvfb.display().to_owned();
+                let handle = self.handle();
+                self.servers.insert(handle, xvfb);
+                Ok(json!({ "display": display, "handle": handle }))
+            }
             "release" => {
                 let handle = whole(request, "handle").ok_or("release takes a handle")?;
                 self.owners.remove(&handle);
                 self.observers.remove(&handle);
                 self.paintings.remove(&handle);
+                self.servers.remove(&handle);
                 Ok(json!({}))
             }
             "listeners" => {
@@ -358,7 +400,9 @@ async fn main() {
     host.owners.clear();
     host.observers.clear();
     host.paintings.clear();
+    // The servers under test go first: one may be capturing a private X server.
     if let Some(running) = host.server.take() {
         running.stop().await;
     }
+    host.servers.clear();
 }
