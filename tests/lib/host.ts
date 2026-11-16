@@ -277,6 +277,19 @@ export class Host {
     }
 
     /**
+     * Map solid override-redirect windows on the X display until released,
+     * and one flipping between two colors on a period where `flicker` names it.
+     * @param paints Each window's `[x, y, w, h, 0xRRGGBB]`.
+     * @param flicker The flipping window, its second color and its period.
+     * @returns The windows.
+     */
+    async paint(paints: readonly (readonly number[])[], flicker?: { paint: readonly number[]; second: number; periodMs: number }): Promise<Held> {
+        const args: Record<string, unknown> = { paints };
+        if (flicker) args.flicker = { paint: flicker.paint, second: flicker.second, period_ms: flicker.periodMs };
+        return this.held(await this.request('x11.paint', args));
+    }
+
+    /**
      * Run `wl-observer` on the server's compositor at `socket`.
      * @param socket The compositor's socket name.
      * @param env Added to the observer's environment.

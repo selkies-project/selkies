@@ -17,6 +17,10 @@
 //! - `WLOBS_OUTPUT` the output, in announcement order, it goes fullscreen on (0).
 //! - `WLOBS_MAXIMIZE=1` asks for a maximized window instead.
 //! - `WLOBS_FILL` an ARGB8888 color (hex) the surface is painted; unset leaves it transparent.
+//! - `WLOBS_BLOCK` a rectangle painted over the fill, `x,y,w,h,argb`, so the picture carries a
+//!   second known color.
+//! - `WLOBS_FILL2` and `WLOBS_BLINK_MS` a second fill the surface alternates with on that period,
+//!   so a damage-driven capture keeps receiving frames from an otherwise still screen.
 
 use std::io::Read;
 use std::process::ExitCode;
@@ -341,8 +345,37 @@ fn run(socket: &str) -> Result<(), String> {
     } else {
         (1280, 2160)
     };
-    let buffer = wayland::solid_buffer(&shm, &qh, width, height, fill)?;
-    surface.attach(Some(&buffer), 0, 0);
+    // As the Python observer did, the block is painted over a fill only, never over a
+    // transparent surface.
+    let block = std::env::var("WLOBS_BLOCK")
+        .ok()
+        .and_then(|spec| wayland::Block::parse(&spec));
+    let painted = |color: u32| {
+        wayland::painted_buffer(
+            &shm,
+            &qh,
+            width,
+            height,
+            color,
+            if color == 0 { None } else { block },
+        )
+    };
+    let blink = Duration::from_millis(
+        std::env::var("WLOBS_BLINK_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(0),
+    );
+    let fill2 = std::env::var("WLOBS_FILL2")
+        .ok()
+        .and_then(|v| u32::from_str_radix(v.trim(), 16).ok())
+        .unwrap_or(0);
+    let mut buffers = vec![painted(fill)?];
+    if !blink.is_zero() {
+        buffers.push(painted(fill2)?);
+    }
+    let buffer = &buffers[0];
+    surface.attach(Some(buffer), 0, 0);
     surface.commit();
     queue.roundtrip(&mut state).map_err(|e| e.to_string())?;
     emit(
@@ -354,7 +387,26 @@ fn run(socket: &str) -> Result<(), String> {
         ],
     );
     let deadline = Instant::now() + Duration::from_secs_f64(duration.max(0.0));
-    let ended = wayland::dispatch_until(&mut queue, &mut state, deadline);
+    let ended = if blink.is_zero() {
+        wayland::dispatch_until(&mut queue, &mut state, deadline)
+    } else {
+        // The two buffers alternate on the blink period, the seat's events dispatched between.
+        let mut shown = 0;
+        let mut next = Instant::now() + blink;
+        loop {
+            if let Err(e) = wayland::dispatch_until(&mut queue, &mut state, next.min(deadline)) {
+                break Err(e);
+            }
+            if Instant::now() >= deadline || wayland::terminated() {
+                break Ok(());
+            }
+            shown ^= 1;
+            surface.attach(Some(&buffers[shown]), 0, 0);
+            surface.damage_buffer(0, 0, width, height);
+            surface.commit();
+            next += blink;
+        }
+    };
     emit("done", &[]);
     for path in &state.keymaps {
         let _ = std::fs::remove_file(path);

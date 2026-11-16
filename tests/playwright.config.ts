@@ -23,6 +23,9 @@ export default defineConfig({
     retries: 0,
     timeout: budget > 0 ? budget * 1000 : 0,
     reporter: [['list']],
+    // A click or a navigation waits 30 s, as the Python suites' did: past it
+    // the step fails where it stuck instead of holding the suite to its budget.
+    use: { actionTimeout: 30_000, navigationTimeout: 30_000 },
     outputDir: `${WORKDIR}/playwright-results`,
     preserveOutput: 'failures-only',
 });

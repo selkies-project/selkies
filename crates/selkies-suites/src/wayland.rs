@@ -124,8 +124,13 @@ pub fn dispatch_until<S>(
             events: libc::POLLIN,
             revents: 0,
         }];
+        // Never past the deadline, so a caller dispatching up to its next paint paints on time.
+        let wait = deadline
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_millis(100));
+        let wait = libc::c_int::try_from(wait.as_millis()).unwrap_or(100);
         // SAFETY: one valid pollfd, for the length given.
-        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 1, 100) };
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 1, wait) };
         if ready > 0 {
             match guard.read() {
                 Ok(_) => {}
@@ -330,7 +335,68 @@ where
         + wayland_client::Dispatch<wayland_client::protocol::wl_buffer::WlBuffer, ()>
         + 'static,
 {
+    painted_buffer(shm, qh, width, height, fill, None)
+}
+
+/// A rectangle painted over a buffer's fill: x, y, width, height and its ARGB8888 color.
+#[derive(Clone, Copy, Debug)]
+pub struct Block {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub color: u32,
+}
+
+impl Block {
+    /// A block from `x,y,w,h,argb` (`500,100,300,200,ffff0000`).
+    pub fn parse(spec: &str) -> Option<Block> {
+        let parts: Vec<&str> = spec.trim().split(',').collect();
+        let [x, y, width, height, color] = parts.as_slice() else {
+            return None;
+        };
+        Some(Block {
+            x: x.trim().parse().ok()?,
+            y: y.trim().parse().ok()?,
+            width: width.trim().parse().ok()?,
+            height: height.trim().parse().ok()?,
+            color: u32::from_str_radix(color.trim(), 16).ok()?,
+        })
+    }
+}
+
+/// [`solid_buffer`] with `block` painted over the fill.
+///
+/// # Errors
+///
+/// When the pixels cannot be written.
+pub fn painted_buffer<S>(
+    shm: &wayland_client::protocol::wl_shm::WlShm,
+    qh: &wayland_client::QueueHandle<S>,
+    width: i32,
+    height: i32,
+    fill: u32,
+    block: Option<Block>,
+) -> Result<wayland_client::protocol::wl_buffer::WlBuffer, String>
+where
+    S: wayland_client::Dispatch<wayland_client::protocol::wl_shm_pool::WlShmPool, ()>
+        + wayland_client::Dispatch<wayland_client::protocol::wl_buffer::WlBuffer, ()>
+        + 'static,
+{
     let fd = pixels(width, height, fill)?;
+    if let Some(block) = block {
+        use std::os::unix::fs::FileExt;
+        let file = std::fs::File::from(fd.try_clone().map_err(|e| e.to_string())?);
+        let x = block.x.clamp(0, width);
+        let span = usize::try_from(block.width.min(width - x).max(0)).unwrap_or(0);
+        let row = block.color.to_le_bytes().repeat(span);
+        for y in block.y.max(0)..block.y.saturating_add(block.height).min(height) {
+            let at = (u64::try_from(y).unwrap_or(0) * u64::try_from(width).unwrap_or(0)
+                + u64::try_from(x).unwrap_or(0))
+                * 4;
+            file.write_all_at(&row, at).map_err(|e| e.to_string())?;
+        }
+    }
     let size = width.saturating_mul(height).saturating_mul(4);
     let pool = shm.create_pool(fd.as_fd(), size, qh, ());
     let buffer = pool.create_buffer(

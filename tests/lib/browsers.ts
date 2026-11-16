@@ -10,8 +10,13 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { existsSync, readdirSync } from 'node:fs';
+import { arch } from 'node:os';
+import { join } from 'node:path';
 
-import { chromium, firefox, webkit, type Browser } from '@playwright/test';
+import { chromium, firefox, webkit, type Browser, type BrowserContext } from '@playwright/test';
+
+import { WORKDIR } from './env.ts';
 
 /** An engine a suite drives. */
 export type Engine = 'chromium' | 'firefox' | 'webkit';
@@ -106,4 +111,73 @@ export function engineFromEnv(): Engine {
     const named = process.env.E2E_ENGINE || 'chromium';
     if (named === 'chromium' || named === 'firefox' || named === 'webkit') return named;
     throw new Error(`E2E_ENGINE=${named} is not chromium, firefox or webkit`);
+}
+
+/**
+ * The persistent Firefox profile: Firefox grants clipboard access only to a
+ * profile that carries the permission, and accepts an H.264 video m-line only
+ * with the OpenH264 GMP plugin tests/tools/fetch-openh264.sh side-loads.
+ */
+export const FF_E2E_PROFILE: string = process.env.E2E_FIREFOX_PROFILE || join(WORKDIR, 'firefox-profile');
+
+/**
+ * The version of the OpenH264 GMP side-loaded into the persistent profile.
+ * Without it Firefox answers a WebRTC offer with the video m-line rejected.
+ * @returns The newest version there, or null.
+ */
+export function openh264Version(): string | null {
+    const root = join(FF_E2E_PROFILE, 'gmp-gmpopenh264');
+    if (!existsSync(root)) return null;
+    for (const version of readdirSync(root).sort().reverse()) {
+        if (existsSync(join(root, version, 'libgmpopenh264.so'))) return version;
+    }
+    return null;
+}
+
+/**
+ * The prefs that point Firefox at the side-loaded plugin: it scans
+ * `gmp-gmpopenh264/<version>` only once a pref names that version, and the
+ * GMP updater is turned off so it does not replace it mid-run.
+ * @returns The prefs; none without the plugin.
+ */
+function openh264Prefs(): Record<string, string | number | boolean> {
+    const version = openh264Version();
+    if (!version) return {};
+    return {
+        'media.gmp-gmpopenh264.version': version,
+        'media.gmp-gmpopenh264.abi': arch() === 'arm64' ? 'aarch64-gcc3' : 'x86_64-gcc3',
+        'media.gmp-gmpopenh264.lastUpdate': 1,
+        'media.gmp-manager.updateEnabled': false,
+    };
+}
+
+/**
+ * A headless Firefox context on the persistent profile, with the autoplay
+ * allowance `launchBrowser` gives Firefox, the clipboard testing pref, and
+ * the OpenH264 prefs; the caller closes it.
+ * @param options The viewport, further prefs, and further context options.
+ * @returns The context.
+ */
+export function firefoxPersistentContext(options: {
+    viewport?: { width: number; height: number };
+    prefs?: Record<string, string | number | boolean>;
+    hasTouch?: boolean;
+} = {}): Promise<BrowserContext> {
+    const executablePath = process.env.E2E_FIREFOX || undefined;
+    return firefox.launchPersistentContext(FF_E2E_PROFILE, {
+        headless: true,
+        args: ['--allow-downgrade'],
+        firefoxUserPrefs: {
+            'media.gmp-gmpopenh264.enabled': true,
+            'media.autoplay.default': 0,
+            'media.autoplay.blocking_policy': 0,
+            'media.autoplay.block-webaudio': false,
+            'dom.events.testing.asyncClipboard': true,
+            ...openh264Prefs(),
+            ...(options.prefs ?? {}),
+        },
+        ...(options.viewport ? { viewport: options.viewport } : {}),
+        ...(options.hasTouch ? { hasTouch: true } : {}),
+        ...(executablePath ? { executablePath, channel: 'moz-firefox' } : {}),
+    });
 }

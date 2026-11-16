@@ -502,3 +502,89 @@ pub fn window_manager(display: &str) -> Option<(u32, String)> {
         .unwrap_or(0);
     Some((pid, named))
 }
+
+/// Solid windows mapped on a display, override-redirect so no manager moves them, and one that
+/// flips between two colors on a period, for a capture that has to keep sending; dropping it
+/// takes them all down with its connection.
+pub struct Painting {
+    _worker: Worker,
+}
+
+/// A window's rectangle and its color (0x00RRGGBB).
+#[derive(Clone, Copy, Debug)]
+pub struct Paint {
+    pub x: i16,
+    pub y: i16,
+    pub width: u16,
+    pub height: u16,
+    pub color: u32,
+}
+
+impl Painting {
+    /// Map `paints` on `display`, and when `flicker` names one, a window that flips between its
+    /// color and `second` every `period`.
+    ///
+    /// # Errors
+    ///
+    /// When the display does not answer or refuses a window.
+    pub fn start(
+        display: &str,
+        paints: &[Paint],
+        flicker: Option<(Paint, u32, Duration)>,
+    ) -> Result<Painting, String> {
+        let (connection, root) =
+            open(display).ok_or_else(|| format!("{display} did not answer"))?;
+        let window = |paint: &Paint| -> Result<Window, String> {
+            let id = connection.generate_id().map_err(|e| e.to_string())?;
+            connection
+                .create_window(
+                    x11rb::COPY_DEPTH_FROM_PARENT,
+                    id,
+                    root,
+                    paint.x,
+                    paint.y,
+                    paint.width,
+                    paint.height,
+                    0,
+                    WindowClass::INPUT_OUTPUT,
+                    x11rb::COPY_FROM_PARENT,
+                    &CreateWindowAux::new()
+                        .background_pixel(paint.color)
+                        .override_redirect(1),
+                )
+                .map_err(|e| e.to_string())?;
+            connection.map_window(id).map_err(|e| e.to_string())?;
+            Ok(id)
+        };
+        for paint in paints {
+            window(paint)?;
+        }
+        let flipping = flicker
+            .map(|(paint, second, period)| {
+                window(&paint).map(|id| (id, [paint.color, second], period))
+            })
+            .transpose()?;
+        connection.sync().map_err(|e| e.to_string())?;
+        Ok(Painting {
+            _worker: Worker::start(move |stop| {
+                let mut flips = 0usize;
+                while !stop.load(Ordering::Relaxed) {
+                    let Some((id, colors, period)) = flipping else {
+                        std::thread::sleep(Duration::from_millis(20));
+                        continue;
+                    };
+                    std::thread::sleep(period);
+                    flips += 1;
+                    let _ = connection.change_window_attributes(
+                        id,
+                        &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
+                            .background_pixel(colors[flips % 2]),
+                    );
+                    let _ = connection.clear_area(false, id, 0, 0, 0, 0);
+                    let _ = connection.sync();
+                }
+                drop(connection);
+            }),
+        })
+    }
+}

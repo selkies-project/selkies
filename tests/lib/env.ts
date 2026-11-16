@@ -26,6 +26,9 @@ export const TOOLS: string = join(TESTS, 'tools');
 /** The built web client the server serves. */
 export const CORE_DIST: string = join(REPO, 'web/selkies-web-core/dist');
 
+/** The built dashboard, which a suite has the server serve in the client's place. */
+export const DASHBOARD_DIST: string = join(REPO, 'web/selkies-dashboard/dist');
+
 /**
  * Where the suites keep server logs and scratch: `E2E_WORKDIR`, else
  * `selkies-tests` under the temporary directory, as the Rust harness has it.

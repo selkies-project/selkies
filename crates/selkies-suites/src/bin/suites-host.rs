@@ -31,6 +31,7 @@
 //! | `x11.window_manager` | `display` | `manager`: its `pid` (0 unknown) and `name`, null for none |
 //! | `x11.clipboard` | `timeout_ms`, `display` | `text`: CLIPBOARD's text, null when none comes |
 //! | `x11.own_clipboard` | `payload`, `display` | `handle` of an owner serving `payload` |
+//! | `x11.paint` | `paints`, `flicker`, `display` | `handle` of solid windows: each `[x, y, w, h, rgb]`, the flicker `{paint, second, period_ms}` |
 //! | `wl.observe` | `socket`, `env` | `handle` of a `wl-observer` on the server's compositor |
 //! | `wl.wait` | `handle`, `kind`, `match`, `timeout_ms` | `event`: the first of `kind` matching, or null |
 //! | `release` | `handle` | an owner or observer ended |
@@ -60,6 +61,8 @@ struct Host {
     owners: HashMap<u64, SelectionOwner>,
     /// Observers, by the handle given out for them.
     observers: HashMap<u64, WlObserver>,
+    /// Painted windows, by the handle given out for them.
+    paintings: HashMap<u64, x11::Painting>,
     next: u64,
 }
 
@@ -76,6 +79,18 @@ fn whole(request: &Map<String, Value>, field: &str) -> Option<u64> {
 /// `timeout_ms` of `request`, else `default`.
 fn timeout(request: &Map<String, Value>, default: Duration) -> Duration {
     whole(request, "timeout_ms").map_or(default, Duration::from_millis)
+}
+
+/// A window to paint, `[x, y, w, h, rgb]`.
+fn paint(value: &Value) -> Option<x11::Paint> {
+    let n = |i: usize| value.get(i).and_then(Value::as_i64);
+    Some(x11::Paint {
+        x: i16::try_from(n(0)?).ok()?,
+        y: i16::try_from(n(1)?).ok()?,
+        width: u16::try_from(n(2)?).ok()?,
+        height: u16::try_from(n(3)?).ok()?,
+        color: u32::try_from(n(4)?).ok()?,
+    })
 }
 
 /// The X display a request names, else the test display.
@@ -177,6 +192,24 @@ impl Host {
                 self.owners.insert(handle, owner);
                 Ok(json!({ "handle": handle }))
             }
+            "x11.paint" => {
+                let paints = request
+                    .get("paints")
+                    .and_then(Value::as_array)
+                    .map(|list| list.iter().filter_map(paint).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let flicker = request.get("flicker").and_then(|f| {
+                    Some((
+                        paint(f.get("paint")?)?,
+                        u32::try_from(f.get("second")?.as_u64()?).ok()?,
+                        Duration::from_millis(f.get("period_ms")?.as_u64()?),
+                    ))
+                });
+                let painting = x11::Painting::start(&display(request)?, &paints, flicker)?;
+                let handle = self.handle();
+                self.paintings.insert(handle, painting);
+                Ok(json!({ "handle": handle }))
+            }
             "wl.observe" => {
                 let socket = text(request, "socket").ok_or("wl.observe takes a socket")?;
                 let bin = std::env::current_exe()
@@ -216,6 +249,7 @@ impl Host {
                 let handle = whole(request, "handle").ok_or("release takes a handle")?;
                 self.owners.remove(&handle);
                 self.observers.remove(&handle);
+                self.paintings.remove(&handle);
                 Ok(json!({}))
             }
             "listeners" => {
@@ -304,6 +338,7 @@ async fn main() {
     }
     host.owners.clear();
     host.observers.clear();
+    host.paintings.clear();
     if let Some(running) = host.server.take() {
         running.stop().await;
     }
