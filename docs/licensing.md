@@ -130,7 +130,7 @@ Most crates in either graph, the dependencies of pixelflux and pcmflux included,
 | BSL-1.0 | permissive | `xxhash-rust` |
 | ISC | permissive | `libloading`, `rustls-webpki`, `untrusted` |
 | Unicode-3.0 | permissive | `icu_collections`, `icu_locale_core`, `icu_normalizer`, `icu_normalizer_data`, `icu_properties`, `icu_properties_data`, `icu_provider`, `litemap`, `potential_utf`, `tinystr`, `writeable`, `yoke`, `yoke-derive`, `zerofrom`, `zerofrom-derive`, `zerotrie`, `zerovec`, `zerovec-derive` |
-| Zlib | permissive | `slotmap`, `zlib-rs` |
+| Zlib | permissive | `foldhash`, `slotmap`, `zlib-rs` |
 | MPL-2.0 | weak copyleft | `pcmflux`, `pelorus`, `pixelflux`, `selkies`, `selkies-draw`, `selkies-rtc`, `selkies-turn-rest`, `selkies-wm` |
 
 <!-- check-licenses:end rust-licenses -->
