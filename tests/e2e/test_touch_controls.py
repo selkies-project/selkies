@@ -282,6 +282,19 @@ def keyboard_button_block(res: "H.Results", dashboard: str, engine: str) -> None
                     close_sidebar(page)
                 res.check(f"{tag}: the dashboard's own keyboard control brings it back",
                           button.count() > 0 and button.first.is_visible())
+                # A press that travels drags the button and raises nothing; the taps below find it where it was left.
+                box = button.first.bounding_box()
+                x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+                page.evaluate(FOCUS_SPY)
+                page.mouse.move(x, y)
+                page.mouse.down()
+                page.mouse.move(x - 200, y - 150, steps=5)
+                page.mouse.up()
+                time.sleep(0.3)
+                left = button.first.bounding_box()
+                res.check(f"{tag}: a drag moves the keyboard button with the pointer",
+                          abs(left["x"] - (box["x"] - 200)) <= 2 and abs(left["y"] - (box["y"] - 150)) <= 2, (box, left))
+                res.check(f"{tag}: and raises no keyboard", not page.evaluate("window.__assistFocus"))
                 # Each button that raises the keyboard asks the engine for it outright where it has the
                 # VirtualKeyboard API (Chromium on Windows leaves it down for a field focused by script, and
                 # always with a keyboard attached), with the hidden field focused under the manual policy, and
