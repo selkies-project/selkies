@@ -42,6 +42,18 @@ export function pulseUnload(id: string | null): void {
 }
 
 /**
+ * The sound server's address: the one `PULSE_SERVER` names, else the one
+ * `pactl info` reports.
+ * @returns The address, or null without one.
+ */
+export function pulseServer(): string | null {
+    if (process.env.PULSE_SERVER) return process.env.PULSE_SERVER;
+    const info = spawnSync('pactl', ['info'], { encoding: 'utf8', timeout: 10_000 }).stdout ?? '';
+    const line = info.split('\n').find((l) => l.startsWith('Server String:'));
+    return line ? line.slice('Server String:'.length).trim() : null;
+}
+
+/**
  * The environment of a wl-clipboard call on `socket`, under the run's
  * runtime directory where the server's compositor listens.
  * @param socket The compositor's socket name.
