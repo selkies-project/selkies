@@ -12,15 +12,19 @@
 //! runtime directory, buses, sound server, and display, the user's home its only share) on
 //! Selkies' own desktop, the selkies-desktop shell over the window manager on the Wayland
 //! backend, and serve it over HTTPS. So a bare `selkies` re-executes itself as `selkies session`
-//! with [`defaults`] added to its environment: the backend, the shell, HTTPS on the port, which
-//! the server gives a self-signed certificate it keeps under the state directory, and the login
-//! the containers document, `ubuntu` with the placeholder password `mypasswd`, which is for trying
-//! it out. The session runs as the user who started it, on the loopback addresses alone, so
-//! choosing a password of their own is theirs, as it is for a container's operator, and the log
-//! says how: a file named in `SELKIES_BASIC_AUTH_PASSWORD_FILE`, which keeps the password out of
-//! the environment other processes see. Each default is the environment's own
-//! `SELKIES_` setting, set only where the environment leaves it unset, so a variable the user
-//! exports still wins and the server's settings parser stays the one place they are read.
+//! with [`defaults`] added to its environment: the backend, the shell, and HTTPS on the port,
+//! which the server gives a self-signed certificate it keeps under the state directory. Each
+//! default is the environment's own `SELKIES_` setting, set only where the environment leaves it
+//! unset, so a variable the user exports still wins and the server's settings parser stays the
+//! one place they are read.
+//!
+//! The login is not among the defaults: the program carries no credential of its own, so there
+//! is none to ship or leak. The session listens on the loopback addresses alone, but every
+//! account on the machine reaches those and the session is the user's desktop and home, so the
+//! login stays on, and a bare `selkies` refuses to start one that nobody chose a password for,
+//! by the server's own rule ([`crate::http::require_configured_credentials`]): before any of
+//! the session comes up, it says how to name one, a file in `SELKIES_BASIC_AUTH_PASSWORD_FILE`,
+//! which keeps the password out of the environment other processes see.
 //!
 //! Any argument is a request for the server alone (attached to the display and sound server the
 //! environment names) or one of its commands; so is a bare `selkies` started inside a
@@ -39,11 +43,11 @@ pub fn wanted(args: &[String], get: impl Fn(&str) -> Option<String>) -> bool {
     args.is_empty() && get(SESSION_ID_VAR).is_none()
 }
 
-/// The placeholder login a container documents, used where the environment names none.
-pub const PLACEHOLDER_USER: &str = "ubuntu";
-
-/// The placeholder password a container documents, used where the environment names none.
-pub const PLACEHOLDER_PASSWORD: &str = "mypasswd";
+/// What a bare `selkies` says when its login has no password, in place of starting the session.
+const NO_PASSWORD: &str = "selkies: the desktop asks for a login, and no password was set. Name a \
+     file holding one, readable by you alone, in SELKIES_BASIC_AUTH_PASSWORD_FILE (or set \
+     SELKIES_BASIC_AUTH_PASSWORD), then run selkies again; SELKIES_ENABLE_BASIC_AUTH=false \
+     serves it with no login, to every account on this machine.";
 
 /// The variables the standalone session adds to an environment `get` reads, each only where
 /// that environment sets neither it nor a name the same setting is read under.
@@ -77,25 +81,12 @@ pub fn defaults(get: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
         &["SELKIES_HTTPS_KEY"],
         &tls.join("selkies.key").to_string_lossy(),
     );
-    default(
-        &["SELKIES_BASIC_AUTH_USER", "CUSTOM_USER"],
-        PLACEHOLDER_USER,
-    );
-    default(
-        &[
-            "SELKIES_BASIC_AUTH_PASSWORD",
-            "PASSWORD",
-            "PASSWD",
-            "SELKIES_BASIC_AUTH_PASSWORD_FILE",
-        ],
-        PLACEHOLDER_PASSWORD,
-    );
     env
 }
 
 /// The line that tells the user where their desktop is and how to sign in, from the settings
-/// the session's server will resolve. It names the password only where it is the documented
-/// placeholder, since the log is what a user pastes into a report.
+/// the session's server will resolve. It never names the password, since the log is what a user
+/// pastes into a report.
 fn banner(settings: &Settings) -> String {
     let scheme = if settings.enable_https().on {
         "https"
@@ -110,12 +101,6 @@ fn banner(settings: &Settings) -> String {
     };
     let login = if !settings.enable_basic_auth().on {
         "with no login".to_string()
-    } else if settings.basic_auth_password() == PLACEHOLDER_PASSWORD {
-        format!(
-            "signing in as {} with the placeholder password {PLACEHOLDER_PASSWORD}; name a file \
-             holding your own in SELKIES_BASIC_AUTH_PASSWORD_FILE",
-            settings.basic_auth_user()
-        )
     } else if !settings.basic_auth_password_file().is_empty() {
         format!(
             "signing in as {} with the password in {}",
@@ -135,7 +120,8 @@ fn banner(settings: &Settings) -> String {
 }
 
 /// Run the standalone desktop: print where it is and re-execute this program as
-/// `selkies session` with [`defaults`]. Returns only on failure, with the exit status.
+/// `selkies session` with [`defaults`]. Returns only on failure, with the exit status: a login
+/// nobody chose a password for is refused before the session starts.
 pub fn main() -> i32 {
     let get = |name: &str| std::env::var(name).ok();
     let env = defaults(get);
@@ -145,6 +131,10 @@ pub fn main() -> i32 {
             .map(|(_, v)| v.clone())
             .or_else(|| get(name))
     });
+    if let Err(refused) = crate::http::require_configured_credentials(&resolved) {
+        eprintln!("{NO_PASSWORD}");
+        return refused.exit_code();
+    }
     eprintln!("{}", banner(&resolved));
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
@@ -182,15 +172,50 @@ mod tests {
     }
 
     #[test]
-    fn the_defaults_are_wayland_the_shell_https_and_the_placeholder_login() {
+    fn the_defaults_are_wayland_the_shell_and_https_and_carry_no_login() {
         let none = env(&[]);
         let added: HashMap<String, String> =
             defaults(|k| none.get(k).cloned()).into_iter().collect();
         assert_eq!(added["SELKIES_WAYLAND"], "true");
         assert_eq!(added["SELKIES_DESKTOP"], "true");
         assert_eq!(added["SELKIES_ENABLE_HTTPS"], "true");
-        assert_eq!(added["SELKIES_BASIC_AUTH_USER"], "ubuntu");
-        assert_eq!(added["SELKIES_BASIC_AUTH_PASSWORD"], "mypasswd");
+        for name in [
+            "SELKIES_BASIC_AUTH_USER",
+            "SELKIES_BASIC_AUTH_PASSWORD",
+            "SELKIES_BASIC_AUTH_PASSWORD_FILE",
+            "SELKIES_ENABLE_BASIC_AUTH",
+        ] {
+            assert!(!added.contains_key(name), "{name} is the user's to set");
+        }
+    }
+
+    /// The settings a bare `selkies` resolves in `environment`, its defaults added.
+    fn resolved(environment: &[(&str, &str)]) -> Settings {
+        let given = env(environment);
+        let added = defaults(|k| given.get(k).cloned());
+        Settings::parse(&[], &|name| {
+            added
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+                .or_else(|| given.get(name).cloned())
+        })
+    }
+
+    #[test]
+    fn a_login_nobody_chose_a_password_for_is_refused_and_a_chosen_one_is_served() {
+        let refused = crate::http::require_configured_credentials(&resolved(&[("HOME", "/h")]));
+        assert_eq!(
+            refused.map_err(|e| e.exit_code()),
+            Err(crate::http::EXIT_CONFIG_ERROR),
+            "a bare selkies with no password set refuses to start"
+        );
+        let chosen = resolved(&[("HOME", "/h"), ("SELKIES_BASIC_AUTH_PASSWORD", "mine")]);
+        assert!(crate::http::require_configured_credentials(&chosen).is_ok());
+        assert!(!banner(&chosen).contains("mine"), "{}", banner(&chosen));
+        let open = resolved(&[("HOME", "/h"), ("SELKIES_ENABLE_BASIC_AUTH", "false")]);
+        assert!(crate::http::require_configured_credentials(&open).is_ok());
+        assert!(banner(&open).contains("with no login"), "{}", banner(&open));
     }
 
     #[test]
@@ -224,15 +249,6 @@ mod tests {
             defaults(|k| user.get(k).cloned()).into_iter().collect();
         assert!(!added.contains_key("SELKIES_WAYLAND"));
         assert!(!added.contains_key("SELKIES_ENABLE_HTTPS"));
-        assert!(!added.contains_key("SELKIES_BASIC_AUTH_USER"));
-        assert!(!added.contains_key("SELKIES_BASIC_AUTH_PASSWORD"));
         assert_eq!(added["SELKIES_DESKTOP"], "true");
-        let file = env(&[("SELKIES_BASIC_AUTH_PASSWORD_FILE", "/run/secrets/selkies")]);
-        let added: HashMap<String, String> =
-            defaults(|k| file.get(k).cloned()).into_iter().collect();
-        assert!(
-            !added.contains_key("SELKIES_BASIC_AUTH_PASSWORD"),
-            "a password file is the user's own login"
-        );
     }
 }
