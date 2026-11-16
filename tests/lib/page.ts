@@ -25,6 +25,8 @@ declare global {
         __wsTexts?: string[];
         __wsStates?: string[];
         __clipMsgs?: { text?: string }[];
+        __wsTypes?: Record<string, number>;
+        encoder?: string;
         videoChunksReceived?: number;
         currentAudioBufferSize?: number;
     }
@@ -84,6 +86,26 @@ export const PAGE_TAP_JS = `
     if (e.data.type === 'displayConfigUpdate' || e.data.type === 'DISPLAY_CONFIG_UPDATE') window.__displayCfg.push(e.data);
     if (e.data.type === 'clientRoleUpdate') window.__roleUpdates.push(e.data.role);
   });
+`;
+
+/**
+ * Every RTCPeerConnection the page opens, in `window.__pcs`, so a stream that
+ * never shows a frame can be asked what it received and decoded.
+ */
+export const PC_TAP_JS = `
+(() => {
+  const PC = window.RTCPeerConnection;
+  if (!PC) return;
+  window.__pcs = [];
+  const Tapped = function (...args) {
+    const pc = new PC(...args);
+    window.__pcs.push(pc);
+    return pc;
+  };
+  Tapped.prototype = PC.prototype;
+  Object.setPrototypeOf(Tapped, PC);
+  window.RTCPeerConnection = Tapped;
+})();
 `;
 
 /** An opened client: its browser and page, and the errors and 404s it keeps collecting. */

@@ -51,6 +51,7 @@ pub struct Launch {
     wayland: bool,
     display: Option<String>,
     socket: Option<PathBuf>,
+    port: Option<u16>,
     env: Vec<(String, String)>,
 }
 
@@ -62,6 +63,7 @@ pub fn launch(label: &str) -> Launch {
         wayland: false,
         display: None,
         socket: None,
+        port: None,
         env: Vec::new(),
     }
 }
@@ -90,6 +92,13 @@ impl Launch {
     /// socket to be bound.
     pub fn unix_socket(mut self, socket: &Path) -> Launch {
         self.socket = Some(socket.to_owned());
+        self
+    }
+
+    /// Serve on `port` in place of a free one, as a later server must where a page's origin,
+    /// and so what it stored, has to stay the same.
+    pub fn port(mut self, port: u16) -> Launch {
+        self.port = Some(port);
         self
     }
 
@@ -134,10 +143,10 @@ impl Launch {
             "no selkies server to run at {}: set SELKIES_TEST_SERVER or build target/release/selkies",
             binary.display()
         );
-        let port = if self.socket.is_some() {
-            0
-        } else {
-            free_port()
+        let port = match (&self.socket, self.port) {
+            (Some(_), _) => 0,
+            (None, Some(port)) => port,
+            (None, None) => free_port(),
         };
         let log = log_path(&self.label);
         let sink = File::create(&log).expect("the server log");

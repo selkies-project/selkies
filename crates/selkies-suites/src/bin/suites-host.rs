@@ -19,7 +19,7 @@
 //!
 //! | op | takes | answers |
 //! | --- | --- | --- |
-//! | `server.start` | `label`, `mode`, `wayland`, `display`, `socket`, `env` | `port`, `pid`, `log` |
+//! | `server.start` | `label`, `mode`, `wayland`, `display`, `socket`, `port`, `env` | `port`, `pid`, `log` |
 //! | `server.stop` | | `tail`: the end of its log |
 //! | `server.mark` | | `mark`: the log's length now |
 //! | `server.log` | `from`: a mark | `text`: the log from it on |
@@ -122,6 +122,9 @@ impl Host {
                     );
                 if let Some(display) = text(request, "display") {
                     launch = launch.display(display);
+                }
+                if let Some(port) = whole(request, "port").and_then(|p| u16::try_from(p).ok()) {
+                    launch = launch.port(port);
                 }
                 if let Some(socket) = text(request, "socket") {
                     launch = launch.unix_socket(Path::new(socket));

@@ -32,6 +32,8 @@ export interface ServerOptions {
     display?: string;
     /** Serve on this Unix socket alone, with no TCP port. */
     socket?: string;
+    /** Serve on this port, a page's origin kept across servers, in place of a free one. */
+    port?: number;
     /** Set over what the harness sets. */
     env?: Record<string, string>;
 }
