@@ -35,7 +35,7 @@ use log::{debug, error, info, warn};
 use regex::Regex;
 
 pub use super::x11::applied_dpi;
-use super::x11::on_x11;
+use super::x11::{on_x11, set_applied_dpi};
 use super::xrandr::{run_tool, which};
 
 /// Where xfconfd persists the channel `set_dpi` writes on XFCE.
@@ -659,10 +659,17 @@ pub async fn desktop_dpi() -> Option<i32> {
 /// whenever the desktop differs from it, a client-driven desktop keeps the density its last
 /// page gave it, and either way the one in effect is what a page's DPI is then compared
 /// against. Unity on a fresh home writes nothing.
+///
+/// A client-driven desktop has the density it kept whether or not it could be written again.
+/// XFCE takes one only through its session's bus, and a server started ahead of that session
+/// writes nothing, while the session then applies what xfconfd persisted. That density is
+/// recorded as the one applied all the same: a page at unity would otherwise be compared
+/// against the configured default and leave the desktop where it was. An operator-set value
+/// that could not be written is not the desktop's, and is not recorded.
 pub async fn restore_dpi(configured: i32, locked: bool) -> i32 {
     let (target, apply) = restore_plan(desktop_dpi().await, configured, locked);
-    if apply {
-        set_dpi(target).await;
+    if apply && !set_dpi(target).await && !locked {
+        set_applied_dpi(target);
     }
     target
 }
