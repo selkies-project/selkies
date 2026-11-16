@@ -443,6 +443,7 @@ fn run(socket: &str) -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
+    selkies_suites::die_with_parent();
     wayland::watch_for_termination();
     let socket = std::env::args()
         .nth(1)

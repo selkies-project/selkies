@@ -171,6 +171,19 @@ pub fn suite() -> String {
     }
 }
 
+/// End this program when the process that started it ends. A suite's runner killed from outside
+/// (a timeout skips every cleanup) then leaves no painter or relay behind on the display.
+pub fn die_with_parent() {
+    // SAFETY: getppid and prctl read and write no memory of this process.
+    unsafe {
+        let parent = libc::getppid();
+        // A parent gone before the prctl left no signal behind; the parent id has changed then.
+        if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 || libc::getppid() != parent {
+            std::process::exit(1);
+        }
+    }
+}
+
 /// The last `lines` lines of `text`.
 pub fn tail(text: &str, lines: usize) -> String {
     let all: Vec<&str> = text.lines().collect();

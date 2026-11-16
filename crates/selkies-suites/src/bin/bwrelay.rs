@@ -158,6 +158,7 @@ fn number(arg: Option<&String>, what: &str) -> Result<u64, String> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), String> {
+    selkies_suites::die_with_parent();
     let args: Vec<String> = std::env::args().collect();
     let listen = number(args.get(1), "listen port")?;
     let target = number(args.get(2), "target port")?;

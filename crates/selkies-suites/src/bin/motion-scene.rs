@@ -278,6 +278,7 @@ fn run() -> Result<(), String> {
 }
 
 fn main() {
+    selkies_suites::die_with_parent();
     if let Err(e) = run() {
         eprintln!("motion-scene: {e}");
         std::process::exit(1);
