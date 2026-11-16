@@ -96,7 +96,7 @@ SUITES: list = [
     {"path": "tools/slider_stops_audit.ts", "tier": "unit", "timeout": 120},
     {"path": "tools/display_refresh_audit.ts", "tier": "unit", "timeout": 120},
     {"path": "tools/dpi_default_mirror_audit.ts", "tier": "unit", "timeout": 120},
-    {"path": "unit/test_ts_static.py", "tier": "unit", "timeout": 120},
+    {"path": "tools/ts_static_audit.ts", "tier": "unit", "timeout": 120},
     {"path": "tools/dashboard_no_lazy_chunks_audit.ts", "tier": "unit", "timeout": 120},
     {"path": "unit/test_frame_num_range_log.py", "tier": "unit", "timeout": 60},
     {"path": "tools/cursor_scaling_audit.ts", "tier": "unit", "timeout": 120},
@@ -127,7 +127,9 @@ SUITES: list = [
     {"path": RUST + "display_rate_control.rs", "tier": "integration", "timeout": 600},
     {"path": RUST + "state_stress.rs", "tier": "integration", "timeout": 900},
     {"path": RUST + "switch_stress.rs", "tier": "integration", "timeout": 600},
-    {"path": "integration/test_webrtc_unix_socket.py", "tier": "integration", "timeout": 600},
+    {"path": "integration/webrtc_unix_socket.spec.ts", "tier": "integration", "timeout": 600},
+    {"path": "integration/gamepad_release.spec.ts", "tier": "integration", "timeout": 300},
+    {"path": "integration/gamepad_switch.spec.ts", "tier": "integration", "timeout": 300},
     {"path": RUST + "gpu_probe.rs", "tier": "integration", "timeout": 180},
     {"path": RUST + "missing_libraries.rs", "tier": "integration", "timeout": 900},
     {"path": RUST + "command_dispatch.rs", "tier": "integration", "timeout": 120},
@@ -325,12 +327,12 @@ def cases(tiers: Optional[Sequence[str]] = None) -> Iterator[tuple]:
 
 def name(path: str, tier: str) -> str:
     """The name a suite is selected and its logs are kept under, without its
-    selector: `integration/test_webrtc_unix_socket` for `integration/test_webrtc_unix_socket.py`,
+    selector: `e2e/test_matrix` for `e2e/test_matrix.py`,
     `integration/test_protocol` for the Rust target `protocol.rs` of that tier,
     `integration/test_gamepad_switch` for the Playwright suite
     `integration/gamepad_switch.spec.ts`, and `unit/test_fit_frame` for the
-    audit `tools/fit_frame_audit.ts`, so a
-    suite keeps its name in whichever language it is written."""
+    audit `tools/fit_frame_audit.ts`, so a suite keeps its name in whichever
+    language it is written."""
     stem = os.path.splitext(path)[0]
     if path.endswith(".rs"):
         return f"{tier}/test_{os.path.basename(stem)}"
