@@ -190,3 +190,30 @@ export async function closeBrowser(closer: Browser | BrowserContext, timeoutS = 
         return false;
     }
 }
+
+declare global {
+    interface Window {
+        fps?: number;
+    }
+}
+
+/**
+ * The first non-zero fps the client reports.
+ * @param page The client.
+ * @param timeoutS How long to wait.
+ * @returns The fps, or 0 when none came or the page stopped answering.
+ */
+export async function pageFps(page: Page, timeoutS = 10): Promise<number> {
+    for (const until = Date.now() + timeoutS * 1000; Date.now() < until;) {
+        try {
+            const fps = await within(page.evaluate(() => window.fps ?? 0));
+            if (fps > 0) return fps;
+        } catch (e) {
+            if (!(e instanceof PageStalled)) throw e;
+            process.stdout.write(`[page-fps] ${e.message}\n`);
+            return 0;
+        }
+        await sleep(500);
+    }
+    return 0;
+}

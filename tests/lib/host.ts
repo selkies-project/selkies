@@ -14,7 +14,7 @@
 
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 import { fields, isRecord, numberOr, stringOr, type Fields } from '../../web/selkies-web-core/lib/narrow.ts';
@@ -48,22 +48,35 @@ export interface Started {
     url: string;
 }
 
+let found: string | undefined;
+
 /**
  * The `suites-host` program: `SELKIES_SUITES_HOST`, else the debug build in
- * the target directory cargo uses, built first where cargo is at hand.
+ * the target directory cargo uses, built first, with the crate's other
+ * programs, where cargo is at hand.
  * @returns Its path.
  * @throws {Error} When it is neither named nor built.
  */
 function program(): string {
+    if (found !== undefined) return found;
     const named = process.env.SELKIES_SUITES_HOST;
-    if (named) return named;
+    if (named) return (found = named);
     const target = process.env.CARGO_TARGET_DIR || join(REPO, 'target');
     const built = join(target, 'debug', 'suites-host');
-    const cargo = spawnSync('cargo', ['build', '--quiet', '--locked', '-p', 'selkies-suites', '--bin', 'suites-host'],
+    const cargo = spawnSync('cargo', ['build', '--quiet', '--locked', '-p', 'selkies-suites', '--bins'],
         { cwd: REPO, stdio: ['ignore', 'inherit', 'inherit'] });
-    if (cargo.error === undefined && cargo.status !== 0) throw new Error(`cargo build of suites-host exited ${cargo.status}`);
+    if (cargo.error === undefined && cargo.status !== 0) throw new Error(`cargo build of the suites' programs exited ${cargo.status}`);
     if (!existsSync(built)) throw new Error(`${built} is not built and cargo is not on PATH to build it`);
-    return built;
+    return (found = built);
+}
+
+/**
+ * Another program of `crates/selkies-suites` (its src/bin), built beside `suites-host`.
+ * @param name The program (`motion-scene`).
+ * @returns Its path.
+ */
+export function suitesBin(name: string): string {
+    return join(dirname(program()), name);
 }
 
 /** Something the host program keeps until it is released. */
