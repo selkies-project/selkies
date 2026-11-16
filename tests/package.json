@@ -1,0 +1,15 @@
+{
+  "name": "selkies-tests",
+  "private": true,
+  "description": "Selkies' browser suites on Playwright Test",
+  "type": "module",
+  "license": "MPL-2.0",
+  "scripts": {
+    "typecheck": "tsc -p ."
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.1",
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}

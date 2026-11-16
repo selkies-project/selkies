@@ -40,6 +40,15 @@ updates:
       web-client:
         patterns: ["*"]
 
+  # Browser suites on Playwright Test
+  - package-ecosystem: npm
+    directory: /tests
+    schedule:
+      interval: weekly
+    groups:
+      browser-suites:
+        patterns: ["*"]
+
   # BrowserStack smoke
   - package-ecosystem: npm
     directory: /tests/browserstack

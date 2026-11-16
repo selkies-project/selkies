@@ -5,7 +5,7 @@
  */
 
 // The scripts outside the web packages: the Node audits and probes under
-// tests/tools, the BrowserStack smoke, the site's build scripts and the image
+// tests/tools, the browser suites and their library, the BrowserStack smoke, the site's build scripts and the image
 // tier's tester pages. They lint with the dashboard's ESLint and
 // typescript-eslint, as web/eslint.config.mts does.
 import { createRequire } from 'node:module'
@@ -62,6 +62,26 @@ export default [
         ],
         tsconfigRootDir: import.meta.dirname,
       },
+    },
+    plugins: { '@typescript-eslint': tseslint.plugin },
+    rules: {
+      ...rules,
+      ...tsTypeChecked,
+      'no-unused-vars': 'off',
+      '@typescript-eslint/no-unused-vars': ['error', { caughtErrors: 'none' }],
+    },
+  },
+  {
+    // The browser suites on Playwright Test and their library: Node programs
+    // whose page callbacks run in the browser, checked against the
+    // Playwright and Node types the tests package carries.
+    files: ['tests/lib/**/*.ts', 'tests/integration/**/*.spec.ts', 'tests/e2e/**/*.spec.ts', 'tests/playwright.config.ts'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      globals: { ...globalsOf('node'), ...globalsOf('browser') },
+      parser: tseslint.parser,
+      parserOptions: { project: ['tests/tsconfig.json'], tsconfigRootDir: import.meta.dirname },
     },
     plugins: { '@typescript-eslint': tseslint.plugin },
     rules: {

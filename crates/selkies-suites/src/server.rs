@@ -50,6 +50,7 @@ pub struct Launch {
     mode: String,
     wayland: bool,
     display: Option<String>,
+    socket: Option<PathBuf>,
     env: Vec<(String, String)>,
 }
 
@@ -60,6 +61,7 @@ pub fn launch(label: &str) -> Launch {
         mode: "websockets".to_owned(),
         wayland: false,
         display: None,
+        socket: None,
         env: Vec::new(),
     }
 }
@@ -80,6 +82,14 @@ impl Launch {
     /// Capture the X display `display` (a private server's) in place of the test display.
     pub fn display(mut self, display: &str) -> Launch {
         self.display = Some(display.to_owned());
+        self
+    }
+
+    /// Serve on the Unix socket `socket` alone, with no port, as a server behind
+    /// jupyter-server-proxy runs: nothing listens on TCP, and [`Server::ready`] waits for the
+    /// socket to be bound.
+    pub fn unix_socket(mut self, socket: &Path) -> Launch {
+        self.socket = Some(socket.to_owned());
         self
     }
 
@@ -124,7 +134,11 @@ impl Launch {
             "no selkies server to run at {}: set SELKIES_TEST_SERVER or build target/release/selkies",
             binary.display()
         );
-        let port = free_port();
+        let port = if self.socket.is_some() {
+            0
+        } else {
+            free_port()
+        };
         let log = log_path(&self.label);
         let sink = File::create(&log).expect("the server log");
         let mut command = Command::new(&binary);
@@ -134,8 +148,14 @@ impl Launch {
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", private_dir("home"))
-            .env("XDG_RUNTIME_DIR", private_dir("run"))
-            .env("SELKIES_PORT", port.to_string())
+            .env("XDG_RUNTIME_DIR", private_dir("run"));
+        if let Some(socket) = &self.socket {
+            let _ = std::fs::remove_file(socket);
+            command.arg("--unix-socket").arg(socket);
+        } else {
+            command.env("SELKIES_PORT", port.to_string());
+        }
+        command
             .env("SELKIES_ENABLE_BASIC_AUTH", "false")
             .env("SELKIES_MODE", &self.mode)
             .env("SELKIES_WEB_ROOT", repo().join("web/selkies-web-core/dist"))
@@ -172,6 +192,7 @@ impl Launch {
             pid: child.id(),
             child: std::sync::Mutex::new(child),
             port,
+            socket: self.socket,
             log,
             last_page: std::sync::Mutex::new(None),
             pages: std::sync::Mutex::new(Vec::new()),
@@ -210,6 +231,7 @@ pub struct Server {
     child: std::sync::Mutex<Child>,
     pid: u32,
     port: u16,
+    socket: Option<PathBuf>,
     log: PathBuf,
     /// When the last page set out to connect.
     last_page: std::sync::Mutex<Option<Instant>>,
@@ -219,7 +241,12 @@ pub struct Server {
 }
 
 impl Server {
-    /// The port every route of the server is on.
+    /// The server's process id, which leads its process group.
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    /// The port every route of the server is on; 0 for a server on a Unix socket.
     pub fn port(&self) -> u16 {
         self.port
     }
@@ -266,11 +293,27 @@ impl Server {
         }
     }
 
-    /// Wait for `/api/status`; the error says how the server failed to come up, for a suite
-    /// whose finding that is.
+    /// Wait for `/api/status`, or for its socket to be bound for a server on a Unix socket; the
+    /// error says how the server failed to come up, for a suite whose finding that is.
     pub async fn came_up(&self) -> Result<(), String> {
         let deadline = Instant::now() + STARTUP;
         loop {
+            if let Some(socket) = &self.socket {
+                if socket.exists() {
+                    return Ok(());
+                }
+                if let Some(status) = self.exited() {
+                    return Err(format!("selkies exited during startup ({status})"));
+                }
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "selkies did not bind {} within {STARTUP:?}",
+                        socket.display()
+                    ));
+                }
+                tokio::time::sleep(POLL).await;
+                continue;
+            }
             let answer = http::request(
                 self.port,
                 "GET",
@@ -304,6 +347,11 @@ impl Server {
     pub fn log_from(&self, mark: usize) -> String {
         let bytes = std::fs::read(&self.log).unwrap_or_default();
         String::from_utf8_lossy(bytes.get(mark..).unwrap_or_default()).into_owned()
+    }
+
+    /// Where the log is kept.
+    pub fn log_path(&self) -> &Path {
+        &self.log
     }
 
     /// The whole log.

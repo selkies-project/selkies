@@ -148,8 +148,15 @@ pub fn path_with(dir: &Path) -> String {
     format!("{}:{rest}", dir.display())
 }
 
-/// The suite this test binary holds: its file name without the hash cargo appends.
+/// The suite this process serves: `SELKIES_SUITE`, which a Playwright suite hands the host
+/// program it drives (`src/bin/suites-host.rs`), else the test binary's file name without the
+/// hash cargo appends.
 pub fn suite() -> String {
+    if let Ok(named) = std::env::var("SELKIES_SUITE")
+        && !named.is_empty()
+    {
+        return named;
+    }
     let exe = std::env::current_exe().expect("the test binary's path");
     let stem = exe
         .file_stem()

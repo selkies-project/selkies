@@ -12,8 +12,13 @@ naming the tests of the target to run:
 
     cargo test -p selkies-suites --test protocol -- --include-ignored
 
-A suite whose path ends in `.ts` is a Node audit under `tools/`, run with the
-types stripped:
+A suite whose path ends in `.spec.ts` drives browsers on Playwright Test, one
+test per selector, from the tests package (`npm ci` in tests/):
+
+    tests/node_modules/.bin/playwright test --config tests/playwright.config.ts integration/gamepad_switch.spec.ts
+
+A suite whose path ends in `.ts` otherwise is a Node audit under `tools/`, run
+with the types stripped:
 
     node tests/tools/fit_frame_audit.ts
 
@@ -32,6 +37,7 @@ selects tiers from it. Tiers describe what a suite needs:
     image        a published desktop image through the release checklist, run on request
 """
 import os
+import re
 import shutil
 import sys
 from typing import Iterator, Optional, Sequence
@@ -321,11 +327,15 @@ def name(path: str, tier: str) -> str:
     """The name a suite is selected and its logs are kept under, without its
     selector: `integration/test_webrtc_unix_socket` for `integration/test_webrtc_unix_socket.py`,
     `integration/test_protocol` for the Rust target `protocol.rs` of that tier,
-    and `unit/test_fit_frame` for the audit `tools/fit_frame_audit.ts`, so a
+    `integration/test_gamepad_switch` for the Playwright suite
+    `integration/gamepad_switch.spec.ts`, and `unit/test_fit_frame` for the
+    audit `tools/fit_frame_audit.ts`, so a
     suite keeps its name in whichever language it is written."""
     stem = os.path.splitext(path)[0]
     if path.endswith(".rs"):
         return f"{tier}/test_{os.path.basename(stem)}"
+    if path.endswith(".spec.ts"):
+        return f"{tier}/test_{os.path.basename(path).removesuffix('.spec.ts')}"
     if path.endswith(".ts"):
         return f"{tier}/test_{os.path.basename(stem).removesuffix('_audit')}"
     return stem
@@ -339,6 +349,12 @@ def command(path: str, selector: Optional[str]) -> list:
         # here: `cargo test --workspace` runs on hosts with no display.
         return ["cargo", "test", "--locked", "--package", "selkies-suites", "--test", target,
                 "--", "--include-ignored"] + ([selector] if selector else [])
+    if path.endswith(".spec.ts"):
+        # A selector names one test of the suite, whole: grep matches the
+        # title's end, so `websockets` does not also run `websockets-wayland`.
+        grep = ["--grep", f"(^| ){re.escape(selector)}$"] if selector else []
+        return [shutil.which("node") or "node", os.path.join(TESTS, "node_modules", "@playwright", "test", "cli.js"),
+                "test", "--config", os.path.join(TESTS, "playwright.config.ts"), path] + grep
     if path.endswith(".ts"):
         return [shutil.which("node") or "node", os.path.join(TESTS, path)] + ([selector] if selector else [])
     return [sys.executable, os.path.join(TESTS, path)] + ([selector] if selector else [])

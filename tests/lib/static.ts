@@ -1,0 +1,115 @@
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+/**
+ * The web client's TypeScript as a browser takes it. A page that imports
+ * `lib/input.ts` straight from the repository needs the types removed on the
+ * way out, and an init script is a classic script: both are stripped with
+ * Node's `stripTypeScriptTypes`, the removal the Node audits under
+ * `tests/tools` rely on when they import the same modules. Types are blanked
+ * rather than deleted, so a stack trace's lines and columns stay the
+ * source's. Only stripping is done: a module that needs a real transform (an
+ * enum, a namespace, a parameter property) fails here and in the audits
+ * alike, which keeps the client inside the subset both can run.
+ * @module
+ */
+
+import { readFileSync, statSync } from 'node:fs';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { stripTypeScriptTypes } from 'node:module';
+import { extname, join, normalize, resolve, sep } from 'node:path';
+
+/**
+ * The JavaScript a TypeScript module strips to.
+ * @param source The module's text.
+ * @returns The same text with every type annotation blanked out.
+ * @throws {Error} When the module needs more than stripping.
+ */
+export function stripTypes(source: string): string {
+    return stripTypeScriptTypes(source);
+}
+
+/** Content types by extension, for what is served as it is. */
+const TYPES: Readonly<Record<string, string>> = {
+    '.html': 'text/html; charset=utf-8',
+    '.js': 'text/javascript; charset=utf-8',
+    '.mjs': 'text/javascript; charset=utf-8',
+    '.css': 'text/css; charset=utf-8',
+    '.json': 'application/json',
+    '.wasm': 'application/wasm',
+    '.svg': 'image/svg+xml',
+    '.png': 'image/png',
+    '.txt': 'text/plain; charset=utf-8',
+};
+
+/** A static server on loopback. */
+export interface Served {
+    server: Server;
+    /** `http://127.0.0.1:<port>`. */
+    url: string;
+    close: () => Promise<void>;
+}
+
+/**
+ * Serve `root` on a loopback port, every `.ts` file but a declaration file as
+ * the JavaScript its types strip to (kept by path and modification time,
+ * since a page imports dozens of modules on every load), anything else as it
+ * is; a module that cannot be stripped is a 500, not half a page.
+ * @param root The directory served.
+ * @returns The server, once it listens.
+ */
+export async function serveTypeScript(served: string): Promise<Served> {
+    const root = resolve(served);
+    const stripped = new Map<string, { stamp: number; body: Buffer }>();
+    const server = createServer((req, res) => {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        const rel = normalize(decodeURIComponent(url.pathname));
+        const path = join(root, rel);
+        if (rel.split(sep).includes('..') || !(path === root || path.startsWith(root + sep))) {
+            res.writeHead(403).end();
+            return;
+        }
+        let stamp: number;
+        try {
+            const st = statSync(path);
+            if (!st.isFile()) throw new Error('not a file');
+            stamp = st.mtimeMs;
+        } catch {
+            res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('not found\n');
+            return;
+        }
+        let body: Buffer;
+        let type: string;
+        if (path.endsWith('.ts') && !path.endsWith('.d.ts')) {
+            let hit = stripped.get(path);
+            if (hit === undefined || hit.stamp !== stamp) {
+                try {
+                    hit = { stamp, body: Buffer.from(stripTypes(readFileSync(path, 'utf8'))) };
+                } catch (e) {
+                    res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' })
+                        .end(`cannot strip types from ${path.slice(root.length)}: ${String(e)}\n`);
+                    return;
+                }
+                stripped.set(path, hit);
+            }
+            body = hit.body;
+            type = 'text/javascript; charset=utf-8';
+        } else {
+            body = readFileSync(path);
+            type = TYPES[extname(path)] ?? 'application/octet-stream';
+        }
+        res.writeHead(200, { 'Content-Type': type, 'Content-Length': body.length, 'Cache-Control': 'no-store' }).end(body);
+    });
+    await new Promise<void>((done) => { server.listen(0, '127.0.0.1', done); });
+    const address = server.address();
+    const port = typeof address === 'object' && address !== null ? (address satisfies AddressInfo).port : 0;
+    return {
+        server,
+        url: `http://127.0.0.1:${port}`,
+        close: () => new Promise<void>((done) => { server.closeAllConnections(); server.close(() => { done(); }); }),
+    };
+}

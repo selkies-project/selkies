@@ -54,6 +54,21 @@ node tests/tools/fit_frame_audit.ts
 
 An audit that exits without printing a check fails.
 
+The browser suites in TypeScript are Playwright Test specs,
+`tests/integration/*.spec.ts` and `tests/e2e/*.spec.ts`, on the library in
+`tests/lib` and the tests package (`npm ci` in `tests/`). The registry lists a
+spec by its file, under the name of the case it holds, each selector being one
+of its tests; one runs on its own as:
+
+```bash
+(cd tests && npx playwright test integration/gamepad_switch.spec.ts)
+```
+
+A spec's servers are started by `suites-host`, a program of
+`crates/selkies-suites` the library drives over its standard streams, so they
+run in the sandbox the Rust suites' do and leave their logs the same way. A
+spec that prints no check fails, as an audit does.
+
 The server under test is the `selkies` binary: `SELKIES_TEST_SERVER`, else
 `target/release/selkies` in the tree (`cargo build --release -p selkies`), else
 `selkies` on `PATH`. The suites' own dependencies are `tests/requirements.txt`
@@ -67,7 +82,7 @@ unit tier needs only the source tree and `pytest`.
 | Tier | Needs |
 | --- | --- |
 | `unit` | The source tree and `gcc` for `tests/tools`. The audits of the web client (translations, typing, pointer lock, relative motion) also want `node`, and are reported skipped without it. The example session scripts are parsed with `bash -n` (their Python helpers byte-compiled), and every shell script the tree ships is linted at `shellcheck`'s lowest severity where it is installed. Which findings that severity reports differs between `shellcheck` releases, so CI pins the version rather than taking the runner image's; a distro build may disagree with it in either direction. |
-| `integration` | An X display named by `E2E_DISPLAY` or the Wayland backend, PulseAudio, a built `selkies` server, and the `pixelflux`/`pcmflux` wheels. Suites needing an X server of their own start a throwaway `Xvfb` on a free display number instead, and need nothing set. The output-layout suite wants the Xvfb the images ship, XLibre's patched to offer pluggable outputs, which the bundle carries at `libexec/selkies/Xvfb` (the CI job puts the installed wheel's on the path); on a stock one it skips. The Wayland seam suite wants a labwc patched with the control socket and the seam cursor path, which `scripts/ci/build-labwc.sh` builds (the CI job does exactly that); on a stock labwc it skips its held-grab checks. The lone-display suite builds its GDK client (`tools/crtc_probe.c`) against GTK3 and Xrandr through `pkg-config` (`libgtk-3-dev`, `libxrandr-dev`). |
+| `integration` | An X display named by `E2E_DISPLAY` or the Wayland backend, PulseAudio, a built `selkies` server, and the `pixelflux`/`pcmflux` wheels. Suites needing an X server of their own start a throwaway `Xvfb` on a free display number instead, and need nothing set. The output-layout suite wants the Xvfb the images ship, XLibre's patched to offer pluggable outputs, which the bundle carries at `libexec/selkies/Xvfb` (the CI job puts the installed wheel's on the path); on a stock one it skips. The Wayland seam suite wants a labwc patched with the control socket and the seam cursor path, which `scripts/ci/build-labwc.sh` builds (the CI job does exactly that); on a stock labwc it skips its held-grab checks. The lone-display suite builds its GDK client (`tools/crtc_probe.c`) against GTK3 and Xrandr through `pkg-config` (`libgtk-3-dev`, `libxrandr-dev`). The gamepad and Unix-socket suites drive Chromium on Playwright Test, from the tests package (`npm ci` in `tests/`). |
 | `e2e` | The above plus Playwright browsers (WebKit on Linux also needs GStreamer's `opengl` plugin, `gstreamer1.0-gl`, which `playwright install --with-deps webkit` brings; without it WebKit paints every `<video>` through a software fallback sink, so the harness refuses to launch it), the built web client (`scripts/ci/build-web.sh`), `wl-clipboard` for the Wayland clipboard checks, `wmctrl` for the two-display desktop-window check (skipped with a notice when absent), `tkinter` for the sender-lag recovery suite's scene painter (skipped without it), `tests/tools/fetch-openh264.sh` for the Firefox WebRTC blocks, and a coturn `turnserver` on `PATH` (or named by `E2E_TURNSERVER`) for the TURN relay suite, which skips with the install command when there is none. The pointer-motion suite drives the *installed* Chrome and Firefox on the test display with XTEST, and skips when neither is on `PATH`. The pointer-lock suite's game-view block needs `libsdl2-2.0-0` (skipped without it), and its desktop selectors need `openbox`, `kwin-x11`, and `kwin-wayland` plus `dbus-run-session`, and the `labwc` the Wayland suites already use (each skipped with the missing binary named). The host-portal suite runs a KDE stack on a private bus: `kwin-wayland` (with KWin 6 also `kwin-common`, where Debian and Ubuntu ship its screencast plugin), PipeWire, WirePlumber, `xdg-desktop-portal` and its KDE backend with the Qt Wayland plugins it is built on (`qtwayland5` for Plasma 5, `qt6-wayland` for 6), and `gdbus`; KWin 6 casts the screen only on a render node, which a host without a GPU gets from the `vgem` module (`sudo modprobe vgem`, the node readable and writable by the user), and the suite skips with what is missing named. Its `gnome` blocks run headless `mutter` instead, with `tools/mutter_portal.py` as the portal's backend on the system Python's PyGObject (`python3-gi`), and skip the same way. The gaming-mode suite drives the installed Chrome, windowed under `openbox` on a private X server, and skips without either. |
 | `perf` | A long constrained-link pacer benchmark, plus `xterm` and `xdotool` for the screen-damage load generator. Run on request. |
 | `image` | A published desktop image and somewhere to run it (Kubernetes, Docker, or a session already up), installed Chrome, release Firefox, Playwright's WebKit, `xdotool` and `xclip` on the client display. Run on request; see [Image tier](#image-tier). |
@@ -83,6 +98,7 @@ unit tier needs only the source tree and `pytest`.
 | `SELKIES_TEST_SERVER` | `target/release/selkies` in the tree, else `selkies` on `PATH` | The selkies server under test. |
 | `E2E_PAGE_CALL_TIMEOUT` | `60` | Seconds a browser is given to answer a call that carries no deadline of its own (`evaluate`, a close). An engine whose renderer wedges would otherwise hold a suite to the runner's kill; past the bound the call raises and the suite reports, printing the page's last console lines and every WebKit thread's stack (`gdb`, through `sudo -n` where Yama needs it; kept in `browser-stall-<pid>.log` in the work directory too). 0 turns it off. |
 | `E2E_CHROME` | unset | System Chrome/Chromium binary. Unset uses Playwright's bundled Chromium. |
+| `SELKIES_SUITES_HOST` | the debug build in the target directory (`CARGO_TARGET_DIR`, else `target/`), built first where `cargo` is on `PATH` | The `suites-host` program the Playwright suites start their servers through. |
 | `E2E_FIREFOX_PROFILE` | `$E2E_WORKDIR/firefox-profile` | Persistent Firefox profile; clipboard permission does not survive a fresh one, and `tests/tools/fetch-openh264.sh` seeds the OpenH264 plugin into it. Firefox negotiates no H.264 without that plugin, and the WebRTC block skips. |
 | `E2E_TURN_REST_URI` | unset | TURN REST endpoint. WebRTC runs on host candidates alone without it. |
 | `E2E_MUTTER` | `mutter` on `PATH` | Mutter executable the host-portal suite's `gnome` blocks run headless. |

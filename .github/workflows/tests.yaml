@@ -314,6 +314,7 @@ jobs:
           cache-dependency-path: |
             web/selkies-web-core/package.json
             web/selkies-dashboard/package.json
+            tests/package-lock.json
       - name: Set up Python
         id: python-first
         # A download GitHub fails is tried again after a wait, twice.
@@ -514,10 +515,18 @@ jobs:
         run: ./scripts/ci/build-web.sh
       - name: Build the test tools
         run: make -C tests/tools
-      # The Rust suites (crates/selkies-suites) depend on no crate of the
-      # workspace, so they build here without the server's libraries, on the
-      # toolchain the server is built with (infra/packaging/rust.sh, the pin
-      # scripts/ci/server-build-deps.sh reads too). Built ahead of the run, so no
+      # The browser suites on Playwright Test (tests/*/*.spec.ts) run from the
+      # tests package; they drive the system Chrome E2E_CHROME names, whose
+      # libraries the Chromium install below brings.
+      - name: Install the browser suites' packages
+        working-directory: tests
+        run: ../scripts/ci/retry.sh 5 60 npm ci --no-audit --no-fund
+      # The Rust suites (crates/selkies-suites), and suites-host, the program of
+      # that crate the Playwright suites start their servers through, depend on
+      # no crate of the workspace, so they build here without the server's
+      # libraries, on the toolchain the server is built with
+      # (infra/packaging/rust.sh, the pin scripts/ci/server-build-deps.sh reads
+      # too). Built ahead of the run, so no
       # suite's budget pays for the compile, and kept between runs, so a run
       # whose lockfile and suites are unchanged pays for neither the crates nor
       # the build.

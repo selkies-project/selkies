@@ -19,7 +19,7 @@ workspace = true
 # No crate of the workspace and nothing native beyond the server's own TLS provider, so the suites
 # build where the server does not: beside a server a wheel installed. The crates are the ones the
 # server speaks WebSockets and HTTP with, at its versions.
-tokio = { version = "1", features = ["rt", "macros", "net", "time", "sync", "io-util"] }
+tokio = { version = "1", features = ["rt", "macros", "net", "time", "sync", "io-util", "io-std"] }
 tokio-websockets = { version = "0.13", default-features = false, features = ["client", "aws_lc_rs", "fastrand"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["client", "server", "http1"] }

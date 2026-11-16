@@ -5,8 +5,8 @@
 #
 # ESLint over the dashboard, the web core, the touch gamepad and the scripts
 # outside them, plus the TypeScript check of the dashboard, the web core, the
-# Node audits, the BrowserStack smoke and the site. Run from the repository
-# root; requires npm.
+# Node audits, the browser suites, the BrowserStack smoke and the site. Run
+# from the repository root; requires npm.
 #
 # The CI lint gate and the pre-commit hook both call this, so the two cannot
 # drift apart.
@@ -52,6 +52,14 @@ if [ ! -x "${site}/node_modules/.bin/tsc" ]; then
         --fetch-retries=5 --fetch-retry-maxtimeout=120000)
 fi
 
+# The browser suites' type-checked lint below resolves Playwright's types from
+# the tests package's install
+suites=tests
+if [ ! -x "${suites}/node_modules/.bin/tsc" ]; then
+    (cd "${suites}" && npm ci --no-audit --no-fund \
+        --fetch-retries=5 --fetch-retry-maxtimeout=120000)
+fi
+
 # The smoke's type-checked lint below resolves WebdriverIO's types from its
 # own install
 smoke=tests/browserstack
@@ -60,12 +68,13 @@ if [ ! -x "${smoke}/node_modules/.bin/tsc" ]; then
         --fetch-retries=5 --fetch-retry-maxtimeout=120000)
 fi
 
-# The Node audits, the BrowserStack smoke, the site's scripts and configs, the
-# image tier's tester pages and this config itself: eslint.config.mts at the
-# root, with the same ESLint.
-echo "eslint: tests/tools tests/browserstack website tests/image/site eslint.config.mts"
+# The Node audits, the browser suites, the BrowserStack smoke, the site's
+# scripts and configs, the image tier's tester pages and this config itself:
+# eslint.config.mts at the root, with the same ESLint.
+echo "eslint: tests/tools tests/lib tests/*/*.spec.ts tests/browserstack website tests/image/site eslint.config.mts"
 web/selkies-dashboard/node_modules/.bin/eslint --flag "${flag}" --max-warnings 0 \
-    'tests/tools/**/*.ts' 'tests/browserstack/*.ts' 'website/scripts/**/*.ts' \
+    'tests/tools/**/*.ts' 'tests/lib/**/*.ts' 'tests/*/*.spec.ts' \
+    tests/playwright.config.ts 'tests/browserstack/*.ts' 'website/scripts/**/*.ts' \
     website/next.config.ts website/postcss.config.ts 'tests/image/site/**/*.ts' eslint.config.mts
 
 # The dashboard's own build runs tsc as well, but that is downstream of this gate.
@@ -81,6 +90,11 @@ echo "tsc: web/selkies-web-core"
 echo "tsc: tests/tools"
 "${pkg}/node_modules/.bin/tsc" -p tests/tools
 "${pkg}/node_modules/.bin/tsc" -p tests/tools/tsconfig.browser.json
+
+# The browser suites check themselves with the TypeScript the tests package
+# declares, against the Playwright and Node types it carries.
+echo "tsc: tests"
+(cd "${suites}" && npm run --silent typecheck)
 
 # The BrowserStack smoke checks itself with the TypeScript it declares, against
 # the WebdriverIO and Node types its own dependencies carry.
