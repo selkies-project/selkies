@@ -65,7 +65,7 @@ x11rb = { version = "0.14", features = ["xtest", "xfixes", "randr", "xkb", "xinp
 libpulse-binding = "2.30"
 sysinfo = "0.40"
 nvml-wrapper = "0.13"
-prometheus-client = "0.25"
+prometheus-client = "0.26"
 rmp-serde = "1"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 chrono = "0.4"
