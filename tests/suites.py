@@ -260,7 +260,7 @@ SUITES: list = [
      "selectors": ["websockets", "webrtc", "policy"]},
     {"path": "e2e/test_printing.py", "tier": "e2e", "timeout": 1200,
      "selectors": ["websockets", "webrtc", "policy"]},
-    {"path": "e2e/test_operator_api.py", "tier": "e2e", "timeout": 1200,
+    {"path": "e2e/operator_api.spec.ts", "tier": "e2e", "timeout": 1200,
      "selectors": ["websockets", "webrtc", "wayland"]},
     {"path": "e2e/test_encoder_support.py", "tier": "e2e", "timeout": 900,
      "selectors": ["menu", "pinned"]},
