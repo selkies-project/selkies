@@ -13,7 +13,8 @@
  * Everything that reads the fragment reads the keyword alone
  * (`urlFragmentKeyword`), so no hash parser sees the token and none logs it; a
  * window this page opens for the session carries a fragment token on in its own
- * fragment (`fragmentWithSessionToken`), and a sharing link starts from the page
+ * fragment (`fragmentWithSessionToken`), on this page's origin
+ * (`sessionPageURL`), and a sharing link starts from the page
  * without any token (`shareablePageURL`).
  * @module
  */
@@ -69,6 +70,20 @@ export function urlFragmentKeyword(): string {
 export function fragmentWithSessionToken(keyword: string): string {
   const { token } = readUrlFragment();
   return token ? `#${keyword}&token=${encodeURIComponent(token)}` : `#${keyword}`;
+}
+
+/**
+ * The absolute URL of another page of this session (the second display's
+ * window): this page's origin, path, and query, then the fragment of
+ * `fragmentWithSessionToken`. The origin is written out because a path alone
+ * resolves against the page, and one starting with `//` would name another
+ * host, which the fragment's token must never reach.
+ * @param keyword The keyword without its `#` (`display2-right`).
+ * @returns The URL to open.
+ */
+export function sessionPageURL(keyword: string): string {
+  const here = new URL(window.location.href);
+  return `${here.origin}${here.pathname}${here.search}${fragmentWithSessionToken(keyword)}`;
 }
 
 /**

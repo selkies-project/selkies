@@ -39,7 +39,7 @@ const {
     SESSION_TOKEN_PROTOCOL, SESSION_TOKEN_PROTOCOL_PREFIX, getSessionToken, installSessionCookie,
     sessionAuthHeaders, sessionTokenInFragment, sessionTokenProtocols, withSessionToken,
 } = await import('../../web/selkies-web-core/lib/session-token.ts');
-const { fragmentWithSessionToken, shareablePageURL, urlFragmentKeyword } =
+const { fragmentWithSessionToken, sessionPageURL, shareablePageURL, urlFragmentKeyword } =
     await import('../../web/selkies-web-core/lib/page-url.ts');
 
 at('http://host.test/app/#token=f1');
@@ -98,6 +98,14 @@ check('the second display carries a fragment token in its own fragment',
 at('http://host.test/app/?token=q1');
 check('the second display leaves a query token to the query it keeps',
       fragmentWithSessionToken('display2-right') === '#display2-right');
+
+at('http://host.test/app/?keep=1#token=f1');
+check('the second display opens on this page\'s origin',
+      sessionPageURL('display2-right') === 'http://host.test/app/?keep=1#display2-right&token=f1',
+      sessionPageURL('display2-right'));
+at('http://host.test//elsewhere.test/app/#token=f1');
+check('a page path that starts with // keeps the second display, and its token, on this origin',
+      new URL(sessionPageURL('display2-right')).host === 'host.test', sessionPageURL('display2-right'));
 
 at('http://host.test/app/?token=q1&keep=1#player2');
 check('a sharing link drops a query token', shareablePageURL() === 'http://host.test/app/?keep=1', shareablePageURL());
