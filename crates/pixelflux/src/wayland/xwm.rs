@@ -865,7 +865,7 @@ impl XwmHandler for AppState {
         self.refocus_pointer();
         for node in &mut self.output_nodes {
             if let Some(cap) = node.capture.as_mut() {
-                cap.change_pending = true;
+                cap.note_change();
             }
         }
     }
@@ -975,7 +975,7 @@ impl XwmHandler for AppState {
                 .map_element(window, root_location(&surface), false);
             for node in &mut self.output_nodes {
                 if let Some(cap) = node.capture.as_mut() {
-                    cap.change_pending = true;
+                    cap.note_change();
                 }
             }
         }

@@ -6,7 +6,7 @@
 		// Path is relative to the devcontainer.json file.
 		"dockerfile": "../Dockerfile",
 		"args": {
-			"IMAGE_TAG": "ubuntu-26.04"
+			"IMAGE_TAG": "ubuntu26.04"
 		}
 	},
 	"features": {

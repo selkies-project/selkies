@@ -36,7 +36,9 @@ use tokio::io::AsyncReadExt;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
 
-use super::pacing::{TRANSFER_MIN_GAUGED_BYTES, TransferPacer, UplinkGauge, gauged_chunk_size};
+use super::pacing::{
+    TRANSFER_MIN_GAUGED_BYTES, TransferPacer, UplinkGauge, gauged_chunk_size, pace_gauged,
+};
 use super::{AuditSink, FilesState, RequestAuth};
 
 /// A path's percent-encoding: `/` and the unreserved characters pass, everything else is
@@ -216,14 +218,10 @@ impl Streaming {
         if let Some(cap) = &self.cap {
             cap.pace(n).await;
         }
-        if let Some(gauge) = &mut self.gauge {
-            let verdict = gauge.sample();
-            if gauge.alive() {
-                let inflation = gauge.inflation_us();
-                self.pacer.pace_verdict(n, verdict, Some(inflation)).await;
-            } else {
-                self.gauge = None;
-            }
+        if let Some(gauge) = &mut self.gauge
+            && !pace_gauged(&self.pacer, gauge, n).await
+        {
+            self.gauge = None;
         }
         self.sent += n as u64;
         Ok(Some(Bytes::from(buf)))

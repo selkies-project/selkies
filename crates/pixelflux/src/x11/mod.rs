@@ -396,6 +396,9 @@ struct RootDamage {
     /// A report read off the connection and not yet acted on. Latched here because reading the
     /// connection is what notices one, and that happens well before the frame it wakes.
     reported: Cell<bool>,
+    /// A report set aside while its change is held for the next one ([`Self::hold`]): where the
+    /// root changed, None where the server cannot say. The next take returns it too.
+    held: Cell<Option<Option<Vec<Rectangle>>>>,
 }
 
 impl RootDamage {
@@ -425,12 +428,21 @@ impl RootDamage {
             id,
             parts,
             reported: Cell::new(false),
+            held: Cell::new(None),
         })
     }
 
-    /// Whether the server has reported a change since the last [`Self::clear`], taking in
-    /// whatever else the connection carries along the way.
+    /// Whether the server has reported a change since the last [`Self::clear`], or one is held
+    /// ([`Self::hold`]), taking in whatever else the connection carries along the way.
     fn reported(&self, conn: &RustConnection) -> bool {
+        let held = self.held.take();
+        let any = held.is_some();
+        self.held.set(held);
+        self.reported_anew(conn) || any
+    }
+
+    /// Whether the server has reported a change since the last take, a held one aside.
+    fn reported_anew(&self, conn: &RustConnection) -> bool {
         while let Ok(Some(event)) = conn.poll_for_event() {
             if matches!(event, Event::DamageNotify(_)) {
                 self.reported.set(true);
@@ -439,12 +451,25 @@ impl RootDamage {
         self.reported.get()
     }
 
+    /// Set the reported change aside for the next take, so that the server reports the next
+    /// change anew: a change held for a source's next frame (`FramePace::merge_until`) waits
+    /// on that report.
+    fn hold(&self, conn: &RustConnection) {
+        let taken = self.take_reported(conn);
+        let held = match self.held.take() {
+            Some(before) => union(before, taken),
+            None => taken,
+        };
+        self.held.set(Some(held));
+    }
+
     /// Empty the region behind a report that has been acted on, so the next change is reported
     /// in turn; a tick nothing reported leaves the server alone. Called before a grab, which
     /// leaves a change racing the grab to wake the next frame instead of being cleared along
     /// with what the grab captured.
     fn clear(&self, conn: &RustConnection) {
-        if !self.reported(conn) {
+        self.held.set(None);
+        if !self.reported_anew(conn) {
             return;
         }
         self.reported.set(false);
@@ -452,10 +477,20 @@ impl RootDamage {
         let _ = conn.flush();
     }
 
-    /// [`Self::clear`], saying where the root changed: the damaged rectangles, empty where
-    /// nothing was reported, None where a change was reported but the server cannot say where.
+    /// [`Self::clear`], saying where the root changed, a held change's rectangles among them:
+    /// the damaged rectangles, empty where nothing was reported, None where a change was
+    /// reported but the server cannot say where.
     fn take(&self, conn: &RustConnection) -> Option<Vec<Rectangle>> {
-        if !self.reported(conn) {
+        let taken = self.take_reported(conn);
+        match self.held.take() {
+            Some(held) => union(held, taken),
+            None => taken,
+        }
+    }
+
+    /// [`Self::take`] of what the server reported alone, leaving a held change where it is.
+    fn take_reported(&self, conn: &RustConnection) -> Option<Vec<Rectangle>> {
+        if !self.reported_anew(conn) {
             return Some(Vec::new());
         }
         let Some(parts) = self.parts else {
@@ -472,6 +507,13 @@ impl RootDamage {
                 .rectangles,
         )
     }
+}
+
+/// Both changes' rectangles, None where the server could not say where either was.
+fn union(a: Option<Vec<Rectangle>>, b: Option<Vec<Rectangle>>) -> Option<Vec<Rectangle>> {
+    let mut a = a?;
+    a.extend(b?);
+    Some(a)
 }
 
 /// [`RootDamage::take`] for a tick `trigger` woke: whether the root changed since the last
@@ -551,7 +593,9 @@ fn readable(conn: &RustConnection, timeout: Duration) -> bool {
 }
 
 /// Block until the capture is due a frame and say what asked for it: a change the server
-/// reported, brought forward by as much as the pacing budget allows, or the frame timer.
+/// reported, brought forward by as much as the pacing budget allows, or the frame timer. A
+/// change the pacing holds for a source's next frame (`FramePace::merge_until`) is set aside
+/// until the server reports another, which the frame then carries too.
 ///
 /// Without DAMAGE the wait is the timer's alone, which is the cadence a capture keeps when
 /// nothing else can say the screen moved.
@@ -577,6 +621,14 @@ fn wait_for_frame(
     sleep_until(pace.pull_at(TickTrigger::Damage, period, now).min(due));
     loop {
         if damage.reported(conn) {
+            if let Some(until) = pace.merge_until(period, Instant::now()) {
+                damage.hold(conn);
+                let deadline = until.min(due);
+                while !damage.reported_anew(conn)
+                    && let Some(wait) = deadline.checked_duration_since(Instant::now())
+                    && readable(conn, wait)
+                {}
+            }
             return TickTrigger::Damage;
         }
         let Some(wait) = due.checked_duration_since(Instant::now()) else {
@@ -591,6 +643,7 @@ fn wait_for_frame(
 /// [`wait_for_frame`] on a shared framebuffer's watch (`framebuffer`): a drawing operation the
 /// server signals on it ends the wait as a reported change would, with no round trip, and so
 /// does a resize retiring it.
+/// A change held for a source's next frame waits for the server's next drawing operation.
 fn wait_for_framebuffer(fb: &SharedFramebuffer, pace: &FramePace, period: Duration) -> TickTrigger {
     let now = Instant::now();
     let due = pace.next_due(period, now);
@@ -601,11 +654,17 @@ fn wait_for_framebuffer(fb: &SharedFramebuffer, pace: &FramePace, period: Durati
     {
         thread::sleep(wait);
     }
-    match due.checked_duration_since(Instant::now()) {
-        Some(wait) if fb.wait(wait) => TickTrigger::Damage,
-        None if fb.wait(Duration::ZERO) => TickTrigger::Damage,
-        _ => TickTrigger::Timer,
+    let changed = match due.checked_duration_since(Instant::now()) {
+        Some(wait) => fb.wait(wait),
+        None => fb.wait(Duration::ZERO),
+    };
+    if !changed {
+        return TickTrigger::Timer;
     }
+    if let Some(until) = pace.merge_until(period, Instant::now()) {
+        fb.wait_past(fb.drawing_count(), until.min(due));
+    }
+    TickTrigger::Damage
 }
 
 /// The shared framebuffer of `root`'s screen (`framebuffer`), where the server offers one and

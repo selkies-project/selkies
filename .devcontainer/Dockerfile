@@ -101,4 +101,4 @@ RUN key() { \
     printf 'Package: nodejs\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' | sudo tee /etc/apt/preferences.d/nodejs > /dev/null && \
     sudo apt-get update && sudo apt-get install --no-install-recommends -y xdg-utils google-chrome-stable nodejs && \
     sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/* && \
-    xdg-settings set default-web-browser google-chrome.desktop
+    mkdir -p "${HOME}/.config" && xdg-settings set default-web-browser google-chrome.desktop

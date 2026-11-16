@@ -3379,3 +3379,47 @@ async fn the_deployment_names_and_icons_the_installed_app() {
     assert_eq!(manifest["name"], "Selkies");
     app.stop().await;
 }
+
+/// A web root that names the app in its own manifest keeps that name while `ui_title` is left
+/// to its default, the rule the page's tab follows, and an operator's `ui_title` still names
+/// it over the web root's.
+#[tokio::test]
+async fn a_web_roots_own_name_stands_until_the_operator_sets_ui_title() {
+    let root = crate::http::testing::tempfile_dir("selkies-manifest-name-");
+    std::fs::write(root.join("index.html"), "<!doctype html>").unwrap();
+    std::fs::write(
+        root.join("manifest.json"),
+        r#"{"name":"Kiosk","short_name":"K"}"#,
+    )
+    .unwrap();
+    let serve = |config: HttpConfig| {
+        let state = AppState::new(config, FixedSupervisor::new(None, &[]))
+            .with_web_client(Some(WebClient::Directory(root.clone())));
+        async move {
+            let app = TestServer::start(build(state, Vec::new())).await;
+            let body = app.call("GET", "/manifest.json", &[]).await.body;
+            app.stop().await;
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()
+        }
+    };
+
+    let settings = |title: Option<&'static str>| {
+        crate::settings::Settings::parse(&[], &move |name| match name {
+            "SELKIES_ENABLE_BASIC_AUTH" => Some("false".into()),
+            "SELKIES_UI_TITLE" => title.map(str::to_string),
+            _ => None,
+        })
+    };
+
+    let manifest = serve(HttpConfig::from_settings(&settings(None))).await;
+    assert_eq!(
+        (&manifest["name"], &manifest["short_name"]),
+        (&json!("Kiosk"), &json!("K"))
+    );
+
+    let titled = serve(HttpConfig::from_settings(&settings(Some("Firefox")))).await;
+    assert_eq!(
+        (&titled["name"], &titled["short_name"]),
+        (&json!("Firefox"), &json!("Firefox"))
+    );
+}
