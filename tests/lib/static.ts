@@ -17,7 +17,7 @@
  * @module
  */
 
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { stripTypeScriptTypes } from 'node:module';
@@ -64,17 +64,33 @@ export interface Served {
  */
 export async function serveTypeScript(served: string): Promise<Served> {
     const root = resolve(served);
+    const realRoot = realpathSync(root);
+    const inside = (p: string, base: string): boolean => p === base || p.startsWith(base + sep);
     const stripped = new Map<string, { stamp: number; body: Buffer }>();
     const server = createServer((req, res) => {
+        // Nothing served is ever read as another type: an error's text stays text.
+        res.setHeader('X-Content-Type-Options', 'nosniff');
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-        const rel = normalize(decodeURIComponent(url.pathname));
+        let rel: string;
+        try {
+            rel = normalize(decodeURIComponent(url.pathname));
+        } catch {
+            res.writeHead(400).end();
+            return;
+        }
         const path = join(root, rel);
-        if (rel.split(sep).includes('..') || !(path === root || path.startsWith(root + sep))) {
+        if (rel.split(sep).includes('..') || !inside(path, root)) {
             res.writeHead(403).end();
             return;
         }
         let stamp: number;
         try {
+            // A symbolic link in the tree may point out of it: what is read is
+            // where the path really leads, and that has to be inside too.
+            if (!inside(realpathSync(path), realRoot)) {
+                res.writeHead(403).end();
+                return;
+            }
             const st = statSync(path);
             if (!st.isFile()) throw new Error('not a file');
             stamp = st.mtimeMs;
