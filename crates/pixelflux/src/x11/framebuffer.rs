@@ -77,14 +77,12 @@ const WATCH_BITS: usize = 24;
 /// Reads a frame tries for a whole one before it is grabbed through XShm instead.
 const READ_ATTEMPTS: u32 = 4;
 
-/// Bytes of tiles past which a read copies its rows of tiles on `COPY_THREADS` threads
-/// (`SharedFramebuffer::copy_tiles`); below it, starting them costs more than it saves. Scoped
-/// threads of the copy's own rather than the rayon pool: waking the pool's every worker for a
-/// copy a frame kept them spinning, 1.9 cores more at 2560x1600 and 60 fps.
+/// Bytes of tiles past which a read copies its rows of tiles on its grab's copy pool
+/// (`SharedFramebuffer::copy_tiles`); below it, handing them over costs more than it saves.
 const PARALLEL_BYTES: usize = 1 << 20;
 
-/// Threads a large copy runs on, the capture thread among them: a copy is bound by memory
-/// bandwidth, which a few threads fill.
+/// Threads a large copy runs on, the capture thread and its grab's copy pool
+/// ([`FramebufferGrab`]): a copy is bound by memory bandwidth, which a few threads fill.
 const COPY_THREADS: usize = 4;
 
 /// How long a read waits for a drawing operation under way to end before it gives up on the
@@ -376,6 +374,47 @@ impl SharedFramebuffer {
         ready || self.drawn() || self.retired()
     }
 
+    /// The drawing count as it stands, odd while an operation runs.
+    pub(crate) fn drawing_count(&self) -> u64 {
+        self.framebuffer.word64(HEAD_SEQ).load(Ordering::Acquire)
+    }
+
+    /// Wait until `deadline` for a drawing operation to end after the count stood at `count`
+    /// (the one running then, if one was), or for the framebuffer to retire: true where one
+    /// did. Tiles drawn before it are left in the watch, so this waits on the count rather than
+    /// on the bitmap [`Self::wait`] reads.
+    pub(crate) fn wait_past(&self, count: u64, deadline: Instant) -> bool {
+        let ended = (count + 2) & !1;
+        loop {
+            self.watch.word(WATCH_ARMED).store(1, Ordering::SeqCst);
+            fence(Ordering::SeqCst);
+            if self.drawing_count() >= ended || self.retired() {
+                return true;
+            }
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            let mut poll = libc::pollfd {
+                fd: self.event.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let timeout = libc::timespec {
+                tv_sec: left.as_secs() as _,
+                tv_nsec: libc::c_long::from(left.subsec_nanos()),
+            };
+            // SAFETY: one pollfd for the duration of the call.
+            if unsafe { libc::ppoll(&mut poll, 1, &timeout, std::ptr::null()) } > 0 {
+                let mut drained = 0u64;
+                // SAFETY: an 8-byte read of the eventfd's counter into a u64; the fd is
+                // nonblocking.
+                unsafe {
+                    libc::read(self.event.as_raw_fd(), (&mut drained as *mut u64).cast(), 8);
+                }
+            }
+        }
+    }
+
     /// The drawing count once no operation runs, or `None` past `DRAW_WAIT`.
     fn settled_seq(&self) -> Option<u64> {
         let seq = self.framebuffer.word64(HEAD_SEQ);
@@ -395,11 +434,13 @@ impl SharedFramebuffer {
     /// Copy the tiles `pending` marks within the region at (`x`, `y`) of `width` x `height`
     /// into `dst` (`dst_stride` bytes a row, the region's top-left at its start). Each row of
     /// tiles lands in rows of `dst` of its own, so a change past `PARALLEL_BYTES` copies its
-    /// rows of tiles on `COPY_THREADS` threads: one thread copying a whole 2560x1600 screen took
-    /// 1.2 to 6.7 ms, reading what the server had just drawn from another core's cache, which
-    /// held a full-screen change back behind an XShm grab, the server's copy from its own.
+    /// rows of tiles on `COPY_THREADS` threads, the calling one and `pool`'s, where there is a
+    /// pool: one thread copying a whole 2560x1600 screen took 1.2 to 6.7 ms, reading what the
+    /// server had just drawn from another core's cache, which held a full-screen change back
+    /// behind an XShm grab, the server's copy from its own.
     fn copy_tiles(
         &self,
+        pool: Option<&rayon::ThreadPool>,
         pending: &[u64],
         dst: &mut [u8],
         dst_stride: usize,
@@ -458,22 +499,24 @@ impl SharedFramebuffer {
                 }
             }
         };
-        if copied > PARALLEL_BYTES {
-            let per = rows.len().div_ceil(COPY_THREADS);
-            let mut parts: Vec<Vec<_>> = Vec::with_capacity(COPY_THREADS);
-            let mut rows = rows.into_iter().peekable();
-            while rows.peek().is_some() {
-                parts.push(rows.by_ref().take(per).collect());
+        match pool {
+            Some(pool) if copied > PARALLEL_BYTES => {
+                let per = rows.len().div_ceil(COPY_THREADS);
+                let mut rows = rows.into_iter();
+                let first: Vec<_> = rows.by_ref().take(per).collect();
+                let copy_row = &copy_row;
+                pool.in_place_scope(|scope| {
+                    loop {
+                        let part: Vec<_> = rows.by_ref().take(per).collect();
+                        if part.is_empty() {
+                            break;
+                        }
+                        scope.spawn(move |_| part.into_iter().for_each(copy_row));
+                    }
+                    first.into_iter().for_each(copy_row);
+                });
             }
-            let first = parts.remove(0);
-            std::thread::scope(|scope| {
-                for part in parts {
-                    scope.spawn(|| part.into_iter().for_each(copy_row));
-                }
-                first.into_iter().for_each(copy_row);
-            });
-        } else {
-            rows.into_iter().for_each(copy_row);
+            _ => rows.into_iter().for_each(copy_row),
         }
     }
 
@@ -561,18 +604,49 @@ pub(crate) struct FramebufferGrab {
     drawn: Vec<u64>,
     /// The tiles the last XShm grab took, named again with the frame after it.
     carry: Vec<u64>,
+    /// The threads a large copy runs on, kept for the grab's life where its screen can hold a
+    /// change past `PARALLEL_BYTES` ([`Self::copy_pool`]).
+    copy_pool: Option<rayon::ThreadPool>,
 }
 
 impl FramebufferGrab {
     /// A grab for `surfaces` pool surfaces, each missing the whole screen.
     pub(crate) fn new(fb: SharedFramebuffer, surfaces: usize) -> Self {
         let words = fb.words();
+        let copy_pool = Self::copy_pool(&fb);
         Self {
             fb,
             pending: vec![vec![u64::MAX; words]; surfaces],
             drawn: vec![u64::MAX; words],
             carry: vec![0; words],
+            copy_pool,
         }
+    }
+
+    /// The threads of the grab's own that take a large copy's parts beside the capture thread,
+    /// or none where its screen never holds a change past `PARALLEL_BYTES` or the pool cannot be
+    /// built (the copy then runs on the capture thread alone).
+    ///
+    /// The pool lives as long as the grab rather than threads being started for each copy: a
+    /// full-screen copy at 57 fps took 0.68 ms of CPU a frame at 1280x720 where started threads
+    /// took 0.98, and 1.51 at 1920x1080 where they took 1.71, the copy itself no slower. The
+    /// capture thread copies a part itself rather than waiting on the pool, which kept the copy
+    /// as fast as before. A pool of as many threads as the copy has parts leaves none idle to
+    /// spin, as rayon's global pool left a thread per CPU spinning (1.9 cores more at 2560x1600
+    /// and 60 fps), and one of the grab's own keeps one display's copy from waiting on another
+    /// display's work.
+    fn copy_pool(fb: &SharedFramebuffer) -> Option<rayon::ThreadPool> {
+        if fb.stride * fb.height as usize <= PARALLEL_BYTES {
+            return None;
+        }
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(COPY_THREADS - 1)
+            .thread_name(|_| "pixelflux-fbcopy".into())
+            .build()
+            .map_err(|e| {
+                eprintln!("[X11] No shared framebuffer copy pool, copying on one thread: {e}")
+            })
+            .ok()
     }
 
     /// Take the tiles drawn since the last take into every surface's and into `drawn`.
@@ -681,8 +755,13 @@ impl FramebufferGrab {
             let Some(before) = self.fb.settled_seq() else {
                 continue;
             };
-            self.fb
-                .copy_tiles(&self.pending[idx], dst, dst_stride, region);
+            self.fb.copy_tiles(
+                self.copy_pool.as_ref(),
+                &self.pending[idx],
+                dst,
+                dst_stride,
+                region,
+            );
             fence(Ordering::Acquire);
             if self.fb.framebuffer.word64(HEAD_SEQ).load(Ordering::Acquire) == before {
                 self.pending[idx].fill(0);
@@ -793,6 +872,82 @@ mod tests {
             tile,
             tiles_x,
             tiles_y,
+        }
+    }
+
+    #[test]
+    fn a_copy_past_the_parallel_threshold_lands_every_pixel_where_it_belongs() {
+        let (w, h) = (1280usize, 720usize);
+        let mut grab = FramebufferGrab::new(fake(w as u32, h as u32, 64), 1);
+        assert!(
+            grab.copy_pool.is_some(),
+            "a screen this size copies on a pool"
+        );
+        let (x, y, rw, rh) = (8usize, 4usize, w - 24, h - 12);
+        assert!(rw * rh * 4 > PARALLEL_BYTES);
+        let mut dst = vec![0u8; rw * rh * 4];
+        assert!(grab.read(
+            0,
+            &mut dst,
+            rw * 4,
+            (x as u32, y as u32, rw as u32, rh as u32)
+        ));
+        for row in 0..rh {
+            for col in 0..rw {
+                assert_eq!(
+                    pixel(&dst, rw * 4, col, row),
+                    ((row + y) * w + col + x) as u32
+                );
+            }
+        }
+    }
+
+    fn process_cpu() -> Duration {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: one timespec written by the call.
+        unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut ts) };
+        Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+    }
+
+    #[test]
+    #[ignore = "prints measurements"]
+    fn bench_copy_tiles() {
+        for (w, h) in [(1280u32, 720u32), (1920, 1080), (2560, 1600)] {
+            let fb = fake(w, h, 64);
+            let pool = FramebufferGrab::copy_pool(&fb);
+            let pending = vec![u64::MAX; (fb.tiles_x * fb.tiles_y).div_ceil(64) as usize];
+            let mut dst = vec![0u8; (w * h * 4) as usize];
+            for (label, pace) in [("back to back", None), ("57 fps", Some(1.0 / 57.0))] {
+                let frames = 400u32;
+                let (cpu0, wall0) = (process_cpu(), Instant::now());
+                let mut copy_wall = Duration::ZERO;
+                for _ in 0..frames {
+                    let start = Instant::now();
+                    fb.copy_tiles(
+                        pool.as_ref(),
+                        &pending,
+                        &mut dst,
+                        (w * 4) as usize,
+                        (0, 0, w, h),
+                    );
+                    copy_wall += start.elapsed();
+                    if let Some(p) = pace {
+                        std::thread::sleep(
+                            Duration::from_secs_f64(p).saturating_sub(start.elapsed()),
+                        );
+                    }
+                }
+                let cpu = process_cpu() - cpu0;
+                println!(
+                    "BENCH {w}x{h} {label:<12} copy {:.3} ms  cpu {:.3} ms a frame  ({:.1} s)",
+                    copy_wall.as_secs_f64() * 1e3 / f64::from(frames),
+                    cpu.as_secs_f64() * 1e3 / f64::from(frames),
+                    wall0.elapsed().as_secs_f64()
+                );
+            }
         }
     }
 

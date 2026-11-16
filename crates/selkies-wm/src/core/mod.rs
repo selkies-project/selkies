@@ -5091,12 +5091,17 @@ mod tests {
         }
     }
 
+    /// An engine on the defaults, whatever the host it runs on carries: what `Engine::new` read
+    /// from the system's `rc.xml` and the desktop shell's settings (openbox's stock `rc.xml`
+    /// names four desktops) is put back to the defaults, the desktop count it set included.
     fn engine() -> (Engine, Arc<Mutex<Vec<String>>>) {
         let spawned = Arc::new(Mutex::new(Vec::new()));
         let mut engine = Engine::new(Backend::Wayland, Box::new(Recorder(spawned.clone())));
         engine.config = Config::default();
         engine.menus = Menus::default();
         engine.memory = WindowMemory::transient();
+        engine.theme.desktops = None;
+        engine.desktop_count = engine.configured_desktops();
         let mut out = Vec::new();
         engine.handle(
             Event::Outputs(vec![OutputInfo {

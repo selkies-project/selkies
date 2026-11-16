@@ -27,7 +27,7 @@
  * @module
  */
 import * as React from "react";
-import { fragmentWithSessionToken } from "../../../selkies-web-core/lib/page-url.ts";
+import { sessionPageURL } from "../../../selkies-web-core/lib/page-url.ts";
 import { showVirtualKeyboard as raiseVirtualKeyboard } from "../../../selkies-web-core/lib/virtual-keyboard.ts";
 import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY, USER_CHORDS_KEY, chordEvents,
   formatChord, parseChord, readUserChords, writeUserChords, type ChordEvent } from "../../../selkies-web-core/lib/touch-controls.ts";
@@ -437,8 +437,7 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
    * leaves the arrows up: an arrow click is a fresh one.
    */
   const launchWindow = React.useCallback((direction: string, screen: ScreenDetailed | null = null) => {
-    const here = new URL(window.location.href);
-    const url = `${here.pathname}${here.search}${fragmentWithSessionToken(`display2-${direction}`)}`;
+    const url = sessionPageURL(`display2-${direction}`);
     let features = "resizable=yes,scrollbars=yes";
     if (screen) {
       features += `,left=${screen.availLeft},top=${screen.availTop},width=${screen.availWidth},height=${screen.availHeight}`;

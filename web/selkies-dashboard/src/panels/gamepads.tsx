@@ -152,13 +152,43 @@ const subscribeCoarsePointer = (onChange: () => void) => {
 };
 const isCoarsePointer = () => coarsePointer?.matches ?? false;
 
+/** Pointer travel in pixels before a press on the keyboard button is a drag rather than a tap. */
+const DRAG_THRESHOLD = 10;
+
 /**
  * The button that raises the virtual keyboard, in its own click, while the
  * primary pointer is coarse (a phone, a tablet, a convertible in its tablet
  * posture) and no keyboard is attached, unless the keyboard toggle has hidden it.
+ *
+ * A press that travels drags the button off whatever it covers, and the
+ * click that ends a drag raises nothing. Only its colors transition, so it
+ * stays under the finger instead of easing toward it.
  */
 export function VirtualKeyboardButton() {
   const d = useDashboard();
+  const [place, setPlace] = React.useState({ right: 16, bottom: 16 });
+  const drag = React.useRef({ pointerId: -1, moved: false, x: 0, y: 0, right: 0, bottom: 0 });
+  const onPointerDown = (e: React.PointerEvent) => {
+    drag.current = { pointerId: e.pointerId, moved: false, x: e.clientX, y: e.clientY, ...place };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const onPointerMove = (e: React.PointerEvent) => {
+    const from = drag.current;
+    if (from.pointerId !== e.pointerId) return;
+    const dx = e.clientX - from.x;
+    const dy = e.clientY - from.y;
+    if (!from.moved && Math.abs(dx) <= DRAG_THRESHOLD && Math.abs(dy) <= DRAG_THRESHOLD) return;
+    from.moved = true;
+    setPlace({ right: from.right - dx, bottom: from.bottom - dy });
+  };
+  const onPointerUp = () => { drag.current.pointerId = -1; };
+  const onClick = () => {
+    if (drag.current.moved) {
+      drag.current.moved = false;
+      return;
+    }
+    d.showVirtualKeyboard();
+  };
   const coarse = React.useSyncExternalStore(subscribeCoarsePointer, isCoarsePointer);
   // On its own setting, not on the gamepads, and only while the primary pointer is coarse: a fine one on a touch
   // screen is a convertible with its keyboard attached (Edge on a Surface turns it fine with the type cover), where
@@ -166,9 +196,9 @@ export function VirtualKeyboardButton() {
   if (!d.keyboardButton || !coarse || d.isSecondaryDisplay || d.isViewer || !d.renderable.chrome
     || !d.renderable.keyboardButton) return null;
   return (
-    <Button variant="default" size="icon" className="virtual-keyboard-button fixed right-4 bottom-4 z-[2050]" data-virtual-keyboard-button=""
-      aria-label={t("topMenu.virtualKeyboard")} title={t("topMenu.virtualKeyboard")}
-      onClick={d.showVirtualKeyboard}>
+    <Button variant="default" size="icon" className="virtual-keyboard-button fixed z-[2050] touch-none transition-colors" data-virtual-keyboard-button=""
+      aria-label={t("topMenu.virtualKeyboard")} title={t("topMenu.virtualKeyboard")} style={place}
+      onClick={onClick} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}>
       <Keyboard className="size-4" />
     </Button>
   );

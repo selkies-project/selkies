@@ -117,8 +117,8 @@
   exists, whatever the umask (`--runtime-dir` makes the one it names so), so that directory's mode is their access
   control; under `--host` the session joins the host's buses and sound server instead and starts none of these.
   `selkies` run with no arguments serves the user's own desktop and home on `localhost:8080`, as that user
-  (`commands/standalone.rs`), behind the placeholder login below unless the environment sets one; every local
-  account reaches the loopback addresses, and choosing a password is the user's, as it is a container operator's.
+  (`commands/standalone.rs`); every local account reaches the loopback addresses, so the login stays on, and the
+  program carries no password of its own: it refuses to start until the user sets one, as the server does.
   `--basic-auth-password-file` reads the password from a file at startup, so it is in neither the environment nor
   the command line another local account can read; the file's own mode is its access control. The screen is no account's to map: Xvfb starts without `-shmem`, whose
   segment any local account could read and write, and shares its framebuffer (`SELKIES-FRAMEBUFFER`) only with a
@@ -198,6 +198,7 @@
   job, so no app name reaches a shell; every page of the session is told each job's output.
 - With authentication turned off (no password, no tokens), any connector controls the desktop by design; operators
   front such deployments with their own proxy.
-- The documented placeholder container password (`mypasswd`), which a bare `selkies` signs in with too, and the
-  turn-rest addon's public openrelay secret are intentional.
+- The documented placeholder container password (`mypasswd`), which the base image sets for its operator to
+  change, and the turn-rest addon's public openrelay secret are intentional; the `selkies` program itself carries
+  no password.
 - Reports should name the file and line, give a reproducer runnable against the source tree, and propose a patch.

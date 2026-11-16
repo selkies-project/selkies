@@ -82,6 +82,35 @@ pub fn gauged_chunk_size(pacer: &TransferPacer) -> usize {
     sized.clamp(TRANSFER_CHUNK_MIN_BYTES, TRANSFER_CHUNK_MAX_BYTES)
 }
 
+/// Pace `nbytes` a gauged transfer holds through `pacer`, one [`gauged_chunk_size`] piece
+/// at a time, folding a fresh `gauge` verdict in before each piece.
+///
+/// The allowance moves only on a verdict, and verdicts come at the gauge's ping cadence, so
+/// the gauge has to be sampled at that cadence however much the transfer holds at once. A
+/// download reads one piece at a time, but an upload's body arrives in whatever the HTTP
+/// stack read (hundreds of KiB on a fast link), and pacing such a chunk on one verdict
+/// would grow the allowance once per chunk rather than once per ping: the slow start that
+/// should double every round trip doubles every second or two. The pieces are sized again
+/// from the rate each verdict leaves.
+///
+/// Returns `false` once the gauge has no session socket left, with the rest of `nbytes`
+/// unpaced: the session it protected is gone, and the caller stops gauging.
+pub async fn pace_gauged(pacer: &TransferPacer, gauge: &mut UplinkGauge, nbytes: usize) -> bool {
+    let mut rest = nbytes;
+    while rest > 0 {
+        let verdict = gauge.sample();
+        if !gauge.alive() {
+            return false;
+        }
+        let piece = rest.min(gauged_chunk_size(pacer));
+        pacer
+            .pace_verdict(piece, verdict, Some(gauge.inflation_us()))
+            .await;
+        rest -= piece;
+    }
+    true
+}
+
 /// A session socket the gauge can ping: the transport implements it over the socket's writer.
 pub trait SessionPing: Send + Sync {
     /// Send a WebSocket ping carrying `payload` behind everything written to the socket so
@@ -813,6 +842,54 @@ mod tests {
             !gauge.alive(),
             "a dead session socket takes the gauge with it"
         );
+    }
+
+    /// A session socket whose peer answers every ping the moment it goes out.
+    struct AnsweringSocket {
+        clock: OnceLock<std::sync::Weak<UplinkClock>>,
+    }
+
+    impl SessionPing for AnsweringSocket {
+        fn ping(&self, payload: &[u8]) -> bool {
+            if let Some(clock) = self.clock.get().and_then(std::sync::Weak::upgrade) {
+                clock.note_pong(payload);
+            }
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn a_chunk_held_at_once_grows_the_allowance_at_the_ping_cadence() {
+        let socket = Arc::new(AnsweringSocket {
+            clock: OnceLock::new(),
+        });
+        let clock = Arc::new(UplinkClock::new(socket.clone()));
+        socket
+            .clock
+            .set(Arc::downgrade(&clock))
+            .expect("the clock is set once");
+        let mut gauge = socket_gauge(clock);
+        let pacer = TransferPacer::adaptive();
+        let start = pacer.rate_bps();
+        // What the HTTP stack hands an upload at once on a fast link.
+        assert!(pace_gauged(&pacer, &mut gauge, 408 * 1024).await);
+        assert!(
+            pacer.rate_bps() >= 4.0 * start,
+            "a clear path doubles the allowance at each ping while the chunk drains, \
+             not once for the chunk: {} -> {}",
+            start,
+            pacer.rate_bps()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gauge_left_without_sockets_stops_pacing() {
+        let socket = Arc::new(FakeSocket {
+            pings: Mutex::new(Vec::new()),
+            fail: AtomicBool::new(true),
+        });
+        let mut gauge = socket_gauge(Arc::new(UplinkClock::new(socket)));
+        assert!(!pace_gauged(&TransferPacer::adaptive(), &mut gauge, 1 << 20).await);
     }
 
     #[test]

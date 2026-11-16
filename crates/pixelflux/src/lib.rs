@@ -3724,6 +3724,8 @@ fn start_capture_on_display(
         needs_full_render: true,
         pace: FramePace::windowed(),
         change_pending: false,
+        last_change: None,
+        merge_hold: None,
         callbacks_at: None,
         callbacks_owed: false,
     };
@@ -4603,16 +4605,21 @@ fn render_pass(state: &mut AppState, trigger: TickTrigger) -> bool {
 /// Render each capture a change waits on (`WlCapture::change_pending`: a client's commit,
 /// input, a host frame) once its period is open: a change takes its period's frame as it
 /// lands, the X11 captures' schedule, rather than waiting for the frame timer. A capture whose
-/// period a frame already took keeps waiting, and the timer wakes as the next one opens.
+/// period a frame already took keeps waiting, and the timer wakes as the next one opens; one
+/// the pacing holds for a source's next frame waits for the next change
+/// (`WlCapture::holds_change`).
 fn serve_changes(state: &mut AppState) {
     let now = Instant::now();
     let open: Vec<u32> = state
         .output_nodes
-        .iter()
+        .iter_mut()
         .filter_map(|n| {
-            let cap = n.capture.as_ref()?;
-            (cap.change_pending && cap.pace.due(TickTrigger::Damage, capture_period(cap), now))
-                .then_some(n.id)
+            let cap = n.capture.as_mut()?;
+            let period = capture_period(cap);
+            (cap.change_pending
+                && cap.pace.due(TickTrigger::Damage, period, now)
+                && !cap.holds_change(period, now))
+            .then_some(n.id)
         })
         .collect();
     if open.is_empty() {
@@ -4911,6 +4918,7 @@ fn render_node_tick(
         let paced = FramePace::input_paced(state.input_interval, period);
         cap.pace.ticked(trigger, period, Instant::now(), paced);
         cap.change_pending = false;
+        cap.merge_hold = None;
     }
 
     // The cursor is composited only on the output the pointer is on, at that output's
@@ -5060,6 +5068,7 @@ fn render_node_tick(
         {
             cap.pace.ticked(trigger, period, now, false);
             cap.change_pending = false;
+            cap.merge_hold = None;
         }
         if let Some(f) = new_frame {
             retain_host_frame(&host, node.capture.as_mut(), host_idx, f);
@@ -8099,7 +8108,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 // A capture whose period a frame already took shows the input when the next opens.
                 for node in &mut state.output_nodes {
                     if let Some(cap) = node.capture.as_mut() {
-                        cap.change_pending = true;
+                        cap.note_change();
                     }
                 }
                 state.space.refresh();
@@ -8139,7 +8148,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 .find(|n| n.id == id)
                 .and_then(|n| n.capture.as_mut())
             {
-                cap.change_pending = true;
+                cap.note_change();
             }
             state.space.refresh();
             render_display(state, id, TickTrigger::HostFrame);
@@ -8303,7 +8312,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 .output_nodes
                 .iter()
                 .filter_map(|n| n.capture.as_ref())
-                .map(|cap| cap.pace.next_wake(capture_period(cap), now, cap.change_pending))
+                .map(|cap| cap.next_wake(capture_period(cap), now))
                 .min()
                 .unwrap_or(loop_start_time + frame_period(state.settings.target_fps));
             let next_due = match wayland::wm::next_wake(state) {

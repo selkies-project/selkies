@@ -250,6 +250,16 @@ what runs where.
   thread for slight extra CPU when latency justifies it, never for work that merely moves a queue or a contended lock.
 - End-to-end latency and an unrestricted frame rate are separate goals, not two ends of one dial: neither is
   spent to buy the other, and a change that trades one away has not improved the other.
+- This is a low-latency remote desktop, not a video clip, and over WebSockets and WebRTC alike:
+  - Video always runs at the lowest latency it can, and latency always outranks smoothness. A frame that arrives
+    late is shown at once or dropped, never held back to even out the cadence, and nothing buffers, paces, or
+    plays back frames behind the live picture to make motion look steadier.
+  - Audio latency comes first too, and every effort goes into reducing it. Keeping audio free of artifacts (gaps,
+    clicks, dropouts, sped-up or slowed playback) matters as much, and the two goals go together: a change that buys
+    one by spending the other has not finished the job. The smallest buffer that plays cleanly is the target, and
+    delay that builds up (behind a stalled link, a queue, or the other stream) is shed rather than played out late.
+  - Audio and video do not wait on each other: neither is delayed to stay in step with the other, and neither
+    queues behind the other on the wire.
 - A change never drops a capability or falls back to an older implementation to make itself simpler. Where one
   seems to be in the way, say what it is rather than removing it.
 - Compatibility spans the Rust toolchain from the workspace's `rust-version` on and CUDA/NVENC 11 to 13 or higher.

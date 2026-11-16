@@ -246,6 +246,11 @@ pub struct WlCapture {
     /// A change (a client's commit, input, a host frame) found its period's frame taken and
     /// waits for the next period to open (`serve_changes`); any frame rendered clears it.
     pub change_pending: bool,
+    /// When the last change arrived ([`Self::note_change`]).
+    pub last_change: Option<Instant>,
+    /// A pending change held for the next change (`FramePace::merge_until`): since when, and
+    /// until when at most; any frame rendered clears it.
+    pub merge_hold: Option<(Instant, Instant)>,
     /// The window boundary whose frame callbacks went out (`answer_frame_callbacks`).
     pub callbacks_at: Option<Instant>,
     /// A boundary's frame callbacks wait for the render of a change still pending at it.
@@ -253,6 +258,33 @@ pub struct WlCapture {
 }
 
 impl WlCapture {
+    /// A change arrived: a client's commit, input, or a host frame.
+    pub fn note_change(&mut self) {
+        self.change_pending = true;
+        self.last_change = Some(Instant::now());
+    }
+
+    /// Whether the pending change waits for the next one at `now` rather than taking the
+    /// frame its pacing allows: held for a source's next frame (`FramePace::merge_until`) until
+    /// another change arrives or the hold's time is up.
+    pub fn holds_change(&mut self, period: std::time::Duration, now: Instant) -> bool {
+        if self.merge_hold.is_none() {
+            self.merge_hold = self.pace.merge_until(period, now).map(|until| (now, until));
+        }
+        self.merge_hold.is_some_and(|(since, until)| {
+            now < until && self.last_change.is_none_or(|at| at <= since)
+        })
+    }
+
+    /// When the event loop next has to wake for this capture: the end of a hold where a change
+    /// is held, else what the pacing says (`FramePace::next_wake`).
+    pub fn next_wake(&self, period: std::time::Duration, now: Instant) -> Instant {
+        match self.merge_hold {
+            Some((_, until)) if self.change_pending => until.min(self.pace.next_due(period, now)),
+            _ => self.pace.next_wake(period, now, self.change_pending),
+        }
+    }
+
     /// Arm a keyframe on whichever path is live, plus a full render so a static
     /// screen still produces the frame. Exactly ONE flag is set: the pool encode
     /// loop consumes the atomic, every other path consumes `pending_force_idr` —
@@ -1326,7 +1358,7 @@ impl CompositorHandler for AppState {
         if new_content && self.host.is_none() {
             for node in &mut self.output_nodes {
                 if let Some(cap) = node.capture.as_mut() {
-                    cap.change_pending = true;
+                    cap.note_change();
                 }
             }
         }

@@ -53,7 +53,7 @@ use serde_json::json;
 use tokio::io::AsyncWriteExt;
 
 use super::confine::WalkError;
-use super::pacing::{TRANSFER_MIN_GAUGED_BYTES, monotonic};
+use super::pacing::{TRANSFER_MIN_GAUGED_BYTES, monotonic, pace_gauged};
 use super::{ChunkState, FilesState, RequestAuth, json_error, strerror};
 
 /// Idle chunked transfers older than this are reaped; generous relative to one 64 MiB slice,
@@ -442,8 +442,8 @@ fn expire_stale_chunked_uploads(state: &FilesState) {
 /// has spare and backs off the moment the session's own delay inflates. A transfer below
 /// `TRANSFER_MIN_GAUGED_BYTES` skips the gauge, as does one with no gauge-able session socket;
 /// a gauge whose sockets all vanish mid-transfer stops pacing, since the session it protected
-/// is gone. The chunks arrive as the HTTP stack delivers them; a gauged transfer's pacing is
-/// applied per chunk at the size the stack read.
+/// is gone. The chunks arrive as the HTTP stack delivers them, often hundreds of KiB at once,
+/// so a gauged chunk is paced in pieces with a verdict for each ([`pace_gauged`]).
 ///
 /// Returns the byte count written, or the failure's message; the caller owns removal of the
 /// target file.
@@ -498,17 +498,10 @@ async fn stream_upload_body(
         if let Some(cap) = &cap {
             cap.pace(chunk.len()).await;
         }
-        if let Some(g) = &mut gauge {
-            let verdict = g.sample();
-            if g.alive() {
-                let inflation = g.inflation_us();
-                state
-                    .upload_pacer
-                    .pace_verdict(chunk.len(), verdict, Some(inflation))
-                    .await;
-            } else {
-                gauge = None;
-            }
+        if let Some(g) = &mut gauge
+            && !pace_gauged(&state.upload_pacer, g, chunk.len()).await
+        {
+            gauge = None;
         }
         file.write_all(&chunk).await.map_err(|e| e.to_string())?;
         written += chunk.len() as u64;

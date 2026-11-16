@@ -11,21 +11,19 @@ export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-proje
 
 ## Your own desktop in a browser
 
-Run `selkies` with no arguments and it brings up a desktop of its own on this machine: an isolated session, with its own runtime directory, buses, sound server, and display, on Selkies' own desktop shell and window manager over the Wayland backend, which shares only your home directory with you. It prints where to find it:
+Run `selkies` with no arguments and it brings up a desktop of its own on this machine: an isolated session, with its own runtime directory, buses, sound server, and display, on Selkies' own desktop shell and window manager over the Wayland backend, which shares only your home directory with you.
+
+It serves HTTPS on a self-signed certificate it writes under `~/.local/state/selkies` (browsers warn once until it is trusted) and listens on the loopback addresses alone. It still asks for a login, since every account on the machine reaches those and the session is your desktop and your home, and it carries no password of its own: until you set one it refuses to start, and says how. The way to set one is a file only you can read, which keeps it out of the environment other processes see:
 
 ```bash
 pip install selkies
-selkies
-# Selkies: your desktop is at https://localhost:8080, signing in as ubuntu with the placeholder password mypasswd; name a file holding your own in SELKIES_BASIC_AUTH_PASSWORD_FILE.
-```
-
-It serves HTTPS on a self-signed certificate it writes under `~/.local/state/selkies` (browsers warn once until it is trusted), listens on the loopback addresses alone, and signs in with the placeholder login the containers document, `ubuntu` and `mypasswd`, which is for trying it out: every account on the machine reaches the loopback addresses, and the session is your desktop and your home. It runs as you, so setting a password of your own is yours to do, and the way to is a file only you can read, which keeps it out of the environment other processes see:
-
-```bash
 install -D -m 600 /dev/null ~/.config/selkies/password
 printf '%s\n' 'a password of your own' > ~/.config/selkies/password
-SELKIES_BASIC_AUTH_USER="${USER}" SELKIES_BASIC_AUTH_PASSWORD_FILE=~/.config/selkies/password selkies
+SELKIES_BASIC_AUTH_PASSWORD_FILE=~/.config/selkies/password selkies
+# Selkies: your desktop is at https://localhost:8080, signing in as <you> with the password in /home/<you>/.config/selkies/password.
 ```
+
+The login's name is yours (`USER`), as for the server below.
 
 Every default is a setting you override from the environment the same way, and the rest stay as they are: `SELKIES_BASIC_AUTH_USER` for the login's name, `SELKIES_WAYLAND=false` for X11, `SELKIES_PORT`, `SELKIES_PUBLIC=true` to listen on every interface. Any argument runs the server alone, attached to the display and sound server you point it at ([Run a session](#run-a-session)); `selkies session` runs a whole session with the desktop you choose ([Jupyter, Coder, and Open OnDemand](platforms.md)).
 

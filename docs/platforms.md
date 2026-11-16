@@ -18,7 +18,7 @@ what the host lacks and then Selkies, passing it every argument it does not take
 itself, so the port, the socket, the login, and every other
 [setting](settings.md) are Selkies' own, from the command line or `SELKIES_*`
 variables alike. `selkies` run with no arguments at all is this command on
-Selkies' own desktop shell, over HTTPS behind the placeholder login
+Selkies' own desktop shell, over HTTPS behind a login whose password you set
 ([Native Install](native.md#your-own-desktop-in-a-browser)):
 
 - **Isolation**: the session is its own, sharing only the home directory with the
@@ -103,11 +103,10 @@ without a login of its own; the session ends with the server, a killed one
 included. The same holds under JupyterHub, where each user's server offers
 their own desktop. The environment the server starts in chooses the rest:
 `XDG_CURRENT_DESKTOP` the desktop, `SELKIES_WAYLAND` the backend. The host
-brings what the wheel leaves to it: a desktop, Xvfb for the X11 backend, and
-the libraries the server takes from the system as
-[pixelflux's own wheels do](https://github.com/selkies-project/selkies/tree/main/crates/pixelflux#3-install-the-package),
-which a desktop usually carries (`libgbm1` and `libpixman-1-0` on Debian and
-Ubuntu); without them the `selkies` executable does not start.
+brings what the wheel leaves to it, the desktop: the wheel is the release
+bundle repackaged, so it carries its own X servers, `xkbcomp`, PulseAudio and
+dbus-daemon, and the `selkies` executable needs only the host's C and C++
+runtimes, opening libgbm and the GPU's own libraries where the host has them.
 
 ## Coder
 
