@@ -23,10 +23,11 @@ LOG="${SESSION_HOME}/selkies.log"
 USER_NAME="standalone"
 PASSWORD_FILE="${SESSION_HOME}/password"
 
-# The status of a GET of the entry page; a login where one is given
+# The status of a GET of the entry page; a login where one is given. curl
+# writes 000 itself when nothing answers.
 status() {
     curl -sk -L --location-trusted --max-time 10 -o /dev/null -w '%{http_code}' "$@" "${URL}" \
-        || echo 000
+        || true
 }
 
 fail() {
