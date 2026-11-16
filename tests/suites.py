@@ -4,7 +4,7 @@
 Every suite is a standalone program that prints one PASS/FAIL line per check and
 exits non-zero if any of them failed, so it can be run directly:
 
-    python3 tests/e2e/test_encoders.py ws-x11
+    python3 tests/e2e/test_codecs.py ws-x11
 
 A suite whose path ends in `.rs` is a test target of `crates/selkies-suites`,
 which drives the server from Rust; it runs as `command()` gives it, a selector
@@ -239,7 +239,7 @@ SUITES: list = [
      "selectors": ["webrtc", "websockets"]},
     {"path": "e2e/test_ws_verdicts.py", "tier": "e2e", "timeout": 900,
      "selectors": ["mk-access", "no-resize"]},
-    {"path": "e2e/test_multi_controller.py", "tier": "e2e", "timeout": 600,
+    {"path": "e2e/multi_controller.spec.ts", "tier": "e2e", "timeout": 600,
      "selectors": ["websockets", "webrtc", "settings", "settings-wr", "nodisrupt", "visible", "visible-wr",
                    "inuse", "inuse-wr", "older", "frozen-wr"]},
     {"path": "e2e/test_wayland_host_portal.py", "tier": "e2e", "timeout": 900,
@@ -290,7 +290,7 @@ SUITES: list = [
      "selectors": ["x11", "wl", "x11-two", "wl-two", "x11-dashboards"]},
     {"path": "e2e/test_keyboard_layout.py", "tier": "e2e", "timeout": 600,
      "selectors": ["ws-x11", "wr-x11", "ws-wl", "wr-wl"]},
-    {"path": "e2e/test_encoders.py", "tier": "e2e", "timeout": 900,
+    {"path": "e2e/encoders.spec.ts", "tier": "e2e", "timeout": 900,
      "selectors": ["ws-x11", "wr-x11", "ws-wl", "wr-wl"]},
     {"path": "e2e/test_video_drop_recovery.py", "tier": "e2e", "timeout": 600,
      "selectors": ["default", "cpu"]},
@@ -327,7 +327,7 @@ def cases(tiers: Optional[Sequence[str]] = None) -> Iterator[tuple]:
 
 def name(path: str, tier: str) -> str:
     """The name a suite is selected and its logs are kept under, without its
-    selector: `e2e/test_encoders` for `e2e/test_encoders.py`,
+    selector: `e2e/test_codecs` for `e2e/test_codecs.py`,
     `integration/test_protocol` for the Rust target `protocol.rs` of that tier,
     `integration/test_gamepad_switch` for the Playwright suite
     `integration/gamepad_switch.spec.ts`, and `unit/test_fit_frame` for the

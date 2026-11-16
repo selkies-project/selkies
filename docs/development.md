@@ -233,7 +233,7 @@ The reference images use the [s6 supervision suite](https://skarnet.org/software
 pytest tests -m unit                    # the source tree only
 pytest tests -m integration             # a display, PulseAudio, an installed selkies
 pytest tests -m e2e                     # the above plus Playwright browsers
-python3 tests/e2e/test_encoders.py wr-wl  # or one suite, one block, on its own
+python3 tests/e2e/test_codecs.py wr-x11  # or one suite, one block, on its own
 (cd tests && npx playwright test e2e/matrix.spec.ts -g wr-wl)  # likewise, for a Playwright suite
 ```
 
