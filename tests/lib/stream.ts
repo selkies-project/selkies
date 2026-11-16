@@ -10,7 +10,7 @@
  * @module
  */
 
-import type { Page } from '@playwright/test';
+import type { Browser, BrowserContext, Page } from '@playwright/test';
 
 import { PAGE_CALL_TIMEOUT_S, sleep } from './env.ts';
 
@@ -170,4 +170,23 @@ export function realConsole(errors: readonly string[], notFound: readonly string
         errors: errors.filter((e) => !benign.some((b) => e.includes(b))),
         notFound: notFound.filter((u) => !(u.endsWith('/manifest.json') || u.includes('favicon'))),
     };
+}
+
+/**
+ * Close a browser or a persistent context, abandoning one that will not go:
+ * the checks are done by the time anything closes, so a browser that does
+ * not answer is left to the driver to reap.
+ * @param closer The browser or context.
+ * @param timeoutS How long it is given.
+ * @returns Whether it closed on its own.
+ */
+export async function closeBrowser(closer: Browser | BrowserContext, timeoutS = 30): Promise<boolean> {
+    try {
+        await within(closer.close(), 'the browser', timeoutS);
+        return true;
+    } catch (e) {
+        if (!(e instanceof PageStalled)) return true;
+        process.stdout.write(`note: the browser did not close within ${timeoutS.toFixed(0)}s; abandoning it\n`);
+        return false;
+    }
 }
