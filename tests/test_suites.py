@@ -109,6 +109,11 @@ def test_suite(path: str, selector: Optional[str], timeout: int, name: str) -> N
     # output that is kept: a Python suite dumps every thread's stack, a Rust
     # one, whose waits are all bounded, the end of each running server's log.
     env = dict(os.environ, SELKIES_SUITE_DEADLINE=str(max(30, timeout - 60)))
+    if path.endswith(".ts"):
+        # Node keeps the code it compiled for the next case: a Playwright suite
+        # loads Playwright in its runner and again in its worker, a second each
+        # without the cache.
+        env.setdefault("NODE_COMPILE_CACHE", os.path.join(helpers.WORKDIR, "node-compile-cache"))
     case = name.replace("/", "-") + (f"-{selector}" if selector else "")
     started = time.time()
     try:

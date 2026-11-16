@@ -17,7 +17,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
-import { fields, numberOr, stringOr } from '../../web/selkies-web-core/lib/narrow.ts';
+import { fields, isRecord, numberOr, stringOr, type Fields } from '../../web/selkies-web-core/lib/narrow.ts';
 import { REPO } from './env.ts';
 
 /** A server to start, as `server.start` takes it. */
@@ -64,6 +64,42 @@ function program(): string {
     if (cargo.error === undefined && cargo.status !== 0) throw new Error(`cargo build of suites-host exited ${cargo.status}`);
     if (!existsSync(built)) throw new Error(`${built} is not built and cargo is not on PATH to build it`);
     return built;
+}
+
+/** Something the host program keeps until it is released. */
+export interface Held {
+    handle: number;
+    release: () => Promise<void>;
+}
+
+/** A `wl-observer` on a compositor: its event lines as they arrive. */
+export interface Observer extends Held {
+    /**
+     * The first event of `kind` whose fields named in `match` hold those values.
+     * @param kind The event's kind (`kbd_key`, `ptr_motion`, ...).
+     * @param timeoutS How long to wait.
+     * @param match Fields it must carry.
+     * @returns The event, or null.
+     */
+    wait: (kind: string, timeoutS?: number, match?: Record<string, unknown>) => Promise<Fields | null>;
+    /**
+     * Whether its surface mapped.
+     * @param timeoutS How long to wait.
+     * @returns True once it did.
+     */
+    ready: (timeoutS?: number) => Promise<boolean>;
+}
+
+/**
+ * Two numbers, as the program answers a position or a size.
+ * @param value The answer's field.
+ * @returns The pair, or null.
+ */
+function pair(value: unknown): [number, number] | null {
+    if (!Array.isArray(value) || value.length !== 2) return null;
+    const a: unknown = value[0];
+    const b: unknown = value[1];
+    return typeof a === 'number' && typeof b === 'number' ? [a, b] : null;
 }
 
 /** A pending request's settlement. */
@@ -127,6 +163,8 @@ export class Host {
         const id = this.next++;
         return new Promise((resolve, reject) => {
             this.waiting.set(id, { resolve, reject });
+            // The request's own id is the program's to answer by; what a request
+            // names (an observer) goes by `handle`.
             this.child.stdin.write(`${JSON.stringify({ ...args, id, op })}\n`);
         });
     }
@@ -148,6 +186,96 @@ export class Host {
      */
     async stop(): Promise<string> {
         return stringOr(fields(await this.request('server.stop')).tail) ?? '';
+    }
+
+    /**
+     * The log's length now: a mark for `saw`.
+     * @returns The mark.
+     */
+    async mark(): Promise<number> {
+        return numberOr(fields(await this.request('server.mark')).mark) ?? 0;
+    }
+
+    /**
+     * Whether `needle` reaches the running server's log past `from` within
+     * `timeoutS`.
+     * @param needle The text.
+     * @param timeoutS How long to wait.
+     * @param from A mark; 0 reads the whole log.
+     * @returns Whether it did.
+     */
+    async saw(needle: string, timeoutS = 12, from = 0): Promise<boolean> {
+        const ok = fields(await this.request('server.saw', { needle, from, timeout_ms: Math.round(timeoutS * 1000) }));
+        return ok.saw === true;
+    }
+
+    /**
+     * Whether the key typing `keysym` is held on the X display.
+     * @param keysym The keysym (a Latin-1 character's is its code).
+     * @returns Whether it is down; null where no keycode carries it.
+     */
+    async keyHeld(keysym: number): Promise<boolean | null> {
+        const held = fields(await this.request('x11.key_held', { keysym })).held;
+        return typeof held === 'boolean' ? held : null;
+    }
+
+    /** @returns Where the X pointer is on the root, or null. */
+    async pointer(): Promise<[number, number] | null> {
+        return pair(fields(await this.request('x11.pointer')).at);
+    }
+
+    /** @returns The X root's size, read on a fresh connection, or null. */
+    async rootSize(): Promise<[number, number] | null> {
+        return pair(fields(await this.request('x11.root_size')).size);
+    }
+
+    /**
+     * CLIPBOARD's text on the X display.
+     * @param timeoutS How long its owner is given to answer.
+     * @returns The text, or null when none came.
+     */
+    async x11Clipboard(timeoutS = 8): Promise<string | null> {
+        return stringOr(fields(await this.request('x11.clipboard', { timeout_ms: Math.round(timeoutS * 1000) })).text) ?? null;
+    }
+
+    /**
+     * Own CLIPBOARD on the X display, serving `payload` until released.
+     * @param payload The text handed to every requestor.
+     * @returns The owner.
+     */
+    async ownClipboard(payload: string): Promise<Held> {
+        return this.held(await this.request('x11.own_clipboard', { payload }));
+    }
+
+    /**
+     * Run `wl-observer` on the server's compositor at `socket`.
+     * @param socket The compositor's socket name.
+     * @param env Added to the observer's environment.
+     * @returns The observer.
+     */
+    async observe(socket: string, env: Record<string, string> = {}): Promise<Observer> {
+        const held = this.held(await this.request('wl.observe', { socket, env: { WLOBS_DURATION: '60', ...env } }));
+        return {
+            ...held,
+            wait: async (kind, timeoutS = 8, match = {}) => {
+                const event = fields(await this.request('wl.wait', { handle: held.handle, kind, match, timeout_ms: Math.round(timeoutS * 1000) })).event;
+                return isRecord(event) ? event : null;
+            },
+            ready: async (timeoutS = 10) => {
+                const event = fields(await this.request('wl.wait', { handle: held.handle, kind: 'mapped', timeout_ms: Math.round(timeoutS * 1000) })).event;
+                return isRecord(event);
+            },
+        };
+    }
+
+    /**
+     * Something held until released, from the id an answer names.
+     * @param answer The answer.
+     * @returns Its handle.
+     */
+    private held(answer: unknown): Held {
+        const handle = numberOr(fields(answer).handle) ?? 0;
+        return { handle, release: async () => { await this.request('release', { handle }); } };
     }
 
     /**

@@ -23,17 +23,31 @@
 //! | `server.stop` | | `tail`: the end of its log |
 //! | `server.mark` | | `mark`: the log's length now |
 //! | `server.log` | `from`: a mark | `text`: the log from it on |
+//! | `server.saw` | `from`, `needle`, `timeout_ms` | `saw`: whether the log took `needle` past `from` in time |
 //! | `listeners` | `pid` | `listeners`: the TCP addresses the process listens on |
+//! | `x11.key_held` | `keysym`, `display` | `held`: whether its key is down, null without a keycode |
+//! | `x11.pointer` | `display` | `at`: `[x, y]` on the root |
+//! | `x11.root_size` | `display` | `size`: `[width, height]` |
+//! | `x11.clipboard` | `timeout_ms`, `display` | `text`: CLIPBOARD's text, null when none comes |
+//! | `x11.own_clipboard` | `payload`, `display` | `handle` of an owner serving `payload` |
+//! | `wl.observe` | `socket`, `env` | `handle` of a `wl-observer` on the server's compositor |
+//! | `wl.wait` | `handle`, `kind`, `match`, `timeout_ms` | `event`: the first of `kind` matching, or null |
+//! | `release` | `handle` | an owner or observer ended |
+//!
+//! `display` defaults to `E2E_DISPLAY`, the display the servers capture.
 //!
 //! A new `server.start` stops the server before it, as one suite runs one server at a time. The
 //! program ends when its standard input does, which is when the suite's process does however it
 //! ends, and takes its server along; a server is tied to this program's thread as well, so not
 //! even a kill of this program leaves one running.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
+use std::time::Duration;
 
-use selkies_suites::{Server, server};
+use selkies_suites::wayland::WlObserver;
+use selkies_suites::x11::{self, SelectionOwner};
+use selkies_suites::{Server, private_dir, server};
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -41,11 +55,37 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 #[derive(Default)]
 struct Host {
     server: Option<Server>,
+    /// Clipboard owners, by the handle given out for them; dropping one releases the selection.
+    owners: HashMap<u64, SelectionOwner>,
+    /// Observers, by the handle given out for them.
+    observers: HashMap<u64, WlObserver>,
+    next: u64,
 }
 
 /// `field` of `request` as a string, if it is one.
 fn text<'a>(request: &'a Map<String, Value>, field: &str) -> Option<&'a str> {
     request.get(field).and_then(Value::as_str)
+}
+
+/// `field` of `request` as a number, if it is a whole one.
+fn whole(request: &Map<String, Value>, field: &str) -> Option<u64> {
+    request.get(field).and_then(Value::as_u64)
+}
+
+/// `timeout_ms` of `request`, else `default`.
+fn timeout(request: &Map<String, Value>, default: Duration) -> Duration {
+    whole(request, "timeout_ms").map_or(default, Duration::from_millis)
+}
+
+/// The X display a request names, else the test display.
+fn display(request: &Map<String, Value>) -> Result<String, String> {
+    if let Some(named) = text(request, "display") {
+        return Ok(named.to_owned());
+    }
+    std::env::var("E2E_DISPLAY")
+        .ok()
+        .filter(|d| !d.is_empty())
+        .ok_or_else(|| "E2E_DISPLAY is not set and the request names no display".to_owned())
 }
 
 impl Host {
@@ -104,6 +144,75 @@ impl Host {
                     .unwrap_or(0);
                 Ok(json!({ "text": self.running()?.log_from(from) }))
             }
+            "server.saw" => {
+                let from = whole(request, "from")
+                    .and_then(|m| usize::try_from(m).ok())
+                    .unwrap_or(0);
+                let needle = text(request, "needle").ok_or("server.saw takes a needle")?;
+                let within = timeout(request, Duration::from_secs(12));
+                Ok(json!({ "saw": self.running()?.saw(from, needle, within).await }))
+            }
+            "x11.key_held" => {
+                let keysym = whole(request, "keysym")
+                    .and_then(|k| u32::try_from(k).ok())
+                    .ok_or("x11.key_held takes a keysym")?;
+                Ok(json!({ "held": x11::key_held(&display(request)?, keysym) }))
+            }
+            "x11.pointer" => Ok(json!({ "at": x11::pointer(&display(request)?) })),
+            "x11.root_size" => Ok(json!({ "size": x11::root_size(&display(request)?) })),
+            "x11.clipboard" => {
+                let within = timeout(request, Duration::from_secs(8));
+                Ok(json!({ "text": x11::read_clipboard(&display(request)?, within) }))
+            }
+            "x11.own_clipboard" => {
+                let payload =
+                    text(request, "payload").ok_or("x11.own_clipboard takes a payload")?;
+                let owner = SelectionOwner::serving(&display(request)?, payload.as_bytes());
+                let handle = self.handle();
+                self.owners.insert(handle, owner);
+                Ok(json!({ "handle": handle }))
+            }
+            "wl.observe" => {
+                let socket = text(request, "socket").ok_or("wl.observe takes a socket")?;
+                let bin = std::env::current_exe()
+                    .map_err(|e| format!("this program's path: {e}"))?
+                    .with_file_name("wl-observer");
+                let env: Vec<(String, String)> = request
+                    .get("env")
+                    .and_then(Value::as_object)
+                    .map(|env| {
+                        env.iter()
+                            .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let env: Vec<(&str, &str)> =
+                    env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+                let observer = WlObserver::start(&bin, socket, &private_dir("run"), &env);
+                let handle = self.handle();
+                self.observers.insert(handle, observer);
+                Ok(json!({ "handle": handle }))
+            }
+            "wl.wait" => {
+                let handle = whole(request, "handle").ok_or("wl.wait takes a handle")?;
+                let Some(observer) = self.observers.get(&handle) else {
+                    return Err(format!("no observer {handle}"));
+                };
+                let kind = text(request, "kind").ok_or("wl.wait takes a kind")?;
+                let want = request
+                    .get("match")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                let within = timeout(request, Duration::from_secs(8));
+                Ok(json!({ "event": observer.wait_for_match(kind, &want, within).await }))
+            }
+            "release" => {
+                let handle = whole(request, "handle").ok_or("release takes a handle")?;
+                self.owners.remove(&handle);
+                self.observers.remove(&handle);
+                Ok(json!({}))
+            }
             "listeners" => {
                 let pid = request
                     .get("pid")
@@ -113,6 +222,12 @@ impl Host {
             }
             other => Err(format!("no operation {other}")),
         }
+    }
+
+    /// A new handle for something held until it is released.
+    fn handle(&mut self) -> u64 {
+        self.next += 1;
+        self.next
     }
 
     fn running(&self) -> Result<&Server, String> {
@@ -182,6 +297,8 @@ async fn main() {
             break;
         }
     }
+    host.owners.clear();
+    host.observers.clear();
     if let Some(running) = host.server.take() {
         running.stop().await;
     }

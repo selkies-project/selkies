@@ -258,6 +258,17 @@ impl WlObserver {
 
     /// The first event of `kind` within `timeout`.
     pub async fn wait_for(&self, kind: &str, timeout: Duration) -> Option<Value> {
+        self.wait_for_match(kind, &Map::new(), timeout).await
+    }
+
+    /// The first event of `kind` whose fields named in `want` hold those values, within
+    /// `timeout`.
+    pub async fn wait_for_match(
+        &self,
+        kind: &str,
+        want: &Map<String, Value>,
+        timeout: Duration,
+    ) -> Option<Value> {
         let deadline = Instant::now() + timeout;
         loop {
             let found = self
@@ -265,7 +276,12 @@ impl WlObserver {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .iter()
-                .find(|l| l.get("kind").and_then(Value::as_str) == Some(kind))
+                .find(|l| {
+                    l.get("kind").and_then(Value::as_str) == Some(kind)
+                        && want
+                            .iter()
+                            .all(|(field, value)| l.get(field) == Some(value))
+                })
                 .cloned();
             if found.is_some() || Instant::now() >= deadline {
                 return found;

@@ -359,3 +359,93 @@ pub fn set_root_cardinal(display: &str, name: &str, value: Option<u32>) -> bool 
     };
     set().is_some()
 }
+
+/// Whether the key that types `keysym` is held on `display`, read from the keymap the server
+/// reports: `None` when no keycode carries the keysym or the display does not answer.
+pub fn key_held(display: &str, keysym: u32) -> Option<bool> {
+    let (connection, _) = open(display)?;
+    let setup = connection.setup();
+    let (first, last) = (setup.min_keycode, setup.max_keycode);
+    let mapping = connection
+        .get_keyboard_mapping(first, last - first + 1)
+        .ok()?
+        .reply()
+        .ok()?;
+    let per = usize::from(mapping.keysyms_per_keycode).max(1);
+    let index = mapping
+        .keysyms
+        .chunks(per)
+        .position(|syms| syms.contains(&keysym))?;
+    let code = usize::from(first) + index;
+    let keys = connection.query_keymap().ok()?.reply().ok()?.keys;
+    Some(keys.get(code / 8)? & (1 << (code % 8)) != 0)
+}
+
+/// Where the pointer is on `display`'s root, `None` when the display does not answer.
+pub fn pointer(display: &str) -> Option<(i16, i16)> {
+    let (connection, root) = open(display)?;
+    let reply = connection.query_pointer(root).ok()?.reply().ok()?;
+    Some((reply.root_x, reply.root_y))
+}
+
+/// The CLIPBOARD's text on `display` as its owner converts it to `UTF8_STRING`, waiting up to
+/// `timeout` for the answer: `None` when there is no owner, it refuses, or it does not answer.
+pub fn read_clipboard(display: &str, timeout: Duration) -> Option<String> {
+    let (connection, root) = open(display)?;
+    let window = connection.generate_id().ok()?;
+    connection
+        .create_window(
+            x11rb::COPY_DEPTH_FROM_PARENT,
+            window,
+            root,
+            0,
+            0,
+            1,
+            1,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            x11rb::COPY_FROM_PARENT,
+            &CreateWindowAux::new(),
+        )
+        .ok()?;
+    let atom = |name: &[u8]| -> Option<u32> {
+        Some(connection.intern_atom(false, name).ok()?.reply().ok()?.atom)
+    };
+    let (clipboard, utf8, probe) = (
+        atom(b"CLIPBOARD")?,
+        atom(b"UTF8_STRING")?,
+        atom(b"SELKIES_PROBE")?,
+    );
+    connection
+        .convert_selection(window, clipboard, utf8, probe, x11rb::CURRENT_TIME)
+        .ok()?;
+    connection.flush().ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        match connection.poll_for_event() {
+            Ok(Some(Event::SelectionNotify(notify))) => {
+                if notify.property == u32::from(AtomEnum::NONE) {
+                    return None;
+                }
+                let value = connection
+                    .get_property(
+                        false,
+                        window,
+                        notify.property,
+                        AtomEnum::ANY,
+                        0,
+                        u32::MAX / 4,
+                    )
+                    .ok()?
+                    .reply()
+                    .ok()?
+                    .value;
+                return Some(String::from_utf8_lossy(&value).into_owned());
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => return None,
+        }
+    }
+    None
+}

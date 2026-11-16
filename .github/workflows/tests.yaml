@@ -532,14 +532,14 @@ jobs:
       # the build.
       - name: Resolve the Rust toolchain pin
         id: rust
-        if: contains(inputs.tiers || 'integration or e2e', 'integration')
+        if: contains(inputs.tiers || 'integration or e2e', 'integration') || contains(inputs.tiers || '', 'e2e')
         run: |
           {
             echo "toolchain=$(sed -n 's/^PIN="\(.*\)"$/\1/p' infra/packaging/rust.sh)"
             echo "image=$(. /etc/os-release && echo "${ID}${VERSION_ID}")"
           } >> "$GITHUB_OUTPUT"
       - name: Cache the Rust suites' build
-        if: contains(inputs.tiers || 'integration or e2e', 'integration')
+        if: contains(inputs.tiers || 'integration or e2e', 'integration') || contains(inputs.tiers || '', 'e2e')
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -552,11 +552,13 @@ jobs:
           restore-keys: |
             suites-${{ steps.rust.outputs.image }}-${{ runner.arch }}-${{ steps.rust.outputs.toolchain }}-
       - name: Build the Rust suites
-        if: contains(inputs.tiers || 'integration or e2e', 'integration')
+        if: contains(inputs.tiers || 'integration or e2e', 'integration') || contains(inputs.tiers || '', 'e2e')
         run: |
           scripts/ci/retry.sh 5 60 rustup toolchain install "${{ steps.rust.outputs.toolchain }}" --profile minimal
           rustup default "${{ steps.rust.outputs.toolchain }}"
           scripts/ci/retry.sh 5 60 cargo test --locked --package selkies-suites --no-run
+          # Built now, so no Playwright suite pays for cargo's look at it either
+          echo "SELKIES_SUITES_HOST=${PWD}/target/debug/suites-host" >> "$GITHUB_ENV"
       # The same stack a development sandbox starts, on the display the
       # workflow names. VirtualCamera publishes a PipeWire node as well as
       # listening on its socket, so the webcam suite needs a reachable daemon.
