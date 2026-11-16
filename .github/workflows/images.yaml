@@ -238,7 +238,7 @@ jobs:
   merge:
     name: Merge base and desktop manifests (${{ matrix.flavor }})
     needs: build
-    if: github.repository == 'selkies-project/selkies'
+    if: ${{ !cancelled() && needs.build.result == 'success' && github.repository == 'selkies-project/selkies' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
