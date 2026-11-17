@@ -222,7 +222,9 @@ impl CsvSink {
     /// and a fresh file (header plus first row). Reconnecting clients send near-empty
     /// reports, too few fields to be a real stats sample, which are not written.
     fn write(&mut self, stats: &[(String, String)], path: &Path, is_audio: bool) {
-        let timestamp = chrono::Local::now().format("%d/%B/%Y:%H:%M:%S").to_string();
+        let timestamp = jiff::ZonedDateTime::now()
+            .strftime("%d/%B/%Y:%H:%M:%S")
+            .to_string();
         let mut headers = vec!["timestamp".to_string()];
         let mut values = vec![timestamp];
         for (key, value) in stats {
@@ -795,7 +797,9 @@ impl Metrics {
     /// Point CSV capture at fresh timestamped files for a new connection. The header state
     /// is reset off the runtime: a rewrite in flight on the writer may hold the lock.
     pub async fn initialize_webrtc_csv_file(&self, webrtc_stats_dir: &str) {
-        let timestamp = chrono::Local::now().format("%Y-%m-%d:%H:%M:%S").to_string();
+        let timestamp = jiff::ZonedDateTime::now()
+            .strftime("%Y-%m-%d:%H:%M:%S")
+            .to_string();
         {
             let mut paths = self.paths.lock().unwrap_or_else(|e| e.into_inner());
             paths.0 = Some(format!(

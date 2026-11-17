@@ -68,7 +68,7 @@ nvml-wrapper = "0.13"
 prometheus-client = "0.26"
 rmp-serde = "1"
 zip = { version = "9", default-features = false, features = ["deflate"] }
-chrono = "0.4"
+jiff = "1"
 shlex = "2"
 tempfile = "3"
 xkbcommon = { version = "0.9", default-features = false }
