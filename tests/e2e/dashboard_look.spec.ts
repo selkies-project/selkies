@@ -170,7 +170,12 @@ async function forced(page: Page, states: string[], body: () => Promise<void>): 
     }
 }
 
-const scrollTo = (page: Page, i: unknown, y: unknown): Promise<unknown> => within(page.evaluate(`(([i, y]) => { const el = document.querySelector(\`[data-look-scroll='\${i}']\`); if (el) el.scrollTop = y; })(${r([i, y])})`));
+/** Scroll container `i` (as the audit marked it) to `y`, its values passed to the page as data, not code. */
+const scrollTo = (page: Page, i: unknown, y: unknown): Promise<unknown> => within(page.evaluate(([index, top]) => {
+    for (const el of document.querySelectorAll<HTMLElement>('[data-look-scroll]')) {
+        if (el.dataset.lookScroll === String(index)) el.scrollTop = Number(top);
+    }
+}, [i, y] as const));
 
 /** Audit what shows, then every scrolling container a page at a time to its end, and put each back. */
 async function sweep(page: Page, view: string, state: string, found: Row[], rings = false): Promise<void> {
