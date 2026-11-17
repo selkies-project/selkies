@@ -79,6 +79,8 @@ export class SteppedShaper implements Leg {
     private readonly queue: [number, () => void][] = [];
     private queued = 0;
     private freeAt = 0;
+    /** When the datagram at the head leaves, once it has been planned. */
+    private headDepart: number | null = null;
     private timer: NodeJS.Timeout | null = null;
     dropped = 0;
     shaped = 0;
@@ -100,6 +102,7 @@ export class SteppedShaper implements Leg {
     /** Change the rate: what is queued leaves at the new one. */
     set rate(bps: number) {
         this.rateBps = bps;
+        this.headDepart = null;
         if (this.timer !== null) {
             clearTimeout(this.timer);
             this.timer = null;
@@ -118,13 +121,18 @@ export class SteppedShaper implements Leg {
         if (this.timer === null) this.pump();
     }
 
-    /** Send every datagram due by now (a millisecond's grace, the timers' grain), then wait for the next. */
+    /**
+     * Send every datagram due by now (a millisecond's grace, the timers'
+     * grain), then wait for the next. The head's departure is fixed when it
+     * reaches the head, so the wait for it is not charged to it again.
+     */
     private pump(): void {
-        const now = performance.now() / 1000;
         for (;;) {
+            const now = performance.now() / 1000;
             const head = this.queue[0];
             if (!head) return;
-            const depart = Math.max(this.freeAt, now) + head[0] * 8 / this.rateBps;
+            this.headDepart ??= Math.max(this.freeAt, now) + head[0] * 8 / this.rateBps;
+            const depart = this.headDepart;
             if (depart > now + 0.001) {
                 this.timer = setTimeout(() => { this.timer = null; this.pump(); }, (depart - now) * 1000);
                 return;
@@ -132,6 +140,7 @@ export class SteppedShaper implements Leg {
             this.queue.shift();
             this.queued -= head[0];
             this.freeAt = depart;
+            this.headDepart = null;
             if (this.delayS) setTimeout(head[1], this.delayS * 1000);
             else head[1]();
         }

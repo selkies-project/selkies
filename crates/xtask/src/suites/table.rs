@@ -135,6 +135,7 @@ pub static SUITES: &[Suite] = &[
     suite("tools/dashboard_no_lazy_chunks_audit.ts", "unit", 120),
     suite("tools/frame_num_range_log_audit.ts", "unit", 60),
     suite("tools/cursor_scaling_audit.ts", "unit", 120),
+    suite("tools/udprelay_audit.ts", "unit", 120),
     Suite {
         path: rust!("stall_recovery.rs"),
         tier: "integration",
