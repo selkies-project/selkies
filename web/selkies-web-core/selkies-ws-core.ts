@@ -7324,7 +7324,7 @@ class WorkerWebSocket {
                 this.currentAudioData = null;
                 this.currentDataOffset = 0;
 
-                // Adaptive jitter depth under a fixed drop-oldest ceiling.
+                // Adaptive jitter depth under a fixed ceiling that cuts to live.
                 // Output starts once target packets are queued; a mid-stream
                 // underrun that a late delivery caused deepens the target, a
                 // clean stretch decays it back, and standing depth above it is
@@ -7364,7 +7364,7 @@ class WorkerWebSocket {
                 this.pendingUnderrunSamples = 0;
 
                 // Concealment counters: zero-filled samples output on underrun, and
-                // packets dropped by the drop-oldest ring when the queue overflows.
+                // packets dropped from the head of the queue, by the trim or at its ceiling.
                 this.underrunSamples = 0;
                 this.droppedOldest = 0;
                 // Every seam is smoothed over 2 ms: output fades in when priming
@@ -7401,7 +7401,7 @@ class WorkerWebSocket {
                         else if (this.drainSlackMin < this.shiftSlackMin) this.shiftSlackMin = this.drainSlackMin;
                     }
                     this.drainSlackMin = Infinity;
-                    if (this.audioBufferQueue.length >= this.MAX_BUFFER_PACKETS) this._dropHead();
+                    if (this.audioBufferQueue.length >= this.MAX_BUFFER_PACKETS) this._spliceToLive();
                     this.audioBufferQueue.push(pcmData);
                 };
                 const receive = (data) => {
@@ -7554,6 +7554,15 @@ class WorkerWebSocket {
             _dropHead() {
                 const gone = this.audioBufferQueue.shift();
                 this.droppedOldest++;
+                this._blendHead(gone);
+            }
+
+            /**
+             * Blends the head of a dropped packet into the head of the
+             * packet now first in the queue.
+             * @param {Float32Array} gone The first packet dropped.
+             */
+            _blendHead(gone) {
                 const next = this.audioBufferQueue[0];
                 if (!gone || !next) return;
                 const ch = this.channels;
@@ -7565,6 +7574,25 @@ class WorkerWebSocket {
                         next[i] = gone[i] + (next[i] - gone[i]) * w;
                     }
                 }
+            }
+
+            /**
+             * Cuts a queue that reached its ceiling down to the target in
+             * one seam, the packet arriving being its newest: packets
+             * arriving faster than they play are a backlog reaching the page
+             * late, and dropping one of them for each that arrives would
+             * play that whole backlog sped up, where one cut skips to the
+             * live sound.
+             */
+            _spliceToLive() {
+                const keep = Math.max(this.target - 1, 0);
+                const excess = this.audioBufferQueue.length - keep;
+                if (excess <= 0) return;
+                const gone = this.audioBufferQueue[0];
+                this.audioBufferQueue.splice(0, excess);
+                this.droppedOldest += excess;
+                this.overCount = 0;
+                this._blendHead(gone);
             }
 
             /**
