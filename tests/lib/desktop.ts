@@ -19,6 +19,23 @@ import { delimiter, join } from 'node:path';
 import { sleep, WORKDIR } from './env.ts';
 
 /**
+ * Load a null sink named `name`. Nothing is loaded when a sink of that name
+ * exists already: pactl would otherwise make a second one under the same
+ * name. A sink left behind outlives the run that made it, so the id goes to
+ * `pulseUnload` once finished.
+ * @param name The sink's name.
+ * @param options Further module arguments, `key=value` each.
+ * @returns The module's id, or null when none was loaded.
+ */
+export function pulseNullSink(name: string, options: Record<string, string> = {}): string | null {
+    const existing = spawnSync('pactl', ['list', 'short', 'sinks'], { encoding: 'utf8', timeout: 10_000 }).stdout ?? '';
+    if (existing.split('\n').some((line) => line.split('\t')[1] === name)) return null;
+    const args = [`sink_name=${name}`, ...Object.entries(options).map(([k, v]) => `${k}=${v}`)];
+    const id = (spawnSync('pactl', ['load-module', 'module-null-sink', ...args], { encoding: 'utf8', timeout: 10_000 }).stdout ?? '').trim();
+    return /^\d+$/.test(id) ? id : null;
+}
+
+/**
  * Play a tone into `sink`. The capture is gated on silence, so a check that
  * audio reaches a client has to give it something to hear. A browser on this
  * host plays what it receives back into the same sink, so once audio flows it

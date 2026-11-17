@@ -108,6 +108,62 @@ export const PC_TAP_JS = `
 })();
 `;
 
+/**
+ * WebCodecs audio taken from the page and from every script it starts from a
+ * blob (its workers), the way an engine without the API presents, so the
+ * audio workers fall back on libopus in WASM.
+ */
+export const NO_WEBCODECS_AUDIO_JS = `
+(() => {
+  const strip = "for (const n of ['AudioDecoder', 'AudioEncoder', 'AudioData', 'EncodedAudioChunk']) {" +
+    " try { Object.defineProperty(globalThis, n, { value: undefined, configurable: true, writable: true }); } catch (e) {} }\\n";
+  new Function(strip)();
+  const create = URL.createObjectURL;
+  URL.createObjectURL = function (obj) {
+    if (obj instanceof Blob && /javascript/.test(obj.type)) obj = new Blob([strip, obj], { type: obj.type });
+    return create.call(URL, obj);
+  };
+})();
+`;
+
+/**
+ * An init script running `body` on every page-side send, with the payload in
+ * `data`; mutating an ArrayBuffer in place changes what goes out.
+ * @param body JavaScript statements, evaluated with `data` in scope.
+ * @returns The script, for `context.addInitScript`.
+ */
+export function wireHookJs(body: string): string {
+    return `
+(() => {
+  const hook = (data) => { ${body} };
+  for (const proto of [window.RTCDataChannel && RTCDataChannel.prototype,
+                       window.WebSocket && WebSocket.prototype]) {
+    if (!proto || typeof proto.send !== 'function') continue;
+    const orig = proto.send;
+    proto.send = function (d) { try { hook(d); } catch (e) {} return orig.call(this, d); };
+  }
+  const wrap = (t) => {
+    if (!t || t.__wireHooked || typeof t.send !== 'function') return t;
+    t.__wireHooked = true;
+    const orig = t.send.bind(t);
+    t.send = (d) => { try { hook(d); } catch (e) {} return orig(d); };
+    return t;
+  };
+  const prev = Object.getOwnPropertyDescriptor(window, 'selkiesTransport');
+  let held = null;
+  Object.defineProperty(window, 'selkiesTransport', {
+    configurable: true,
+    get: () => (prev && prev.get ? prev.get() : held),
+    set: (v) => { const w = wrap(v); held = w; if (prev && prev.set) prev.set(w); },
+  });
+})();
+`;
+}
+
+/** Every text the page sends, in `window.__wireSent`, and its peer connections in `window.__pcs`. */
+export const WIRE_TAP_JS: string = 'window.__wireSent = [];\n'
+    + wireHookJs("if (typeof data === 'string') window.__wireSent.push(data);") + PC_TAP_JS;
+
 /** An opened client: its browser and page, and the errors and 404s it keeps collecting. */
 export interface Client {
     browser: Browser;

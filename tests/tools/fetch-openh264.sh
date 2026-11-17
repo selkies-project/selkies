@@ -13,13 +13,14 @@
 # queries, and verified against the checksum that service publishes.
 #
 # Writes $E2E_FIREFOX_PROFILE/gmp-gmpopenh264/<version>/, which is where
-# Firefox looks once media.gmp-gmpopenh264.version names that version (set in
-# tests/e2e/test_browsers.py alongside the other profile prefs).
+# Firefox looks once media.gmp-gmpopenh264.version names that version (set by
+# openh264Prefs in tests/lib/browsers.ts alongside the other profile prefs).
 set -eu
 
-# Defaults track tests/helpers.py's WORKDIR, which is what test_browsers.py
-# resolves the profile against; a different fallback here installs the plugin
-# where the suite does not look and the firefox-wr block skips.
+# Defaults track the suites' WORKDIR (tests/lib/env.ts), which is what the
+# suites resolve the profile against (FF_E2E_PROFILE in tests/lib/browsers.ts);
+# a different fallback here installs the plugin where the suites do not look
+# and the Firefox WebRTC blocks skip.
 PROFILE="${E2E_FIREFOX_PROFILE:-${E2E_WORKDIR:-${TMPDIR:-/tmp}/selkies-tests}/firefox-profile}"
 
 case "$(uname -m)" in

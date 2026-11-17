@@ -17,7 +17,7 @@ const budget = Number(process.env.SELKIES_SUITE_DEADLINE ?? '0');
 
 export default defineConfig({
     testDir: '.',
-    testMatch: ['integration/*.spec.ts', 'e2e/*.spec.ts'],
+    testMatch: ['integration/*.spec.ts', 'e2e/*.spec.ts', 'perf/*.spec.ts', 'image/*.spec.ts'],
     workers: 1,
     fullyParallel: false,
     retries: 0,

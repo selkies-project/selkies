@@ -10,6 +10,7 @@
  * @module
  */
 
+import { spawnSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 
 /** The capture rate, the tone's sample rate too. */
@@ -43,6 +44,22 @@ export function toneWav(path: string, seconds = 2, amplitude = 11_000): void {
         wav.writeInt16LE(Math.trunc(amplitude * Math.sin(2 * Math.PI * TONE_HZ * i / CAPTURE_RATE)), 44 + i * 2);
     }
     writeFileSync(path, wav);
+}
+
+/**
+ * Mono 16-bit PCM recorded from `source` for `seconds`. parec records until it
+ * is stopped, so the run's timeout is what ends it, and the output drained up
+ * to then is the recording.
+ * @param source The sound server's source (a sink's `.monitor`).
+ * @param seconds How long.
+ * @returns The samples.
+ */
+export function record(source: string, seconds = 2): Int16Array {
+    const run = spawnSync('parec', [`--device=${source}`, '--format=s16le', `--rate=${CAPTURE_RATE}`, '--channels=1', '--raw', '--latency-msec=50'],
+        { timeout: seconds * 1000, maxBuffer: 64 << 20 });
+    const data = run.stdout;
+    const even = data.subarray(0, data.length - (data.length % 2));
+    return new Int16Array(even.buffer.slice(even.byteOffset, even.byteOffset + even.length));
 }
 
 /** How loud a recording is and how much of it is the tone. */

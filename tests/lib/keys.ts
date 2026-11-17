@@ -29,11 +29,13 @@ import type { Observer } from './host.ts';
  * A tool of `tests/tools`, built into the work directory unless a build
  * newer than its source is there.
  * @param name The tool (`x11_keyobs`).
- * @param packages What `pkg-config` names its libraries.
+ * @param packages What `pkg-config` names its libraries; none for a tool
+ *     that loads what it needs at run time.
+ * @param extra Further compiler arguments (`-ldl`).
  * @returns Its path.
  * @throws {Error} When pkg-config or the compiler fails.
  */
-function built(name: string, packages: readonly string[]): string {
+export function builtTool(name: string, packages: readonly string[], extra: readonly string[] = []): string {
     const source = join(TOOLS, `${name}.c`);
     const out = join(WORKDIR, name);
     if (existsSync(out) && statSync(out).mtimeMs >= statSync(source).mtimeMs) return out;
@@ -42,9 +44,9 @@ function built(name: string, packages: readonly string[]): string {
         if (run.status !== 0) throw new Error(`pkg-config ${args.join(' ')}: ${(run.stderr ?? '').trim() || String(run.error)}`);
         return run.stdout.trim();
     };
-    const flags = ask(['--cflags', '--libs', ...packages]).split(/\s+/).filter(Boolean);
-    const libdir = ask(['--variable=libdir', packages[0]]);
-    const cc = spawnSync('cc', ['-O2', '-o', out, source, ...flags, `-Wl,-rpath,${libdir}`], { encoding: 'utf8', timeout: 180_000 });
+    const flags = packages.length ? ask(['--cflags', '--libs', ...packages]).split(/\s+/).filter(Boolean) : [];
+    const rpath = packages.length ? [`-Wl,-rpath,${ask(['--variable=libdir', packages[0]])}`] : [];
+    const cc = spawnSync('cc', ['-O2', '-o', out, source, ...flags, ...rpath, ...extra], { encoding: 'utf8', timeout: 180_000 });
     if (cc.status !== 0) throw new Error(`cc ${name}: ${(cc.stderr ?? '').slice(0, 300)}`);
     return out;
 }
@@ -61,7 +63,7 @@ export class X11Keys {
 
     /** @param display The X display. */
     constructor(display: string) {
-        this.child = spawn(built('x11_keyobs', ['x11']), [display], { stdio: ['pipe', 'pipe', 'inherit'] });
+        this.child = spawn(builtTool('x11_keyobs', ['x11']), [display], { stdio: ['pipe', 'pipe', 'inherit'] });
         createInterface({ input: this.child.stdout }).on('line', (line) => {
             let got: Fields;
             try {
@@ -107,7 +109,7 @@ export class Xkb {
     private readonly answers: ((line: string) => void)[] = [];
 
     constructor() {
-        this.child = spawn(built('xkb_lookup', ['xkbcommon']), [], { stdio: ['pipe', 'pipe', 'inherit'] });
+        this.child = spawn(builtTool('xkb_lookup', ['xkbcommon']), [], { stdio: ['pipe', 'pipe', 'inherit'] });
         createInterface({ input: this.child.stdout }).on('line', (line) => { this.answers.shift()?.(line); });
     }
 

@@ -22,8 +22,8 @@ import { within } from './stream.ts';
 const WL_SOCKET = 'wayland-1';
 // The color painted on the server, and how far a decoded sample may stray
 // from it (4:2:0 chroma, limited range, and two codecs' rounding).
-const PAINT: readonly number[] = [40, 120, 220];
-const PAINT_ARGB = 'ff2878dc';
+export const PAINT: readonly number[] = [40, 120, 220];
+export const PAINT_ARGB = 'ff2878dc';
 const TOLERANCE = 24;
 // A saturated second block guards the color matrix: a stream converted with
 // one matrix and painted with another lands more than twenty levels off here,
@@ -31,9 +31,9 @@ const TOLERANCE = 24;
 // which Chromium and Firefox both convert through, clamps the BT.709
 // Cb-to-blue coefficient to 2.0 from 2.112, which costs a green block eleven
 // levels of blue and this one two.
-const SATURATED: readonly number[] = [255, 0, 0];
-const SATURATED_ARGB = 'ffff0000';
-const SATURATED_TOLERANCE = 10;
+export const SATURATED: readonly number[] = [255, 0, 0];
+export const SATURATED_ARGB = 'ffff0000';
+export const SATURATED_TOLERANCE = 10;
 // Where the blocks sit, and a spot well outside them.
 const BLOCK = [100, 100, 300, 200] as const;
 const BLOCK2 = [500, 100, 300, 200] as const;
@@ -68,18 +68,19 @@ export interface Sample {
  * @param tolerance The levels it may stray.
  * @returns True when it is.
  */
-function near(rgb: number[] | null, want: readonly number[], tolerance = TOLERANCE): boolean {
-    return rgb !== null && rgb.every((v, i) => Math.abs(v - want[i]) <= tolerance);
+export function near(rgb: number[] | null | undefined, want: readonly number[], tolerance = TOLERANCE): boolean {
+    return rgb != null && rgb.every((v, i) => Math.abs(v - want[i]) <= tolerance);
 }
 
 /**
- * The decoded picture at the three points: whichever sink is showing (the
+ * The decoded picture at three points: whichever sink is showing (the
  * <video> a full-frame mode renders through, else the canvas), drawn once
  * into a scratch canvas.
  * @param page The client.
+ * @param points The points read as `inside`, `outside` and `saturated`, x then y.
  * @returns The sample, or null with no sink yet.
  */
-function samplePage(page: Page): Promise<Sample | null> {
+export function sampleAt(page: Page, points: readonly number[]): Promise<Sample | null> {
     return within(page.evaluate(([ix, iy, ox, oy, sx, sy]): Sample | null => {
         const v = document.querySelector('video');
         let src: HTMLVideoElement | HTMLCanvasElement | null = null;
@@ -108,7 +109,7 @@ function samplePage(page: Page): Promise<Sample | null> {
             return [d[i], d[i + 1], d[i + 2]];
         };
         return { kind, w, h, inside: px(ix, iy), outside: px(ox, oy), saturated: px(sx, sy) };
-    }, [...INSIDE, ...OUTSIDE, ...INSIDE2]));
+    }, points));
 }
 
 /**
@@ -165,12 +166,24 @@ export class Picture {
             this.live ? { paint: [...FLICKER, FLICKER_GRAYS[0]], second: FLICKER_GRAYS[1], periodMs: LIVE_FLIP_MS } : undefined);
     }
 
-    async keepsPresenting(res: Checks, tag: string, page: Page): Promise<void> {
+    /**
+     * Whether the <video> keeps presenting frames on the live picture.
+     * @param res The checks.
+     * @param tag The block's name.
+     * @param page The client.
+     * @param waived Why an engine cannot be held to it, which skips the check.
+     */
+    async keepsPresenting(res: Checks, tag: string, page: Page, waived = ''): Promise<void> {
+        const name = `${tag}: frames keep presenting on a changing screen`;
+        if (waived) {
+            res.skip(name, waived);
+            return;
+        }
         const start = await presented(page);
         await sleep(LIVE_S * 1000);
         const frames = await presented(page);
         const live = { frames: frames === null ? null : frames - (start ?? 0), secs: LIVE_S, flips: Math.round(LIVE_S * 1000 / LIVE_FLIP_MS) };
-        res.check(`${tag}: frames keep presenting on a changing screen`, (live.frames ?? 0) >= LIVE_MIN_FRAMES, live);
+        res.check(name, (live.frames ?? 0) >= LIVE_MIN_FRAMES, live);
     }
 
     async clear(): Promise<void> {
@@ -192,7 +205,7 @@ export class Picture {
     async wait(page: Page, timeoutS = 20, matrix = true): Promise<Sample | null> {
         let sample: Sample | null = null;
         for (const until = Date.now() + timeoutS * 1000; Date.now() < until;) {
-            sample = await samplePage(page);
+            sample = await sampleAt(page, [...INSIDE, ...OUTSIDE, ...INSIDE2]);
             if (this.matches(sample, matrix)) return sample;
             await sleep(500);
         }

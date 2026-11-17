@@ -15,6 +15,7 @@
 import type { Locator, Page } from '@playwright/test';
 
 import { sleep } from './env.ts';
+import { within } from './stream.ts';
 
 /** The bar's buttons that open a menu. */
 export const BAR_MENU_TRIGGERS = '[data-slot="tooltip-trigger"][aria-haspopup="menu"]';
@@ -390,4 +391,103 @@ export function openVideoSettings(page: Page, layout: string, reveal = ''): Prom
  */
 export function openScreenSettings(page: Page, layout: string, reveal = ''): Promise<boolean> {
     return layout === 'default' ? sidebarSection(page, 'Screen') : openBarSettingsTab(page, 'Resolution', reveal);
+}
+
+declare global {
+    interface Window {
+        videoChunksReceived?: number;
+    }
+}
+
+/**
+ * Wait for the first video chunk, by which the dashboard has the server's
+ * settings. It takes a canvas of any size: a phone's is under 640 pixels.
+ * @param page The client.
+ * @param timeoutS How long to wait.
+ * @returns Whether one came.
+ */
+export async function waitChunk(page: Page, timeoutS = 15): Promise<boolean> {
+    for (const until = Date.now() + timeoutS * 1000; Date.now() < until;) {
+        if (await within(page.evaluate(() => (window.videoChunksReceived ?? 0) > 0))) return true;
+        await sleep(250);
+    }
+    return false;
+}
+
+/**
+ * Open the dashboard's clipboard panel.
+ * @param page The client.
+ * @param dashboard The layout.
+ * @returns Whether it opened.
+ */
+export async function openClipboardPanel(page: Page, dashboard: string): Promise<boolean> {
+    if (dashboard === 'default') {
+        if (!(await within(page.evaluate(() => Boolean(document.querySelector('.sidebar.is-open')))))) {
+            await within(page.evaluate(() => { window.postMessage({ type: 'toggleDashboard' }, window.location.origin); }));
+            await sleep(800);
+        }
+        if ((await page.locator('#dashboardClipboardTextarea').count()) === 0) {
+            await page.locator('.sidebar-section-header:has-text("Clipboard")').first().click();
+            await sleep(600);
+        }
+        return (await page.locator('#dashboardClipboardTextarea').count()) > 0;
+    }
+    return barOpenMenuItem(page, 'Clipboard');
+}
+
+/**
+ * Choose `file` through the clipboard panel's Upload Image button, as a user
+ * does. The browser's file dialog takes the window's focus while it is open,
+ * which closes any menu around the button (a bar's panel is a submenu).
+ * Playwright answers the dialog without showing it, so the blur the dialog
+ * would cause is dispatched between the click and the answer.
+ * @param page The client.
+ * @param dashboard The layout.
+ * @param file The file picked.
+ * @returns False when the panel or its button is not there.
+ */
+export async function pickClipboardImage(page: Page, dashboard: string, file: { name: string; mimeType: string; buffer: Buffer }): Promise<boolean> {
+    if (!(await openClipboardPanel(page, dashboard))) return false;
+    const button = page.locator('button:has-text("Upload Image")').first();
+    if ((await button.count()) === 0) return false;
+    const chooser = page.waitForEvent('filechooser', { timeout: 5000 });
+    await button.click();
+    const picked = await chooser;
+    await within(page.evaluate(() => window.dispatchEvent(new Event('blur'))));
+    await sleep(400);
+    await picked.setFiles(file);
+    await sleep(800);
+    return true;
+}
+
+/**
+ * Pick `mode` (cbr or crf) in either layout's rate-control menu, opening the video settings first where they are closed.
+ * @returns Whether the menu was found and the pick made.
+ */
+export async function pickRateControl(page: Page, dashboard: string, mode: string): Promise<boolean> {
+    try {
+        if (!(await page.locator('#rateControlSelect').count())) await openVideoSettings(page, dashboard, '#rateControlSelect');
+        await page.selectOption('#rateControlSelect', mode, { timeout: 5000 });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/** Whether a dashboard switch reads on. */
+export async function switchOn(sw: Locator): Promise<boolean> {
+    return (await sw.getAttribute('aria-checked')) === 'true';
+}
+
+/** Open the sidebar's apps panel; false when it never appears. */
+export async function openAppsModal(page: Page): Promise<boolean> {
+    await page.locator('.toggle-handle').first().click();
+    await sleep(600);
+    const header = page.locator('.sidebar-section-header:has-text("Apps")').first();
+    if ((await header.count()) === 0) return false;
+    await header.click();
+    await sleep(600);
+    await page.locator('#apps-content button').first().click();
+    await sleep(1000);
+    return (await page.locator('[role="dialog"]:has-text("Apps")').count()) > 0;
 }

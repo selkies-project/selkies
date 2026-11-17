@@ -71,9 +71,9 @@ fi
 # The Node audits, the browser suites, the BrowserStack smoke, the site's
 # scripts and configs, the image tier's tester pages and this config itself:
 # eslint.config.mts at the root, with the same ESLint.
-echo "eslint: tests/tools tests/lib tests/*/*.spec.ts tests/browserstack website tests/image/site eslint.config.mts"
+echo "eslint: tests/tools tests/lib tests/*/*.spec.ts tests/image tests/browserstack website eslint.config.mts"
 web/selkies-dashboard/node_modules/.bin/eslint --flag "${flag}" --max-warnings 0 \
-    'tests/tools/**/*.ts' 'tests/lib/**/*.ts' 'tests/*/*.spec.ts' \
+    'tests/tools/**/*.ts' 'tests/lib/**/*.ts' 'tests/*/*.spec.ts' 'tests/image/*.ts' 'tests/image/items/*.ts' \
     tests/playwright.config.ts 'tests/browserstack/*.ts' 'website/scripts/**/*.ts' \
     website/next.config.ts website/postcss.config.ts 'tests/image/site/**/*.ts' eslint.config.mts
 

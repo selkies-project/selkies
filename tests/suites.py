@@ -348,9 +348,11 @@ def command(path: str, selector: Optional[str]) -> list:
     if path.endswith(".rs"):
         target = os.path.splitext(os.path.basename(path))[0]
         # Every test of a suite is ignored until a run names its target, as
-        # here: `cargo test --workspace` runs on hosts with no display.
+        # here: `cargo test --workspace` runs on hosts with no display. A
+        # selector filters the target's tests by name, which spells its
+        # hyphens as underscores.
         return ["cargo", "test", "--locked", "--package", "selkies-suites", "--test", target,
-                "--", "--include-ignored"] + ([selector] if selector else [])
+                "--", "--include-ignored"] + ([selector.replace("-", "_")] if selector else [])
     if path.endswith(".spec.ts"):
         # A selector names one test of the suite, whole: grep matches the
         # title's end, so `websockets` does not also run `websockets-wayland`.
