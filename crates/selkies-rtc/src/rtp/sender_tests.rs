@@ -2338,6 +2338,25 @@ fn a_frame_is_interleaved_into_groups_and_its_repairs_reach_the_history() {
 }
 
 #[test]
+fn a_full_paths_loss_adds_no_repairs() {
+    let mut s = RtpSender::new(Kind::Video, Box::new(NoHooks));
+    for _ in 0..6 {
+        s.steer_fec(0.3, true);
+    }
+    assert_eq!(
+        s.fec_repair_packets, 1,
+        "a queue's overflow raised the density"
+    );
+    for _ in 0..6 {
+        s.steer_fec(0.3, false);
+    }
+    assert_eq!(
+        s.fec_repair_packets, 3,
+        "the same loss with no queue standing"
+    );
+}
+
+#[test]
 fn the_repair_density_follows_the_loss_and_the_queue() {
     let mut s = RtpSender::new(Kind::Video, Box::new(NoHooks));
     let mut steps = Vec::new();

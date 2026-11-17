@@ -49,7 +49,8 @@
 //!
 //! FlexFEC repairs are built beside the frame's media packets and sent in the same burst: a
 //! group closes at every frame end or at `FEC_GROUP_PACKETS`, takes the repairs `fec_repairs`
-//! grants it at the density `steer_fec` sets from the smoothed loss, and the repairs are
+//! grants it at the density `steer_fec` sets from the smoothed loss of the windows no queue
+//! stood in, and the repairs are
 //! interleaved so `n` repairs recover `n` losses one XOR at a time. The history
 //! (`RtpHistory`) is told the instant a repair reaches the wire, the pacer's queue included.
 //!
@@ -876,14 +877,21 @@ impl RtpSender {
 
     /// Set the FlexFEC repair density from a measured loss fraction: one repair per group
     /// under 2% loss, two under 8%, three above, read on a smoothed loss so a single small
-    /// window neither adds nor drops a repair on its own. Every group takes them while the
+    /// window neither adds nor drops a repair on its own. The loss of a window a queue stood
+    /// in (`queued`) is left out: a full path dropped it, and repairs would only add to what it
+    /// cannot carry (a 4 Mbit/s path narrowed under an 8 Mbit/s stream ran its queue full
+    /// almost twice as long with them). Every group takes them while the
     /// path loses packets with no queue standing (`queued`), a loss a repair recovers without
     /// a retransmission's round trip: the loss read on windows `FEC_CLEAR_WINDOWS` past the
     /// last queue, since a queue's overflow shows in the windows it stood in and the ones
     /// just after. With nothing lost that way, or while a queue stands, the repairs follow the
     /// media packets (`fec_repairs`).
     pub fn steer_fec(&mut self, loss_fraction: f64, queued: bool) {
-        self.fec_loss += (loss_fraction - self.fec_loss) * 0.3;
+        // A window a queue stood in lost what the full path dropped: repairs would only add to
+        // what it cannot carry, so that loss leaves the density where it was.
+        if !queued {
+            self.fec_loss += (loss_fraction - self.fec_loss) * 0.3;
+        }
         self.fec_clear = if queued { 0 } else { self.fec_clear + 1 };
         if self.fec_clear > FEC_CLEAR_WINDOWS {
             self.fec_clear_loss += (loss_fraction - self.fec_clear_loss) * 0.3;
