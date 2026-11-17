@@ -17,6 +17,7 @@ members = [
     "crates/pelorus",
     "crates/selkies-turn-rest",
     "crates/selkies-suites",
+    "crates/selkies-image-site",
     "crates/xtask",
 ]
 default-members = ["crates/selkies", "crates/selkies-rtc", "crates/selkies-desktop"]

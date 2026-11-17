@@ -21,6 +21,7 @@
 //! | --- | --- | --- |
 //! | `server.start` | `label`, `mode`, `wayland`, `display`, `socket`, `port`, `env` | `port`, `pid`, `log` |
 //! | `server.stop` | | `tail`: the end of its log |
+//! | `server.binary` | | `path`: the server under test, as the harness resolves it |
 //! | `server.mark` | | `mark`: the log's length now |
 //! | `server.log` | `from`: a mark | `text`: the log from it on |
 //! | `server.saw` | `from`, `needle`, `timeout_ms` | `saw`: whether the log took `needle` past `from` in time |
@@ -30,14 +31,33 @@
 //! | `x11.root_size` | `display` | `size`: `[width, height]` |
 //! | `x11.window_manager` | `display` | `manager`: its `pid` (0 unknown) and `name`, null for none |
 //! | `x11.clipboard` | `timeout_ms`, `display` | `text`: CLIPBOARD's text, null when none comes |
-//! | `x11.own_clipboard` | `payload`, `display` | `handle` of an owner serving `payload` |
+//! | `x11.own_clipboard` | `payload` or `payload_hex`, `formats`, `display` | `handle` of an owner answering each of `formats` (`{target, text}` or `{target, hex}`) with its bytes, and any other target with the payload where one is given |
+//! | `x11.owns` | `handle`, `display` | `owns`: whether that owner still holds CLIPBOARD |
+//! | `x11.targets` | `timeout_ms`, `display` | `targets`: the names CLIPBOARD's owner lists for `TARGETS`, null when none answers |
+//! | `x11.convert` | `target`, `timeout_ms`, `display` | `hex`: CLIPBOARD converted to `target`, null when refused or unanswered |
+//! | `x11.keycode` | `keysym`, `display` | `code`: the keycode typing it, null without one |
+//! | `x11.buttons` | `display` | `held`: the pointer buttons held, lowest first |
+//! | `x11.watch` | `cover`, `display` | `handle` of a window in the middle, or covering the display, that records keys, buttons and motion |
+//! | `x11.events` | `handle` | `events`: what the window received, each `{kind, detail, x, y, root_x, root_y, at}`, `at` in seconds on `CLOCK_MONOTONIC` |
+//! | `x11.probe` | `name`, `width`, `height`, `display` | `handle` and X `id` of a plain titled window for a window manager to take |
+//! | `x11.frame` | `handle` | `frame`: `[x, y, width, height]` of the frame a manager put the probe in, null while it has none |
+//! | `x11.churn` | `width`, `height`, `display` | `handle` of a window drawing a moving block 30 times a second |
+//! | `x11.root_cardinal` | `name`, `value`, `display` | `value`: the root's CARDINAL `name`, null where absent; a `value` given sets it first, a null one deletes it |
+//! | `x11.warp` | `x`, `y`, `display` | `done`: the pointer put there |
+//! | `x11.key` | `keysym`, `press`, `display` | `done`: an XTEST press or release of the key typing `keysym` |
+//! | `x11.button` | `button`, `press`, `display` | `done`: an XTEST press or release |
+//! | `x11.motion` | `dx`, `dy`, `count`, `gap_ms`, `display` | `done`: `count` XTEST relative moves, `gap_ms` apart |
 //! | `x11.paint` | `paints`, `flicker`, `display` | `handle` of solid windows: each `[x, y, w, h, rgb]`, the flicker `{paint, second, period_ms}` |
 //! | `wl.observe` | `socket`, `env`, `program` | `handle` of a client on the server's compositor: `wl-observer`, or the crate's `program` |
 //! | `wl.wait` | `handle`, `kind`, `match`, `timeout_ms` | `event`: the first of `kind` matching, or null |
 //! | `wl.output` | `handle` | `lines`: what the client printed that was no event |
 //! | `wl.lines` | `handle`, `from` | `lines`: its event lines from index `from` on |
-//! | `xvfb.start` | `width`, `height`, `extra` | `display` and `handle` of a private Xvfb |
-//! | `release` | `handle` | an owner or observer ended |
+//! | `xvfb.start` | `width`, `height`, `extra`, `binary` | `display` and `handle` of a private Xvfb (`binary` a path or a name on `PATH`, `Xvfb` by default) |
+//! | `unix.stale` | `path` | a socket file at `path` whose listener has gone away |
+//! | `threads` | `pid` | `threads`: the thread ids the process runs now |
+//! | `load.start` | `threads`, `stall` | `handle` of busy processes sharing one CPU with `threads`, stopped |
+//! | `load.resume` / `load.pause` | `handle` | the burst begun or ended |
+//! | `release` | `handle` | an owner, observer, painting, X server or load ended |
 //!
 //! `display` defaults to `E2E_DISPLAY`, the display the servers capture.
 //!
@@ -50,6 +70,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::time::Duration;
 
+use selkies_suites::load::{self, Load};
 use selkies_suites::wayland::WlObserver;
 use selkies_suites::x11::{self, SelectionOwner};
 use selkies_suites::xvfb::Xvfb;
@@ -67,9 +88,46 @@ struct Host {
     observers: HashMap<u64, WlObserver>,
     /// Painted windows, by the handle given out for them.
     paintings: HashMap<u64, x11::Painting>,
+    /// Churning windows, by the handle given out for them.
+    churns: HashMap<u64, x11::Churn>,
+    /// Input watches, by the handle given out for them.
+    watches: HashMap<u64, x11::InputWatch>,
+    /// Windows for a window manager to take, by the handle given out for them.
+    probes: HashMap<u64, x11::ManagedProbe>,
     /// Private X servers, by the handle given out for them.
     servers: HashMap<u64, Xvfb>,
+    /// CPU loads, by the handle given out for them.
+    loads: HashMap<u64, Load>,
     next: u64,
+}
+
+/// `bytes` as lowercase hexadecimal, two digits a byte.
+fn to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
+}
+
+/// The bytes `hex` spells, or `None` where it is no even run of hexadecimal digits.
+fn from_hex(hex: &str) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok())
+        .collect()
+}
+
+/// The bytes a request carries in `text_field` as text, or in `hex_field` as hexadecimal.
+fn bytes_of(request: &Map<String, Value>, text_field: &str, hex_field: &str) -> Option<Vec<u8>> {
+    text(request, text_field)
+        .map(|t| t.as_bytes().to_vec())
+        .or_else(|| text(request, hex_field).and_then(from_hex))
 }
 
 /// `field` of `request` as a string, if it is one.
@@ -160,6 +218,7 @@ impl Host {
                 Some(running) => Ok(json!({ "tail": running.stop().await })),
                 None => Ok(json!({ "tail": "" })),
             },
+            "server.binary" => Ok(json!({ "path": selkies_suites::server_binary() })),
             "server.mark" => Ok(json!({ "mark": self.running()?.mark() })),
             "server.log" => {
                 let from = request
@@ -183,6 +242,133 @@ impl Host {
                     .ok_or("x11.key_held takes a keysym")?;
                 Ok(json!({ "held": x11::key_held(&display(request)?, keysym) }))
             }
+            "x11.keycode" => {
+                let keysym = whole(request, "keysym")
+                    .and_then(|k| u32::try_from(k).ok())
+                    .ok_or("x11.keycode takes a keysym")?;
+                Ok(json!({ "code": x11::keycode(&display(request)?, keysym) }))
+            }
+            "x11.churn" => {
+                let size = |field: &str, default: u16| {
+                    whole(request, field)
+                        .and_then(|v| u16::try_from(v).ok())
+                        .unwrap_or(default)
+                };
+                let churn =
+                    x11::Churn::start(&display(request)?, size("width", 900), size("height", 700))?;
+                let handle = self.handle();
+                self.churns.insert(handle, churn);
+                Ok(json!({ "handle": handle }))
+            }
+            "x11.root_cardinal" => {
+                let shown = display(request)?;
+                let name = text(request, "name").ok_or("x11.root_cardinal takes a name")?;
+                if let Some(value) = request.get("value") {
+                    let value = value.as_u64().and_then(|v| u32::try_from(v).ok());
+                    x11::set_root_cardinal(&shown, name, value);
+                }
+                Ok(json!({ "value": x11::root_cardinal(&shown, name) }))
+            }
+            "x11.warp" => {
+                let at = |field: &str| {
+                    request
+                        .get(field)
+                        .and_then(Value::as_i64)
+                        .and_then(|v| i16::try_from(v).ok())
+                        .unwrap_or(0)
+                };
+                Ok(json!({ "done": x11::warp(&display(request)?, at("x"), at("y")) }))
+            }
+            "x11.key" => {
+                let keysym = whole(request, "keysym")
+                    .and_then(|k| u32::try_from(k).ok())
+                    .ok_or("x11.key takes a keysym")?;
+                let press = request
+                    .get("press")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                Ok(json!({ "done": x11::fake_key(&display(request)?, keysym, press) }))
+            }
+            "x11.button" => {
+                let button = whole(request, "button")
+                    .and_then(|b| u8::try_from(b).ok())
+                    .ok_or("x11.button takes a button")?;
+                let press = request
+                    .get("press")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                Ok(json!({ "done": x11::fake_button(&display(request)?, button, press) }))
+            }
+            "x11.motion" => {
+                let delta = |field: &str| {
+                    request
+                        .get(field)
+                        .and_then(Value::as_i64)
+                        .and_then(|v| i16::try_from(v).ok())
+                        .unwrap_or(0)
+                };
+                let count = whole(request, "count")
+                    .and_then(|c| u32::try_from(c).ok())
+                    .unwrap_or(1);
+                let gap = Duration::from_millis(whole(request, "gap_ms").unwrap_or(0));
+                let shown = display(request)?;
+                let (dx, dy) = (delta("dx"), delta("dy"));
+                let done = tokio::task::spawn_blocking(move || {
+                    x11::fake_motion(&shown, dx, dy, count, gap)
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+                Ok(json!({ "done": done }))
+            }
+            "x11.buttons" => Ok(json!({ "held": x11::buttons_held(&display(request)?) })),
+            "x11.watch" => {
+                let cover = request
+                    .get("cover")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let watch = x11::InputWatch::start(&display(request)?, cover)?;
+                let handle = self.handle();
+                self.watches.insert(handle, watch);
+                Ok(json!({ "handle": handle }))
+            }
+            "x11.events" => {
+                let handle = whole(request, "handle").ok_or("x11.events takes a handle")?;
+                let watch = self.watches.get(&handle).ok_or("no such watch")?;
+                let events: Vec<Value> = watch
+                    .events()
+                    .iter()
+                    .map(|e| {
+                        json!({
+                            "kind": e.kind, "detail": e.detail, "x": e.x, "y": e.y,
+                            "root_x": e.root_x, "root_y": e.root_y, "at": e.at,
+                        })
+                    })
+                    .collect();
+                Ok(json!({ "events": events }))
+            }
+            "x11.probe" => {
+                let name = text(request, "name").unwrap_or("selkies-probe");
+                let size = |field: &str, default: u16| {
+                    whole(request, field)
+                        .and_then(|v| u16::try_from(v).ok())
+                        .unwrap_or(default)
+                };
+                let probe = x11::ManagedProbe::start(
+                    &display(request)?,
+                    name,
+                    size("width", 400),
+                    size("height", 260),
+                )?;
+                let id = probe.id();
+                let handle = self.handle();
+                self.probes.insert(handle, probe);
+                Ok(json!({ "handle": handle, "id": id }))
+            }
+            "x11.frame" => {
+                let handle = whole(request, "handle").ok_or("x11.frame takes a handle")?;
+                let probe = self.probes.get(&handle).ok_or("no such probe")?;
+                Ok(json!({ "frame": probe.frame() }))
+            }
             "x11.pointer" => Ok(json!({ "at": x11::pointer(&display(request)?) })),
             "x11.window_manager" => Ok(json!({
                 "manager": x11::window_manager(&display(request)?)
@@ -193,13 +379,43 @@ impl Host {
                 let within = timeout(request, Duration::from_secs(8));
                 Ok(json!({ "text": x11::read_clipboard(&display(request)?, within) }))
             }
+            "x11.targets" => {
+                let within = timeout(request, Duration::from_secs(8));
+                Ok(json!({ "targets": x11::clipboard_targets(&display(request)?, within) }))
+            }
+            "x11.convert" => {
+                let within = timeout(request, Duration::from_secs(5));
+                let target = text(request, "target").ok_or("x11.convert takes a target")?;
+                let value = x11::convert_clipboard(&display(request)?, target, within);
+                Ok(json!({ "hex": value.map(|v| to_hex(&v)) }))
+            }
             "x11.own_clipboard" => {
-                let payload =
-                    text(request, "payload").ok_or("x11.own_clipboard takes a payload")?;
-                let owner = SelectionOwner::serving(&display(request)?, payload.as_bytes());
+                let payload = bytes_of(request, "payload", "payload_hex");
+                let formats: Vec<(String, Vec<u8>)> = request
+                    .get("formats")
+                    .and_then(Value::as_array)
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(Value::as_object)
+                            .filter_map(|f| {
+                                Some((text(f, "target")?.to_owned(), bytes_of(f, "text", "hex")?))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if payload.is_none() && formats.is_empty() {
+                    return Err("x11.own_clipboard takes a payload or formats".into());
+                }
+                let owner =
+                    SelectionOwner::offering(&display(request)?, &formats, payload.as_deref())?;
                 let handle = self.handle();
                 self.owners.insert(handle, owner);
                 Ok(json!({ "handle": handle }))
+            }
+            "x11.owns" => {
+                let handle = whole(request, "handle").ok_or("x11.owns takes a handle")?;
+                let owner = self.owners.get(&handle).ok_or("no such owner")?;
+                Ok(json!({ "owns": owner.owns(&display(request)?) }))
             }
             "x11.paint" => {
                 let paints = request
@@ -297,9 +513,8 @@ impl Host {
                     })
                     .unwrap_or_default();
                 let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
-                // The harness panics where no server comes up; here that is this request's failure.
-                let xvfb = std::panic::catch_unwind(|| Xvfb::start(width, height, &extra))
-                    .map_err(|_| "no private X server came up".to_owned())?;
+                let binary = text(request, "binary").unwrap_or("Xvfb");
+                let xvfb = Xvfb::start_binary(binary, width, height, &extra)?;
                 let display = xvfb.display().to_owned();
                 let handle = self.handle();
                 self.servers.insert(handle, xvfb);
@@ -311,6 +526,49 @@ impl Host {
                 self.observers.remove(&handle);
                 self.paintings.remove(&handle);
                 self.servers.remove(&handle);
+                self.loads.remove(&handle);
+                self.watches.remove(&handle);
+                self.churns.remove(&handle);
+                self.probes.remove(&handle);
+                Ok(json!({}))
+            }
+            "unix.stale" => {
+                let path = text(request, "path").ok_or("unix.stale takes a path")?;
+                let _ = std::fs::remove_file(path);
+                // A listener bound and dropped leaves its socket file behind, as a dead server does.
+                std::os::unix::net::UnixListener::bind(path).map_err(|e| format!("{path}: {e}"))?;
+                Ok(json!({}))
+            }
+            "threads" => {
+                let pid = whole(request, "pid")
+                    .and_then(|p| u32::try_from(p).ok())
+                    .ok_or("threads takes a pid")?;
+                Ok(json!({ "threads": load::threads(pid) }))
+            }
+            "load.start" => {
+                let threads: Vec<i32> = request
+                    .get("threads")
+                    .and_then(Value::as_array)
+                    .ok_or("load.start takes threads")?
+                    .iter()
+                    .filter_map(|t| t.as_i64().and_then(|t| i32::try_from(t).ok()))
+                    .collect();
+                let stall = request
+                    .get("stall")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                let handle = self.handle();
+                self.loads.insert(handle, Load::start(&threads, stall));
+                Ok(json!({ "handle": handle }))
+            }
+            "load.resume" | "load.pause" => {
+                let handle = whole(request, "handle").ok_or("a load op takes a handle")?;
+                let held = self.loads.get(&handle).ok_or("no such load")?;
+                if op == "load.resume" {
+                    held.resume();
+                } else {
+                    held.pause();
+                }
                 Ok(json!({}))
             }
             "listeners" => {
