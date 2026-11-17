@@ -1,0 +1,54 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+name: CodSpeed
+
+# CPU benchmarks of the WebRTC transport's per-frame and per-packet work
+# (crates/selkies-rtc/benches), measured with CodSpeed's simulation
+# instrument, which counts instructions rather than time, so a pull request's
+# report against main does not move with the runner's load.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Lets CodSpeed run the benchmarks of a branch on request
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A pull request's newer push replaces its run; every commit on main keeps
+  # its own, the baseline the reports compare against.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  benchmarks:
+    name: Run benchmarks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # CodSpeed authenticates the upload through OIDC
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Rust toolchain
+        run: |
+          pin="$(sed -n 's/^PIN="\(.*\)"$/\1/p' infra/packaging/rust.sh)"
+          scripts/ci/retry.sh 5 60 rustup toolchain install "${pin}" --profile minimal
+          rustup default "${pin}"
+      # The same version as the codspeed-criterion-compat the benchmarks build
+      # against (crates/selkies-rtc/Cargo.toml): the two are released together,
+      # and Dependabot moves only the crate.
+      - name: Install cargo-codspeed
+        run: scripts/ci/retry.sh 5 60 cargo install --locked cargo-codspeed --version 6.0.0
+      - name: Build the benchmarks
+        run: cargo codspeed build --locked --measurement-mode simulation -p selkies-rtc
+      - name: Run the benchmarks
+        uses: CodSpeedHQ/action@af75f77f17a054769abefaa42fe8dc2975469b5f # v5.6.3
+        with:
+          mode: simulation
+          run: cargo codspeed run -p selkies-rtc
