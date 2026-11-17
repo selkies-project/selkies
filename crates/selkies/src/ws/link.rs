@@ -851,6 +851,7 @@ impl DisplayLink {
                 capacity_bps,
                 probed,
                 pacer_dropped: false,
+                pace_bps: None,
             })
             .round();
         let restored = steer.restored;
