@@ -44,11 +44,7 @@ async fn the_dpi_verb_is_handled_and_a_new_display_starts_at_the_set_frame_rate(
     page.send("s,120");
     let scaled = server.saw(mark, "DPI", Duration::from_millis(1500)).await;
     let said = server.log_from(mark);
-    checks.check(
-        "D3: 's,120' not dropped",
-        !said.contains("unhandled on_scaling_ratio") || scaled,
-        said.trim(),
-    );
+    checks.check("D3: 's,120' not dropped", scaled, said.trim());
 
     let mark = server.mark();
     page.send("STOP_VIDEO");

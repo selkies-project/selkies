@@ -34,11 +34,22 @@ zune-jpeg = { version = "0.5", default-features = false, features = ["std"] }
 zune-core = { version = "0.5", default-features = false, features = ["std"] }
 # What a suite reads back from the X display and puts on it: the root's size, the outputs, a
 # selection owner, damage.
-x11rb = { version = "0.14", features = ["randr", "res", "xf86vidmode"] }
+x11rb = { version = "0.14", features = ["randr", "res", "xf86vidmode", "xtest"] }
 # A Wayland app owning a session's clipboard (src/bin/wl-clipboard-owner.rs), through the
 # data-control protocol, at pixelflux's versions; pure Rust, no libwayland.
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+# The portal backend that forwards a session to Mutter's own D-Bus API (src/bin/mutter-portal.rs),
+# at pixelflux's version.
+zbus = { version = "6", default-features = false, features = ["default-rt", "service"] }
+serde = "1"
+# The layer surface a panel opens its menus from (src/bin/wl-popup-client.rs), at pixelflux's
+# version.
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# The headless WebRTC client of the pacer and recovery suites (src/bin/webrtc-peer.rs): webrtc-rs's
+# sans-IO stack, its own crypto provider on AWS-LC as the server's is, so no workspace crate.
+rtc = { version = "=0.21.1", default-features = false, features = ["crypto-aws-lc-rs"] }
 
 [dev-dependencies]
 # What tests/fetch_verified.rs serves GitHub's answers with: a proxy that ends TLS for the hosts

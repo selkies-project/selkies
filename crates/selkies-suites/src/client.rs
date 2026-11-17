@@ -91,7 +91,17 @@ impl Client {
     /// When the socket is refused or the server sends nothing within ten seconds; the message
     /// carries the server's log.
     pub async fn connect(server: &Server, query: &str) -> Client {
-        let uri = server.websocket(query);
+        Client::connect_at(server, &server.websocket(query)).await
+    }
+
+    /// Connect to `uri`, a way to `server`'s data WebSocket other than its own port (a relay in
+    /// front of it), and wait for the server's first message.
+    ///
+    /// # Panics
+    ///
+    /// As [`Client::connect`].
+    pub async fn connect_at(server: &Server, uri: &str) -> Client {
+        let uri = uri.to_owned();
         server.page_turn().await;
         let connecting = async {
             ClientBuilder::new()
@@ -184,6 +194,14 @@ impl Client {
     /// follow say so.
     pub fn send(&self, verb: &str) {
         let _ = self.outgoing.send(Some(Message::text(verb.to_owned())));
+    }
+
+    /// Whether the socket has closed, from either end.
+    pub fn closed(&self) -> bool {
+        self.inbox
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .closed
     }
 
     /// How many text messages have arrived: a mark for [`Client::text`].

@@ -5,7 +5,7 @@
  */
 
 //! The session-screen ladder over a recording pixelflux and a live labwc, the layout passes against
-//! a model of the capture compositor's overlap rule (`test_wayland_secondary_shrink.py`), the start
+//! a model of the capture compositor's overlap rule (`wayland_secondary_shrink.spec.ts`), the start
 //! verdict, and the apps runner (the `apps_local_repo` suite).
 
 use std::collections::{HashMap, HashSet};
@@ -1120,7 +1120,7 @@ async fn a_live_session_without_a_control_holds_its_spare_screens() {
     );
 }
 
-// --- The layout passes (test_wayland_secondary_shrink.py) ----------------------------------------
+// --- The layout passes (wayland_secondary_shrink.spec.ts) ----------------------------------------
 
 /// The primary's capture is a view (output 1) over its screen (output 0): it moves with the screen
 /// and never stands in anything's way.

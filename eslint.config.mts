@@ -75,7 +75,7 @@ export default [
     // The browser suites on Playwright Test and their library: Node programs
     // whose page callbacks run in the browser, checked against the
     // Playwright and Node types the tests package carries.
-    files: ['tests/lib/**/*.ts', 'tests/integration/**/*.spec.ts', 'tests/e2e/**/*.spec.ts', 'tests/playwright.config.ts'],
+    files: ['tests/lib/**/*.ts', 'tests/integration/**/*.spec.ts', 'tests/e2e/**/*.spec.ts', 'tests/perf/**/*.spec.ts', 'tests/image/*.ts', 'tests/image/items/*.ts', 'tests/playwright.config.ts'],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'module',

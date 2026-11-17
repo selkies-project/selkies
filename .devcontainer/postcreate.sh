@@ -21,11 +21,14 @@ cd "${WORKSPACE_FOLDER:-/workspaces/selkies}"
 PATH="${CARGO_HOME:-${HOME}/.cargo}/bin:${PATH}"
 cargo build --release --locked -p selkies
 
-# The suites' own dependencies, and the pixelflux and pcmflux they drive beside
-# the server: local wheels of the same sources the server links.
+# The browser suites' package, and for the soak tier the pixelflux and pcmflux
+# it drives through their Python bindings: local wheels of the same sources the
+# server links. Jupyter is the Jupyter suite's, the one tool of the browser
+# tiers that is Python's.
+(cd tests && npm ci --no-audit --no-fund)
 WHEELS="$(mktemp -d)"
 python3 -m pip wheel --no-deps --wheel-dir "${WHEELS}" ./crates/pixelflux ./crates/pcmflux
-PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --retries 5 --timeout 60 --user -r tests/requirements.txt
+PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --retries 5 --timeout 60 --user jupyter-server jupyter-server-proxy
 PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --user --no-deps --force-reinstall "${WHEELS}"/*.whl
 rm -rf "${WHEELS}"
 
@@ -33,7 +36,7 @@ rm -rf "${WHEELS}"
 # libraries, the OpenH264 plugin Firefox negotiates H.264 with, and the C
 # helpers under tests/tools. Best effort, so a container without the network
 # or the packages for them still has the server.
-if python3 -m playwright install --with-deps chromium firefox webkit &&
+if (cd tests && npx playwright install --with-deps chromium firefox webkit) &&
     sh tests/tools/fetch-openh264.sh &&
     make -C tests/tools; then
   echo "The suites' browsers and tools are installed; scripts/ci/test-stack.sh starts their display."

@@ -462,11 +462,12 @@ fixed device format, and publishing happen on the camera's own thread. `push` ta
 optional arguments (`rotation` in clockwise degrees, then a horizontal `flip`); `convert::orient_i420` bakes it
 right after decode, ahead of the fit, and an upright MJPEG frame keeps its pass-through. Sinks are the shared-memory ring served to the
 Selkies V4L2 interposer (`ring.rs`/`server.rs`; the layout is mirrored byte-for-byte by
-`addons/v4l2-interposer/v4l2_interposer.c` and checked by selkies' `tests/unit/test_webcam_abi.py`), a
+`addons/v4l2-interposer/v4l2_interposer.c` and read back through it by selkies'
+`crates/selkies/tests/webcam_device.rs`), a
 v4l2loopback output device (`v4l2out.rs`), and a PipeWire `Video/Source` node (`pipewire.rs`, `libpipewire-0.3`
 loaded at run time, pods built by hand — never add a build-time PipeWire dependency). `cargo test --lib webcam`
 covers the ring, decoders (including an OpenH264 encode-and-decode round trip), and pod layouts; the device-level and browser
-checks live in Selkies (`crates/selkies/tests/webcam_device.rs`, `tests/e2e/test_webcam.py` from the repository root).
+checks live in Selkies (`crates/selkies/tests/webcam_device.rs`, `tests/e2e/webcam.spec.ts` from the repository root).
 
 Licensing is part of the build matrix: `LICENSES.md` inventories every crate and native library of the default
 (`gpl`, libx264) and `PIXELFLUX_ENABLE_GPL=0` (`openh264`) builds, `cargo xtask licenses --crate crates/pixelflux`

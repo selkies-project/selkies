@@ -63,9 +63,9 @@ impl Default for AuditConfig {
 /// `ts`, seconds since the epoch, as an RFC 3339 UTC timestamp with milliseconds.
 pub fn rfc3339(ts: f64) -> String {
     let millis = (ts * 1000.0).round() as i64;
-    chrono::DateTime::from_timestamp_millis(millis)
-        .map(|t| t.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
-        .unwrap_or_else(|| "1970-01-01T00:00:00.000Z".to_string())
+    jiff::Timestamp::from_millisecond(millis)
+        .map(|t| t.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
+        .unwrap_or_else(|_| "1970-01-01T00:00:00.000Z".to_string())
 }
 
 fn now_seconds() -> f64 {
@@ -476,9 +476,7 @@ mod tests {
         let stamps: Vec<&str> = got.iter().map(|e| e["ts"].as_str().unwrap()).collect();
         let mut sorted = stamps.clone();
         sorted.sort();
-        let first = chrono::DateTime::parse_from_rfc3339(stamps[0])
-            .unwrap()
-            .timestamp() as f64;
+        let first = stamps[0].parse::<jiff::Timestamp>().unwrap().as_second() as f64;
         assert!(
             stamps == sorted && (now_seconds() - first).abs() < 5.0,
             "timestamps come from emit time and keep order"

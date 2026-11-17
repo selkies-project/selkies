@@ -11,7 +11,7 @@
  * `setInterval` the page starts counted in `window.__timers` (its period
  * under `created_<id>`, its runs under `<id>`, its clears under
  * `cleared_<id>`). A classic script once its types are stripped
- * (`tests/helpers.py` `pad_init_js`).
+ * (`padInitScript` in `tests/lib/uinput.ts`).
  * @module
  */
 

@@ -338,7 +338,7 @@ pub fn ipv6_loopback_redirect(
 /// at `?` and `#` (or `-`), and the agent.
 pub struct AccessRecord<'a> {
     pub remote: Option<SocketAddr>,
-    pub started: chrono::DateTime<chrono::Local>,
+    pub started: jiff::ZonedDateTime,
     pub method: &'a str,
     /// The request path, never its query.
     pub path: &'a str,
@@ -367,7 +367,7 @@ impl std::fmt::Display for AccessRecord<'_> {
             self.remote
                 .map(|a| a.ip().to_string())
                 .unwrap_or_else(|| "-".to_string()),
-            self.started.format("%d/%b/%Y:%H:%M:%S %z"),
+            self.started.strftime("%d/%b/%Y:%H:%M:%S %z"),
             self.method,
             self.path,
             self.version,
@@ -381,7 +381,7 @@ impl std::fmt::Display for AccessRecord<'_> {
 
 /// The access-log middleware: one INFO line per response under the `access` target.
 pub async fn access_log(request: Request, next: Next) -> Response {
-    let started = chrono::Local::now();
+    let started = jiff::ZonedDateTime::now();
     let remote = request
         .extensions()
         .get::<ConnInfo>()
@@ -902,7 +902,7 @@ mod tests {
         ]);
         let line = AccessRecord {
             remote: Some("127.0.0.1:5".parse().unwrap()),
-            started: chrono::Local::now(),
+            started: jiff::ZonedDateTime::now(),
             method: "GET",
             path: "/api/websockets",
             version: "HTTP/1.1",

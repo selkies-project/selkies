@@ -29,92 +29,17 @@
 // the wire keep coming while the painted picture holds still. JPEG sends a
 // still screen once and its paint-over once, then nothing, so the jpeg block
 // paints a picture that keeps changing away from the sampled points.
-import type { Browser, BrowserContext, Page } from '@playwright/test';
+import type { Page } from '@playwright/test';
 import { test } from '@playwright/test';
 
 import { DASHBOARD_DIST, sleep, suiteOf } from '../lib/env.ts';
-import { firefoxPersistentContext, FF_E2E_PROFILE, launchBrowser, openh264Version, type Engine } from '../lib/browsers.ts';
+import { FF_E2E_PROFILE, openh264Version, type Engine } from '../lib/browsers.ts';
 import { Checks } from '../lib/checks.ts';
 import { openVideoSettings } from '../lib/dashboard.ts';
+import { encoderField, ENGINES, lastStreamLine, openPage, TURBO } from '../lib/encode.ts';
 import { Host } from '../lib/host.ts';
 import { Picture } from '../lib/picture.ts';
 import { waitWrVideo, waitWsVideo, within, type VideoSize } from '../lib/stream.ts';
-
-const TURBO = { SELKIES_VIDEO_STREAMING_MODE: 'true' };
-
-// Every 0x04 frame on the WebSocket carries its Y start and height in the
-// header, a full-frame one only 0; JPEG stripes are counted by the video
-// worker. Undiverted frames are read off the worker-socket handle (and a plain
-// page socket, should the worker fall back); frames diverted straight to the
-// video worker never surface here and are reported by
-// window.videoStripeRows instead.
-const STRIPE_TAP = `
-(() => {
-  window.__stripes = {};
-  const tap = (e) => {
-    if (!(e.data instanceof ArrayBuffer) || e.data.byteLength < 10) return;
-    const v = new DataView(e.data);
-    if (v.getUint8(0) !== 0x04) return;
-    window.__stripes[v.getUint16(4, false)] = v.getUint16(8, false);
-  };
-  const WS = window.WebSocket;
-  window.WebSocket = function(...a) {
-    const s = a.length === 1 ? new WS(a[0]) : new WS(a[0], a[1]);
-    s.addEventListener('message', tap);
-    return s;
-  };
-  window.WebSocket.prototype = WS.prototype;
-  Object.setPrototypeOf(window.WebSocket, WS);
-  let transport = null;
-  Object.defineProperty(window, 'selkiesTransport', {
-    configurable: true,
-    get: () => transport,
-    set: (v) => {
-      transport = v;
-      if (v && v.addEventListener && !v.__stripeTapped) {
-        v.__stripeTapped = true;
-        v.addEventListener('message', tap);
-      }
-    },
-  });
-})();
-`;
-
-declare global {
-    interface Window {
-        __stripes?: Record<string, number>;
-        videoStripeRows?: Record<string, number>;
-        videoDivertOn?: boolean;
-    }
-}
-
-/**
- * A page of `engine` on the client in `mode`, with its browser or context to close.
- * @param url The server.
- * @param mode The transport.
- * @param engine The engine.
- * @returns What to close, and the page.
- */
-async function openPage(url: string, mode: string, engine: Engine): Promise<[Browser | BrowserContext, Page]> {
-    let owner: Browser | BrowserContext;
-    let ctx: BrowserContext;
-    if (engine === 'firefox') {
-        ctx = await firefoxPersistentContext({ viewport: { width: 1280, height: 720 } });
-        owner = ctx;
-    } else {
-        const browser = await launchBrowser(engine);
-        owner = browser;
-        ctx = await browser.newContext({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1 });
-    }
-    await ctx.addInitScript({ content: `window.__SELKIES_STREAMING_MODE__ = '${mode}';` });
-    // Firefox runs on one persistent profile: the encoder a previous block's
-    // ladder stored must not become this block's pick.
-    await ctx.addInitScript({ content: 'try { localStorage.clear(); } catch (e) {}' });
-    await ctx.addInitScript({ content: STRIPE_TAP });
-    const page = await ctx.newPage();
-    await page.goto(`${url}/`, { waitUntil: 'load' });
-    return [owner, page];
-}
 
 function waitVideo(page: Page, mode: string): Promise<VideoSize | null> {
     return mode === 'websockets' ? waitWsVideo(page, 30) : waitWrVideo(page);
@@ -182,28 +107,17 @@ function isFullframe(seen: Record<number, number>, frameH: number): boolean {
 }
 
 /** How many times pixelflux has printed its stream line. */
-async function streamLines(host: Host): Promise<number> {
+async function streamLineCount(host: Host): Promise<number> {
     return (await host.log()).split('Stream settings active').length - 1;
-}
-
-/** The newest stream line pixelflux printed. */
-async function lastStreamLine(host: Host): Promise<string> {
-    return (await host.log()).split('\n').filter((l) => l.includes('Stream settings active')).at(-1) ?? '';
 }
 
 /** The stream line once pixelflux has printed more than `count` of them. */
 async function waitStreamLine(host: Host, count: number, timeoutS = 20): Promise<string> {
     for (const until = Date.now() + timeoutS * 1000; Date.now() < until;) {
-        if ((await streamLines(host)) > count) return lastStreamLine(host);
+        if ((await streamLineCount(host)) > count) return lastStreamLine(host);
         await sleep(500);
     }
     return '';
-}
-
-/** The encoder part of a stream line, for a check's detail. */
-function encoderField(line: string): string {
-    const at = Math.max(line.indexOf('Encoder:'), line.indexOf('Mode:'));
-    return at >= 0 ? line.slice(at, at + 60) : line.slice(-80);
 }
 
 /**
@@ -305,7 +219,7 @@ async function blockSwitch(host: Host, mode: string, wayland: boolean, res: Chec
             res.check(`${tag}: the dashboard offers jpeg and no striped H.264`, options.includes('jpeg') && !options.includes('h264enc-striped'), options);
             let seen = await waitStripes(page, false);
             res.check(`${tag}: default stream is full-frame`, video !== null && isFullframe(seen, video.h), seen);
-            let before = await streamLines(host);
+            let before = await streamLineCount(host);
             await page.selectOption('#encoderSelect', 'jpeg');
             let line = await waitStreamLine(host, before);
             res.check(`${tag}: capture restarted on jpeg`, Boolean(line), encoderField(line));
@@ -315,7 +229,7 @@ async function blockSwitch(host: Host, mode: string, wayland: boolean, res: Chec
             res.check(`${tag}: jpeg decodes in the video worker`, divert.on && divert.rows > 1, divert);
             let sample = await picture.wait(page);
             res.check(`${tag}: the picture decodes as jpeg`, picture.matches(sample), sample);
-            before = await streamLines(host);
+            before = await streamLineCount(host);
             await page.selectOption('#encoderSelect', 'h264enc');
             line = await waitStreamLine(host, before);
             res.check(`${tag}: capture restarted back on h264enc`, Boolean(line), encoderField(line));
@@ -331,8 +245,6 @@ async function blockSwitch(host: Host, mode: string, wayland: boolean, res: Chec
         await host.stop();
     }
 }
-
-const ENGINES: readonly Engine[] = ['chromium', 'firefox', 'webkit'];
 
 for (const which of ['ws-x11', 'wr-x11', 'ws-wl', 'wr-wl']) {
     test(which, async () => {

@@ -19,6 +19,23 @@ import { delimiter, join } from 'node:path';
 import { sleep, WORKDIR } from './env.ts';
 
 /**
+ * Load a null sink named `name`. Nothing is loaded when a sink of that name
+ * exists already: pactl would otherwise make a second one under the same
+ * name. A sink left behind outlives the run that made it, so the id goes to
+ * `pulseUnload` once finished.
+ * @param name The sink's name.
+ * @param options Further module arguments, `key=value` each.
+ * @returns The module's id, or null when none was loaded.
+ */
+export function pulseNullSink(name: string, options: Record<string, string> = {}): string | null {
+    const existing = spawnSync('pactl', ['list', 'short', 'sinks'], { encoding: 'utf8', timeout: 10_000 }).stdout ?? '';
+    if (existing.split('\n').some((line) => line.split('\t')[1] === name)) return null;
+    const args = [`sink_name=${name}`, ...Object.entries(options).map(([k, v]) => `${k}=${v}`)];
+    const id = (spawnSync('pactl', ['load-module', 'module-null-sink', ...args], { encoding: 'utf8', timeout: 10_000 }).stdout ?? '').trim();
+    return /^\d+$/.test(id) ? id : null;
+}
+
+/**
  * Play a tone into `sink`. The capture is gated on silence, so a check that
  * audio reaches a client has to give it something to hear. A browser on this
  * host plays what it receives back into the same sink, so once audio flows it
@@ -90,7 +107,8 @@ function missing(error: Error | undefined): void {
 
 /**
  * Set the compositor's selection, with one retry: `wl-copy` can stall on
- * protocol dispatch while the compositor is under input load.
+ * protocol dispatch while the compositor is under input load, and an attempt
+ * still running at its limit is killed.
  * @param socket The compositor's socket name.
  * @param text The text.
  * @param timeoutS How long each attempt is given.
@@ -99,10 +117,11 @@ function missing(error: Error | undefined): void {
  */
 export async function wlCopy(socket: string, text: string, timeoutS = 10): Promise<boolean> {
     for (let attempt = 1; attempt <= 2; attempt++) {
-        const run = spawnSync('wl-copy', [text], { timeout: timeoutS * 1000, env: wlEnv(socket), stdio: 'ignore' });
+        const run = spawnSync('wl-copy', [text], {
+            timeout: timeoutS * 1000, killSignal: 'SIGKILL', env: wlEnv(socket), stdio: 'ignore',
+        });
         missing(run.error);
         if (run.error === undefined || attempt === 2) return run.status === 0;
-        spawnSync('pkill', ['-9', '-f', 'wl-copy'], { stdio: 'ignore' });
         await sleep(1000);
     }
     return false;

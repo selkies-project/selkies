@@ -20,8 +20,8 @@ import time
 import urllib.request
 import weakref
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import helpers as H
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import soak_lib as H
 
 # Filled in by __main__ with a throwaway X server of this suite's own:
 # the capture checks paint the root and resize it.

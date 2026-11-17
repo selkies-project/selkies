@@ -197,11 +197,24 @@ impl Launch {
             .spawn()
             .unwrap_or_else(|e| panic!("{} did not start: {e}", binary.display()));
         running_logs(|logs| logs.push(log.clone()));
+        let subfolder = self
+            .env
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "SELKIES_SUBFOLDER")
+            .map(|(_, value)| value.trim_matches('/').to_owned())
+            .unwrap_or_default();
+        let status_path = if subfolder.is_empty() {
+            "/api/status".to_owned()
+        } else {
+            format!("/{subfolder}/api/status")
+        };
         Server {
             pid: child.id(),
             child: std::sync::Mutex::new(child),
             port,
             socket: self.socket,
+            status_path,
             log,
             last_page: std::sync::Mutex::new(None),
             pages: std::sync::Mutex::new(Vec::new()),
@@ -241,6 +254,9 @@ pub struct Server {
     pid: u32,
     port: u16,
     socket: Option<PathBuf>,
+    /// The status route the startup wait polls: `/api/status` under the subfolder the launch
+    /// names (`SELKIES_SUBFOLDER`), since a subfolder deployment moves every route.
+    status_path: String,
     log: PathBuf,
     /// When the last page set out to connect.
     last_page: std::sync::Mutex<Option<Instant>>,
@@ -326,7 +342,7 @@ impl Server {
             let answer = http::request(
                 self.port,
                 "GET",
-                "/api/status",
+                &self.status_path,
                 &[],
                 &[],
                 Duration::from_secs(2),
@@ -340,7 +356,8 @@ impl Server {
             }
             if Instant::now() >= deadline {
                 return Err(format!(
-                    "selkies did not answer /api/status within {STARTUP:?}"
+                    "selkies did not answer {} within {STARTUP:?}",
+                    self.status_path
                 ));
             }
             tokio::time::sleep(POLL).await;

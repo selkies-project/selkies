@@ -316,7 +316,7 @@ const ROLES: &[Role] = &[
             "regex",
             "memchr",
             "mime_guess",
-            "chrono",
+            "jiff",
             "shlex",
             "tempfile",
         ],

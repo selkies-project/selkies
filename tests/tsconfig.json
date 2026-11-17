@@ -13,5 +13,5 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["playwright.config.ts", "lib/*.ts", "integration/*.spec.ts", "e2e/*.spec.ts"]
+  "include": ["playwright.config.ts", "lib/*.ts", "integration/*.spec.ts", "e2e/*.spec.ts", "perf/*.spec.ts", "image/*.ts", "image/items/*.ts"]
 }

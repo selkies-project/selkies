@@ -19,6 +19,8 @@ workspace = true
 # No crate of the workspace and nothing native, so the tool builds where the server does not.
 # The PNG decoder the server's image handling already brings in.
 png = "0.18"
+# The suites' process groups: the kill a timeout or an interrupt sends them (`suites`)
+libc = "0.2"
 regex = "1"
 serde = "1"
 serde_json = "1"

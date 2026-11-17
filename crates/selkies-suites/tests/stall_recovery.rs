@@ -45,7 +45,7 @@ fn events(server: &Server, mark: usize) -> BTreeMap<&'static str, usize> {
         ("desync_reprobe", "Re-probing desynced client"),
         ("lifted", "Backpressure LIFTED"),
         ("triggered", "Backpressure TRIGGERED"),
-        ("traceback", "Traceback"),
+        ("panicked", "panicked"),
     ]
     .into_iter()
     .map(|(kind, needle)| (kind, text.matches(needle).count()))
@@ -409,7 +409,7 @@ impl Run<'_> {
         }
         self.check(
             "dead: nothing raised in the server",
-            ev["traceback"] == 0,
+            ev["panicked"] == 0,
             format!("{ev:?}"),
         );
         c.close().await;
@@ -476,7 +476,7 @@ impl Run<'_> {
         );
         self.check(
             &name("nothing raised in the server"),
-            ev["traceback"] == 0,
+            ev["panicked"] == 0,
             format!("{ev:?}"),
         );
         c.close().await;

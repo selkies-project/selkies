@@ -48,9 +48,19 @@ pub fn jpeg_settings(display_id: &str) -> String {
 
 /// The layout the server last calculated, by display id, from its log.
 pub fn layout(server: &Server) -> Option<BTreeMap<String, Rect>> {
-    let log = server.log();
-    let line = log.lines().rfind(|l| l.contains("Layout calculated"))?;
-    let (_, literal) = line.split_once("Layouts: ")?;
+    layouts_in(&server.log()).pop()
+}
+
+/// Every layout `log` says the server calculated, oldest first, by display id.
+pub fn layouts_in(log: &str) -> Vec<BTreeMap<String, Rect>> {
+    log.lines()
+        .filter(|l| l.contains("Layout calculated"))
+        .filter_map(|line| parse_layouts(line.split_once("Layouts: ")?.1))
+        .collect()
+}
+
+/// One layout literal as the server logs it, `{'primary': {'x': 0, 'y': 0, 'w': 1920, 'h': 1080}}`.
+fn parse_layouts(literal: &str) -> Option<BTreeMap<String, Rect>> {
     let value: serde_json::Value =
         serde_json::from_str(&literal.trim().replace('\'', "\"")).ok()?;
     value

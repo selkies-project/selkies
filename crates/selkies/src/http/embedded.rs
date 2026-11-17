@@ -191,15 +191,15 @@ fn not_modified(headers: &HeaderMap, etag: &str, last_modified: u64) -> bool {
     headers
         .get(header::IF_MODIFIED_SINCE)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| chrono::DateTime::parse_from_rfc2822(value).ok())
-        .is_some_and(|since| since.timestamp() >= last_modified as i64)
+        .and_then(|value| jiff::fmt::rfc2822::parse(value).ok())
+        .is_some_and(|since| since.timestamp().as_second() >= last_modified as i64)
 }
 
 /// `secs` since the epoch as an HTTP date (`Sun, 06 Nov 1994 08:49:37 GMT`).
 fn http_date(secs: u64) -> String {
-    chrono::DateTime::from_timestamp(secs as i64, 0)
-        .unwrap_or_default()
-        .format("%a, %d %b %Y %H:%M:%S GMT")
+    jiff::Timestamp::from_second(secs as i64)
+        .unwrap_or(jiff::Timestamp::UNIX_EPOCH)
+        .strftime("%a, %d %b %Y %H:%M:%S GMT")
         .to_string()
 }
 
