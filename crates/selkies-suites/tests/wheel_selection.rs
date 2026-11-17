@@ -10,7 +10,9 @@
 //! (.devcontainer/features/desktop-selkies/src/select-compatible-wheels.py) picks the wheels an
 //! interpreter can install for the release downloader and the integration workflow. It runs here
 //! as they run it, over each interpreter's supported tags handed to it with `--tags`: CPython 3.9
-//! to 3.15, free-threaded CPython, another platform.
+//! to 3.15, free-threaded CPython, another platform. Its callers pass no `--tags`, so the last
+//! check runs it that way and holds the answer to the one it gives for the running interpreter's
+//! own tags.
 //!
 //! The selector is a Python script on `packaging`, so these need `python3` with `packaging`; they
 //! run with `cargo test --workspace`.
@@ -31,8 +33,9 @@ fn selector() -> PathBuf {
     repo().join(".devcontainer/features/desktop-selkies/src/select-compatible-wheels.py")
 }
 
-/// The lines of `input` the selector keeps for `project` on the supported `tags`.
-fn select(project: &str, input: &str, tags: &[String]) -> Result<Vec<String>, String> {
+/// The lines of `input` the selector keeps for `project` on the supported `tags`, or on the
+/// running interpreter's own where `tags` is `None`, as its callers run it.
+fn select(project: &str, input: &str, tags: Option<&[String]>) -> Result<Vec<String>, String> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static RUNS: AtomicUsize = AtomicUsize::new(0);
     let file = workdir().join(format!(
@@ -40,11 +43,13 @@ fn select(project: &str, input: &str, tags: &[String]) -> Result<Vec<String>, St
         std::process::id(),
         RUNS.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&file, tags.join("\n")).map_err(|e| e.to_string())?;
-    let mut child = Command::new("python3")
-        .arg(selector())
-        .arg("--tags")
-        .arg(&file)
+    let mut command = Command::new("python3");
+    command.arg(selector());
+    if let Some(tags) = tags {
+        std::fs::write(&file, tags.join("\n")).map_err(|e| e.to_string())?;
+        command.arg("--tags").arg(&file);
+    }
+    let mut child = command
         .arg(project)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -68,9 +73,28 @@ fn select(project: &str, input: &str, tags: &[String]) -> Result<Vec<String>, St
         .collect())
 }
 
+/// The tags the running `python3` supports, as `packaging` lists them.
+fn own_tags() -> Result<Vec<String>, String> {
+    let out = Command::new("python3")
+        .args([
+            "-c",
+            "from packaging.tags import sys_tags\nfor tag in sys_tags(): print(tag)",
+        ])
+        .output()
+        .map_err(|e| format!("python3: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect())
+}
+
 /// Whether the selector takes `filename` as a wheel of `project` on the supported `tags`.
 fn compatible(project: &str, filename: &str, tags: &[String]) -> Result<bool, String> {
-    select(project, &format!("{filename}\n"), tags).map(|kept| kept.iter().any(|k| k == filename))
+    select(project, &format!("{filename}\n"), Some(tags))
+        .map(|kept| kept.iter().any(|k| k == filename))
 }
 
 /// An interpreter's own tag and the pure-Python one, on `platform`.
@@ -190,11 +214,22 @@ fn wheels_are_selected_by_their_tags() {
          https://example.invalid/not-a-wheel.txt sha256:def\n\
          https://example.invalid/{PCM} sha256:123\n"
     );
-    let selected = select("pcmflux", &assets, &abi3_here);
+    let selected = select("pcmflux", &assets, Some(&abi3_here));
     checks.check(
         "the CLI preserves only compatible release assets and digests",
         selected.as_deref() == Ok(&[format!("https://example.invalid/{PCM} sha256:123")][..]),
         format!("{selected:?}"),
+    );
+    let own = own_tags();
+    let asked = own
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|tags| select("pcmflux", &assets, Some(tags)));
+    let unasked = select("pcmflux", &assets, None);
+    checks.check(
+        "without --tags the CLI selects for the running interpreter",
+        asked.is_ok() && unasked == asked,
+        format!("{unasked:?} against {asked:?}"),
     );
 
     let workflow =

@@ -88,36 +88,44 @@ fn build_probe() -> Result<PathBuf, String> {
 /// Leave the server as a stock Xvfb is: the images' Xvfb offers spare outputs through a
 /// `Connected` property, which the server takes as the capability to lay displays out as outputs
 /// of their own.
+///
+/// # Panics
+///
+/// When the server cannot be asked or does not drop a property: with an output left pluggable
+/// the session lays the display out as an output, and the logical monitor is never exercised.
 fn unplug_spare_outputs(display: &str) {
-    let Ok((conn, screen)) = RustConnection::connect(Some(display)) else {
-        return;
-    };
+    const ASKED: &str = "the private X server answers";
+    let (conn, screen) = RustConnection::connect(Some(display))
+        .unwrap_or_else(|e| panic!("no connection to {display}: {e}"));
     let root = conn.setup().roots[screen].root;
-    let Some(connected) = conn
+    let connected = conn
         .intern_atom(false, b"Connected")
-        .ok()
-        .and_then(|c| c.reply().ok())
-        .map(|r| r.atom)
-    else {
-        return;
-    };
+        .expect(ASKED)
+        .reply()
+        .expect(ASKED)
+        .atom;
     let outputs = conn
         .randr_get_screen_resources(root)
-        .ok()
-        .and_then(|c| c.reply().ok())
-        .map(|r| r.outputs)
-        .unwrap_or_default();
+        .expect(ASKED)
+        .reply()
+        .expect(ASKED)
+        .outputs;
     for output in outputs {
         let listed = conn
             .randr_list_output_properties(output)
-            .ok()
-            .and_then(|c| c.reply().ok())
-            .is_some_and(|r| r.atoms.contains(&connected));
+            .expect(ASKED)
+            .reply()
+            .expect(ASKED)
+            .atoms
+            .contains(&connected);
         if listed {
-            let _ = conn.randr_delete_output_property(output, connected);
+            conn.randr_delete_output_property(output, connected)
+                .expect(ASKED)
+                .check()
+                .expect("the Connected property is deleted");
         }
     }
-    let _ = conn.sync();
+    conn.sync().expect(ASKED);
 }
 
 /// The probe's re-reads, oldest first.

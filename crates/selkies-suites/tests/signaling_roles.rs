@@ -67,12 +67,23 @@ async fn next_text(socket: &mut Socket, wait: Duration) -> Option<String> {
 }
 
 /// A peer that said HELLO and was answered.
+///
+/// # Panics
+///
+/// When the HELLO is not taken or not answered within five seconds.
 async fn hello(server: &Server, peer_type: &str, meta: &serde_json::Value) -> Socket {
     let mut socket = connect(server).await;
-    let _ = socket
+    socket
         .send(Message::text(format!("HELLO {peer_type} {meta}")))
-        .await;
-    let _ = next_text(&mut socket, Duration::from_secs(5)).await;
+        .await
+        .unwrap_or_else(|e| panic!("HELLO {peer_type} was not sent: {e}"));
+    assert!(
+        next_text(&mut socket, Duration::from_secs(5))
+            .await
+            .is_some(),
+        "HELLO {peer_type} was not answered\n{}",
+        server.log_tail()
+    );
     socket
 }
 
@@ -134,11 +145,14 @@ async fn signaling_roles() {
         &json!({"client_type": "controller", "client_slot": -1}),
     )
     .await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while registered(&server, "client").is_empty() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     let victim_uid = registered(&server, "client")
         .last()
         .cloned()
-        .unwrap_or_default();
+        .unwrap_or_else(|| panic!("no client peer registered\n{}", server.log_tail()));
     let mut other = hello(
         &server,
         "client",

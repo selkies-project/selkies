@@ -156,12 +156,14 @@ enum Source {
 }
 
 /// Put `payload` on the session clipboard as text, as an application would.
-fn push_clipboard(wayland: bool, payload: &[u8]) -> Option<Source> {
+///
+/// # Panics
+///
+/// When `wl-copy` does not start or does not take the payload: the transfer the suite measures
+/// would never run.
+fn push_clipboard(wayland: bool, payload: &[u8]) -> Source {
     if !wayland {
-        return Some(Source::X(SelectionOwner::serving(
-            &server::test_display(),
-            payload,
-        )));
+        return Source::X(SelectionOwner::serving(&server::test_display(), payload));
     }
     let mut copy = Command::new("wl-copy")
         .args(["-t", "text/plain"])
@@ -169,11 +171,11 @@ fn push_clipboard(wayland: bool, payload: &[u8]) -> Option<Source> {
         .env("XDG_RUNTIME_DIR", private_dir("run"))
         .stdin(Stdio::piped())
         .spawn()
-        .ok()?;
-    let mut stdin = copy.stdin.take()?;
-    let _ = stdin.write_all(payload);
+        .expect("wl-copy starts");
+    let mut stdin = copy.stdin.take().expect("wl-copy's stdin");
+    stdin.write_all(payload).expect("wl-copy takes the payload");
     drop(stdin);
-    Some(Source::Wayland(copy))
+    Source::Wayland(copy)
 }
 
 /// The gaps between audio frames from `start` to `end`.
@@ -217,12 +219,11 @@ async fn block(case: &str, wayland: bool, buffer: i32) {
         .collect();
     page.close().await;
     match source {
-        Some(Source::Wayland(mut copy)) => {
+        Source::Wayland(mut copy) => {
             let _ = copy.kill();
             let _ = copy.wait();
         }
-        Some(Source::X(owner)) => drop(owner),
-        None => {}
+        Source::X(owner) => drop(owner),
     }
     let idle = gaps(&stamps, idle_at, push_at);
     let during = gaps(&stamps, push_at, done_at);

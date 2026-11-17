@@ -37,12 +37,15 @@ const CLIENT: [&str; 4] = [
 ];
 
 /// What `selkies gpu-probe` reports with `env` added: its facts, its summary line, its stderr.
+///
+/// # Panics
+///
+/// When the probe does not start or is still running after three minutes.
 fn probe(env: &[(&str, &str)]) -> (BTreeMap<String, String>, String, String) {
     let mut command = Command::new(server_binary());
     command.arg("gpu-probe").envs(env.iter().copied());
-    let Ok(ran) = run_within(&mut command, Duration::from_secs(180)) else {
-        return (BTreeMap::new(), String::new(), String::new());
-    };
+    let ran = run_within(&mut command, Duration::from_secs(180))
+        .unwrap_or_else(|e| panic!("selkies gpu-probe {e}"));
     let facts = ran
         .stdout
         .lines()

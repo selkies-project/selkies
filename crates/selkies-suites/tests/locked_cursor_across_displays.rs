@@ -56,7 +56,7 @@ type Box4 = (i64, i64, i64, i64);
 /// The sprite's box within one delivered band, in the display's own pixels: where the band's
 /// difference from `bg`, as luma, passes the tolerance.
 fn band_box(stripe: &Stripe, bg: [i64; 3]) -> Option<Box4> {
-    let (w, _, pixels) = decode_rgb(&stripe.jpeg)?;
+    let (w, _, pixels) = decode_rgb(&stripe.jpeg).expect("a delivered band decodes");
     let mut found: Option<Box4> = None;
     for (i, px) in pixels.as_chunks::<3>().0.iter().enumerate() {
         let d = |c: usize| (i64::from(px[c]) - bg[c]).abs();
