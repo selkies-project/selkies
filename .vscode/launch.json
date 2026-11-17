@@ -5,11 +5,11 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python: Attach using Process Id",
-            "type": "python",
+            // A running selkies (the server is Rust), through the CodeLLDB extension
+            "name": "Attach to selkies",
+            "type": "lldb",
             "request": "attach",
-            "processId": "${command:pickProcess}",
-            "justMyCode": false
+            "pid": "${command:pickMyProcess}"
         }
     ]
 }

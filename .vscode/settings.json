@@ -1,6 +1,7 @@
 {
+    // The tree's Python (the soak suites, the Jupyter entry point, the wheel
+    // scripts) is formatted and linted with ruff, as pre-commit does
     "[python]": {
-        "editor.defaultFormatter": "ms-python.python"
-    },
-    "python.formatting.provider": "none"
+        "editor.defaultFormatter": "charliermarsh.ruff"
+    }
 }
