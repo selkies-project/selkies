@@ -107,7 +107,8 @@ function missing(error: Error | undefined): void {
 
 /**
  * Set the compositor's selection, with one retry: `wl-copy` can stall on
- * protocol dispatch while the compositor is under input load.
+ * protocol dispatch while the compositor is under input load, and an attempt
+ * still running at its limit is killed.
  * @param socket The compositor's socket name.
  * @param text The text.
  * @param timeoutS How long each attempt is given.
@@ -116,10 +117,11 @@ function missing(error: Error | undefined): void {
  */
 export async function wlCopy(socket: string, text: string, timeoutS = 10): Promise<boolean> {
     for (let attempt = 1; attempt <= 2; attempt++) {
-        const run = spawnSync('wl-copy', [text], { timeout: timeoutS * 1000, env: wlEnv(socket), stdio: 'ignore' });
+        const run = spawnSync('wl-copy', [text], {
+            timeout: timeoutS * 1000, killSignal: 'SIGKILL', env: wlEnv(socket), stdio: 'ignore',
+        });
         missing(run.error);
         if (run.error === undefined || attempt === 2) return run.status === 0;
-        spawnSync('pkill', ['-9', '-f', 'wl-copy'], { stdio: 'ignore' });
         await sleep(1000);
     }
     return false;
