@@ -104,9 +104,9 @@ async function blockMatrix(r: Checks, host: Host): Promise<void> {
 }
 
 /**
- * Switching transports twice must not trip DuplicateTimeseries: every
- * collector registered has to be released, or the second entry into a mode
- * raises at the metrics' construction and the service dies before it serves.
+ * Switching transports twice must leave each service serving: what a mode
+ * registered has to be released, or the second entry into it ends the service
+ * before it serves.
  */
 async function blockSwitch(r: Checks, host: Host): Promise<void> {
     const { url } = await host.start({ label: 'switch', mode: 'websockets', env: { SELKIES_ENABLE_METRICS_HTTP: 'true' } });
@@ -134,9 +134,8 @@ async function blockSwitch(r: Checks, host: Host): Promise<void> {
             r.check(`mode is ${target} after switch`, got === target, await tail(host, 4));
         }
         const log = await host.log();
-        r.check('no DuplicateTimeseries', !/Duplicated timeseries/i.test(log),
-            log.split('\n').filter((l) => l.includes('Duplicated')).join('\n').slice(0, 200));
-        r.check('no unexpected service termination', !/Service terminated unexpectedly/i.test(log));
+        r.check('no unexpected service termination', !/Service '[^']*' terminated unexpectedly/.test(log),
+            log.split('\n').filter((l) => l.includes('terminated unexpectedly')).join('\n').slice(0, 200));
     } finally {
         await host.stop();
     }
@@ -192,7 +191,8 @@ async function blockPacer(r: Checks, host: Host): Promise<void> {
             await sleep(6000);
             const fps = await pageFps(page);
             r.check('stream still alive with pacer', Boolean(fps), fps);
-            r.check('no pacer queue overflow purge storm', !/pacer.*purge.*purge.*purge/i.test(await host.log()));
+            const purges = (await host.log()).split('\n').filter((l) => /pacer: .* purged/.test(l));
+            r.check('no pacer queue overflow purge storm', purges.length < 3, purges.slice(0, 3));
         } finally {
             await closeBrowser(browser);
         }

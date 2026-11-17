@@ -49,7 +49,7 @@ fn reconfigure_trail(log: &str) -> String {
         "Calculating new extended desktop layout",
         "total display size is zero",
         "Removing and triggering full display reconfiguration",
-        "dropped on Wayland",
+        "' dropped: ",
         "Layout calculated",
     ];
     let seen: Vec<&str> = log

@@ -134,8 +134,7 @@ async fn settings_changed_while_a_stream_is_stopped_wait_for_the_next_start() {
         "A1: no capture restart while stopped",
         server
             .stays_without(mark, "Capture started for", Duration::from_secs(1))
-            .await
-            || deferred,
+            .await,
         "",
     );
     checks.check(

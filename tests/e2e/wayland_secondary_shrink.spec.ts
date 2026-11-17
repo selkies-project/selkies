@@ -108,7 +108,7 @@ async function resizeSecondary(host: Host, res: Checks, primary: RawWs, secondar
     res.check(`${label}: the compositor refused no output move or creation`,
         !tail.includes('RepositionOutput 0: rejected') && !tail.includes('CreateOutput 2: rejected') && !tail.includes('cannot create an output') && !tail.includes('cannot move the primary'),
         lines.filter((l) => l.includes('rejected')).slice(0, 3));
-    res.check(`${label}: the secondary was not dropped`, !tail.includes('dropped on Wayland') && !secondaryMsgs.some((m) => m.startsWith('KILL')), secondaryMsgs.slice(0, 3));
+    res.check(`${label}: the secondary was not dropped`, !tail.includes("' dropped: ") && !secondaryMsgs.some((m) => m.startsWith('KILL')), secondaryMsgs.slice(0, 3));
     res.check(`${label}: the secondary output was kept rather than recreated`, !tail.includes('Output 2 created') && !tail.includes('recreating it'), lines.filter((l) => l.includes('Output 2')).slice(0, 4));
     const outputs = lines.filter((l) => l.includes('[Wayland] Output') || l.includes('Configuring Output'));
     res.check(`${label}: the compositor's outputs hold the new rectangles`,
@@ -171,7 +171,7 @@ async function driveWebrtc(host: Host, res: Checks, url: string): Promise<void> 
             res.check(`${label}: the primary moved to the secondary's new edge`, moved, lines.slice(0, 6));
             res.check(`${label}: the compositor refused no output move or creation`, !lines.some((l) => l.includes('rejected')), lines.slice(0, 6));
             res.check(`${label}: the secondary output was kept rather than recreated`, !lines.some((l) => l.includes('Output 2 created') || l.includes('destroyed')), lines.slice(0, 6));
-            res.check(`${label}: the secondary was not dropped`, !(await host.log(mark)).includes('dropped on Wayland'), '');
+            res.check(`${label}: the secondary was not dropped`, !(await host.log(mark)).includes("' dropped: "), '');
             let sized = false;
             let info: unknown = null;
             for (const until = Date.now() + 30_000; Date.now() < until && !sized;) {

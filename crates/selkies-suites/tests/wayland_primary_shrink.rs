@@ -110,7 +110,7 @@ async fn wayland_primary_shrink() {
     );
     checks.check(
         "the secondary was not dropped",
-        !tail.contains("dropped on Wayland") && killed.is_empty() && !secondary.closed(),
+        !tail.contains("' dropped: ") && killed.is_empty() && !secondary.closed(),
         format!("{:?}", &killed[..killed.len().min(3)]),
     );
     let after = layouts_in(&tail).pop().unwrap_or_default();

@@ -51,7 +51,8 @@ for (const mode of ['websockets', 'webrtc']) {
                     // A client machine dying mid-press sends no close on any layer (no
                     // TCP FIN, no SCTP teardown), so the release must come from the
                     // input-liveness sweep, not from transport teardown.
-                    killDescendants((name) => name.includes('chrom') || name.includes('headless'));
+                    const killed = killDescendants((name) => name.includes('chrom') || name.includes('headless'));
+                    res.check(`${mode}: the browser's processes were killed`, killed > 0, killed);
                     await within(browser.close(), 'the browser').catch(() => undefined);
                 }
                 const released: [number, number, number] = [EV_KEY, BTN_A, 0];

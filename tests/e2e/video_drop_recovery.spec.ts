@@ -66,8 +66,6 @@ async function drive(res: Checks, host: Host, cell: string, display: string): Pr
         const first = await waitClean(page, 30);
         res.check(`${tag}: the decoded picture matches the frame it claims to be`, first !== null && !corrupt(first), first);
         if (!first) return;
-        const encoder = cell === 'cpu' ? 'cpu' : 'default';
-        res.check(`${tag}: the server runs the ${encoder} encoder`, (await host.saw('pipeline', 1)) || true);
         const stats0 = await stats(page);
         const drops0 = await bridgeCounter(url, 'dropped');
         res.check(`${tag}: the bridge-drop counter is published`, drops0 !== null, drops0);
