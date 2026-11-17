@@ -19,6 +19,7 @@
 //! socket is aborted, never closed: a close frame would queue behind the very backlog the
 //! peer stopped taking.
 
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -49,6 +50,16 @@ pub type PongAnswer = Box<dyn FnOnce(f64) + Send>;
 /// aborted. Longer than the pauses a live path shows (a Wi-Fi roam, TCP backing its
 /// retransmission timer off, a tab the engine froze for a moment).
 pub const SEND_STALL_SECONDS: f64 = 10.0;
+
+/// How long an audio frame may wait in a socket's outbox before it is let go unwritten: the
+/// player holds tens of milliseconds, so a frame this late would only be played out as a
+/// backlog after a congested stretch.
+pub const AUDIO_STALE_SECONDS: f64 = 0.2;
+
+/// The most a WebSocket's kernel send buffer holds unsent (`TCP_NOTSENT_LOWAT`): the queue a
+/// slow path builds stays in the outbox, where stale audio can be let go, rather than in a
+/// buffer the kernel grows to megabytes. Bytes in flight are not bounded by it.
+pub const NOTSENT_LOWAT_BYTES: libc::c_int = 64 * 1024;
 /// How often a waiting send looks at its socket for that progress.
 pub const SEND_PROBE_SECONDS: f64 = 0.5;
 /// How long a bounded control send (a kill, a `VIDEO_STOPPED` to a superseded page) waits.
@@ -176,6 +187,25 @@ impl TcpLink {
 
 /// Offset of `tcpi_bytes_acked` in Linux's `struct tcp_info`.
 const TCPI_BYTES_ACKED: usize = 120;
+/// Hold a WebSocket's kernel send buffer to `NOTSENT_LOWAT_BYTES` unsent; a socket that refuses
+/// keeps the kernel's default, which only moves where a backlog waits.
+pub fn bound_unsent(fd: RawFd) {
+    let lowat = NOTSENT_LOWAT_BYTES;
+    // SAFETY: `fd` is the socket's own descriptor for the call, and the option is an int.
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_NOTSENT_LOWAT,
+            (&lowat as *const libc::c_int).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        debug!(target: "ws", "TCP_NOTSENT_LOWAT refused: {}", std::io::Error::last_os_error());
+    }
+}
+
 /// Linux `SIOCOUTQNSD`.
 const SIOCOUTQNSD: libc::c_ulong = 0x894B;
 
@@ -226,6 +256,9 @@ impl SocketLink for NoLink {
 pub struct Outgoing {
     pub frame: Frame,
     pub done: Option<oneshot::Sender<Result<(), SendError>>>,
+    /// When the frame is worth nothing any more (`ws::now()` seconds): one still queued then
+    /// is let go when its turn comes rather than written.
+    pub stale_at: Option<f64>,
 }
 
 /// What a connection connected as (`client_permissions[websocket]`).
@@ -287,6 +320,8 @@ pub struct Client {
     liveness: Liveness,
     /// The ping clock the file transfers' uplink gauge reads over this socket.
     transfer_clock: OnceLock<Arc<UplinkClock>>,
+    /// Audio frames let go because they went stale in the outbox.
+    stale_audio: AtomicU64,
     me: Weak<Client>,
 }
 
@@ -327,6 +362,7 @@ impl Client {
             gz: AtomicBool::new(false),
             pad: AtomicBool::new(false),
             pong_answers: Mutex::new(Vec::new()),
+            stale_audio: AtomicU64::new(0),
             tx,
             queued: AtomicUsize::new(0),
             closed: AtomicBool::new(false),
@@ -433,15 +469,30 @@ impl Client {
         frame: Frame,
         done: Option<oneshot::Sender<Result<(), SendError>>>,
     ) -> Result<(), SendError> {
+        self.enqueue_until(frame, done, None)
+    }
+
+    fn enqueue_until(
+        &self,
+        frame: Frame,
+        done: Option<oneshot::Sender<Result<(), SendError>>>,
+        stale_at: Option<f64>,
+    ) -> Result<(), SendError> {
         if self.closed() {
             return Err(SendError::Closed);
         }
         self.queued.fetch_add(frame.len(), Ordering::Relaxed);
         let len = frame.len();
-        self.tx.send(Outgoing { frame, done }).map_err(|_| {
-            self.queued.fetch_sub(len, Ordering::Relaxed);
-            SendError::Closed
-        })
+        self.tx
+            .send(Outgoing {
+                frame,
+                done,
+                stale_at,
+            })
+            .map_err(|_| {
+                self.queued.fetch_sub(len, Ordering::Relaxed);
+                SendError::Closed
+            })
     }
 
     /// Queue a frame without waiting for it.
@@ -487,6 +538,25 @@ impl Client {
         self.enqueue(frame, Some(done_tx))?;
         let client = self.clone();
         Ok(async move { client.watch_send(done_rx, what).await })
+    }
+
+    /// `send_live_later` for an audio frame, which goes stale `AUDIO_STALE_SECONDS` after it
+    /// is queued: audio that late is worth less than the gap it would fill, so a socket whose
+    /// path backed up skips it and goes on with live audio rather than play a backlog out late.
+    pub fn send_audio_later(
+        self: &Arc<Self>,
+        frame: Frame,
+    ) -> Result<impl std::future::Future<Output = Result<(), SendError>> + Send + 'static, SendError>
+    {
+        let (done_tx, done_rx) = oneshot::channel();
+        self.enqueue_until(frame, Some(done_tx), Some(now() + AUDIO_STALE_SECONDS))?;
+        let client = self.clone();
+        Ok(async move { client.watch_send(done_rx, "Audio").await })
+    }
+
+    /// Audio frames this socket let go because they went stale in its outbox.
+    pub fn stale_audio(&self) -> u64 {
+        self.stale_audio.load(Ordering::Relaxed)
     }
 
     /// Wait for a queued frame while the peer keeps taking bytes.
@@ -585,6 +655,7 @@ impl Client {
                     reason: reason.to_string(),
                 },
                 done: Some(done_tx),
+                stale_at: None,
             })
             .is_err()
         {
@@ -685,8 +756,11 @@ impl Client {
 }
 
 /// The writer task of one socket: frames leave in outbox order, each sender told when its
-/// frame was handed to the kernel. Ends when the connection is aborted, the sink fails, or
-/// the client is dropped.
+/// frame was handed to the kernel, but for audio (the frames that go stale), which leaves
+/// ahead of whatever else is waiting, in its own order: a key frame queued behind the path
+/// does not hold the audio queued after it, as WebRTC's pacer sends audio ahead of video.
+/// A frame already being written stays whole. Ends when the connection is aborted, the sink
+/// fails, or the client is dropped.
 pub async fn run_writer<S>(
     client: Arc<Client>,
     mut rx: mpsc::UnboundedReceiver<Outgoing>,
@@ -696,20 +770,44 @@ pub async fn run_writer<S>(
     S: Sink<Message> + Unpin,
     S::Error: std::fmt::Display,
 {
+    let mut audio: VecDeque<Outgoing> = VecDeque::new();
+    let mut rest: VecDeque<Outgoing> = VecDeque::new();
+    let lane = |out: Outgoing, audio: &mut VecDeque<Outgoing>, rest: &mut VecDeque<Outgoing>| {
+        if out.stale_at.is_some() {
+            audio.push_back(out);
+        } else {
+            rest.push_back(out);
+        }
+    };
     loop {
-        let out = tokio::select! {
-            out = rx.recv() => match out {
-                Some(out) => out,
-                None => break,
-            },
-            changed = abort.changed() => {
-                if changed.is_err() || *abort.borrow() {
-                    break;
+        while let Ok(out) = rx.try_recv() {
+            lane(out, &mut audio, &mut rest);
+        }
+        let Some(out) = audio.pop_front().or_else(|| rest.pop_front()) else {
+            tokio::select! {
+                out = rx.recv() => match out {
+                    Some(out) => lane(out, &mut audio, &mut rest),
+                    None => break,
+                },
+                changed = abort.changed() => {
+                    if changed.is_err() || *abort.borrow() {
+                        break;
+                    }
                 }
-                continue;
             }
+            continue;
         };
         client.dequeued(out.frame.len());
+        if out.stale_at.is_some_and(|stale_at| now() > stale_at) {
+            let dropped = client.stale_audio.fetch_add(1, Ordering::Relaxed) + 1;
+            if dropped.is_power_of_two() {
+                debug!(target: "ws", "{dropped} stale audio frames let go for {}", client.remote);
+            }
+            if let Some(done) = out.done {
+                let _ = done.send(Ok(()));
+            }
+            continue;
+        }
         let message = out.frame.into_message();
         let result = tokio::select! {
             sent = sink.send(message) => sent.map_err(|e| {
@@ -728,7 +826,9 @@ pub async fn run_writer<S>(
     }
     client.closed.store(true, Ordering::Relaxed);
     rx.close();
-    while let Ok(out) = rx.try_recv() {
+    let mut left = audio;
+    left.extend(rest);
+    while let Some(out) = left.pop_front().or_else(|| rx.try_recv().ok()) {
         client.dequeued(out.frame.len());
         if let Some(done) = out.done {
             let _ = done.send(Err(SendError::Closed));
@@ -1052,6 +1152,111 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::*;
     use super::*;
+
+    /// Audio queued behind a frame the path takes a second to carry is stale by its turn and
+    /// let go unwritten, each sender told it is done; audio queued once the path is clear is
+    /// written, so the page goes on from live audio instead of a backlog.
+    #[tokio::test]
+    async fn stale_audio_is_let_go_and_live_audio_follows() {
+        let perms = Perms {
+            token: None,
+            role: "controller".into(),
+            slot: Json::Null,
+            id: "00000001".into(),
+            connected_at: 0.0,
+        };
+        let (client, rx, abort) = Client::new(
+            1,
+            "127.0.0.1:1".parse().unwrap(),
+            perms,
+            Box::new(NoLink),
+            Liveness::default(),
+        );
+        let written = Arc::new(Mutex::new(Vec::<usize>::new()));
+        let log = written.clone();
+        let sink = futures::sink::unfold((), move |(), message: Message| {
+            let log = log.clone();
+            async move {
+                let len = message.as_payload().len();
+                if len >= 100_000 {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                log.lock().push(len);
+                Ok::<(), std::io::Error>(())
+            }
+        });
+        let writer = tokio::spawn(run_writer(client.clone(), rx, abort, Box::pin(sink)));
+        client.fire(Frame::Binary(Bytes::from(vec![0u8; 100_000])));
+        // The key frame is being written before any audio is queued.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut waits = Vec::new();
+        for _ in 0..10 {
+            waits.push(
+                client
+                    .send_audio_later(Frame::Binary(Bytes::from(vec![1u8; 100])))
+                    .unwrap(),
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        for wait in waits {
+            assert!(wait.await.is_ok(), "a let-go frame's sender is answered");
+        }
+        client
+            .send_audio_later(Frame::Binary(Bytes::from(vec![1u8; 200])))
+            .unwrap()
+            .await
+            .unwrap();
+        assert_eq!(client.stale_audio(), 10);
+        assert_eq!(*written.lock(), vec![100_000, 200]);
+        writer.abort();
+    }
+
+    /// Audio queued behind two key frames leaves as soon as the one being written is done,
+    /// ahead of the second, which leaves after it in its own order.
+    #[tokio::test]
+    async fn audio_leaves_ahead_of_queued_video() {
+        let perms = Perms {
+            token: None,
+            role: "controller".into(),
+            slot: Json::Null,
+            id: "00000002".into(),
+            connected_at: 0.0,
+        };
+        let (client, rx, abort) = Client::new(
+            2,
+            "127.0.0.1:1".parse().unwrap(),
+            perms,
+            Box::new(NoLink),
+            Liveness::default(),
+        );
+        let written = Arc::new(Mutex::new(Vec::<usize>::new()));
+        let log = written.clone();
+        let sink = futures::sink::unfold((), move |(), message: Message| {
+            let log = log.clone();
+            async move {
+                let len = message.as_payload().len();
+                if len >= 100_000 {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                log.lock().push(len);
+                Ok::<(), std::io::Error>(())
+            }
+        });
+        let writer = tokio::spawn(run_writer(client.clone(), rx, abort, Box::pin(sink)));
+        client.fire(Frame::Binary(Bytes::from(vec![0u8; 100_000])));
+        // The first key frame is being written when the second and the audio are queued.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        client.fire(Frame::Binary(Bytes::from(vec![0u8; 100_001])));
+        client
+            .send_audio_later(Frame::Binary(Bytes::from(vec![1u8; 100])))
+            .unwrap()
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(*written.lock(), vec![100_000, 100, 100_001]);
+        assert_eq!(client.stale_audio(), 0);
+        writer.abort();
+    }
 
     #[tokio::test]
     async fn a_control_send_behind_a_slow_drain_keeps_its_client() {

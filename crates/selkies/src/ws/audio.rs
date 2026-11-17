@@ -53,8 +53,7 @@ pub async fn run_fanout<T: AudioTargets>(host: Arc<T>, mut rx: broadcast::Receiv
                 host.audio_socket_died(client.id);
                 continue;
             }
-            let Ok(wait) = client.send_live_later(Frame::Binary(packet.data.clone()), "Audio")
-            else {
+            let Ok(wait) = client.send_audio_later(Frame::Binary(packet.data.clone())) else {
                 host.audio_socket_died(client.id);
                 continue;
             };
