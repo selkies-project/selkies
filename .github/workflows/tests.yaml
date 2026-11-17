@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       tiers:
-        description: 'Marker expression, e.g. "e2e" or "integration or e2e"'
+        description: 'Tier names joined by "or", e.g. "e2e" or "integration or e2e"'
         type: string
         default: integration or e2e
       suites:
@@ -25,7 +25,7 @@ on:
   workflow_call:
     inputs:
       tiers:
-        description: Marker expression selecting the tiers to run
+        description: Tier names joined by "or", selecting the tiers to run
         type: string
         default: integration
       wheels_ready:
@@ -142,10 +142,8 @@ jobs:
       # the selector reads wheel tags with packaging, under the runner's python3
       - name: Install packaging for the wheel selector
         run: sudo apt-get install --no-install-recommends -y python3-packaging
-      # For the shell suite (crates/selkies-suites/tests/session_scripts.rs).
-      # Without it the suite still passes, having run only bash -n: the lint
-      # half reports itself skipped inside a test that passes, so nothing else
-      # notices it never ran.
+      # For the shell suite (crates/selkies-suites/tests/session_scripts.rs),
+      # which fails without it
       - name: Install shellcheck
         run: scripts/ci/install-shellcheck.sh
       - name: cargo test
@@ -602,6 +600,7 @@ jobs:
           mkdir -p suite-logs
           cp -r /tmp/selkies-tests/*.log suite-logs/ 2>/dev/null || true
           cp -r /tmp/selkies-tests/suite-logs/. suite-logs/ 2>/dev/null || true
+          cp suites-report.xml suite-logs/ 2>/dev/null || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

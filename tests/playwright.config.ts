@@ -21,6 +21,7 @@ export default defineConfig({
     workers: 1,
     fullyParallel: false,
     retries: 0,
+    forbidOnly: Boolean(process.env.CI),
     timeout: budget > 0 ? budget * 1000 : 0,
     reporter: [['list']],
     // A click or a navigation waits 30 s, as the Python suites' did: past it

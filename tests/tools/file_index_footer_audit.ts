@@ -6,20 +6,32 @@
 
 /**
  * What the shared file-listing footer does to a fancyindex page, run against
- * the copy named on the command line: the parent row is removed at the mount's
+ * the copy named on the command line, or against both copies the tree keeps
+ * (nginx's footer and the one the server embeds) when none is named: the parent row is removed at the mount's
  * root and nowhere else, whichever mount, with or without the root's trailing
  * slash, and however deep a subdirectory that happens to be named after a
  * mount; a sorted listing, whose every link carries the sort query, keeps its
  * directories navigable; and a session token joins a query already there.
  *
- * Usage: node file_index_footer_audit.ts <footer.html or index_html.rs>
+ * Usage: node file_index_footer_audit.ts [footer.html or index_html.rs]
  * Prints one PASS/FAIL line per check and exits non-zero if any failed.
  * @module
  */
 
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { compileFunction } from 'node:vm';
+
+if (process.argv[2] === undefined) {
+    const repo = resolve(import.meta.dirname, '../..');
+    let status = 0;
+    for (const copy of ['web/selkies-web-core/nginx/footer.html', 'crates/selkies/src/files/index_html.rs']) {
+        const ran = spawnSync(process.execPath, [import.meta.filename, resolve(repo, copy)], { stdio: 'inherit' });
+        if (ran.status !== 0) status = 1;
+    }
+    process.exit(status);
+}
 
 // The file named, resolved, and refused where it holds a NUL or names a parent.
 const named = resolve(process.argv[2] ?? '');

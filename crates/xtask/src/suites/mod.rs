@@ -24,7 +24,7 @@
 //!
 //! Each case runs in a process group of its own, told its budget less a minute
 //! (`SELKIES_SUITE_DEADLINE`) so a suite that stalls says where before the group is killed at
-//! the budget. A case that loses a browser or its player is run once more, both runs printed.
+//! the budget, or as soon as the driver is interrupted. A case that loses a browser or its player is run once more, both runs printed.
 //! The logs a case left in the work directory (`E2E_WORKDIR`) are kept under
 //! `suite-logs/<case>/`. A case passes on a zero exit having made a check (a Rust target, having
 //! run a test); a case that skips as a whole fails the run, as a dependency the runner was meant
@@ -37,6 +37,7 @@ use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 pub use table::SUITES;
@@ -138,6 +139,8 @@ impl Case {
                 target,
                 "--",
                 "--include-ignored",
+                // A passing test's `SKIP` lines are among what the run lists.
+                "--show-output",
             ]);
             if let Some(selector) = self.selector {
                 cmd.arg(selector.replace('-', "_"));
@@ -222,7 +225,25 @@ struct Ran {
     timed_out: bool,
 }
 
-/// Run `cmd` in a process group of its own, killing the group when it runs past `budget`.
+/// Set by SIGINT and SIGTERM, which [`run`] answers by ending the case it is running.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn interrupted(_signal: libc::c_int) {
+    INTERRUPTED.store(true, Ordering::Relaxed);
+}
+
+/// Have an interrupt of the driver end the running case's process group before the driver
+/// exits: the group is the case's own, so the terminal's signal never reaches it.
+fn watch_interrupts() {
+    let handler = interrupted as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    for signal in [libc::SIGINT, libc::SIGTERM] {
+        // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+        unsafe { libc::signal(signal, handler) };
+    }
+}
+
+/// Run `cmd` in a process group of its own, killing the group when it runs past `budget` or the
+/// driver is interrupted, which exits the driver with 130.
 fn run(mut cmd: Command, budget: Duration) -> Result<Ran, String> {
     use std::os::unix::process::CommandExt as _;
     cmd.process_group(0)
@@ -257,6 +278,11 @@ fn run(mut cmd: Command, budget: Duration) -> Result<Ran, String> {
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.code(),
+            Ok(None) if INTERRUPTED.load(Ordering::Relaxed) => {
+                kill_group(pid);
+                let _ = child.wait();
+                std::process::exit(130);
+            }
             Ok(None) if Instant::now() >= deadline => {
                 timed_out = true;
                 kill_group(pid);
@@ -277,10 +303,11 @@ fn run(mut cmd: Command, budget: Duration) -> Result<Ran, String> {
 }
 
 fn kill_group(pid: u32) {
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", &format!("-{pid}")])
-        .stderr(Stdio::null())
-        .status();
+    let Ok(group) = libc::pid_t::try_from(pid) else {
+        return;
+    };
+    // SAFETY: a signal to a process group, by the id of the child that leads it.
+    unsafe { libc::killpg(group, libc::SIGKILL) };
 }
 
 /// Copy the logs a case left in `workdir` since `since` into `suite-logs/<label>/`. The
@@ -553,6 +580,7 @@ pub fn main(args: &[String]) -> Result<bool, String> {
         }
         return Ok(true);
     }
+    watch_interrupts();
     let tests = crate::repo().join("tests");
     let workdir = PathBuf::from(std::env::var("E2E_WORKDIR").unwrap_or_else(|_| {
         std::env::temp_dir()

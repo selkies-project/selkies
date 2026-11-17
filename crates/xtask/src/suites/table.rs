@@ -50,6 +50,8 @@ pub static SUITES: &[Suite] = &[
         name: Some("unit/test_track_transform"),
     },
     suite("tools/stripe_clock_audit.ts", "unit", 120),
+    suite("tools/file_index_footer_audit.ts", "unit", 120),
+    suite("tools/webcam_orientation_audit.ts", "unit", 120),
     suite("tools/chunk_stamp_audit.ts", "unit", 120),
     suite("tools/fit_frame_audit.ts", "unit", 120),
     suite("tools/encode_pace_audit.ts", "unit", 120),
