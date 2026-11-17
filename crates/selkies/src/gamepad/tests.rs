@@ -37,8 +37,12 @@ fn scratch(tag: &str) -> PathBuf {
         .keep()
 }
 
-/// Build one tool under `tests/tools` with its Makefile and return its path.
+/// Build one tool under `tests/tools` with its Makefile and return its path. One build at a
+/// time: two tests that load the same tool would each run `make` on it, and the first to end
+/// would load a file the other's compiler is still writing.
 fn tool(name: &str) -> PathBuf {
+    static BUILDING: Mutex<()> = Mutex::new(());
+    let _one = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
     let tools = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/tools");
     let status = Command::new("make")
         .args(["-s", "-C"])
