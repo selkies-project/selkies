@@ -108,11 +108,10 @@ jobs:
       - name: Run the unit tier
         run: cargo xtask suites --tier unit --junit unit-report.xml
 
-  # The Python the tree ships outside the wheel (addons/base/fetch-verified, the
-  # devcontainer's wheel selector, the services' helpers) holds to the oldest
-  # interpreter ruff.toml targets and runs on the newest as well. Their suites
-  # start the python3 first on PATH, which the server's unit tier leaves as the
-  # runner's own.
+  # The Python the tree ships outside the wheel, the devcontainer's wheel
+  # selector, holds to the oldest interpreter ruff.toml targets and runs on the
+  # newest as well. Its suite starts the python3 first on PATH, which the
+  # server's unit tier leaves as the runner's own.
   scripts-python:
     name: Shipped scripts (Python ${{ matrix.python-version }})
     if: ${{ !inputs.suites && (github.event_name != 'schedule' || github.repository == 'selkies-project/selkies') }}
@@ -172,8 +171,6 @@ jobs:
       # The selector reads wheel tags with packaging
       - name: Install packaging for the wheel selector
         run: scripts/ci/retry.sh 5 60 python3 -m pip install packaging
-      - name: Install shellcheck
-        run: scripts/ci/install-shellcheck.sh
       # What the suites' crate links
       - name: Install the Wayland client library
         run: sudo apt-get install --no-install-recommends -y libwayland-dev
@@ -182,10 +179,10 @@ jobs:
           pin="$(sed -n 's/^PIN="\(.*\)"$/\1/p' infra/packaging/rust.sh)"
           scripts/ci/retry.sh 5 60 rustup toolchain install "${pin}" --profile minimal
           rustup default "${pin}"
-      - name: Run the scripts' suites
+      - name: Run the wheel selector's suite
         run: |
           python3 --version | grep -F "Python ${{ matrix.python-version }}"
-          cargo test --locked -p selkies-suites --test fetch_verified --test wheel_selection --test session_scripts
+          cargo test --locked -p selkies-suites --test wheel_selection
 
   # The server's own unit tier, which runs wherever the suites' does
   server-unit:

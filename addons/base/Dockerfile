@@ -406,8 +406,7 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         # The SVG loader GdkPixbuf needs, so GTK applications render scalable
         # icons rather than blanks
         librsvg2-common \
-        # Python for the image's build helper (fetch-verified) and the embedded
-        # coTURN server (WebRTC mode)
+        # Python 3, and the embedded coTURN server (WebRTC mode)
         python3 \
         coturn \
         ssl-cert && \

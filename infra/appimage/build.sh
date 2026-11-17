@@ -9,8 +9,8 @@
 # entry and icon the AppImage format reads, compressed into a SquashFS image
 # behind AppImage's static type 2 runtime, which mounts it and starts AppRun.
 # Nothing is compiled, so the AppImage runs the same binaries as every other
-# channel, down to the bundle's glibc floor. Needs python3 (fetch-verified) and
-# mksquashfs with zstd (squashfs-tools 4.4 or newer).
+# channel, down to the bundle's glibc floor. Needs curl and jq (fetch-verified)
+# and mksquashfs with zstd (squashfs-tools 4.4 or newer).
 #
 # Usage: build.sh <bundle.tar.gz> <out-dir>
 set -eux
