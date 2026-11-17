@@ -176,7 +176,9 @@ async fn a_locked_pages_cursor_is_drawn_by_the_display_it_is_on() {
     let primary = Client::connect(&server, "").await;
     primary.keep_payloads();
     primary.send(&jpeg_settings("primary"));
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    server
+        .settle(0, "Capture started for 'primary'", Duration::from_secs(15))
+        .await;
     let secondary = Client::connect(&server, "").await;
     secondary.keep_payloads();
     secondary.send(&jpeg_settings("display2"));

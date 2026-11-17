@@ -69,7 +69,9 @@ async fn each_display_carries_its_own_region() {
         .await;
     let primary = Client::connect(&server, "").await;
     primary.send(&jpeg_settings("primary"));
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    server
+        .settle(0, "Capture started for 'primary'", Duration::from_secs(15))
+        .await;
     let secondary = Client::connect(&server, "").await;
     secondary.send(&jpeg_settings("display2"));
 
