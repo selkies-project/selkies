@@ -52,6 +52,7 @@ enum Cmd {
     MotionAbsolute {
         x: f32,
         y: f32,
+        output_fraction: Option<(f64, f64)>,
     },
     MotionRelative {
         dx: f32,
@@ -132,10 +133,12 @@ impl EiInjector {
         let _ = nix_write(self.wake.as_raw_fd());
     }
 
-    pub(crate) fn pointer_motion_abs(&self, x: f64, y: f64) {
+    /// Queue an absolute move, with a fractional point when the host has one output.
+    pub(crate) fn pointer_motion_abs(&self, x: f64, y: f64, output_fraction: Option<(f64, f64)>) {
         self.push(Cmd::MotionAbsolute {
             x: x as f32,
             y: y as f32,
+            output_fraction,
         });
     }
 
@@ -190,6 +193,28 @@ fn nix_write(fd: i32) -> std::io::Result<()> {
     Ok(())
 }
 
+/// A single absolute-input region in the compositor's logical coordinate space.
+struct PointerRegion {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+impl PointerRegion {
+    /// Project a fractional capture point into the valid coordinates of this region.
+    fn project(&self, (fx, fy): (f64, f64)) -> (f32, f32) {
+        let project_axis = |fraction: f64, offset: u32, length: u32| {
+            let size = f64::from(length);
+            (f64::from(offset) + (fraction * size).clamp(0.0, size - 1.0)) as f32
+        };
+        (
+            project_axis(fx, self.x, self.width),
+            project_axis(fy, self.y, self.height),
+        )
+    }
+}
+
 /// One device the server created: its proto object and the emulation state we keep for it.
 struct Device {
     device: ei::Device,
@@ -198,6 +223,7 @@ struct Device {
     sequence: u32,
     pointer: Option<ei::Pointer>,
     pointer_abs: Option<ei::PointerAbsolute>,
+    single_region: Option<PointerRegion>,
     button: Option<ei::Button>,
     scroll: Option<ei::Scroll>,
     keyboard: Option<ei::Keyboard>,
@@ -374,6 +400,15 @@ impl Worker {
                 self.devices.push(Device {
                     pointer: device.interface(),
                     pointer_abs: device.interface(),
+                    single_region: match device.regions() {
+                        [region] if region.width > 0 && region.height > 0 => Some(PointerRegion {
+                            x: region.x,
+                            y: region.y,
+                            width: region.width,
+                            height: region.height,
+                        }),
+                        _ => None,
+                    },
                     button: device.interface(),
                     scroll: device.interface(),
                     keyboard: device.interface(),
@@ -426,8 +461,16 @@ impl Worker {
 
     fn emit(&mut self, cmd: Cmd) {
         match cmd {
-            Cmd::MotionAbsolute { x, y } => {
+            Cmd::MotionAbsolute {
+                x,
+                y,
+                output_fraction,
+            } => {
                 if let Some(i) = self.ready_index(|d| d.pointer_abs.is_some()) {
+                    let (x, y) = match (output_fraction, &self.devices[i].single_region) {
+                        (Some(fraction), Some(region)) => region.project(fraction),
+                        _ => (x, y),
+                    };
                     self.start(i);
                     self.devices[i]
                         .pointer_abs
@@ -666,8 +709,8 @@ mod tests {
 
     /// The injector, run against a minimal in-process EIS server, emits the protocol a
     /// compositor expects: it binds the seat, starts emulating before the first event, and
-    /// sends absolute motion, buttons, keys, and discrete scroll with the values handed to it,
-    /// each committed by a frame.
+    /// sends absolute motion, buttons, keys, and discrete scroll, each committed by a frame.
+    /// A fractional move is resolved against the region announced by the emulated device.
     #[test]
     fn injector_emits_the_expected_eis_protocol() {
         use reis::eis;
@@ -725,7 +768,7 @@ mod tests {
                                 Some("virt"),
                                 eis::device::DeviceType::Virtual,
                                 b.capabilities,
-                                |_| {},
+                                |device| device.device().region(12, 24, 2176, 2160, 1.0),
                             );
                             dev.resumed();
                             let _ = handle.flush();
@@ -759,7 +802,8 @@ mod tests {
 
         let injector =
             EiInjector::spawn(OwnedFd::from(client_sock)).expect("injector binds a device");
-        injector.pointer_motion_abs(400.0, 300.0);
+        injector.pointer_motion_abs(400.0, 300.0, None);
+        injector.pointer_motion_abs(1440.0, 672.0, Some((0.75, 0.75)));
         injector.pointer_button(0x110, true);
         injector.pointer_button(0x110, false);
         injector.key(38, None, true);
@@ -777,6 +821,10 @@ mod tests {
         assert!(
             got.contains(&"abs 400 300".to_string()),
             "absolute motion: {got:?}"
+        );
+        assert!(
+            got.contains(&"abs 1644 1644".to_string()),
+            "absolute motion uses the device region: {got:?}"
         );
         assert!(
             got.contains(&"button 272 true".to_string()),

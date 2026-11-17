@@ -1778,6 +1778,14 @@ impl HostSession {
             node: stream.node_id,
             logical: stream_point(slot, stream.size.unwrap_or(slot.want), x, y),
             position: stream.position,
+            output_fraction: (self.outputs.len() == 1 && slot.want.0 > 0 && slot.want.1 > 0).then(
+                || {
+                    (
+                        (x - f64::from(slot.pos.0)) / f64::from(slot.want.0),
+                        (y - f64::from(slot.pos.1)) / f64::from(slot.want.1),
+                    )
+                },
+            ),
         })
     }
 
@@ -1817,21 +1825,28 @@ impl HostSession {
         }
     }
 
-    /// Absolute motion to a union-layout point, the physical space selkies injects in. libei
-    /// takes it in the compositor's logical space, where EIS regions lie: the stream's
-    /// position plus the point in its logical size. A union layout with no stream position
-    /// to place it by goes as it is, which is that space on an unscaled host.
+    /// Inject absolute motion from the physical capture layout into the host compositor.
+    ///
+    /// On single-output hosts the EIS worker can project the point into the current device
+    /// region after a mode change. The portal stream geometry supplies the logical fallback.
+    /// An unscaled layout without a stream position can be sent directly.
     pub fn pointer_motion_abs(&self, x: f64, y: f64) {
         *self.pointer_at.lock().unwrap() = (x, y);
         if let Some(live) = self.portal_ei() {
             let ei = live.ei.as_ref().unwrap();
+            let target = self.portal_target(x, y);
+            let output_fraction = target.as_ref().and_then(|point| point.output_fraction);
             if let Some(PortalPoint {
                 logical,
                 position: Some(pos),
                 ..
-            }) = self.portal_target(x, y)
+            }) = target
             {
-                ei.pointer_motion_abs(f64::from(pos.0) + logical.0, f64::from(pos.1) + logical.1);
+                ei.pointer_motion_abs(
+                    f64::from(pos.0) + logical.0,
+                    f64::from(pos.1) + logical.1,
+                    output_fraction,
+                );
                 return;
             }
             let (w, h) = self.extent();
@@ -1839,6 +1854,7 @@ impl HostSession {
                 ei.pointer_motion_abs(
                     x.clamp(0.0, f64::from(w - 1)),
                     y.clamp(0.0, f64::from(h - 1)),
+                    output_fraction,
                 );
             }
             return;
@@ -2171,6 +2187,8 @@ struct PortalPoint {
     logical: (f64, f64),
     /// The stream's position in the compositor's logical space, where the portal gave one.
     position: Option<(i32, i32)>,
+    /// Position as a fraction of the capture size on a single-output host.
+    output_fraction: Option<(f64, f64)>,
 }
 
 /// A union-layout point in the logical space of the stream behind `slot`: the slot captures
