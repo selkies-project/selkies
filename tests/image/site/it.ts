@@ -9,7 +9,7 @@
  * harness names for this page's channel (`ch`, "main" unless the URL says).
  * The pages load it as the classic script `it.js`, which the image tier's
  * harness writes from this file with its types stripped
- * (`tests/image/image_lib.py` `install_site`).
+ * (`installSite` in `tests/image/lib.ts`).
  * @module
  */
 

@@ -160,9 +160,10 @@
   builds pixelflux and pcmflux, so it needs the native libraries they build against (the packages
   `scripts/ci/server-build-deps.sh` installs); the ICE topology tests in `crates/selkies-rtc/src/ice/tests.rs` need a
   network interface besides loopback for their host candidates and fail without one.
-- `python -m pytest tests -m unit` runs offline from the source tree, as the unprivileged `tester` user the image
-  creates, since some suites check that permission errors are handled; the suites in `tests/unit` drive the web
-  client's modules and the interposers (`tests/tools` builds a uinput shim and a V4L2 probe).
+- `cargo xtask suites --tier unit` runs offline from the source tree, as the unprivileged `tester` user the image
+  creates, since some suites check that permission errors are handled; the unit tier's audits
+  (`tests/tools/*_audit.ts`, run by `node`) drive the web client's modules and the interposers (`tests/tools` builds
+  a uinput shim and a V4L2 probe).
 - The parsers of what a WebRTC peer sends can be called directly from `crates/selkies-rtc`: `ice::stun::parse`,
   `rtp::RtpPacket::parse` and `rtp::RtcpPacket::parse`, `sctp::Sctp::handle_packet`, `sdp::SessionDescription::parse`.
   `crates/selkies-rtc/fuzz` drives each the way the server does (`cargo fuzz run rtp|sctp|sdp|stun` on a nightly

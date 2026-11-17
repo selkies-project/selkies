@@ -13,6 +13,7 @@
 import type { Browser, BrowserContext, Page } from '@playwright/test';
 
 import { PAGE_CALL_TIMEOUT_S, sleep } from './env.ts';
+import { reportStall } from './stall.ts';
 
 /** A page call the engine never answered: what the driver repeats a suite once for. */
 export class PageStalled extends Error {}
@@ -30,7 +31,10 @@ export async function within<T>(call: Promise<T>, what = 'the page', seconds = P
     if (seconds <= 0) return call;
     let timer: NodeJS.Timeout | undefined;
     const stalled = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => { reject(new PageStalled(`${what} did not answer within ${seconds.toFixed(0)}s`)); }, seconds * 1000);
+        timer = setTimeout(() => {
+            const why = `${what} did not answer within ${seconds.toFixed(0)}s`;
+            void reportStall(why).finally(() => { reject(new PageStalled(why)); });
+        }, seconds * 1000);
     });
     try {
         return await Promise.race([call, stalled]);

@@ -75,10 +75,10 @@ pub struct Case {
 }
 
 impl Case {
-    /// The suite's name: `e2e/test_codecs` for `e2e/test_codecs.py` or `e2e/codecs.spec.ts`,
-    /// `integration/test_protocol` for the Rust target `protocol.rs`, `unit/test_fit_frame` for
-    /// the audit `tools/fit_frame_audit.ts`, so a suite keeps its name in whichever language it
-    /// is written.
+    /// The suite's name: `e2e/test_codecs` for `e2e/codecs.spec.ts`, `integration/test_protocol`
+    /// for the Rust target `protocol.rs`, `unit/test_fit_frame` for the audit
+    /// `tools/fit_frame_audit.ts`, `soak/test_capture_api` for `soak/test_capture_api.py`, so a
+    /// suite keeps its name in whichever language it is written.
     pub fn name(&self) -> String {
         if let Some(name) = self.suite.name {
             return name.to_owned();

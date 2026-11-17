@@ -68,7 +68,8 @@ from a PipeWire node alone.
 The shared-memory layout and the on-connect configuration struct are defined
 once in `pixelflux/src/webcam/ring.rs` and mirrored byte-for-byte by the
 `WC_SHM_*` constants and `webcam_config_t` here; `pixelflux.VirtualCamera.shm_layout()`
-reports the writer's view for the ABI test in `tests/unit`.
+reports the writer's view, and `crates/selkies/tests/webcam_device.rs` reads frames back
+through the interposer.
 
 ## Frame sources
 
