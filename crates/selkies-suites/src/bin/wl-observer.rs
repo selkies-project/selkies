@@ -21,6 +21,9 @@
 //!   second known color.
 //! - `WLOBS_FILL2` and `WLOBS_BLINK_MS` a second fill the surface alternates with on that period,
 //!   so a damage-driven capture keeps receiving frames from an otherwise still screen.
+//! - `WLOBS_CURSOR` a cursor it sets on pointer enter, `SIZE` or `SIZExSCALE`: a black SIZE-pixel
+//!   square drawn from a buffer SCALE times as large, so the compositor shows this client's cursor
+//!   rather than its own (Mutter shows none over a surface that sets none).
 
 use std::io::Read;
 use std::process::ExitCode;
@@ -44,6 +47,8 @@ struct Observer {
     keyboard: Option<wl_keyboard::WlKeyboard>,
     pointer: Option<wl_pointer::WlPointer>,
     keymaps: Vec<std::path::PathBuf>,
+    /// The cursor surface set on every pointer enter, with its buffer kept alive beside it.
+    cursor: Option<(wl_surface::WlSurface, wl_buffer::WlBuffer)>,
 }
 
 fn raw<T: Into<u32>>(value: WEnum<T>) -> u32 {
@@ -93,8 +98,8 @@ impl Dispatch<wl_seat::WlSeat, ()> for Observer {
 
 impl Dispatch<wl_pointer::WlPointer, ()> for Observer {
     fn event(
-        _: &mut Self,
-        _: &wl_pointer::WlPointer,
+        state: &mut Self,
+        pointer: &wl_pointer::WlPointer,
         event: wl_pointer::Event,
         _: &(),
         _: &Connection,
@@ -102,13 +107,19 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Observer {
     ) {
         match event {
             wl_pointer::Event::Enter {
+                serial,
                 surface_x,
                 surface_y,
                 ..
-            } => emit(
-                "ptr_enter",
-                &[("x", Value::from(surface_x)), ("y", Value::from(surface_y))],
-            ),
+            } => {
+                if let Some((cursor, _)) = state.cursor.as_ref() {
+                    pointer.set_cursor(serial, Some(cursor), 0, 0);
+                }
+                emit(
+                    "ptr_enter",
+                    &[("x", Value::from(surface_x)), ("y", Value::from(surface_y))],
+                );
+            }
             wl_pointer::Event::Leave { .. } => emit("ptr_leave", &[]),
             wl_pointer::Event::Motion {
                 surface_x,
@@ -318,6 +329,20 @@ fn run(socket: &str) -> Result<(), String> {
             .bind::<wl_output::WlOutput, _, _>(name, version.min(4), &qh, ())
     });
     queue.roundtrip(&mut state).map_err(|e| e.to_string())?;
+
+    if let Ok(spec) = std::env::var("WLOBS_CURSOR")
+        && !spec.trim().is_empty()
+    {
+        let (edge, scale) = spec.trim().split_once('x').unwrap_or((spec.trim(), "1"));
+        let scale: i32 = scale.parse().unwrap_or(1).max(1);
+        let px = edge.parse::<i32>().unwrap_or(24) * scale;
+        let buffer = wayland::solid_buffer(&shm, &qh, px, px, 0xff00_0000)?;
+        let cursor = compositor.create_surface(&qh, ());
+        cursor.set_buffer_scale(scale);
+        cursor.attach(Some(&buffer), 0, 0);
+        cursor.commit();
+        state.cursor = Some((cursor, buffer));
+    }
 
     let surface = compositor.create_surface(&qh, ());
     let xdg = wm.get_xdg_surface(&surface, &qh, ());

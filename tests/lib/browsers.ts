@@ -21,6 +21,9 @@ import { WORKDIR } from './env.ts';
 /** An engine a suite drives. */
 export type Engine = 'chromium' | 'firefox' | 'webkit';
 
+/** Every engine, in the order the suites run them. */
+export const ENGINES: readonly Engine[] = ['chromium', 'firefox', 'webkit'];
+
 /** The switches every Chromium of the suites runs with. */
 export const BROWSER_ARGS: readonly string[] = [
     '--no-sandbox', '--use-gl=swiftshader', '--mute-audio',
@@ -140,7 +143,7 @@ export function openh264Version(): string | null {
  * GMP updater is turned off so it does not replace it mid-run.
  * @returns The prefs; none without the plugin.
  */
-function openh264Prefs(): Record<string, string | number | boolean> {
+export function openh264Prefs(): Record<string, string | number | boolean> {
     const version = openh264Version();
     if (!version) return {};
     return {
@@ -152,20 +155,28 @@ function openh264Prefs(): Record<string, string | number | boolean> {
 }
 
 /**
- * A headless Firefox context on the persistent profile, with the autoplay
- * allowance `launchBrowser` gives Firefox, the clipboard testing pref, and
- * the OpenH264 prefs; the caller closes it.
- * @param options The viewport, further prefs, and further context options.
+ * A Firefox context on the persistent profile, headless unless `headed`, with
+ * the autoplay allowance `launchBrowser` gives Firefox, the clipboard testing
+ * pref, and the OpenH264 prefs; the caller closes it.
+ * @param options The viewport, further prefs, and further context and launch
+ * options: `env` the browser starts in, `ignoreHTTPSErrors` for a server's
+ * own certificate.
  * @returns The context.
  */
 export function firefoxPersistentContext(options: {
     viewport?: { width: number; height: number };
     prefs?: Record<string, string | number | boolean>;
     hasTouch?: boolean;
+    deviceScaleFactor?: number;
+    headed?: boolean;
+    env?: Record<string, string | undefined>;
+    ignoreHTTPSErrors?: boolean;
 } = {}): Promise<BrowserContext> {
     const executablePath = process.env.E2E_FIREFOX || undefined;
     return firefox.launchPersistentContext(FF_E2E_PROFILE, {
-        headless: true,
+        headless: !options.headed,
+        ...(options.env ? { env: options.env } : {}),
+        ...(options.ignoreHTTPSErrors ? { ignoreHTTPSErrors: true } : {}),
         args: ['--allow-downgrade'],
         firefoxUserPrefs: {
             'media.gmp-gmpopenh264.enabled': true,
@@ -178,6 +189,35 @@ export function firefoxPersistentContext(options: {
         },
         ...(options.viewport ? { viewport: options.viewport } : {}),
         ...(options.hasTouch ? { hasTouch: true } : {}),
+        ...(options.deviceScaleFactor ? { deviceScaleFactor: options.deviceScaleFactor } : {}),
         ...(executablePath ? { executablePath, channel: 'moz-firefox' } : {}),
     });
+}
+
+/** Console errors the browser-engine suites leave out of their console check. */
+export const DECODER_ERROR_PATTERNS: readonly string[] = [
+    'Failed to load resource', 'Unexpected server response:', 'ResizeObserver',
+    'Error getting media devices', 'AudioContext was not allowed',
+    'FATAL DECODER ERROR', 'vp8_codec_error_msg', 'av_send_packet_error',
+];
+
+/**
+ * A browser of `engine` and a 1280x720 context on it. Firefox runs on the
+ * persistent profile that carries the OpenH264 plugin (the bundled one ships
+ * without it, so the WebRTC answer rejects the video m-line) and the autoplay
+ * and clipboard prefs, `prefs` on top; there is no browser apart from its
+ * context then. WebKit is launched as Playwright ships it.
+ * @param engine The engine.
+ * @param prefs Further Firefox prefs.
+ * @returns The browser, null for Firefox, and the context.
+ */
+export async function engineLaunch(engine: Engine, prefs?: Record<string, string | number | boolean>): Promise<[Browser | null, BrowserContext]> {
+    const viewport = { width: 1280, height: 720 };
+    if (engine === 'chromium') {
+        const b = await launchChromium();
+        return [b, await b.newContext({ viewport })];
+    }
+    if (engine === 'firefox') return [null, await firefoxPersistentContext({ viewport, ...(prefs ? { prefs } : {}) })];
+    const b = await webkit.launch({ headless: true });
+    return [b, await b.newContext({ viewport })];
 }

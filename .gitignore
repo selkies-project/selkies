@@ -23,7 +23,7 @@ tests/tools/gamepad/sdlenum
 tests/tools/gamepad/sdlread
 tests/tools/gamepad/udevscan
 
-# Written by pytest --junitxml
+# Written by cargo xtask suites --junit
 suites-report.xml
 unit-report.xml
 

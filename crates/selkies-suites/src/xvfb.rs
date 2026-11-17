@@ -51,10 +51,24 @@ impl Xvfb {
     ///
     /// When Xvfb is missing or none of eight candidate displays came up.
     pub fn start(width: u32, height: u32, extra: &[&str]) -> Xvfb {
+        Xvfb::start_binary("Xvfb", width, height, extra).unwrap_or_else(|why| panic!("{why}"))
+    }
+
+    /// [`Xvfb::start`] with the server `binary` (a path, or a name looked up on `PATH`).
+    ///
+    /// # Errors
+    ///
+    /// When the binary is missing or none of eight candidate displays came up.
+    pub fn start_binary(
+        binary: &str,
+        width: u32,
+        height: u32,
+        extra: &[&str],
+    ) -> Result<Xvfb, String> {
         let free = (64..256).filter(|number| traces(*number).iter().all(|trace| !trace.exists()));
         for number in free.take(8) {
             let display = format!(":{number}");
-            let mut command = Command::new("Xvfb");
+            let mut command = Command::new(binary);
             command
                 .arg(&display)
                 .args(["-screen", "0", &format!("{width}x{height}x24")])
@@ -66,12 +80,12 @@ impl Xvfb {
             tie_to_this_thread(&mut command);
             let mut child = command
                 .spawn()
-                .unwrap_or_else(|e| panic!("Xvfb did not start: {e}; a private X server needs it"));
+                .map_err(|e| format!("{binary} did not start: {e}; a private X server needs it"))?;
             let deadline = Instant::now() + Duration::from_secs(15);
             while Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
                 if crate::x11::root_size(&display).is_some() {
                     if lock_holder(number) == Some(child.id()) {
-                        return Xvfb { child, display };
+                        return Ok(Xvfb { child, display });
                     }
                     break;
                 }
@@ -80,7 +94,7 @@ impl Xvfb {
             let _ = child.kill();
             let _ = child.wait();
         }
-        panic!("no display number yielded a working X server");
+        Err("no display number yielded a working X server".to_owned())
     }
 
     /// The display's name, `:N`.

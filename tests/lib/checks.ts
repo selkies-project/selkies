@@ -38,7 +38,7 @@ function said(detail: unknown): string {
 export class Checks {
     readonly block: string;
     private readonly made: Made[] = [];
-    private readonly skipped: string[] = [];
+    private readonly skipped: { name: string; reason: string }[] = [];
 
     /** @param block The name the block's lines carry in brackets. */
     constructor(block: string) {
@@ -64,7 +64,7 @@ export class Checks {
      * @param reason Why it cannot be.
      */
     skip(name: string, reason: unknown = ''): void {
-        this.skipped.push(name);
+        this.skipped.push({ name, reason: said(reason) });
         process.stdout.write(`SKIP  [${this.block}] ${name}  ${said(reason).slice(0, 110)}\n`);
     }
 
@@ -78,9 +78,46 @@ export class Checks {
      * @throws {Error} Naming the failed checks.
      */
     finish(): void {
+        const failed = this.summary();
+        if (failed.length) throw new Error(`[${this.block}] failed: ${failed.join('; ')}`);
+    }
+
+    /**
+     * Print the block's pass count, as `finish` does, without failing.
+     * @returns The names of the checks that failed.
+     */
+    summary(): string[] {
         const failed = this.failed();
         const tail = this.skipped.length ? `, ${this.skipped.length} skipped` : '';
         process.stdout.write(`[${this.block}] ${this.made.length - failed.length}/${this.made.length} passed${tail}\n`);
-        if (failed.length) throw new Error(`[${this.block}] failed: ${failed.join('; ')}`);
+        return failed;
     }
+
+    /** @returns The counts, each failure as `name: detail` and each skip as `name: reason`. */
+    tally(): { pass: number; fail: number; skip: number; failed: string[]; skipped: string[] } {
+        const failed = this.made.filter((m) => !m.ok);
+        return {
+            pass: this.made.length - failed.length, fail: failed.length, skip: this.skipped.length,
+            failed: failed.map((m) => `${m.name}: ${m.detail}`),
+            skipped: this.skipped.map((s) => `${s.name}: ${s.reason}`),
+        };
+    }
+}
+
+/**
+ * Print every block's pass count, then fail the test when any block had a
+ * failed check, so a run of several blocks reports them all.
+ * @param blocks The blocks, in the order they ran.
+ * @throws {Error} Naming each block's failed checks.
+ */
+export function finishAll(blocks: readonly Checks[]): void {
+    const errors: string[] = [];
+    for (const block of blocks) {
+        try {
+            block.finish();
+        } catch (e) {
+            errors.push(e instanceof Error ? e.message : String(e));
+        }
+    }
+    if (errors.length) throw new Error(errors.join('\n'));
 }

@@ -17,7 +17,8 @@
 //! - `licenses` audits the crate graphs and the web packages' lockfiles and holds the
 //!   generated tables of `docs/licensing.md` to them, and with `--crate` audits pixelflux's
 //!   own graph, as its wheels build it ([`licenses`]);
-//! - `wheel` repackages a release bundle as the selkies wheel of its platform ([`wheel`]).
+//! - `wheel` repackages a release bundle as the selkies wheel of its platform ([`wheel`]);
+//! - `suites` runs the test suites, by tier, expression and shard ([`suites`]).
 //!
 //! The sources are read as text and the crate graph through `cargo metadata`, so the tool
 //! depends on no crate of the workspace and builds without the native libraries they link.
@@ -29,6 +30,7 @@ mod file_index;
 mod licenses;
 mod logo_assets;
 mod settings_doc;
+mod suites;
 mod wheel;
 
 /// The repository root, two directories above this crate.
@@ -67,10 +69,12 @@ fn main() -> ExitCode {
         "logo-assets" => check_flag(&args).and_then(logo_assets::run),
         "licenses" => licenses::run(&args),
         "wheel" => wheel::run(&args),
+        "suites" => suites::main(&args),
         _ => Err(
             "usage: cargo xtask settings-doc [--check] | file-index [--check] | logo-assets [--check] | licenses \
                   [--crate DIR] [--write | --markdown] [--set gpl|non-gpl] [--metadata FILE] \
-                  [--target TRIPLE] [--page FILE] [--quiet] | wheel <bundle.tar.gz> <out-dir>"
+                  [--target TRIPLE] [--page FILE] [--quiet] | wheel <bundle.tar.gz> <out-dir> | suites [--tier T]... \
+                  [--match EXPR] [--shard K/N] [--junit FILE] [--list]"
                 .into(),
         ),
     };

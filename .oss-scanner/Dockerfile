@@ -6,9 +6,9 @@ FROM node:26-trixie
 ENV DEBIAN_FRONTEND=noninteractive \
     CARGO_HOME=/opt/cargo \
     RUSTUP_HOME=/opt/rustup \
-    PATH=/opt/venv/bin:/opt/cargo/bin:$PATH
+    PATH=/opt/cargo/bin:$PATH
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates build-essential dbus gcc-multilib git jq libxkbcommon0 pkg-config python3 python3-dev python3-venv \
+      ca-certificates build-essential dbus gcc-multilib git jq libxkbcommon0 pkg-config python3 python3-dev python3-packaging \
       pulseaudio pulseaudio-utils shellcheck xkb-data xvfb \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m tester
@@ -24,7 +24,6 @@ RUN scripts/ci/server-build-deps.sh && sh crates/pixelflux/scripts/build-kvazaar
     && rm -rf /var/lib/apt/lists/* && cargo fetch --locked \
     && for manifest in crates/selkies-rtc/vendor/*/Cargo.toml; do cargo fetch --locked --manifest-path "$manifest" || exit 1; done \
     && chown -R tester:tester /opt/cargo /opt/rustup
-RUN python3 -m venv /opt/venv && pip install --no-cache-dir pytest
 RUN for dir in addons/input-interposer addons/v4l2-interposer addons/fake-udev tests/tools; do \
       make -C "$dir" CFLAGS="-O1 -g -fno-omit-frame-pointer" || exit 1; \
     done
@@ -50,4 +49,4 @@ RUN runuser -u tester -- sh -c 'scripts/ci/test-stack.sh > /dev/null \
     runuser -u tester -- scripts/ci/test-vendored.sh --offline \
       || echo "WARNING: the vendored rtc crates' tests reported failures"; \
     runuser -u tester -- env E2E_WORKDIR=/tmp/selkies-unit \
-      python -m pytest tests -m unit -q -rs -p no:cacheprovider || echo "WARNING: the unit tier reported failures"
+      cargo --offline xtask suites --tier unit || echo "WARNING: the unit tier reported failures"

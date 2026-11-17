@@ -196,7 +196,9 @@ pub struct Watch {
 
 /// The instructions a run works by: the server's, then the person's own where they gave any.
 fn instructions(capabilities: ::pelorus::tools::Capabilities, suffix: &str) -> String {
-    let date = chrono::Local::now().format("%A, %B %-d, %Y").to_string();
+    let date = jiff::ZonedDateTime::now()
+        .strftime("%A, %B %-d, %Y")
+        .to_string();
     let mut system = system_prompt(capabilities, &date);
     if !suffix.trim().is_empty() {
         system.push_str("\nThe user's standing instructions:\n");

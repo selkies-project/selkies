@@ -467,12 +467,14 @@ impl Session {
     }
 
     /// Start `argv` in the session's process group, founding it with the first child; the
-    /// result indexes `children`. `inherit` is a descriptor the child keeps open past exec, and
+    /// result indexes `children`. `dir` is the child's working directory, the launcher's own
+    /// where it is `None`; `inherit` is a descriptor the child keeps open past exec, and
     /// `quiet` sends the child's output to `/dev/null` rather than the launcher's own streams.
     fn spawn(
         &mut self,
         argv: &[String],
         env: Option<&Env>,
+        dir: Option<&Path>,
         inherit: Option<&OwnedFd>,
         quiet: bool,
     ) -> io::Result<usize> {
@@ -483,6 +485,9 @@ impl Session {
             .env_clear()
             .envs(env.unwrap_or(&self.env))
             .stdin(Stdio::null());
+        if let Some(dir) = dir {
+            command.current_dir(dir);
+        }
         if quiet {
             command.stdout(Stdio::null()).stderr(Stdio::null());
         }
@@ -562,7 +567,7 @@ impl Session {
             .map(|a| a.to_string())
             .chain([format!("--address={address}")])
             .collect();
-            let index = match self.spawn(&argv, None, None, false) {
+            let index = match self.spawn(&argv, None, None, None, false) {
                 Ok(index) => index,
                 Err(err) => {
                     log(&format!("the {} bus did not start: {err}", &kind[2..]));
@@ -677,7 +682,7 @@ impl Session {
             }
             let mut started = Vec::new();
             for argv in &servers {
-                match self.spawn(argv, None, None, false) {
+                match self.spawn(argv, None, None, None, false) {
                     Ok(index) => started.push(index),
                     Err(err) => log(&format!("{} did not start: {err}", argv[0])),
                 }
@@ -838,7 +843,7 @@ impl Session {
                 );
             }
             let index = self
-                .spawn(&argv, Some(&env), Some(&write), false)
+                .spawn(&argv, Some(&env), None, Some(&write), false)
                 .map_err(|e| format!("Xvfb did not start: {e}"))?;
             drop(write);
             let number = read_line_within(read, Duration::from_secs(30));
@@ -922,7 +927,9 @@ impl Session {
         Ok(found())
     }
 
-    /// The session as a display manager starts one, on a session bus of its own.
+    /// The session as a display manager starts one, on a session bus of its own and in the
+    /// user's home, so the desktop and every terminal it opens start there rather than wherever
+    /// the launcher was started from (a service manager's directory, under an init).
     pub fn desktop(&mut self, sid: &str, entry: &Entry, wayland: bool) -> Result<(), String> {
         let mut env = self.env.clone();
         env.insert(
@@ -973,9 +980,10 @@ impl Session {
             .or_else(|| env.get("DISPLAY"))
             .cloned()
             .unwrap_or_default();
+        let home = env.get("HOME").map(PathBuf::from).filter(|h| h.is_dir());
         let quiet = self.quiet_desktop;
         let index = self
-            .spawn(&argv, Some(&env), None, quiet)
+            .spawn(&argv, Some(&env), home.as_deref(), None, quiet)
             .map_err(|e| format!("the desktop did not start: {e}"))?;
         self.desktop = Some(index);
         log(&format!(
@@ -1001,7 +1009,7 @@ impl Session {
             bundle.selkies_env(&mut env);
         }
         let index = self
-            .spawn(command, Some(&env), None, false)
+            .spawn(command, Some(&env), None, None, false)
             .map_err(|e| format!("selkies did not start: {e}"))?;
         self.selkies = Some(index);
         Ok(())
@@ -2237,10 +2245,10 @@ mod tests {
         }
         let mut session = Session::new_in(None, Env::new()).unwrap();
         let first = session
-            .spawn(&argv(&["sleep", "30"]), None, None, false)
+            .spawn(&argv(&["sleep", "30"]), None, None, None, false)
             .unwrap();
         let second = session
-            .spawn(&argv(&["sleep", "30"]), None, None, false)
+            .spawn(&argv(&["sleep", "30"]), None, None, None, false)
             .unwrap();
         let pids: Vec<i32> = [first, second]
             .iter()
@@ -2267,6 +2275,43 @@ mod tests {
         assert!(
             !runtime_dir.exists(),
             "the runtime directory goes with the session"
+        );
+    }
+
+    #[test]
+    fn the_desktop_starts_in_the_users_home_not_the_launchers_directory() {
+        // A session reaps and signals every child of its process, so it needs one of its own.
+        if !isolated() {
+            run_isolated(
+                "commands::session::tests::the_desktop_starts_in_the_users_home_not_the_launchers_directory",
+                &[],
+            );
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let home_path = fs::canonicalize(home.path()).unwrap();
+        assert_ne!(std::env::current_dir().unwrap(), home_path);
+        let mut session = Session::new_in(None, Env::new()).unwrap();
+        session.env.extend([
+            ("HOME".to_string(), home_path.to_string_lossy().into_owned()),
+            ("PATH".to_string(), std::env::var("PATH").unwrap()),
+            // Any bus keeps dbus-run-session out of the command.
+            (
+                "DBUS_SESSION_BUS_ADDRESS".to_string(),
+                "unix:path=/x".into(),
+            ),
+        ]);
+        let entry = Entry::from([(
+            "Exec".to_string(),
+            r#"sh -c 'pwd > "$HOME/cwd"'"#.to_string(),
+        )]);
+        session.desktop("", &entry, false).unwrap();
+        let index = session.desktop.unwrap();
+        session.children[index].wait().unwrap();
+        session.stop();
+        assert_eq!(
+            fs::read_to_string(home_path.join("cwd")).unwrap().trim(),
+            home_path.to_string_lossy()
         );
     }
 

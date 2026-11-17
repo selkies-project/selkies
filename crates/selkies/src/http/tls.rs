@@ -250,10 +250,10 @@ pub fn make_self_signed_cert(cfg: &TlsConfig) -> Result<(PathBuf, PathBuf), TlsE
     let mut dn = rcgen::DistinguishedName::new();
     dn.push(rcgen::DnType::CommonName, "localhost");
     params.distinguished_name = dn;
-    let now = chrono::Utc::now();
-    let (y, m, d) = ymd(now - chrono::Duration::days(1));
+    let now = jiff::Timestamp::now();
+    let (y, m, d) = ymd(now - jiff::SignedDuration::from_hours(24));
     params.not_before = rcgen::date_time_ymd(y, m, d);
-    let (y, m, d) = ymd(now + chrono::Duration::days(3650));
+    let (y, m, d) = ymd(now + jiff::SignedDuration::from_hours(24 * 3650));
     params.not_after = rcgen::date_time_ymd(y, m, d);
     params.is_ca = rcgen::IsCa::ExplicitNoCa;
     let serial: [u8; 16] = rand::random();
@@ -287,9 +287,13 @@ pub fn make_self_signed_cert(cfg: &TlsConfig) -> Result<(PathBuf, PathBuf), TlsE
 }
 
 /// The calendar date of `when`, as rcgen's `date_time_ymd` takes it.
-fn ymd(when: chrono::DateTime<chrono::Utc>) -> (i32, u8, u8) {
-    use chrono::Datelike;
-    (when.year(), when.month() as u8, when.day() as u8)
+fn ymd(when: jiff::Timestamp) -> (i32, u8, u8) {
+    let date = when.to_zoned_datetime(jiff::tz::TimeZone::UTC).date();
+    (
+        i32::from(date.year()),
+        date.month().unsigned_abs(),
+        date.day().unsigned_abs(),
+    )
 }
 
 /// Write the certificate, then the key readable by its owner alone; the mode is set after the

@@ -10,12 +10,12 @@
 //! CI cannot exercise their behavior. It can still guard the failure that reaches a user as a
 //! session that will not paint, or, for a Dockerfile, as a build that dies minutes in: a quoting
 //! or syntax slip. Every service script is parsed with `bash -n`, so is the shell inside each
-//! Dockerfile `RUN`, and where shellcheck is installed every shell script the repository ships is
+//! Dockerfile `RUN`, and every shell script the repository ships is
 //! linted at shellcheck's lowest severity, which the tree passes. CI lints with the release
 //! scripts/ci/install-shellcheck.sh pins, since which findings that severity reports differs
 //! between releases.
 //!
-//! These need only bash (and shellcheck for the lint), so they run with `cargo test --workspace`.
+//! These need only bash and shellcheck, so they run with `cargo test --workspace`.
 
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
@@ -270,13 +270,7 @@ fn the_shipped_shell_parses_and_lints() {
             .display()
             .to_string()
     };
-    let Some(bash) = on_path("bash") else {
-        checks.skip(
-            "parse",
-            "bash not found, so the session scripts cannot be parsed",
-        );
-        return;
-    };
+    let bash = on_path("bash").expect("bash, which parses the session scripts");
     // The session runtime lives in the base container; the desktop image adds the desktop on top
     // of it, so both directories carry scripts a session depends on.
     let base = root.join("addons/base");
@@ -477,7 +471,11 @@ fn the_shipped_shell_parses_and_lints() {
             checks.check(&format!("lint {}", rel(path)), ok, found);
         }
     } else {
-        checks.skip("lint", "shellcheck not installed; parsed with bash -n only");
+        checks.check(
+            "shellcheck lints the shipped shell",
+            false,
+            "shellcheck is not installed",
+        );
     }
     checks.finish("");
 }

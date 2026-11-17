@@ -47,7 +47,7 @@ fn layout_monitors(outputs: bool) -> Vec<String> {
             .env("DISPLAY", test_display()),
         Duration::from_secs(20),
     )
-    .unwrap_or_default();
+    .expect("xrandr lists the test display's monitors");
     listing
         .lines()
         .filter_map(|line| {
@@ -187,8 +187,8 @@ async fn flip_under_a_page(wayland: bool) {
         ),
     );
     checks.check(
-        "no cursor callback outlived its server",
-        !log.contains("Error handling pixelflux cursor"),
+        "nothing panicked across the switches",
+        !log.contains("panicked"),
         "",
     );
     let mode = current_mode(&server).await;

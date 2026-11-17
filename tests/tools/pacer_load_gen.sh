@@ -1,7 +1,7 @@
 #!/bin/bash
 # Animated screen damage for encoder load: a large xterm with scrolling text
 # moved in a Lissajous pattern so the encoder sees fresh full-rect damage.
-# Driven by tests/perf/test_pacer.py; needs xterm and xdotool.
+# Driven by tests/perf/pacer.spec.ts; needs xterm and xdotool.
 export DISPLAY="${E2E_DISPLAY:?set it to the display the suites drive}"
 XPID=""
 # Set before anything is started, and whichever branch runs below: a generator

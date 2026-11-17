@@ -36,22 +36,23 @@ fail() {
     exit 1
 }
 
-# A bare selkies in an environment where nothing of the caller's session
-# steers it, and no login is set, with the variables given as arguments added
+# Become a bare selkies in an environment where nothing of the caller's session
+# steers it, and no login is set, with the variables given as arguments added.
+# It replaces the shell it runs in, so it runs in a subshell of its own: in the
+# foreground in parentheses, and in the background as `&` makes one, whose
+# process is then selkies itself for `$!`.
 bare() {
-    (
-        for name in $(env | sed -nE 's/^((SELKIES_|XDG_|DISPLAY|WAYLAND|PASSWORD|PASSWD|CUSTOM_USER)[A-Za-z0-9_]*)=.*/\1/p'); do
-            unset "${name}" 2> /dev/null || true
-        done
-        cd "${SESSION_HOME}"
-        exec env HOME="${SESSION_HOME}" "$@" "${SELKIES}"
-    )
+    for name in $(env | sed -nE 's/^((SELKIES_|XDG_|DISPLAY|WAYLAND|PASSWORD|PASSWD|CUSTOM_USER)[A-Za-z0-9_]*)=.*/\1/p'); do
+        unset "${name}" 2> /dev/null || true
+    done
+    cd "${SESSION_HOME}"
+    exec env HOME="${SESSION_HOME}" "$@" "${SELKIES}"
 }
 
 # With no password set, it refuses before its session starts: the status that
 # names a configuration error, the way to name one, and nothing listening
 exited=0
-bare > "${LOG}" 2>&1 || exited=$?
+(bare) > "${LOG}" 2>&1 || exited=$?
 [ "${exited}" = 78 ] || fail "with no password set it exited ${exited}, not 78"
 grep -qF "no password was set" "${LOG}" || fail "with no password set it does not say how to name one"
 grep -qF "SELKIES_BASIC_AUTH_PASSWORD_FILE" "${LOG}" || fail "the refusal does not name SELKIES_BASIC_AUTH_PASSWORD_FILE"

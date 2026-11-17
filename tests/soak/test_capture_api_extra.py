@@ -29,9 +29,9 @@ import time
 import urllib.error
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import helpers as H
-from helpers import Results
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import soak_lib as H
+from soak_lib import Results
 
 import pixelflux
 import pcmflux
@@ -137,12 +137,11 @@ class FrameCounter:
 
 def x_root_size() -> tuple[int, int]:
     """(width, height) of the test X server's root window."""
-    from Xlib import display as xdisp
-    d = xdisp.Display(TEST_DISPLAY)
-    s = d.screen()
-    w, h = s.width_in_pixels, s.height_in_pixels
-    d.close()
-    return w, h
+    out = subprocess.run(["xwininfo", "-root", "-display", TEST_DISPLAY], capture_output=True, text=True,
+                         timeout=15, check=True).stdout
+    size = {k.strip(): int(v) for k, v in (line.split(":", 1) for line in out.splitlines()
+                                            if line.strip().startswith(("Width:", "Height:")))}
+    return size["Width"], size["Height"]
 
 
 def ffprobe(path: str) -> Optional[dict]:

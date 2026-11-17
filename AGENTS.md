@@ -73,8 +73,8 @@ so keep anything shaped like `<name>` or containing braces inside backticks.
   `no-unsafe-*` rules, `no-unsafe-type-assertion` among them), and takes no inline configuration (`noInlineConfig`
   in every config): a finding is fixed in the code, never turned off by a comment.
 - No JavaScript files: a classic script a browser is handed as it is (`tests/tools/pad_init.ts`, the image tier's
-  `tests/image/site/it.ts`) is TypeScript too, its types stripped where it is handed out (`tests/ts_static.py`
-  `strip_types`), so it keeps to erasable syntax, declares the `window` globals it sets with `declare global`, and is
+  `tests/image/site/it.ts`) is TypeScript too, its types stripped where it is handed out (`stripTypes` in
+  `tests/lib/static.ts`), so it keeps to erasable syntax, declares the `window` globals it sets with `declare global`, and is
   checked against the browser's types alone (`tests/tools/tsconfig.browser.json`). The web core is TypeScript,
   checked strictly by its own `tsc -b` (`web/selkies-web-core/tsconfig.json`), and the dashboard's `tsc` compiles
   the `lib` modules it imports, the touch gamepad, and the build helpers Node runs with their types stripped
@@ -132,7 +132,7 @@ Development section of `docs/development.md` describes, where `scripts/ci/test-s
 audio the suites stream from on `E2E_DISPLAY`, apart from any desktop's `DISPLAY`, and the suites run under a `HOME`
 apart from any desktop's, since their servers write every density they apply into its resource files. Run the cheapest
 tier that covers a change on every change (`pre-commit run --all-files`, `cargo test --workspace`,
-`pytest tests -m unit`), the `integration` tier and the `e2e` blocks the change touches before reporting it, and a
+`cargo xtask suites --tier unit`), the `integration` tier and the `e2e` blocks the change touches before reporting it, and a
 measurement for every claim that is a number. The suites in `tests/` and `crates/selkies-suites` drive the server
 as a black box over its public interfaces; a part of the server is tested in process by its own `cargo test`, never
 by a suite reaching into it. A suite that needs only the server, a socket, and the display is written in Rust on

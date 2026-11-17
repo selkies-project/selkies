@@ -73,7 +73,7 @@ dependency of the workspace's crates, by what it does:
 | `zip`, `flate2` | MIT; Apache-2.0 OR MIT | permissive | folder downloads, compressed messages |  |
 | `serde`, `serde_json`, `rmp-serde`, `base64`, `percent-encoding`, `url` | Apache-2.0 OR MIT; MIT | permissive | JSON messages, MessagePack to the uinput mouse socket, encodings |  |
 | `libc`, `nix`, `socket2` | Apache-2.0 OR MIT; MIT | permissive | system calls: sockets, descriptors, signals, processes |  |
-| `log`, `thiserror`, `parking_lot`, `regex`, `memchr`, `mime_guess`, `chrono`, `shlex`, `tempfile` | Apache-2.0 OR MIT; MIT OR Unlicense; MIT | permissive | logging, errors, locks, text, MIME types, time, and temporary files |  |
+| `log`, `thiserror`, `parking_lot`, `regex`, `memchr`, `mime_guess`, `jiff`, `shlex`, `tempfile` | Apache-2.0 OR MIT; MIT OR Unlicense; MIT | permissive | logging, errors, locks, text, MIME types, time, and temporary files |  |
 
 <!-- check-licenses:end rust-dependencies -->
 

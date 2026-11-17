@@ -110,7 +110,7 @@ pub async fn handle_recording_start(
     let name = if requested.is_empty() {
         format!(
             "recording-{}.mp4",
-            chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+            jiff::Timestamp::now().strftime("%Y%m%dT%H%M%SZ")
         )
     } else {
         requested

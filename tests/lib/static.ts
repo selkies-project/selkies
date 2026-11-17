@@ -17,7 +17,7 @@
  * @module
  */
 
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { stripTypeScriptTypes } from 'node:module';
@@ -54,27 +54,67 @@ export interface Served {
     close: () => Promise<void>;
 }
 
+/** The largest POST body served, in bytes. */
+const MAX_POST = 16 * 1024 * 1024;
+
 /**
  * Serve `root` on a loopback port, every `.ts` file but a declaration file as
  * the JavaScript its types strip to (kept by path and modification time,
  * since a page imports dozens of modules on every load), anything else as it
  * is; a module that cannot be stripped is a 500, not half a page.
  * @param root The directory served.
+ * @param onPost Takes each POST's path and body, answered 204; without it a POST is served as a GET.
  * @returns The server, once it listens.
  */
-export async function serveTypeScript(served: string): Promise<Served> {
+export async function serveTypeScript(served: string, onPost?: (path: string, body: Buffer) => void): Promise<Served> {
     const root = resolve(served);
+    const realRoot = realpathSync(root);
+    const inside = (p: string, base: string): boolean => p === base || p.startsWith(base + sep);
     const stripped = new Map<string, { stamp: number; body: Buffer }>();
     const server = createServer((req, res) => {
+        // Nothing served is ever read as another type: an error's text stays text.
+        res.setHeader('X-Content-Type-Options', 'nosniff');
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-        const rel = normalize(decodeURIComponent(url.pathname));
+        if (req.method === 'POST' && onPost) {
+            // A page's report, which is small: a body past the cap is refused, not held.
+            const chunks: Buffer[] = [];
+            let size = 0;
+            req.on('data', (c: Buffer) => {
+                size += c.length;
+                if (size > MAX_POST) {
+                    res.writeHead(413).end();
+                    req.destroy();
+                    return;
+                }
+                chunks.push(c);
+            });
+            req.on('end', () => {
+                if (size > MAX_POST) return;
+                onPost(url.pathname, Buffer.concat(chunks));
+                res.writeHead(204).end();
+            });
+            return;
+        }
+        let rel: string;
+        try {
+            rel = normalize(decodeURIComponent(url.pathname));
+        } catch {
+            res.writeHead(400).end();
+            return;
+        }
         const path = join(root, rel);
-        if (rel.split(sep).includes('..') || !(path === root || path.startsWith(root + sep))) {
+        if (rel.split(sep).includes('..') || !inside(path, root)) {
             res.writeHead(403).end();
             return;
         }
         let stamp: number;
         try {
+            // A symbolic link in the tree may point out of it: what is read is
+            // where the path really leads, and that has to be inside too.
+            if (!inside(realpathSync(path), realRoot)) {
+                res.writeHead(403).end();
+                return;
+            }
             const st = statSync(path);
             if (!st.isFile()) throw new Error('not a file');
             stamp = st.mtimeMs;

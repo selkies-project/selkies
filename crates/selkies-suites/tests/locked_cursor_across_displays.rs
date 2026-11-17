@@ -56,7 +56,7 @@ type Box4 = (i64, i64, i64, i64);
 /// The sprite's box within one delivered band, in the display's own pixels: where the band's
 /// difference from `bg`, as luma, passes the tolerance.
 fn band_box(stripe: &Stripe, bg: [i64; 3]) -> Option<Box4> {
-    let (w, _, pixels) = decode_rgb(&stripe.jpeg)?;
+    let (w, _, pixels) = decode_rgb(&stripe.jpeg).expect("a delivered band decodes");
     let mut found: Option<Box4> = None;
     for (i, px) in pixels.as_chunks::<3>().0.iter().enumerate() {
         let d = |c: usize| (i64::from(px[c]) - bg[c]).abs();
@@ -176,7 +176,9 @@ async fn a_locked_pages_cursor_is_drawn_by_the_display_it_is_on() {
     let primary = Client::connect(&server, "").await;
     primary.keep_payloads();
     primary.send(&jpeg_settings("primary"));
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    server
+        .settle(0, "Capture started for 'primary'", Duration::from_secs(15))
+        .await;
     let secondary = Client::connect(&server, "").await;
     secondary.keep_payloads();
     secondary.send(&jpeg_settings("display2"));

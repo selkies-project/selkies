@@ -361,7 +361,7 @@ pub fn scan_directory(
                 format!("{:.1} KB", stat.len() as f64 / 1024.0)
             },
             mtime: local_time(stat.mtime(), stat.mtime_nsec())
-                .format("%Y-%m-%d %H:%M:%S")
+                .strftime("%Y-%m-%d %H:%M:%S")
                 .to_string(),
             is_dir,
         });
@@ -374,17 +374,11 @@ pub fn scan_directory(
 }
 
 /// A file time in the host's local zone.
-pub fn local_time(secs: i64, nsec: i64) -> chrono::DateTime<chrono::Local> {
-    use chrono::TimeZone;
-    chrono::Local
-        .timestamp_opt(secs, nsec.clamp(0, 999_999_999) as u32)
-        .single()
-        .unwrap_or_else(|| {
-            chrono::Local
-                .timestamp_opt(0, 0)
-                .single()
-                .unwrap_or_default()
-        })
+pub fn local_time(secs: i64, nsec: i64) -> jiff::ZonedDateTime {
+    let nsec = i32::try_from(nsec.clamp(0, 999_999_999)).unwrap_or(0);
+    jiff::Timestamp::new(secs, nsec)
+        .unwrap_or(jiff::Timestamp::UNIX_EPOCH)
+        .to_zoned_datetime(jiff::tz::TimeZone::system())
 }
 
 /// One entry of the JSON listing.
@@ -471,9 +465,9 @@ fn isoformat(secs: i64, nsec: i64) -> String {
     let t = local_time(secs, nsec);
     let micros = nsec.clamp(0, 999_999_999) / 1000;
     if micros == 0 {
-        t.format("%Y-%m-%dT%H:%M:%S").to_string()
+        t.strftime("%Y-%m-%dT%H:%M:%S").to_string()
     } else {
-        format!("{}.{micros:06}", t.format("%Y-%m-%dT%H:%M:%S"))
+        format!("{}.{micros:06}", t.strftime("%Y-%m-%dT%H:%M:%S"))
     }
 }
 

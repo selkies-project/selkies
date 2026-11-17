@@ -13,7 +13,7 @@
  */
 
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 
@@ -113,6 +113,44 @@ export interface Observer extends Held {
     ready: (timeoutS?: number) => Promise<boolean>;
 }
 
+/** An event an input watch received. */
+export interface InputEvent {
+    /** KeyPress, KeyRelease, ButtonPress, ButtonRelease or MotionNotify. */
+    kind: string;
+    /** The keycode or button; 0 for a motion. */
+    detail: number;
+    /** Where a motion went, in the window; 0 for the rest. */
+    x: number;
+    y: number;
+    /** Where the pointer was on the root window. */
+    rootX: number;
+    rootY: number;
+    /** When the watch read it, in seconds on CLOCK_MONOTONIC (`monotonic()`). */
+    at: number;
+}
+
+/** @returns Seconds on CLOCK_MONOTONIC, the clock an input watch stamps its events on. */
+export function monotonic(): number {
+    return Number(process.hrtime.bigint()) / 1e9;
+}
+
+/** A window recording the input it receives. */
+export interface InputWatch extends Held {
+    /** @returns What it received so far, oldest first. */
+    events: () => Promise<InputEvent[]>;
+}
+
+/**
+ * Busy processes sharing one CPU with a server's runtime threads
+ * (crates/selkies-suites/src/load.rs), stopped between bursts.
+ */
+export interface Load extends Held {
+    /** Pin the threads beside the busy processes and let those run. */
+    resume: () => Promise<void>;
+    /** Stop the busy processes and give the threads back their CPUs. */
+    pause: () => Promise<void>;
+}
+
 /**
  * Two numbers, as the program answers a position or a size.
  * @param value The answer's field.
@@ -129,6 +167,16 @@ function pair(value: unknown): [number, number] | null {
 interface Waiter {
     resolve: (value: unknown) => void;
     reject: (error: Error) => void;
+}
+
+/**
+ * A server's runtime directory, as its own environment names it.
+ * @param pid The server's process id.
+ * @returns The directory, or '' when its environment names none.
+ */
+export function runtimeDir(pid: number): string {
+    const entry = readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').find((kv) => kv.startsWith('XDG_RUNTIME_DIR='));
+    return entry ? entry.slice('XDG_RUNTIME_DIR='.length) : '';
 }
 
 /** A running `suites-host`, for one suite. */
@@ -204,6 +252,14 @@ export class Host {
     }
 
     /**
+     * The server under test, as the harness resolves it.
+     * @returns Its executable's path.
+     */
+    async serverBinary(): Promise<string> {
+        return stringOr(fields(await this.request('server.binary')).path) ?? '';
+    }
+
+    /**
      * Stop the running server.
      * @returns The end of its log.
      */
@@ -229,6 +285,20 @@ export class Host {
     }
 
     /**
+     * The Wayland socket the server's capture compositor announced in its log.
+     * @param timeoutS How long to wait for the announcement.
+     * @returns The socket's name, or '' when it never came.
+     */
+    async captureSocket(timeoutS = 30): Promise<string> {
+        for (const until = Date.now() + timeoutS * 1000; Date.now() < until;) {
+            const line = (await this.log()).split('\n').find((l) => l.includes('Socket listening on:'));
+            if (line) return line.split('"')[1] ?? '';
+            await new Promise((resolve) => { setTimeout(resolve, 500); });
+        }
+        return '';
+    }
+
+    /**
      * Whether `needle` reaches the running server's log past `from` within
      * `timeoutS`.
      * @param needle The text.
@@ -242,6 +312,111 @@ export class Host {
     }
 
     /**
+     * The keycode that types `keysym` on the X display.
+     * @param keysym The keysym (a Latin-1 character's is its code).
+     * @param display The display; the test display by default.
+     * @returns The keycode, or null where none carries it.
+     */
+    async keycode(keysym: number, display?: string): Promise<number | null> {
+        return numberOr(fields(await this.request('x11.keycode', { keysym, ...(display ? { display } : {}) })).code) ?? null;
+    }
+
+    /**
+     * The root window's CARDINAL property `name` on the X display.
+     * @param name The property.
+     * @param set A value to set first; null deletes it.
+     * @returns Its first value, or null where it is absent.
+     */
+    async rootCardinal(name: string, set?: number | null): Promise<number | null> {
+        const args: Record<string, unknown> = { name };
+        if (set !== undefined) args.value = set;
+        return numberOr(fields(await this.request('x11.root_cardinal', args)).value) ?? null;
+    }
+
+    /**
+     * Put the pointer at (x, y) on the X display's root.
+     * @returns Whether the display answered.
+     */
+    async warp(x: number, y: number, display?: string): Promise<boolean> {
+        return fields(await this.request('x11.warp', { x, y, ...(display ? { display } : {}) })).done === true;
+    }
+
+    /**
+     * Press or release a pointer button through XTEST, as a real mouse would.
+     * @returns Whether the display answered.
+     */
+    async button(button: number, press: boolean, display?: string): Promise<boolean> {
+        return fields(await this.request('x11.button', { button, press, ...(display ? { display } : {}) })).done === true;
+    }
+
+    /**
+     * Press or release the key typing `keysym` on the X display through XTEST.
+     * @param keysym The keysym.
+     * @param press Press, or release.
+     * @param display The display; the test display by default.
+     * @returns Whether it went out.
+     */
+    async key(keysym: number, press: boolean, display?: string): Promise<boolean> {
+        return fields(await this.request('x11.key', { keysym, press, ...(display ? { display } : {}) })).done === true;
+    }
+
+    /**
+     * Move the pointer by (dx, dy) `count` times through XTEST, relative
+     * motion as a mouse makes it, `gapMs` apart.
+     * @returns Whether the display answered.
+     */
+    async motion(dx: number, dy: number, count = 1, gapMs = 0, display?: string): Promise<boolean> {
+        return fields(await this.request('x11.motion', { dx, dy, count, gap_ms: gapMs, ...(display ? { display } : {}) })).done === true;
+    }
+
+    /**
+     * The pointer buttons the X display reports held.
+     * @param display The display; the test display by default.
+     * @returns Their numbers, lowest first.
+     */
+    async buttonsHeld(display?: string): Promise<number[]> {
+        const held = fields(await this.request('x11.buttons', display ? { display } : {})).held;
+        return Array.isArray(held) ? held.filter((b): b is number => typeof b === 'number') : [];
+    }
+
+    /**
+     * Continuous damage on the test display: a window drawing a moving block
+     * thirty times a second, until released; the screen is still once the
+     * root repainted.
+     * @param width The window's width.
+     * @param height Its height.
+     * @param display The display; the test display by default.
+     * @returns The window.
+     */
+    async churn(width = 900, height = 700, display?: string): Promise<Held> {
+        return this.held(await this.request('x11.churn', { width, height, ...(display ? { display } : {}) }));
+    }
+
+    /**
+     * A window on the X display that records the keys, buttons and motion it
+     * receives, the keyboard focus following the pointer onto it: 200 by 200
+     * in the middle, or covering the display at any size it is resized to.
+     * @param cover Whether it covers the display.
+     * @returns The watch.
+     */
+    async watchInput(cover = false): Promise<InputWatch> {
+        const held = this.held(await this.request('x11.watch', cover ? { cover } : {}));
+        return {
+            ...held,
+            events: async () => {
+                const list = fields(await this.request('x11.events', { handle: held.handle })).events;
+                return (Array.isArray(list) ? list : []).map((e) => {
+                    const f = fields(e);
+                    return {
+                        kind: stringOr(f.kind) ?? '', detail: numberOr(f.detail) ?? 0, x: numberOr(f.x) ?? 0, y: numberOr(f.y) ?? 0,
+                        rootX: numberOr(f.root_x) ?? 0, rootY: numberOr(f.root_y) ?? 0, at: numberOr(f.at) ?? 0,
+                    };
+                });
+            },
+        };
+    }
+
+    /**
      * Whether the key typing `keysym` is held on the X display.
      * @param keysym The keysym (a Latin-1 character's is its code).
      * @returns Whether it is down; null where no keycode carries it.
@@ -251,9 +426,32 @@ export class Host {
         return typeof held === 'boolean' ? held : null;
     }
 
-    /** @returns Where the X pointer is on the root, or null. */
-    async pointer(): Promise<[number, number] | null> {
-        return pair(fields(await this.request('x11.pointer')).at);
+    /**
+     * Where the X pointer is on the root.
+     * @param display The display; the test display by default.
+     * @returns The point, or null.
+     */
+    async pointer(display?: string): Promise<[number, number] | null> {
+        return pair(fields(await this.request('x11.pointer', display ? { display } : {})).at);
+    }
+
+    /**
+     * A plain titled window for a window manager to take, until released.
+     * @param name Its title.
+     * @param display The display; the test display by default.
+     * @returns Its handle and X id, and the frame the manager put it in (null while it has none).
+     */
+    async managedProbe(name: string, display?: string): Promise<Held & { id: number; frame: () => Promise<[number, number, number, number] | null> }> {
+        const answer = await this.request('x11.probe', { name, ...(display ? { display } : {}) });
+        const held = this.held(answer);
+        return {
+            ...held,
+            id: numberOr(fields(answer).id) ?? 0,
+            frame: async () => {
+                const f = fields(await this.request('x11.frame', { handle: held.handle })).frame;
+                return Array.isArray(f) && f.length === 4 && f.every((v) => typeof v === 'number') ? [Number(f[0]), Number(f[1]), Number(f[2]), Number(f[3])] : null;
+            },
+        };
     }
 
     /** @returns The X display's window manager, its pid 0 when unknown; null for none. */
@@ -263,9 +461,13 @@ export class Host {
         return { pid: numberOr(manager.pid) ?? 0, name: stringOr(manager.name) ?? '' };
     }
 
-    /** @returns The X root's size, read on a fresh connection, or null. */
-    async rootSize(): Promise<[number, number] | null> {
-        return pair(fields(await this.request('x11.root_size')).size);
+    /**
+     * The X root's size, read on a fresh connection.
+     * @param display The display; the test display by default.
+     * @returns The size, or null.
+     */
+    async rootSize(display?: string): Promise<[number, number] | null> {
+        return pair(fields(await this.request('x11.root_size', display ? { display } : {})).size);
     }
 
     /**
@@ -278,12 +480,42 @@ export class Host {
     }
 
     /**
-     * Own CLIPBOARD on the X display, serving `payload` until released.
-     * @param payload The text handed to every requestor.
-     * @returns The owner.
+     * The targets CLIPBOARD's owner on the X display offers, by name.
+     * @param timeoutS How long its owner is given to answer.
+     * @returns The names, or null when none answers.
      */
-    async ownClipboard(payload: string): Promise<Held> {
-        return this.held(await this.request('x11.own_clipboard', { payload }));
+    async x11Targets(timeoutS = 8): Promise<string[] | null> {
+        const got = fields(await this.request('x11.targets', { timeout_ms: Math.round(timeoutS * 1000) })).targets;
+        return Array.isArray(got) ? got.filter((t): t is string => typeof t === 'string') : null;
+    }
+
+    /**
+     * CLIPBOARD on the X display converted to `target`, in one conversion on
+     * a connection of its own, as a paste makes.
+     * @param target The target (`text/html`, `UTF8_STRING`, ...).
+     * @param timeoutS How long its owner is given to answer.
+     * @returns The bytes, or null when refused or unanswered.
+     */
+    async x11Convert(target: string, timeoutS = 5): Promise<Buffer | null> {
+        const hex = stringOr(fields(await this.request('x11.convert', { target, timeout_ms: Math.round(timeoutS * 1000) })).hex);
+        return hex === undefined ? null : Buffer.from(hex, 'hex');
+    }
+
+    /**
+     * Own CLIPBOARD on the X display until released, as an application does.
+     * @param payload What any target `formats` does not name is answered
+     *     with, `UTF8_STRING` offered for it; null to refuse such targets.
+     * @param formats Further targets offered, each answered with its own bytes.
+     * @returns The owner, which says whether it still holds the clipboard.
+     */
+    async ownClipboard(payload: string | Buffer | null, formats: Readonly<Record<string, string | Buffer>> = {}): Promise<Held & { owns: () => Promise<boolean> }> {
+        const bytes = (v: string | Buffer, key: string, hexKey: string): Record<string, string> => (typeof v === 'string' ? { [key]: v } : { [hexKey]: v.toString('hex') });
+        const answer = await this.request('x11.own_clipboard', {
+            ...(payload === null ? {} : bytes(payload, 'payload', 'payload_hex')),
+            formats: Object.entries(formats).map(([target, data]) => ({ target, ...bytes(data, 'text', 'hex') })),
+        });
+        const held = this.held(answer);
+        return { ...held, owns: async () => fields(await this.request('x11.owns', { handle: held.handle })).owns === true };
     }
 
     /**
@@ -304,10 +536,11 @@ export class Host {
      * @param width Its screen's width, which Xvfb fixes as its largest.
      * @param height Its screen's height.
      * @param extra Further Xvfb arguments.
+     * @param binary The server (a path, or a name on PATH).
      * @returns Its display and its handle.
      */
-    async xvfb(width = 1280, height = 720, extra: readonly string[] = []): Promise<Held & { display: string }> {
-        const answer = await this.request('xvfb.start', { width, height, extra });
+    async xvfb(width = 1280, height = 720, extra: readonly string[] = [], binary = 'Xvfb'): Promise<Held & { display: string }> {
+        const answer = await this.request('xvfb.start', { width, height, extra, binary });
         return { ...this.held(answer), display: stringOr(fields(answer).display) ?? '' };
     }
 
@@ -350,6 +583,40 @@ export class Host {
     private held(answer: unknown): Held {
         const handle = numberOr(fields(answer).handle) ?? 0;
         return { handle, release: async () => { await this.request('release', { handle }); } };
+    }
+
+    /**
+     * Leave a socket file at `path` whose listener has gone away, as a dead
+     * server leaves one.
+     * @param path The socket's path.
+     */
+    async staleSocket(path: string): Promise<void> {
+        await this.request('unix.stale', { path });
+    }
+
+    /**
+     * The threads a process runs now.
+     * @param pid The process.
+     * @returns Their ids.
+     */
+    async threads(pid: number): Promise<number[]> {
+        const list = fields(await this.request('threads', { pid })).threads;
+        return Array.isArray(list) ? list.filter((t): t is number => typeof t === 'number') : [];
+    }
+
+    /**
+     * Busy processes on the highest CPU of `threads`, stopped until resumed.
+     * @param threads A server's runtime threads, read before a page connects.
+     * @param stall Also set the threads to the lowest priority.
+     * @returns The load.
+     */
+    async load(threads: readonly number[], stall = true): Promise<Load> {
+        const held = this.held(await this.request('load.start', { threads, stall }));
+        return {
+            ...held,
+            resume: async () => { await this.request('load.resume', { handle: held.handle }); },
+            pause: async () => { await this.request('load.pause', { handle: held.handle }); },
+        };
     }
 
     /**
