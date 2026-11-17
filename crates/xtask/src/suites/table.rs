@@ -782,6 +782,13 @@ pub static SUITES: &[Suite] = &[
     suite("e2e/ws_unix_socket.spec.ts", "e2e", 600),
     suite("e2e/jupyter_proxy.spec.ts", "e2e", 600),
     suite("perf/pacer.spec.ts", "perf", 3600),
+    Suite {
+        path: "perf/congestion_step.spec.ts",
+        tier: "perf",
+        timeout: 900,
+        selectors: &["websockets", "webrtc", "webrtc-split"],
+        name: None,
+    },
     suite("perf/transfer_saturation.spec.ts", "perf", 1800),
     suite("soak/test_capture_api.py", "soak", 2400),
     suite("soak/test_capture_api_extra.py", "soak", 2400),

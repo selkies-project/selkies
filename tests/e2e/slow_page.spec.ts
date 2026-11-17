@@ -45,7 +45,7 @@ import { Host, suitesBin } from '../lib/host.ts';
 import { PC_TAP_JS } from '../lib/page.ts';
 import { checkPicture, CORRUPT_FRACTION, type Checked } from '../lib/scene.ts';
 import { closeBrowser, waitWrVideo, waitWsVideo, within } from '../lib/stream.ts';
-import { makeRelay, Shaper, type Relay } from '../lib/udprelay.ts';
+import { makeRelay, Shaper, SHAPED_JS, type Relay } from '../lib/udprelay.ts';
 
 const WIDTH = 1280;
 const HEIGHT = 720;
@@ -93,55 +93,6 @@ const FRAME_TAP_JS = `
       configurable: true,
       get: () => transport,
       set: (v) => { transport = v; if (v && v.addEventListener) v.addEventListener('message', tap); },
-    });
-  })();
-`;
-
-// Over WebRTC, the slow page's path to the server is the relays the test runs:
-// every UDP host candidate of the server's becomes the relay the page's
-// __shapedRelay returns for it, every other is dropped, and the page's own
-// candidates are withheld, so the server meets the page as a peer-reflexive
-// candidate behind a relay. Its decode counters are read from __pcs.
-const SHAPED_JS = `
-  (() => {
-    const Orig = window.RTCPeerConnection;
-    window.__pcs = [];
-    const Wrapped = function(...a) { const pc = new Orig(...a); window.__pcs.push(pc); return pc; };
-    Wrapped.prototype = Orig.prototype;
-    Object.setPrototypeOf(Wrapped, Orig);
-    window.RTCPeerConnection = Wrapped;
-    const CAND = /^(a=)?candidate:(\\S+) (\\d+) (udp) (\\d+) (\\S+) (\\d+) typ host(.*)$/i;
-    const shaped = async (line) => {
-      const m = line.match(CAND);
-      if (!m) return null;
-      const [host, port] = await window.__shapedRelay(m[6], Number(m[7]));
-      return \`\${m[1] || ''}candidate:\${m[2]} \${m[3]} \${m[4]} \${m[5]} \${host} \${port} typ host\${m[8]}\`;
-    };
-    const setRemote = Orig.prototype.setRemoteDescription;
-    Orig.prototype.setRemoteDescription = async function(desc) {
-      if (desc && desc.sdp) {
-        const lines = [];
-        for (const l of desc.sdp.split('\\r\\n')) {
-          if (!l.startsWith('a=candidate:')) { lines.push(l); continue; }
-          const r = await shaped(l);
-          if (r) lines.push(r);
-        }
-        desc = {type: desc.type, sdp: lines.join('\\r\\n')};
-      }
-      return setRemote.call(this, desc);
-    };
-    const addCandidate = Orig.prototype.addIceCandidate;
-    Orig.prototype.addIceCandidate = async function(c) {
-      if (!c || !c.candidate) return addCandidate.call(this, c);
-      const r = await shaped(c.candidate);
-      if (!r) return;
-      return addCandidate.call(this, {candidate: r, sdpMid: c.sdpMid, sdpMLineIndex: c.sdpMLineIndex});
-    };
-    const handler = Object.getOwnPropertyDescriptor(Orig.prototype, 'onicecandidate');
-    Object.defineProperty(Orig.prototype, 'onicecandidate', {
-      configurable: true,
-      get() { return handler.get.call(this); },
-      set(fn) { handler.set.call(this, (e) => (e.candidate ? undefined : fn(e))); },
     });
   })();
 `;
