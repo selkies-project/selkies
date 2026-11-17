@@ -13,7 +13,7 @@
 //! is checked to succeed once before it is timed: a bench that measured an error's early return
 //! would read as a speedup.
 //!
-//! `cargo bench -p selkies-rtc` runs them under Criterion; CI runs them under CodSpeed's
+//! `cargo bench -p selkies-rtc` runs them under Criterion locally; CI runs them under CodSpeed's
 //! instruction counting (`cargo codspeed`), which keys its history on the names below.
 
 use std::hint::black_box;
