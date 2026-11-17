@@ -316,27 +316,18 @@ fn the_shipped_shell_parses_and_lints() {
         );
     }
 
-    let helpers = sorted(
-        roots
-            .iter()
-            .flat_map(|r| service_dirs(r))
-            .flat_map(|service| entries(&service, |p| name_of(p).ends_with(".py")))
-            .collect(),
+    // The services' helpers are shell: none ships an interpreter's script beside it.
+    let python: Vec<String> = roots
+        .iter()
+        .flat_map(|r| service_dirs(r))
+        .flat_map(|service| entries(&service, |p| name_of(p).ends_with(".py")))
+        .map(|p| rel(&p))
+        .collect();
+    checks.check(
+        "no service ships a Python helper",
+        python.is_empty(),
+        python.join(", "),
     );
-    for path in &helpers {
-        let compiled = Command::new("python3")
-            .args(["-m", "py_compile"])
-            .arg(path)
-            .output();
-        let (ok, err) = match compiled {
-            Ok(out) => (
-                out.status.success(),
-                String::from_utf8_lossy(&out.stderr).trim().to_owned(),
-            ),
-            Err(e) => (false, e.to_string()),
-        };
-        checks.check(&format!("compile {}", rel(path)), ok, err);
-    }
 
     // An absence invisible until a desktop is in front of someone: a raised latency must reach
     // the daemons.
