@@ -17,11 +17,11 @@
  * @module
  */
 
-import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { stripTypeScriptTypes } from 'node:module';
-import { extname, join, normalize, resolve, sep } from 'node:path';
+import { extname, join, resolve, sep } from 'node:path';
 
 /**
  * The JavaScript a TypeScript module strips to.
@@ -52,6 +52,35 @@ export interface Served {
     /** `http://127.0.0.1:<port>`. */
     url: string;
     close: () => Promise<void>;
+}
+
+/**
+ * The path under `root` that a request's `pathname` names, found through the
+ * directory listings rather than taken from the request: every segment,
+ * percent-decoded, has to be a name its directory lists, so `..`, `.`, a
+ * segment holding a slash and a name that is not there all lead nowhere, and
+ * what comes back is built only from names the tree already holds.
+ * @param root The directory served.
+ * @param pathname The request's path, still percent-encoded.
+ * @returns The path, or undefined when no listed name matches.
+ */
+function locate(root: string, pathname: string): string | undefined {
+    let at = root;
+    for (const raw of pathname.split('/')) {
+        if (raw === '') continue;
+        let wanted: string;
+        let names: string[];
+        try {
+            wanted = decodeURIComponent(raw);
+            names = readdirSync(at);
+        } catch {
+            return undefined;
+        }
+        const name = names.find((n) => n === wanted);
+        if (name === undefined) return undefined;
+        at = join(at, name);
+    }
+    return at;
 }
 
 /** The largest POST body served, in bytes. */
@@ -95,16 +124,9 @@ export async function serveTypeScript(served: string, onPost?: (path: string, bo
             });
             return;
         }
-        let rel: string;
-        try {
-            rel = normalize(decodeURIComponent(url.pathname));
-        } catch {
-            res.writeHead(400).end();
-            return;
-        }
-        const path = join(root, rel);
-        if (rel.split(sep).includes('..') || !inside(path, root)) {
-            res.writeHead(403).end();
+        const path = locate(root, url.pathname);
+        if (path === undefined) {
+            res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('not found\n');
             return;
         }
         let stamp: number;

@@ -15,6 +15,8 @@
 // credential prompt, which a headless engine has nobody to answer. The page
 // therefore carries a password the server refuses: Playwright offers it once,
 // then cancels the prompt, which is what a user who cannot log in does.
+import { randomBytes } from 'node:crypto';
+
 import { test } from '@playwright/test';
 
 import { launchBrowser } from '../lib/browsers.ts';
@@ -39,7 +41,7 @@ test('auth_refresh', async () => {
             const baseNavs = navigates.length;
 
             await host.stop();
-            await host.start({ label: 'auth', mode: 'websockets', port, env: { SELKIES_ENABLE_BASIC_AUTH: 'true', SELKIES_BASIC_AUTH_USER: 'selkies', SELKIES_BASIC_AUTH_PASSWORD: 'hunter2' } });
+            await host.start({ label: 'auth', mode: 'websockets', port, env: { SELKIES_ENABLE_BASIC_AUTH: 'true', SELKIES_BASIC_AUTH_USER: 'selkies', SELKIES_BASIC_AUTH_PASSWORD: randomBytes(12).toString('hex') } });
 
             let reloaded = false;
             for (const until = Date.now() + 75_000; Date.now() < until;) {
