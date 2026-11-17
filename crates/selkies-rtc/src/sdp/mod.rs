@@ -55,8 +55,9 @@ pub const MAX_SSRCS: usize = 512;
 /// than it prints back.
 pub const MAX_RTCP_FB: usize = 512;
 /// The most text a description's feedback may print back, in bytes: an `a=rtcp-fb` line prints
-/// once for each codec it lands on, every codec of its section for `*`, so its length times
-/// those codecs is counted rather than what was read. A browser's offer prints a few kilobytes.
+/// once for each codec it lands on, every codec of its section for `*`, with that codec's
+/// payload type, so what each of those lines prints is counted rather than what was read. A
+/// browser's offer prints a few kilobytes.
 pub const MAX_RTCP_FB_TEXT: usize = 64 * 1024;
 /// The longest remote description read at all, in bytes: a browser's answer is a few
 /// kilobytes.
@@ -804,6 +805,15 @@ fn ip_from_sdp(info: &ConnectionInformation) -> Option<String> {
     info.address.as_ref().map(|a| a.address.clone())
 }
 
+/// How many characters a payload type prints as.
+fn decimal_digits(payload_type: u8) -> usize {
+    match payload_type {
+        0..=9 => 1,
+        10..=99 => 2,
+        _ => 3,
+    }
+}
+
 /// `rtc_sdp::MediaDescription::attribute` reports a flag as `Some(None)`, whose value reads as the
 /// empty string.
 fn attribute_value(attribute: &Attribute) -> &str {
@@ -1128,9 +1138,18 @@ impl SessionDescription {
                         if feedback > MAX_RTCP_FB {
                             return Err(SdpError::Bound(MAX_RTCP_FB, "feedback entries"));
                         }
-                        // Each prints `a=rtcp-fb:<payload type> <kind> <parameter>\r\n`, which
-                        // the value, its own payload type or `*` included, plus 16 bounds.
-                        feedback_text += landed * (value.len() + 16);
+                        // Each codec it lands on prints `a=rtcp-fb:<payload type> <kind>
+                        // <parameter>\r\n`: the value with that codec's payload type in place
+                        // of what was read (`*`, or digits with leading zeros), which its
+                        // length plus 16 bounds. Charged as printed, a description that is
+                        // printed and parsed again is charged the same.
+                        let rest = value.len() - bits[0].len();
+                        feedback_text += media
+                            .codecs
+                            .iter()
+                            .filter(|c| lands(c))
+                            .map(|c| decimal_digits(c.payload_type) + rest + 16)
+                            .sum::<usize>();
                         if feedback_text > MAX_RTCP_FB_TEXT {
                             return Err(SdpError::Bound(MAX_RTCP_FB_TEXT, "feedback text"));
                         }
