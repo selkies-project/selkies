@@ -19,7 +19,7 @@ use super::super::packet::{
     TRANSMISSION_OFFSET_URI, TRANSPORT_CC_URI, VIDEO_TIMING_URI,
 };
 use super::super::params::HeaderExtensionParameters;
-use super::super::rtcp::{PsfbPacket, RtpfbPacket};
+use super::super::rtcp::{PsfbPacket, ReceiverInfo, RtpfbPacket};
 use super::*;
 
 /// A transport recording what it was handed; its refusals and backlog are the test's.
@@ -3259,4 +3259,42 @@ fn repairs_and_key_frame_requests_wait_on_a_full_path() {
         h.s.repair_room(10_000_000, false, now),
         "a budget lifted lets any repair through again"
     );
+}
+
+#[test]
+fn a_report_on_an_older_sender_report_measures_the_round_trip() {
+    // A round trip longer than the gap between two sender reports: the receiver's report
+    // echoes the one before the newest.
+    let mut h = Harness::selective();
+    let lsr_of = |compound: &[u8]| {
+        RtcpPacket::parse(compound)
+            .unwrap()
+            .into_iter()
+            .find_map(|p| match p {
+                RtcpPacket::Sr { sender_info, .. } => {
+                    Some(((sender_info.ntp_timestamp >> 16) & 0xFFFF_FFFF) as u32)
+                }
+                _ => None,
+            })
+            .unwrap()
+    };
+    let first = lsr_of(&h.s.rtcp_report(h.clock));
+    let _newer = h.s.rtcp_report(h.clock + 0.7);
+    let rr = RtcpPacket::Rr {
+        ssrc: 99,
+        reports: vec![ReceiverInfo {
+            ssrc: h.s.ssrc,
+            fraction_lost: 0,
+            packets_lost: 0,
+            highest_sequence: 0,
+            jitter: 0,
+            lsr: first,
+            dlsr: 6554, // 0.1 s
+        }],
+    };
+    h.s.handle_rtcp(&rr, &mut h.tr, h.clock + 1.5);
+    let rtt =
+        h.s.rtt()
+            .expect("the report on the older sender report measured nothing");
+    assert!((rtt - 1.4).abs() < 0.01, "round trip {rtt}");
 }

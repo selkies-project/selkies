@@ -107,6 +107,10 @@ use super::rtcp::{
 use super::twcc::TwccSender;
 
 pub const RTT_ALPHA: f64 = 0.85;
+/// The sender reports a receiver report's LSR is matched against. One goes out every 0.5 to
+/// 1.5 s (`send_report`), and a receiver echoes the last it received: a round trip longer than
+/// the gap to the next one, as a standing queue makes it, echoes one before the newest.
+pub const SR_KEPT: usize = 8;
 /// Receive-only reporters answered per sender report (libwebrtc answers at most 50 per XR).
 pub const RRTR_REPORTERS_MAX: usize = 50;
 /// How long a peer may send nothing at all before this sender stops: a browser sends
@@ -589,8 +593,9 @@ pub struct RtpSender {
     fec_group: Vec<(Vec<u8>, Payload)>,
     fec_first_seq: u16,
     frame_ends: VecDeque<(u16, FrameEnd)>,
-    lsr: Option<u32>,
-    lsr_time: f64,
+    /// The sender reports sent last (`SR_KEPT`): the middle 32 bits of each one's NTP
+    /// timestamp, which a receiver report echoes as its LSR, and when it was sent.
+    sr_sent: VecDeque<(u32, f64)>,
     rtp_timestamp: u32,
     rtp_instant_ns: i64,
     rtp_clock_rate: u32,
@@ -675,8 +680,7 @@ impl RtpSender {
             fec_group: Vec::with_capacity(FEC_GROUP_PACKETS),
             fec_first_seq: 0,
             frame_ends: VecDeque::with_capacity(FRAME_ENDS_MAX),
-            lsr: None,
-            lsr_time: 0.0,
+            sr_sent: VecDeque::with_capacity(SR_KEPT),
             rtp_timestamp: 0,
             rtp_instant_ns: 0,
             rtp_clock_rate: 0,
@@ -2027,8 +2031,15 @@ impl RtpSender {
         match packet {
             RtcpPacket::Rr { reports, .. } | RtcpPacket::Sr { reports, .. } => {
                 for report in reports.iter().filter(|r| r.ssrc == self.ssrc) {
-                    if self.lsr == Some(report.lsr) && report.dlsr != 0 {
-                        let rtt = now - self.lsr_time - f64::from(report.dlsr) / 65536.0;
+                    let sent_at = self
+                        .sr_sent
+                        .iter()
+                        .find(|(lsr, _)| *lsr == report.lsr)
+                        .map(|(_, at)| *at);
+                    if let Some(sent_at) = sent_at
+                        && report.dlsr != 0
+                    {
+                        let rtt = now - sent_at - f64::from(report.dlsr) / 65536.0;
                         self.rtt = Some(match self.rtt {
                             None => rtt,
                             Some(old) => RTT_ALPHA * old + (1.0 - RTT_ALPHA) * rtt,
@@ -2188,8 +2199,11 @@ impl RtpSender {
             reports: vec![],
         }
         .serialize();
-        self.lsr = Some(((ntp_timestamp >> 16) & 0xFFFF_FFFF) as u32);
-        self.lsr_time = now;
+        if self.sr_sent.len() == SR_KEPT {
+            self.sr_sent.pop_front();
+        }
+        self.sr_sent
+            .push_back((((ntp_timestamp >> 16) & 0xFFFF_FFFF) as u32, now));
         if let Some(cname) = &self.cname {
             compound.extend(
                 RtcpPacket::Sdes {
