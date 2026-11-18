@@ -258,12 +258,13 @@ struct Win {
     mapped: bool,
     /// Whether the engine has chosen the window's place.
     placed: bool,
-    /// The client area the engine wants, in layout coordinates.
+    /// The client area the engine wants, in layout coordinates; the committed one while a
+    /// window that follows its commits ([`Engine::follows_commits`]) is resized.
     rect: Rect,
     /// The size the client last drew at.
     committed: Option<Size>,
-    /// The edge the last resize drag held still, kept until the client's answer to that drag
-    /// has arrived, so a size the client snaps to after the release keeps that edge in place.
+    /// The edge the last resize drag held still, until the client answers the drag's last
+    /// configure.
     resize_anchor: Option<ResizeEdge>,
     /// The geometry before a maximize, a quick tile, or fullscreen.
     saved: Option<Rect>,
@@ -1144,31 +1145,37 @@ impl Engine {
         self.emit_stack();
     }
 
-    fn resized(&mut self, id: WindowId, size: Size) {
+    /// A client committed a size; `answered` says whether it answers the newest configure.
+    /// During a drag, and after a resize until its answer, the commit lands against the held
+    /// edge and the frame follows it with no configure back; any other size is kept in the
+    /// work area.
+    fn resized(&mut self, id: WindowId, size: Size, answered: bool) {
+        let grab = self.grab.as_ref().filter(|g| g.window == id).map(|g| g.kind);
         let Some(win) = self.windows.get_mut(&id) else {
             return;
         };
         win.committed = Some(size);
-        if let Some(grab) = self.grab.as_ref().filter(|g| g.window == id) {
+        let held = match grab {
+            Some(GrabKind::Resize(edge)) => Some(edge),
+            Some(GrabKind::Move) => None,
+            None => win.resize_anchor,
+        };
+        if grab.is_none() && answered {
+            win.resize_anchor = None;
+        }
+        if grab.is_some() || held.is_some() {
             if size.w > 0 && size.h > 0 && (win.rect.w != size.w || win.rect.h != size.h) {
                 let wanted = win.rect;
-                let mut rect = wanted;
-                if let GrabKind::Resize(edge) = grab.kind {
+                if let Some(edge) = held {
                     if edge.left() {
-                        rect.x = wanted.right() - size.w;
+                        win.rect.x = wanted.right() - size.w;
                     }
                     if edge.top() {
-                        rect.y = wanted.bottom() - size.h;
+                        win.rect.y = wanted.bottom() - size.h;
                     }
                 }
-                rect.w = size.w;
-                rect.h = size.h;
-                win.rect = rect;
-                // A compositor places the commit against the held edge itself, and a configure
-                // back at this size would ask the client for one the pointer has left.
-                if self.backend != Backend::Wayland {
-                    self.configure(id);
-                }
+                win.rect.w = size.w;
+                win.rect.h = size.h;
                 self.render_frame(id);
             }
             return;
@@ -1178,14 +1185,6 @@ impl Engine {
                 return;
             }
             let wanted = win.rect;
-            if let Some(edge) = win.resize_anchor.take() {
-                if edge.left() {
-                    win.rect.x = wanted.right() - size.w;
-                }
-                if edge.top() {
-                    win.rect.y = wanted.bottom() - size.h;
-                }
-            }
             win.rect.w = size.w;
             win.rect.h = size.h;
             let extents = self.extents_of(id);
@@ -1283,29 +1282,35 @@ impl Engine {
         if let Some(win) = self.windows.get_mut(&id) {
             win.rect = rect;
             win.placed = true;
+            win.resize_anchor = None;
         }
         self.configure(id);
     }
 
-    /// Send the window's configure when its geometry or states differ from the last one sent.
-    /// Send a window its rectangle and states where they changed since the last configure. A
-    /// resize grab from the left or top edge holds the opposite edge, so a compositor places
-    /// each size the client commits against it.
+    /// Send a window its rectangle and states where they changed since the last configure.
     fn configure(&mut self, id: WindowId) {
+        if let Some(rect) = self.win(id).map(|w| w.rect) {
+            self.configure_to(id, rect);
+        }
+    }
+
+    /// Send a window `rect` and its states where they changed since the last configure. A
+    /// resize marks it resizing and, until its answer, holds the edge opposite the dragged one.
+    fn configure_to(&mut self, id: WindowId, rect: Rect) {
         let focused = self.focus == Some(id);
-        let held = match self.grab.as_ref() {
+        let (resizing, held) = match self.grab.as_ref() {
             Some(grab) if grab.window == id => match grab.kind {
-                GrabKind::Resize(edge) => (edge.left(), edge.top()),
-                GrabKind::Move => (false, false),
+                GrabKind::Resize(edge) => (true, Some(edge)),
+                GrabKind::Move => (false, None),
             },
-            _ => (false, false),
+            _ => (false, self.win(id).and_then(|w| w.resize_anchor)),
         };
         let Some(win) = self.windows.get_mut(&id) else {
             return;
         };
         let mut states = win.states(focused);
-        (states.holds_right, states.holds_bottom) = held;
-        let rect = win.rect;
+        states.resizing = resizing;
+        (states.holds_right, states.holds_bottom) = held.map_or((false, false), |e| (e.left(), e.top()));
         if win.sent == Some((rect, states)) {
             return;
         }
@@ -2838,8 +2843,11 @@ impl Engine {
             }
             GrabKind::Resize(edge) => grab::constrain(wanted, &hints, edge),
         };
+        let follows = matches!(grab.kind, GrabKind::Resize(_)) && self.follows_commits(id);
         if let Some(win) = self.windows.get_mut(&id) {
-            win.rect = rect;
+            if !follows {
+                win.rect = rect;
+            }
             win.resize_anchor = None;
             if let Some(o) = self
                 .outputs
@@ -2850,10 +2858,25 @@ impl Engine {
                 win.output = o.id;
             }
         }
-        self.configure(id);
-        self.render_frame(id);
+        if follows {
+            self.configure_to(id, rect);
+        } else {
+            self.configure(id);
+            self.render_frame(id);
+        }
     }
 
+    /// Whether the window's frame follows its commits in a resize rather than the pointer: an
+    /// xdg toplevel answers late and at a size of its choosing; an X11 window takes the size set.
+    fn follows_commits(&self, id: WindowId) -> bool {
+        self.backend == Backend::Wayland
+            && self
+                .win(id)
+                .is_some_and(|w| w.info.kind == Some(pixelflux::wm::WindowKind::Xdg))
+    }
+
+    /// End the drag; a window that follows its commits is sent the last size without the
+    /// resizing state, its edge held until the answer.
     fn end_grab(&mut self) {
         self.tile_dwell = None;
         let preview = self.tile_preview.take();
@@ -2861,9 +2884,13 @@ impl Engine {
         if let Some(grab) = self.grab.take() {
             let id = grab.window;
             if let GrabKind::Resize(edge) = grab.kind
+                && self.follows_commits(id)
                 && let Some(win) = self.windows.get_mut(&id)
             {
                 win.resize_anchor = Some(edge);
+                if let Some((rect, _)) = win.sent {
+                    self.configure_to(id, rect);
+                }
             }
             if let Some((zone, output)) = preview {
                 if let Some(win) = self.windows.get_mut(&id) {
@@ -4991,8 +5018,8 @@ impl WindowPolicy for Engine {
                 self.mapped(id, size);
                 Verdict::Pass
             }
-            Event::Resized { id, size } => {
-                self.resized(id, size);
+            Event::Resized { id, size, answered } => {
+                self.resized(id, size, answered);
                 Verdict::Pass
             }
             Event::Unmapped { id } => {
@@ -6132,12 +6159,13 @@ mod tests {
             })
             .expect("the drag configures the window");
         assert_eq!((rect.w, rect.right()), (650, start.right()));
-        assert!(states.holds_right && !states.holds_bottom);
+        assert!(states.holds_right && !states.holds_bottom && states.resizing);
         out.clear();
         engine.handle(
             Event::Resized {
                 id: 1,
                 size: Size { w: 620, h: 400 },
+                answered: false,
             },
             &mut out,
         );
@@ -6146,6 +6174,74 @@ mod tests {
             (engine.windows[&1].rect.w, engine.windows[&1].rect.right()),
             (620, start.right())
         );
+    }
+
+    /// A resize of an xdg toplevel configures from the pointer and frames what the client
+    /// commits; the release resends the last size unresizing with the edge held until answered.
+    #[test]
+    fn a_resize_of_a_client_snapping_its_size_follows_its_commits() {
+        let (mut engine, _) = engine();
+        open(&mut engine, 1, 600, 400);
+        let start = engine.windows[&1].rect;
+        let at = (f64::from(start.x), f64::from(start.y) + 200.0);
+        engine.pointer = at;
+        engine.run_action(&Action::Resize(Some(ResizeEdge::Left)), Some(1), at);
+        let motion = |engine: &mut Engine, x: f64| {
+            let mut out = Vec::new();
+            engine.handle(
+                Event::Pointer(
+                    PointerEvent {
+                        x,
+                        y: at.1,
+                        kind: PointerKind::Motion,
+                        modifiers: Modifiers::default(),
+                        time: 10,
+                    },
+                    Under::default(),
+                ),
+                &mut out,
+            );
+            out.iter().find_map(|c| match c {
+                Command::Configure { id: 1, rect, states } => Some((*rect, *states)),
+                _ => None,
+            })
+        };
+        let configured = motion(&mut engine, at.0 - 50.0).expect("the drag configures the window");
+        assert_eq!(engine.windows[&1].rect, start, "the frame waits for the client");
+        let mut out = Vec::new();
+        engine.handle(
+            Event::Resized {
+                id: 1,
+                size: Size { w: 642, h: 396 },
+                answered: true,
+            },
+            &mut out,
+        );
+        let snapped = Rect::new(start.right() - 642, start.y, 642, 396);
+        assert_eq!(engine.windows[&1].rect, snapped);
+        assert!(motion(&mut engine, at.0 - 50.0).is_none());
+        assert_eq!(engine.windows[&1].rect, snapped);
+        engine.end_grab();
+        let out = std::mem::take(&mut engine.out);
+        let (rect, states) = out
+            .iter()
+            .find_map(|c| match c {
+                Command::Configure { id: 1, rect, states } => Some((*rect, *states)),
+                _ => None,
+            })
+            .expect("the release configures the window");
+        assert_eq!(rect, configured.0);
+        assert!(!states.resizing && states.holds_right);
+        engine.handle(
+            Event::Resized {
+                id: 1,
+                size: Size { w: 642, h: 396 },
+                answered: true,
+            },
+            &mut Vec::new(),
+        );
+        assert_eq!(engine.windows[&1].rect, snapped);
+        assert_eq!(engine.windows[&1].resize_anchor, None);
     }
 
     /// A bind on the bare Super key runs on its release whether the press reports the key's own

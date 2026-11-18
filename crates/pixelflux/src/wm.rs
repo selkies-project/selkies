@@ -450,8 +450,13 @@ pub enum Event {
     Changed(WindowInfo),
     /// The client drew its first buffer: the window is on screen at this size.
     Mapped { id: WindowId, size: Size },
-    /// A mapped window committed a new size.
-    Resized { id: WindowId, size: Size },
+    /// A mapped toplevel committed a new size or answered a configure with another one;
+    /// `answered` says whether it answers the newest configure.
+    Resized {
+        id: WindowId,
+        size: Size,
+        answered: bool,
+    },
     /// The client withdrew its window (a null buffer, an unmap); it may map again.
     Unmapped { id: WindowId },
     /// The window is gone.
