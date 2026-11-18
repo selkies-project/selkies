@@ -353,7 +353,12 @@ impl Session {
         media.rtcp_host = Some("0.0.0.0".to_owned());
         media.rtcp_port = Some(9);
         media.rtcp_mux = true;
-        media.ssrc = vec![SsrcDescription::new(transceiver.ssrc, &self.cname)];
+        // Audio's SSRC stays unsignaled: the page routes it by MID and takes a new SSRC as a new
+        // receive stream of the same track, which is how the sender sheds the delay a standing
+        // queue taught the page's jitter buffer (`RtpSender::reseat`).
+        if transceiver.kind != MediaKind::Audio {
+            media.ssrc = vec![SsrcDescription::new(transceiver.ssrc, &self.cname)];
+        }
         if transceiver.codecs.iter().any(Codec::is_rtx) {
             media
                 .ssrc

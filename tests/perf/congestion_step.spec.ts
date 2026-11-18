@@ -22,13 +22,15 @@
 // `webrtc` and `webrtc-split`: Chromium behind UDP relays whose downlink rate
 // steps, read from getStats: the audio the jitter buffer sped up (removed for
 // acceleration) or stretched, what it concealed and how deep it ran, and the
-// video frames decoded per 100 ms. `webrtc-split` gives audio a stream id of
+// video frames decoded per 100 ms, summed over audio's receive streams (the
+// server moves audio to a new SSRC once a queue drains). `webrtc-split` gives audio a stream id of
 // its own and plays it from an element of its own, out of video's lip-sync
 // group, which tells that group's share in what the recovery speeds up.
 //
 // Low latency means a recovery plays no backlog (#620): the player is not left
 // to shed delay one packet per arrival, nor the jitter buffer to time-compress
-// it, which is heard as a fast-forward, and frames held during the congestion
+// it, which is heard as a fast-forward, nor left holding the delay the queue
+// taught it once the queue is gone, and frames held during the congestion
 // are not shown back to back. The checks ask that of the recovery; the numbers
 // are written out beside them (congestion-step-*.json in the work directory)
 // for the runs that change it.
@@ -234,10 +236,18 @@ const STATS_JS = `(() => {
     if (!pc) return;
     const t = performance.now();
     const r = await pc.getStats();
+    // Audio summed over its receive streams: a new SSRC is a new stream of the same track.
+    const audio = [t, 0, 0, 0, 0, 0, 0, 0];
+    let streams = 0;
+    r.forEach((s) => {
+      if (s.type !== 'inbound-rtp' || s.kind !== 'audio') return;
+      streams += 1;
+      [s.removedSamplesForAcceleration, s.insertedSamplesForDeceleration, s.concealedSamples, s.jitterBufferDelay,
+        s.jitterBufferEmittedCount, s.jitterBufferTargetDelay].forEach((v, i) => { audio[i + 2] += v || 0; });
+    });
+    if (streams) rows.push(audio);
     r.forEach((s) => {
       if (s.type !== 'inbound-rtp') return;
-      if (s.kind === 'audio') rows.push([t, 0, s.removedSamplesForAcceleration || 0, s.insertedSamplesForDeceleration || 0,
-        s.concealedSamples || 0, s.jitterBufferDelay || 0, s.jitterBufferEmittedCount || 0, s.jitterBufferTargetDelay || 0]);
       if (s.kind === 'video') rows.push([t, 1, s.framesDecoded || 0, s.framesDropped || 0, s.totalInterFrameDelay || 0, 0, 0, 0]);
     });
   }, 100);
@@ -300,7 +310,8 @@ function rtcPhase(stats: readonly Stat[], from: number, to: number): RtcPhase {
     const pick = (kind: number): Stat[] => stats.filter(([t, k]) => k === kind && t >= from && t < to);
     const audio = pick(0);
     const video = pick(1);
-    const d = (rows: Stat[], i: number): number => ((rows.at(-1)?.[i] ?? 0) - (rows[0]?.[i] ?? 0));
+    // What a counter gained over the rows; a stream that leaves takes its counts out of the sum.
+    const d = (rows: Stat[], i: number): number => rows.slice(1).reduce((sum, row, k) => sum + Math.max(0, row[i] - rows[k][i]), 0);
     const ms = (samples: number): number => Math.round((samples * 1000) / 48_000);
     const emitted = d(audio, 6);
     let densest = 0;
@@ -363,9 +374,11 @@ async function wrStep(res: Checks, host: Host, split: boolean): Promise<void> {
         const row = { link: { highKbit: HIGH_KBIT, lowKbit: LOW_KBIT, lowS: LOW_S }, split, dropped: down.dropped, phases };
         process.stdout.write(`${JSON.stringify(row)}\n`);
         writeFileSync(join(WORKDIR, `congestion-step-${name}.json`), JSON.stringify({ ...row, t0, narrowed, back, end, stats }, null, 0));
-        const { before, recovery } = phases;
+        const { before, recovery, after } = phases;
         res.check('video and audio are received before the step', before.videoFps > 10 && before.audioEmitted > 0, before);
         res.check('the recovery plays no audio sped up', recovery.acceleratedMs <= 20, recovery);
+        res.check('audio plays as late after the recovery as before the step',
+            after.bufferMs <= Math.max(2 * before.bufferMs, before.bufferMs + 100), [before.bufferMs, after.bufferMs]);
         res.check('the recovery shows no held video frames back to back', recovery.densestFrames100ms <= 12, recovery);
         await closeBrowser(browser);
         browser = null;

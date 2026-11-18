@@ -350,12 +350,42 @@ async fn rewrite_candidates(
     Ok(out.join("\r\n"))
 }
 
+/// The offer with a placeholder SSRC on each audio section that names none. The server leaves
+/// audio's SSRC unsignaled for the page to route by MID, and webrtc-rs refuses a section with
+/// neither an SSRC nor RIDs beside others; the peer reads audio by its payload types
+/// (`Streams::payload`), so the placeholder only gets the description accepted.
+fn declare_unsignaled(sdp: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut section: Vec<&str> = Vec::new();
+    let mut placeholder = 0u32;
+    let mut flush = |section: &mut Vec<&str>, out: &mut Vec<String>| {
+        let audio = section.first().is_some_and(|l| l.starts_with("m=audio"));
+        out.extend(section.iter().map(|l| (*l).to_owned()));
+        if audio && !section.iter().any(|l| l.starts_with("a=ssrc:")) {
+            placeholder += 1;
+            out.push(format!("a=ssrc:{placeholder} cname:unsignaled"));
+        }
+        section.clear();
+    };
+    for line in sdp.split("\r\n").filter(|l| !l.is_empty()) {
+        if line.starts_with("m=") {
+            flush(&mut section, &mut out);
+        }
+        section.push(line);
+    }
+    flush(&mut section, &mut out);
+    out.push(String::new());
+    out.join("\r\n")
+}
+
 /// What the offer says each SSRC carries: its media and, for a retransmission or FEC stream of a
 /// section the server sends in, the SSRC it repairs; and the abs-send-time extension's id per
 /// media.
 #[derive(Default)]
 struct Streams {
     kind: HashMap<u32, &'static str>,
+    /// The media of each payload type, for a stream the offer leaves unsignaled (audio's).
+    payload: HashMap<u8, &'static str>,
     rtx: HashMap<u32, u32>,
     fec: Vec<u32>,
     abs_send_time: HashMap<&'static str, u8>,
@@ -390,6 +420,11 @@ impl Streams {
                 } else {
                     ""
                 };
+                if !media.is_empty() {
+                    for pt in m.split(' ').skip(3).filter_map(|x| x.parse().ok()) {
+                        s.payload.entry(pt).or_insert(media);
+                    }
+                }
             } else if line == "a=recvonly" || line == "a=inactive" {
                 sends = false;
             } else if let Some(rest) = line.strip_prefix("a=ssrc:") {
@@ -620,6 +655,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Tap {
             let media = streams
                 .kind
                 .get(&repaired.unwrap_or(ssrc))
+                .or_else(|| streams.payload.get(&p.header.payload_type))
                 .copied()
                 .unwrap_or("unknown");
             let payload = &p.payload[..];
@@ -929,7 +965,8 @@ async fn run() -> Result<(), String> {
                             .collect();
                         emit(&json!({"kind": "streams", "rtx": rtx, "fec": parsed.fec}));
                         *streams.lock().expect("streams") = parsed;
-                        let offer = rewrite_candidates(offer, &up, &down, None).await?;
+                        let offer = declare_unsignaled(offer);
+                        let offer = rewrite_candidates(&offer, &up, &down, None).await?;
                         pc.set_remote_description(Instant::now(),
                             RTCSessionDescription::offer(offer.clone()).map_err(|e| e.to_string())?)
                             .map_err(|e| e.to_string())?;

@@ -818,3 +818,23 @@ fn the_offer_names_the_ladder_the_groups_and_the_extensions_of_a_display() {
         "the camera's section is its sink's alone"
     );
 }
+
+#[test]
+fn audio_goes_unsignaled_while_video_keeps_its_ssrcs() {
+    let (session, raw) = offer("vp9enc", 2);
+    let video = sections(&raw, "video", "sendrecv")[0];
+    assert!(video.contains(&format!("a=ssrc:{} cname:", session.transceivers[0].ssrc)));
+    for audio in sections(&raw, "audio", "sendrecv")
+        .into_iter()
+        .chain(sections(&raw, "audio", "recvonly"))
+    {
+        assert!(
+            !audio.contains("a=ssrc"),
+            "the page routes audio by MID, and a new SSRC is a new stream: {audio}"
+        );
+        assert!(
+            audio.contains("a=mid:") && audio.contains("a=msid:"),
+            "{audio}"
+        );
+    }
+}

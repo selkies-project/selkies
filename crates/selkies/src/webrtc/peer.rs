@@ -379,6 +379,43 @@ fn parse_uplink(
 /// The step a peer's padding is written in.
 const PAD_STEP_S: f64 = 0.005;
 
+/// A queue standing on the path deeper than this teaches the page's audio jitter buffer to
+/// hold that delay long after the queue drains: behind a 1.33 s queue Chrome's NetEQ held
+/// 1.4 s for 15 s after the link came back, and took 20 s more to let it go.
+const RESEAT_QUEUE_S: f64 = 0.3;
+/// The queue counts as drained below this.
+const RESEAT_DRAINED_S: f64 = 0.05;
+/// The fewest seconds between two moves, each a seam in the sound.
+const RESEAT_INTERVAL_S: f64 = 10.0;
+
+/// When the audio sender moves to a new SSRC: once a queue deeper than `RESEAT_QUEUE_S` has
+/// drained. The page takes the new SSRC as a new receive stream of the same track, its jitter
+/// buffer fresh, and drops the audio the old one held late, at one seam.
+#[derive(Default)]
+struct Reseat {
+    queued: bool,
+    last: Option<f64>,
+}
+
+impl Reseat {
+    /// Whether the sender moves now, for the queue the newest feedback found standing.
+    fn step(&mut self, queue_s: f64, now: f64) -> bool {
+        if queue_s > RESEAT_QUEUE_S {
+            self.queued = true;
+            return false;
+        }
+        if !self.queued
+            || queue_s >= RESEAT_DRAINED_S
+            || self.last.is_some_and(|t| now - t < RESEAT_INTERVAL_S)
+        {
+            return false;
+        }
+        self.queued = false;
+        self.last = Some(now);
+        true
+    }
+}
+
 /// The queues the media task reads, made before it starts.
 struct MediaChannels {
     commands: mpsc::UnboundedReceiver<Command>,
@@ -401,6 +438,7 @@ struct Media {
     webcam_index: Option<usize>,
     video: RtpSender,
     audio: Option<RtpSender>,
+    reseat: Reseat,
     microphone: Option<RtpReceiver>,
     webcam: Option<RtpReceiver>,
     router: RtpRouter<Track>,
@@ -514,6 +552,7 @@ impl Peer {
             webcam_index,
             video,
             audio,
+            reseat: Reseat::default(),
             microphone: mic_index.map(|_| RtpReceiver::new("audio")),
             webcam: webcam_index.map(|_| RtpReceiver::new("video")),
             router: RtpRouter::new(),
@@ -1342,18 +1381,31 @@ impl Media {
     }
 
     fn on_audio(&mut self, sample: AudioSample) {
-        if let Some(audio) = self.audio.as_mut() {
-            audio.push_frame(
-                EncodedFrame {
-                    data: sample.data,
-                    timestamp: sample.timestamp,
-                    keyframe: true,
-                    ..EncodedFrame::default()
-                },
-                &mut self.paced,
-                clock::monotonic(),
-            );
+        let Some(audio) = self.audio.as_mut() else {
+            return;
+        };
+        let now = clock::monotonic();
+        if audio.started()
+            && self
+                .reseat
+                .step(self.paced.twcc_state().path_queue_s(), now)
+        {
+            let old = audio.ssrc();
+            let ssrc = audio.reseat();
+            self.router.unregister_sender(Track::Audio);
+            self.router.register_sender(Track::Audio, ssrc, false);
+            debug!(target: "webrtc", "audio of peer {} moved from SSRC {old} to {ssrc} once the path's queue drained", self.peer_id);
         }
+        audio.push_frame(
+            EncodedFrame {
+                data: sample.data,
+                timestamp: sample.timestamp,
+                keyframe: true,
+                ..EncodedFrame::default()
+            },
+            &mut self.paced,
+            now,
+        );
     }
 
     /// Release what the pacer's credit covers and hand its events to the video sender.
@@ -1402,6 +1454,27 @@ async fn recv_audio(feed: &mut Option<RelayTrack<AudioSample>>) -> AudioSample {
 mod tests {
     use super::*;
     use selkies_rtc::rtp::packet::{ABS_SEND_TIME_URI, MID_URI};
+
+    #[test]
+    fn audio_moves_once_a_standing_queue_drains_and_not_more_often_than_the_interval() {
+        let mut r = Reseat::default();
+        assert!(
+            !r.step(0.0, 1.0) && !r.step(0.2, 1.1),
+            "no queue deeper than the bound: no move"
+        );
+        assert!(!r.step(0.9, 2.0), "a standing queue: wait for it to drain");
+        assert!(!r.step(0.1, 3.0), "draining, not drained");
+        assert!(r.step(0.01, 3.5), "drained: move");
+        assert!(!r.step(0.0, 3.6), "once per queue");
+        assert!(
+            !r.step(0.5, 5.0) && !r.step(0.0, 6.0),
+            "a second queue within the interval waits"
+        );
+        assert!(
+            r.step(0.0, 3.5 + RESEAT_INTERVAL_S),
+            "and moves once the interval is up"
+        );
+    }
 
     fn map(extensions: &[(u8, &str)]) -> HeaderExtensionsMap {
         let mut map = HeaderExtensionsMap::new();

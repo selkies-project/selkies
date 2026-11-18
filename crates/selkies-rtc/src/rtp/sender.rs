@@ -762,6 +762,13 @@ impl RtpSender {
         self.fec_ssrc
     }
 
+    /// Move the stream to a new SSRC and return it; for a stream the SDP left unsignaled, which
+    /// the receiver then takes as a new stream of the same track.
+    pub fn reseat(&mut self) -> u32 {
+        self.ssrc = random32();
+        self.ssrc
+    }
+
     /// Give the sender fixed SSRCs, as the SDP that announced them requires.
     pub fn set_ssrcs(&mut self, ssrc: u32, rtx_ssrc: u32, fec_ssrc: u32) {
         self.ssrc = ssrc;
