@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache, SwashContent, Weight};
 use tiny_skia::{
-    Color, FillRule, FilterQuality, IntRect, Mask, Paint, Path, PathBuilder, Pixmap, PixmapMut, PixmapPaint,
-    PixmapRef, Stroke, Transform,
+    Color, FillRule, FilterQuality, IntRect, Mask, Paint, Path, PathBuilder, Pixmap, PixmapMut, PixmapRef,
+    Stroke, Transform,
 };
 
 use crate::geom::Rect;
@@ -251,6 +251,9 @@ pub struct Canvas<'a> {
     pix: PixmapMut<'a>,
     scale: i32,
     clip: Option<IntRect>,
+    /// The mask of the clip it was made for, kept while the clip stays: tiny-skia clips only
+    /// through a mask of the whole pixmap.
+    mask: Option<(IntRect, Mask)>,
 }
 
 impl<'a> Canvas<'a> {
@@ -261,7 +264,12 @@ impl<'a> Canvas<'a> {
     /// * `scale` - The output scale factor applied to every coordinate.
     pub fn new(pix: PixmapMut<'a>, scale: i32) -> Canvas<'a> {
         let clip = IntRect::from_xywh(0, 0, pix.width(), pix.height());
-        Canvas { pix, scale, clip }
+        Canvas {
+            pix,
+            scale,
+            clip,
+            mask: None,
+        }
     }
 
     /// The output scale factor.
@@ -332,28 +340,30 @@ impl<'a> Canvas<'a> {
         self.clip
     }
 
-    /// A mask of the current clip when it is smaller than the pixmap, for the
-    /// path operations that cannot be clipped arithmetically.
-    fn clip_mask(&self) -> Option<Mask> {
-        let whole = IntRect::from_xywh(0, 0, self.pix.width(), self.pix.height())?;
-        let clip = self.clip?;
-        if clip == whole {
-            return None;
+    /// Whether a drawing with physical `bounds` needs the clip's mask, making it if so. A
+    /// drawing a pixel inside the clip needs none.
+    fn needs_mask(&mut self, bounds: tiny_skia::Rect) -> bool {
+        let Some(clip) = self.clip else {
+            return false;
+        };
+        if clip.x() == 0
+            && clip.y() == 0
+            && clip.width() == self.pix.width()
+            && clip.height() == self.pix.height()
+        {
+            return false;
         }
-        let mut mask = Mask::new(self.pix.width(), self.pix.height())?;
-        let rect = tiny_skia::Rect::from_xywh(
-            clip.x() as f32,
-            clip.y() as f32,
-            clip.width() as f32,
-            clip.height() as f32,
-        )?;
-        mask.fill_path(
-            &PathBuilder::from_rect(rect),
-            FillRule::Winding,
-            true,
-            Transform::identity(),
-        );
-        Some(mask)
+        if bounds.left() - 1.0 >= clip.x() as f32
+            && bounds.top() - 1.0 >= clip.y() as f32
+            && bounds.right() + 1.0 <= clip.right() as f32
+            && bounds.bottom() + 1.0 <= clip.bottom() as f32
+        {
+            return false;
+        }
+        if self.mask.as_ref().is_none_or(|(made_for, _)| *made_for != clip) {
+            self.mask = clip_mask(self.pix.width(), self.pix.height(), clip).map(|mask| (clip, mask));
+        }
+        self.mask.is_some()
     }
 
     /// Makes a logical rectangle fully transparent.
@@ -500,14 +510,14 @@ impl<'a> Canvas<'a> {
         let mut paint = Paint::default();
         paint.set_color(color);
         paint.anti_alias = true;
-        let mask = self.clip_mask();
-        self.pix.fill_path(
-            &path,
-            &paint,
-            FillRule::Winding,
-            Transform::identity(),
-            mask.as_ref(),
-        );
+        let masked = self.needs_mask(path.bounds());
+        let mask = if masked {
+            self.mask.as_ref().map(|(_, m)| m)
+        } else {
+            None
+        };
+        self.pix
+            .fill_path(&path, &paint, FillRule::Winding, Transform::identity(), mask);
     }
 
     /// Fills a rounded rectangle with a color computed for every pixel from
@@ -557,14 +567,14 @@ impl<'a> Canvas<'a> {
             ),
             ..Paint::default()
         };
-        let mask = self.clip_mask();
-        self.pix.fill_path(
-            &path,
-            &paint,
-            FillRule::Winding,
-            Transform::identity(),
-            mask.as_ref(),
-        );
+        let masked = self.needs_mask(path.bounds());
+        let mask = if masked {
+            self.mask.as_ref().map(|(_, m)| m)
+        } else {
+            None
+        };
+        self.pix
+            .fill_path(&path, &paint, FillRule::Winding, Transform::identity(), mask);
     }
 
     /// Strokes the outline of a rounded rectangle.
@@ -588,9 +598,14 @@ impl<'a> Canvas<'a> {
             width: width * self.s(),
             ..Stroke::default()
         };
-        let mask = self.clip_mask();
+        let masked = self.needs_mask(outset(path.bounds(), stroke.width));
+        let mask = if masked {
+            self.mask.as_ref().map(|(_, m)| m)
+        } else {
+            None
+        };
         self.pix
-            .stroke_path(&path, &paint, &stroke, Transform::identity(), mask.as_ref());
+            .stroke_path(&path, &paint, &stroke, Transform::identity(), mask);
     }
 
     /// Fills an arbitrary path given in logical coordinates.
@@ -605,10 +620,15 @@ impl<'a> Canvas<'a> {
         let mut paint = Paint::default();
         paint.set_color(color);
         paint.anti_alias = true;
-        let mask = self.clip_mask();
         let transform = Transform::from_scale(self.s(), self.s());
+        let masked = self.needs_mask(mapped(path.bounds(), transform));
+        let mask = if masked {
+            self.mask.as_ref().map(|(_, m)| m)
+        } else {
+            None
+        };
         self.pix
-            .fill_path(path, &paint, FillRule::Winding, transform, mask.as_ref());
+            .fill_path(path, &paint, FillRule::Winding, transform, mask);
     }
 
     /// Strokes an arbitrary path given in logical coordinates.
@@ -630,10 +650,14 @@ impl<'a> Canvas<'a> {
             line_join: tiny_skia::LineJoin::Round,
             ..Stroke::default()
         };
-        let mask = self.clip_mask();
         let transform = Transform::from_scale(self.s(), self.s());
-        self.pix
-            .stroke_path(path, &paint, &stroke, transform, mask.as_ref());
+        let masked = self.needs_mask(outset(mapped(path.bounds(), transform), width * self.s()));
+        let mask = if masked {
+            self.mask.as_ref().map(|(_, m)| m)
+        } else {
+            None
+        };
+        self.pix.stroke_path(path, &paint, &stroke, transform, mask);
     }
 
     /// Draws an image scaled to fit a logical box, centered, keeping its aspect.
@@ -693,13 +717,7 @@ impl<'a> Canvas<'a> {
         let sx = rect.w as f32 * s / image.width() as f32;
         let sy = rect.h as f32 * s / image.height() as f32;
         let transform = Transform::from_row(sx, 0.0, 0.0, sy, rect.x as f32 * s, rect.y as f32 * s);
-        let paint = PixmapPaint {
-            quality: FilterQuality::Bilinear,
-            ..PixmapPaint::default()
-        };
-        let mask = self.clip_mask();
-        self.pix
-            .draw_pixmap(0, 0, image.as_ref(), &paint, transform, mask.as_ref());
+        self.draw_pixmap_clipped(image.as_ref(), FilterQuality::Bilinear, transform);
     }
 
     /// Draws an image at a physical position and uniform scale.
@@ -709,14 +727,35 @@ impl<'a> Canvas<'a> {
         } else {
             FilterQuality::Bilinear
         };
-        let paint = PixmapPaint {
-            quality,
-            ..PixmapPaint::default()
-        };
         let transform = Transform::from_row(scale, 0.0, 0.0, scale, x, y);
-        let mask = self.clip_mask();
-        self.pix
-            .draw_pixmap(0, 0, image, &paint, transform, mask.as_ref());
+        self.draw_pixmap_clipped(image, quality, transform);
+    }
+
+    /// Draws an image through a scale and offset, cut to the clip by filling only its part of
+    /// the image's rectangle with the image as a pattern, as tiny-skia draws a pixmap, so no mask.
+    fn draw_pixmap_clipped(&mut self, image: PixmapRef<'_>, quality: FilterQuality, transform: Transform) {
+        let Some(clip) = self.clip else {
+            return;
+        };
+        let Some(bounds) = tiny_skia::Rect::from_xywh(0.0, 0.0, image.width() as f32, image.height() as f32)
+        else {
+            return;
+        };
+        let Some(area) = tiny_skia::Rect::from_xywh(
+            clip.x() as f32,
+            clip.y() as f32,
+            clip.width() as f32,
+            clip.height() as f32,
+        )
+        .and_then(|clip| mapped(bounds, transform).intersect(&clip)) else {
+            return;
+        };
+        let paint = Paint {
+            shader: tiny_skia::Pattern::new(image, tiny_skia::SpreadMode::Pad, quality, 1.0, transform),
+            anti_alias: false,
+            ..Paint::default()
+        };
+        self.pix.fill_rect(area, &paint, Transform::identity(), None);
     }
 
     /// Draws one shaped line of text with its vertical center on a logical Y.
@@ -1088,6 +1127,43 @@ fn render_svg(bytes: &[u8], size: u32, style_sheet: Option<String>) -> Option<Pi
     Some(pix)
 }
 
+/// A mask of a `width` by `height` pixmap that lets through the rectangle `clip` alone.
+fn clip_mask(width: u32, height: u32, clip: IntRect) -> Option<Mask> {
+    let mut mask = Mask::new(width, height)?;
+    let rect = tiny_skia::Rect::from_xywh(
+        clip.x() as f32,
+        clip.y() as f32,
+        clip.width() as f32,
+        clip.height() as f32,
+    )?;
+    mask.fill_path(
+        &PathBuilder::from_rect(rect),
+        FillRule::Winding,
+        true,
+        Transform::identity(),
+    );
+    Some(mask)
+}
+
+/// A rectangle grown by `by` on every side.
+fn outset(rect: tiny_skia::Rect, by: f32) -> tiny_skia::Rect {
+    tiny_skia::Rect::from_ltrb(
+        rect.left() - by,
+        rect.top() - by,
+        rect.right() + by,
+        rect.bottom() + by,
+    )
+    .unwrap_or(rect)
+}
+
+/// A rectangle's bounds through a transform that scales and moves alone.
+fn mapped(rect: tiny_skia::Rect, transform: Transform) -> tiny_skia::Rect {
+    let (sx, sy, tx, ty) = (transform.sx, transform.sy, transform.tx, transform.ty);
+    let (x0, x1) = (rect.left() * sx + tx, rect.right() * sx + tx);
+    let (y0, y1) = (rect.top() * sy + ty, rect.bottom() * sy + ty);
+    tiny_skia::Rect::from_ltrb(x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)).unwrap_or(rect)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1152,6 +1228,49 @@ mod tests {
         assert_eq!(px(0, 0), 255);
         assert_eq!(px(9, 9), 255);
         assert_eq!(px(10, 10), 0);
+    }
+
+    /// A path inside the clip needs no mask, one past it is cut through the clip's kept mask, and
+    /// a new clip gets its own.
+    #[test]
+    fn a_clipped_path_is_cut_at_the_clip_alone() {
+        let mut pix = Pixmap::new(40, 40).unwrap();
+        {
+            let mut canvas = Canvas::new(pix.as_mut(), 1);
+            canvas.clip(Rect::new(5, 5, 20, 20));
+            canvas.fill_rounded(Rect::new(8, 8, 10, 10), 3.0, rgb(255, 0, 0));
+            assert!(canvas.mask.is_none(), "a path inside the clip needs no mask");
+            canvas.fill_rounded(Rect::new(0, 0, 40, 12), 3.0, rgb(0, 255, 0));
+            let first = canvas.mask.as_ref().map(|(clip, _)| *clip);
+            canvas.stroke_rounded(Rect::new(0, 20, 40, 10), 3.0, 2.0, rgb(0, 0, 255));
+            assert_eq!(
+                canvas.mask.as_ref().map(|(clip, _)| *clip),
+                first,
+                "the mask is kept for its clip"
+            );
+            canvas.clip(Rect::new(10, 10, 5, 5));
+            canvas.fill_rect(Rect::new(0, 0, 40, 40), rgb(255, 255, 255));
+            canvas.fill_rounded(Rect::new(0, 0, 40, 40), 2.0, rgb(255, 255, 0));
+            assert_ne!(
+                canvas.mask.as_ref().map(|(clip, _)| *clip),
+                first,
+                "a new clip gets its own mask"
+            );
+        }
+        let alpha = |x: usize, y: usize| pix.data()[(y * 40 + x) * 4 + 3];
+        assert_eq!(alpha(12, 12), 255);
+        assert_eq!(alpha(4, 8), 0, "left of the clip");
+        assert_eq!(alpha(26, 8), 0, "right of the clip");
+        assert_eq!(alpha(10, 2), 0, "above the clip");
+        assert_eq!(alpha(10, 7), 255, "the cut fill inside the clip");
+        assert_eq!(alpha(30, 21), 0, "the cut stroke right of the clip");
+        assert_eq!(alpha(10, 21), 255, "the stroke inside the clip");
+        let yellow =
+            |x: usize, y: usize| pix.data()[(y * 40 + x) * 4..(y * 40 + x) * 4 + 4] == [255, 255, 0, 255];
+        assert!(
+            yellow(12, 12) && !yellow(16, 16),
+            "the second clip cuts the second fill"
+        );
     }
 
     #[test]
