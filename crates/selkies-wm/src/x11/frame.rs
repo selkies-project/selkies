@@ -267,8 +267,15 @@ impl FrameWindow {
             let x = part.rect.x * scale + self.extents.left;
             let y = part.rect.y * scale + self.extents.top;
             let (w, h) = (part.rect.w * scale, part.rect.h * scale);
-            put_image(conn, pixmap, self.gc, &part.image, Rect::new(x, y, w, h));
-            shaped.extend(opaque_rectangles(&part.image, x, y, w, h));
+            put_image(
+                conn,
+                pixmap,
+                self.gc,
+                &part.image,
+                part.source,
+                Rect::new(x, y, w, h),
+            );
+            shaped.extend(opaque_rectangles(&part.image, part.source, x, y, w, h));
         }
         let _ = conn.change_window_attributes(
             self.window,
@@ -292,23 +299,39 @@ impl FrameWindow {
     }
 }
 
-/// Put a premultiplied RGBA image into a drawable at a pixel rectangle, pixel for pixel where
-/// the image has the rectangle's size and resampled to it where it does not.
+/// The physical left, top, width, and height of the part of an image `source` names.
+fn source_span(image: &Image, source: Option<Rect>) -> (u32, u32, u32, u32) {
+    let s = image.scale.max(1) as u32;
+    match source {
+        Some(r) => (
+            r.x.max(0) as u32 * s,
+            r.y.max(0) as u32 * s,
+            r.w.max(1) as u32 * s,
+            r.h.max(1) as u32 * s,
+        ),
+        None => (0, 0, image.width, image.height),
+    }
+}
+
+/// Put a premultiplied RGBA image, or its part `source` names, into a drawable at a pixel
+/// rectangle, resampled where the sizes differ.
 fn put_image(
     conn: &RustConnection,
     drawable: xproto::Drawable,
     gc: xproto::Gcontext,
     image: &Image,
+    source: Option<Rect>,
     at: Rect,
 ) {
     let (x, y, w, h) = (at.x, at.y, at.w, at.h);
     let (iw, ih) = (image.width, image.height);
+    let (sx0, sy0, sw, sh) = source_span(image, source);
     let (w, h) = (w.max(1) as u32, h.max(1) as u32);
     let mut data = Vec::with_capacity((w * h * 4) as usize);
     for row in 0..h {
-        let sy = (row * ih / h).min(ih.saturating_sub(1));
+        let sy = (sy0 + row * sh / h).min(ih.saturating_sub(1));
         for col in 0..w {
-            let sx = (col * iw / w).min(iw.saturating_sub(1));
+            let sx = (sx0 + col * sw / w).min(iw.saturating_sub(1));
             let o = ((sy * iw + sx) * 4) as usize;
             let (r, g, b, a) = (
                 image.rgba.get(o).copied().unwrap_or(0),
@@ -350,16 +373,24 @@ fn put_image(
 
 /// The runs of a part's pixels that are more than half opaque, as rectangles at its place of
 /// `w` by `h` pixels, for the frame's shape.
-fn opaque_rectangles(image: &Image, x: i32, y: i32, w: i32, h: i32) -> Vec<xproto::Rectangle> {
+fn opaque_rectangles(
+    image: &Image,
+    source: Option<Rect>,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+) -> Vec<xproto::Rectangle> {
     let (iw, ih) = (image.width, image.height);
+    let (sx0, sy0, sw, sh) = source_span(image, source);
     let (w, h) = (w.max(1) as u32, h.max(1) as u32);
     let mut rects = Vec::new();
     for row in 0..h {
-        let sy = (row * ih / h).min(ih.saturating_sub(1));
+        let sy = (sy0 + row * sh / h).min(ih.saturating_sub(1));
         let mut run: Option<u32> = None;
         for col in 0..=w {
             let opaque = col < w && {
-                let sx = (col * iw / w).min(iw.saturating_sub(1));
+                let sx = (sx0 + col * sw / w).min(iw.saturating_sub(1));
                 let o = ((sy * iw + sx) * 4 + 3) as usize;
                 image.rgba.get(o).copied().unwrap_or(0) >= 128
             };
@@ -483,8 +514,15 @@ impl OverlayWindow {
         {
             return;
         }
-        put_image(conn, pixmap, self.gc, image, Rect::new(0, 0, rect.w, rect.h));
-        let shaped = opaque_rectangles(image, 0, 0, rect.w, rect.h);
+        put_image(
+            conn,
+            pixmap,
+            self.gc,
+            image,
+            None,
+            Rect::new(0, 0, rect.w, rect.h),
+        );
+        let shaped = opaque_rectangles(image, None, 0, 0, rect.w, rect.h);
         let _ = conn.shape_rectangles(
             shape::SO::SET,
             shape::SK::BOUNDING,
@@ -540,7 +578,7 @@ mod tests {
             scale: 1,
             rgba: Arc::from(rgba),
         };
-        let rects = opaque_rectangles(&image, 10, 20, 4, 4);
+        let rects = opaque_rectangles(&image, None, 10, 20, 4, 4);
         assert_eq!(rects.len(), 1);
         assert_eq!(
             (rects[0].x, rects[0].y, rects[0].width, rects[0].height),

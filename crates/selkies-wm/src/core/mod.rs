@@ -2626,6 +2626,7 @@ impl Engine {
             scale,
             shadow: self.backend == Backend::Wayland && !maximized,
             buttons: self.buttons_of(id),
+            sliced: self.backend == Backend::Wayland,
         };
         let look = self.theme.look;
         let frame: Frame = self.renderer.render(&look, client, &appearance);
@@ -4820,6 +4821,7 @@ impl TileGhostLook<'_> {
                 scale: self.scale,
                 shadow: false,
                 buttons: self.buttons,
+                sliced: false,
             };
             renderer.render(self.look, client, &appearance)
         });

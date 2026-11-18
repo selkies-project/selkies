@@ -27,6 +27,7 @@
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use smithay::backend::allocator::Fourcc;
@@ -62,11 +63,23 @@ use crate::wm::{
     WindowId, WindowInfo, WindowKind, WindowPolicy, WindowType,
 };
 
-/// A frame's parts as render buffers, placed relative to the client area.
+/// A frame's parts as render buffers, placed relative to the client area, front to back.
 #[derive(Clone)]
 pub struct FrameBuffers {
     pub extents: Extents,
-    pub parts: Vec<(Rect, MemoryRenderBuffer)>,
+    pub parts: Vec<PartBuffer>,
+}
+
+/// One frame part as a render buffer.
+#[derive(Clone)]
+pub struct PartBuffer {
+    /// Where the part sits, relative to the client area.
+    pub rect: Rect,
+    /// The part of the buffer stretched over `rect`, the whole buffer where `None`.
+    pub source: Option<Rectangle<f64, Logical>>,
+    pub buffer: MemoryRenderBuffer,
+    /// The pixels the buffer was made from: a frame handing the same ones keeps the buffer.
+    pixels: Arc<[u8]>,
 }
 
 /// An overlay as render buffers at a layout rectangle: the whole picture, or the pieces its
@@ -1399,7 +1412,8 @@ where
         }
     }
     if let Some(frame) = ghost.frame.as_ref() {
-        for (rect, buffer) in &frame.parts {
+        for part in &frame.parts {
+            let rect = part.rect;
             let (location, size) = place(Rect::new(
                 ghost.geometry.x + rect.x,
                 ghost.geometry.y + rect.y,
@@ -1409,9 +1423,9 @@ where
             if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
                 renderer,
                 location,
-                buffer,
+                &part.buffer,
                 Some(effect.alpha),
-                None,
+                part.source,
                 Some(size),
                 Kind::Unspecified,
             ) {
@@ -1443,7 +1457,8 @@ where
     };
     let sx = f64::from(effect.rect.w) / f64::from(client.w.max(1));
     let sy = f64::from(effect.rect.h) / f64::from(client.h.max(1));
-    for (rect, buffer) in &frame.parts {
+    for part in &frame.parts {
+        let rect = part.rect;
         let x = f64::from(effect.rect.x) + f64::from(rect.x) * sx - f64::from(origin.x);
         let y = f64::from(effect.rect.y) + f64::from(rect.y) * sy - f64::from(origin.y);
         let location = Point::<f64, Logical>::from((x, y)).to_physical(Scale::from(scale));
@@ -1455,9 +1470,9 @@ where
         if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             location,
-            buffer,
+            &part.buffer,
             Some(effect.alpha),
-            None,
+            part.source,
             Some(size),
             Kind::Unspecified,
         ) {
@@ -1676,10 +1691,27 @@ fn set_frame(state: &mut AppState, id: WindowId, frame: Option<Frame>) {
     };
     match frame {
         Some(frame) => {
+            let mut previous = wm.frames.remove(&id).map(|f| f.parts).unwrap_or_default();
             let parts = frame
                 .parts
                 .iter()
-                .map(|part| (part.rect, buffer_of(&part.image)))
+                .map(|part| {
+                    let kept = previous
+                        .iter()
+                        .position(|p| Arc::ptr_eq(&p.pixels, &part.image.rgba))
+                        .map(|i| previous.swap_remove(i).buffer);
+                    PartBuffer {
+                        rect: part.rect,
+                        source: part.source.map(|r| {
+                            Rectangle::new(
+                                (f64::from(r.x), f64::from(r.y)).into(),
+                                (f64::from(r.w), f64::from(r.h)).into(),
+                            )
+                        }),
+                        buffer: kept.unwrap_or_else(|| buffer_of(&part.image)),
+                        pixels: part.image.rgba.clone(),
+                    }
+                })
                 .collect();
             wm.frames.insert(
                 id,
@@ -1949,7 +1981,8 @@ where
     let Some(frame) = wm.and_then(|wm| wm.frames.get(&id)) else {
         return elements;
     };
-    for (rect, buffer) in &frame.parts {
+    for part in &frame.parts {
+        let rect = part.rect;
         let loc = Point::<i32, Logical>::from((
             client_loc.x + rect.x - origin.x,
             client_loc.y + rect.y - origin.y,
@@ -1958,9 +1991,9 @@ where
         if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             location,
-            buffer,
+            &part.buffer,
             Some(alpha),
-            None,
+            part.source,
             Some((rect.w, rect.h).into()),
             Kind::Unspecified,
         ) {

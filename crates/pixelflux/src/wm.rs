@@ -525,6 +525,9 @@ pub struct FramePart {
     /// Where the part sits, relative to the client area, in logical pixels.
     pub rect: Rect,
     pub image: Image,
+    /// The part of `image` stretched over `rect`, in its logical pixels; the whole image where
+    /// `None`. A band is read from inside identical pixels, so filtering stays exact.
+    pub source: Option<Rect>,
 }
 
 /// A window's server-side frame: the border it adds around the client area and the parts
@@ -533,6 +536,7 @@ pub struct FramePart {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Frame {
     pub extents: Extents,
+    /// The parts, front to back; they overlap only for a backend that blends them.
     pub parts: Vec<FramePart>,
 }
 

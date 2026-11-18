@@ -35,7 +35,10 @@
 //! Every part is rasterized at the output's integer scale and placed relative to the client
 //! area's top-left corner, so a backend presents it without knowing what it shows. A frame is
 //! drawn again only when something it shows changed (the title, the focus, a hovered button, the
-//! width), never per frame of the stream.
+//! width), never per frame of the stream; for the compositor it is assembled from cached pieces
+//! ([`pieces`]), so a resize draws nothing.
+
+mod pieces;
 
 use std::sync::Arc;
 
@@ -124,7 +127,7 @@ pub fn title_offset(style: WindowStyle, slot: i32, drawn: i32) -> i32 {
 }
 
 /// Which buttons a title bar shows, the image's choice over the theme's three.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Buttons {
     pub minimize: bool,
     pub maximize: bool,
@@ -320,13 +323,15 @@ pub struct Appearance<'a> {
     pub shadow: bool,
     /// The title bar's buttons.
     pub buttons: Buttons,
+    /// Whether the backend stretches and blends parts, so cached pieces may be used ([`pieces`]).
+    pub sliced: bool,
 }
 
-/// The rasterizer of frames: the font system and the icon lookup, kept across frames so text
-/// shaping and icon files are cached.
+/// The rasterizer of frames: fonts, icons, and frame pieces, kept across frames as caches.
 pub struct Renderer {
     pub fonts: Fonts,
     pub icons: Icons,
+    pieces: pieces::Pieces,
 }
 
 impl Renderer {
@@ -335,18 +340,24 @@ impl Renderer {
         Renderer {
             fonts: Fonts::new(),
             icons: Icons::new(icon_theme),
+            pieces: pieces::Pieces::default(),
         }
     }
 
-    /// Switch icon themes.
+    /// Switch icon themes, dropping the pieces drawn with the old one.
     pub fn set_icon_theme(&mut self, icon_theme: Option<&str>) {
         self.icons = Icons::new(icon_theme);
+        self.pieces = pieces::Pieces::default();
     }
 
-    /// The frame around a client of `client` logical pixels, every part drawn: the title bar,
-    /// the left and right borders, the bottom border, and then the shadow's strips when the
-    /// appearance asks for them.
+    /// The frame around a client of `client` logical pixels: from cached pieces where allowed and
+    /// large enough, else drawn whole, the title bar, the borders, and the shadow's strips.
     pub fn render(&mut self, look: &Look, client: Size, appearance: &Appearance<'_>) -> Frame {
+        if appearance.sliced
+            && let Some(frame) = self.render_sliced(look, client, appearance)
+        {
+            return frame;
+        }
         let style = &look.style;
         let palette = &look.palette;
         let layout = layout(
@@ -367,6 +378,7 @@ impl Renderer {
             parts.push(FramePart {
                 rect: Rect::new(origin_x, origin_y, w, e.top),
                 image,
+                source: None,
             });
         }
         let (base, border) = if appearance.active {
@@ -385,10 +397,12 @@ impl Renderer {
             parts.push(FramePart {
                 rect: Rect::new(origin_x, 0, e.left, side_h),
                 image: render_side(e.left, side_h, scale, base, border, 0),
+                source: None,
             });
             parts.push(FramePart {
                 rect: Rect::new(client.w, 0, e.right, side_h),
                 image: render_side(e.right, side_h, scale, base, border, e.right - 1),
+                source: None,
             });
         }
         if e.bottom > 0 {
@@ -397,6 +411,7 @@ impl Renderer {
             parts.push(FramePart {
                 rect,
                 image: render_bottom(w, e.bottom, scale, base, border, radius, under),
+                source: None,
             });
         }
         if let Some(shadow) = &shadow {
@@ -857,6 +872,7 @@ fn render_shadow(shadow: &Shadow, scale: i32) -> Vec<FramePart> {
             Some(FramePart {
                 rect: strip,
                 image: image_of(pixmap, scale),
+                source: None,
             })
         })
         .collect()
@@ -1038,6 +1054,7 @@ mod tests {
             scale,
             shadow,
             buttons: Buttons::ALL,
+            sliced: false,
         }
     }
 
