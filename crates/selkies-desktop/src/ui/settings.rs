@@ -3104,7 +3104,7 @@ fn draw_preset(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hove
         rect.h - 2 * PRESET_PAD - PRESET_NAME,
     );
     let scale = canvas.scale();
-    let width = (image_rect.w * scale).max(1) as u32;
+    let width = thumbnail_step((image_rect.w * scale).max(1) as u32);
     if let Some(look) = &control.look
         && let Some(image) = preset_image(d, look, scale, width)
     {
@@ -3162,7 +3162,7 @@ fn draw_wallpaper_card(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Contr
     let Some(card) = control.wallpaper.clone() else {
         return;
     };
-    let size = (image_rect.w * canvas.scale()).max(1) as u32;
+    let size = thumbnail_step((image_rect.w * canvas.scale()).max(1) as u32);
     match &card.light {
         None => {
             let color = d.painted_wallpaper(config::Wallpaper::default(), (1, 1)).color;
@@ -3234,6 +3234,16 @@ fn draw_wallpaper_card(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Contr
     } else if hovered {
         canvas.stroke_rounded(rect, CARD_RADIUS, 1.0, ui::text_dim());
     }
+}
+
+/// The picture size for a card `width` physical pixels wide: the first step of a ladder rising
+/// a quarter at a time that holds it, so a resize scales one picture instead of making a new one.
+fn thumbnail_step(width: u32) -> u32 {
+    let mut step = 128;
+    while step < width {
+        step = (step + step / 4).div_ceil(16) * 16;
+    }
+    step
 }
 
 /// Draws a picture's thumbnail covering a card's thumbnail area, cut to one
@@ -4345,6 +4355,20 @@ pub fn close(d: &mut Desktop) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A card's picture size holds its width with at most a quarter to spare and rarely changes.
+    #[test]
+    fn a_resized_card_keeps_its_thumbnail_size() {
+        for width in [1, 127, 128, 129, 300, 641, 1999, 4000] {
+            let step = thumbnail_step(width);
+            assert!(
+                step >= width && step <= (width.max(128) * 5).div_ceil(4) + 16,
+                "{width} -> {step}"
+            );
+        }
+        let steps: std::collections::BTreeSet<u32> = (300..600).map(thumbnail_step).collect();
+        assert!(steps.len() <= 4, "{steps:?}");
+    }
     use std::collections::HashMap;
 
     /// A config built from a preset's own changes.

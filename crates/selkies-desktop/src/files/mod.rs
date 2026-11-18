@@ -844,7 +844,8 @@ impl Manager {
         self.thumbnail_of(path, modified, size)
     }
 
-    /// The thumbnail of a file at a modification time and size, queued when not yet made.
+    /// The thumbnail of a file at a modification time and size, queued when not yet made and
+    /// meanwhile the one at the nearest other size.
     fn thumbnail_of(&mut self, path: &std::path::Path, modified: i64, size: u32) -> Option<Arc<Pixmap>> {
         let key = ThumbKey {
             path: path.to_path_buf(),
@@ -855,7 +856,11 @@ impl Manager {
             return cached.clone();
         }
         self.worker.request_thumbnail(key);
-        None
+        self.thumbs
+            .iter()
+            .filter(|(k, v)| k.path == path && k.modified == modified && v.is_some())
+            .min_by_key(|(k, _)| k.size.abs_diff(size))
+            .and_then(|(_, v)| v.clone())
     }
 
     /// Queues copying or moving files into a folder for a window.
