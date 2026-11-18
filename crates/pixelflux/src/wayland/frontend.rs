@@ -3564,10 +3564,13 @@ impl SeatHandler for AppState {
     /// A client requested a cursor change (named, hidden, or surface-backed): retain it as
     /// the current icon and forward it to the Python cursor callback. A surface-backed one
     /// is delivered by the surface's commit or by `flush_pending_cursor`, whichever is first.
+    /// Records the cursor a client asked for and shows it unless the policy shows its own: the
+    /// seat resets to the default as the pointer leaves a client for a frame.
     fn cursor_image(&mut self, _seat: &Seat<AppState>, image: CursorImageStatus) {
         self.current_cursor_icon = Some(image.clone());
         self.cursor_surface_pending = matches!(image, CursorImageStatus::Surface(_));
-        if !self.cursor_surface_pending {
+        let policy_cursor = self.wm.as_ref().is_some_and(|wm| wm.cursor.is_some());
+        if !self.cursor_surface_pending && !policy_cursor {
             self.send_cursor_image(&image);
         }
     }
