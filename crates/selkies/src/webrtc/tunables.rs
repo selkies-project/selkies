@@ -53,8 +53,9 @@ const FPS_MIN_FRAMES: u64 = 4;
 /// video target is cut and a peer's audio takes more than `AUDIO_SHARE` of the path's delivery,
 /// its RED redundancy drops a payload a tick, coming back one a tick once the deeper stream would
 /// take under half that share, or the target is back at its ceiling (`red_step`): RED's depth
-/// multiplies audio's rate, 128 kbit/s at a depth of two near 400.
-const AUDIO_SHARE: f64 = 0.5;
+/// multiplies audio's rate, 128 kbit/s at a depth of two near 400, over a quarter of a
+/// 1.5 Mbit/s path, of which transport-cc reports only part as delivered.
+const AUDIO_SHARE: f64 = 0.25;
 
 /// The payload bit/s a peer's audio sent since the last tick, from the octets it had sent then
 /// and when (`before`) and the octets it has sent `now`; 0 on its first tick.
@@ -1387,7 +1388,7 @@ mod shed_tests {
             "one where the deeper stream would take more than half AUDIO_SHARE holds"
         );
         assert_eq!(
-            shed(140_000.0, 1_200_000.0, true),
+            shed(140_000.0, 2_400_000.0, true),
             1,
             "one where it would take less brings a payload back"
         );
@@ -1415,6 +1416,11 @@ mod shed_tests {
             red_step(2, 2, 400_000.0, 500_000.0, true),
             Some(Some(1)),
             "a depth under the configured one is set as itself"
+        );
+        assert_eq!(
+            red_step(2, 2, 390_000.0, 1_283_000.0, true),
+            Some(Some(1)),
+            "depth two's 390 kbit/s of a narrow path's 1.28 Mbit/s drops a payload"
         );
         assert_eq!(
             red_step(1, 2, 0.0, 1_000_000.0, false),
