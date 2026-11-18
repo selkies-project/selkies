@@ -111,8 +111,12 @@ struct X11Surface {
     shm: Option<ShmSegment>,
     pixels: Vec<u8>,
     /// The server's copy of the pixels, the window's background, made at the first present of
-    /// a size.
+    /// a size it cannot hold.
     image: Option<xproto::Pixmap>,
+    /// The size `image` was made at, which may exceed the window's.
+    image_size: (i32, i32),
+    /// Whether the surface outgrew its memory, so the next is made with room to spare.
+    growing: bool,
     visible: Vec<Rect>,
     /// The input rectangles last presented, in logical pixels, which a reparent re-applies.
     input: Vec<Rect>,
@@ -121,28 +125,29 @@ struct X11Surface {
 }
 
 impl X11Surface {
-    /// Takes a new pixel size, dropping the pixels of the old one.
+    /// Takes a new pixel size, keeping the segment and the image while they hold it, so a
+    /// resize maps and allocates nothing on either side of the connection.
     fn resize(&mut self, conn: &RustConnection, width: i32, height: i32) {
         self.width = width;
         self.height = height;
-        self.release_pixels(conn);
-        self.pixels.clear();
-    }
-
-    /// Frees the server's copies of the pixels, the image and the segment, and leaves the
-    /// window without a background, so the server paints nothing over what it shows until
-    /// the next present makes them again.
-    fn release_pixels(&mut self, conn: &RustConnection) {
-        if let Some(image) = self.image.take() {
-            let _ = conn.change_window_attributes(
-                self.window,
-                &xproto::ChangeWindowAttributesAux::new().background_pixmap(x11rb::NONE),
-            );
-            let _ = conn.free_pixmap(image);
-        }
-        if let Some(segment) = self.shm.take() {
+        let size = width.max(0) as usize * height.max(0) as usize * 4;
+        if self.shm.as_ref().is_some_and(|segment| segment.map.len() < size)
+            && let Some(segment) = self.shm.take()
+        {
             let _ = conn.shm_detach(segment.seg);
+            self.growing = true;
         }
+        if self.image.is_some() && (self.image_size.0 < width || self.image_size.1 < height) {
+            if let Some(image) = self.image.take() {
+                let _ = conn.change_window_attributes(
+                    self.window,
+                    &xproto::ChangeWindowAttributesAux::new().background_pixmap(x11rb::NONE),
+                );
+                let _ = conn.free_pixmap(image);
+            }
+            self.growing = true;
+        }
+        self.pixels.clear();
     }
 
     /// Destroys the window and frees everything the server holds for it.
@@ -2259,6 +2264,8 @@ fn create_window(
         shm: None,
         pixels: Vec::new(),
         image: None,
+        image_size: (0, 0),
+        growing: false,
         visible: Vec::new(),
         input: Vec::new(),
         bar: None,
@@ -2401,9 +2408,18 @@ impl Backend for X11Backend {
             return;
         }
         let size = w as usize * h as usize * 4;
+        let growing = self.surface_ref(id).is_some_and(|s| s.growing);
+        let (room_w, room_h) = if growing {
+            (
+                (w + w / 4).min(i32::from(i16::MAX)),
+                (h + h / 4).min(i32::from(i16::MAX)),
+            )
+        } else {
+            (w, h)
+        };
         let mut new_segment = None;
         if shm_works && self.surface_ref(id).is_some_and(|s| s.shm.is_none()) {
-            if let Some(fd) = create_memfd(size)
+            if let Some(fd) = create_memfd(room_w as usize * room_h as usize * 4)
                 && let Ok(map) = unsafe { memmap2::MmapMut::map_mut(&fd) }
                 && let Ok(seg) = self.conn.generate_id()
                 && let Ok(server_fd) = fd.try_clone()
@@ -2422,7 +2438,7 @@ impl Backend for X11Backend {
             && let Ok(image) = self.conn.generate_id()
             && self
                 .conn
-                .create_pixmap(self.depth, image, window, w as u16, h as u16)
+                .create_pixmap(self.depth, image, window, room_w as u16, room_h as u16)
                 .is_ok()
         {
             let _ = self.conn.change_window_attributes(
@@ -2444,7 +2460,9 @@ impl Backend for X11Backend {
             }
             if new_image.is_some() {
                 surface.image = new_image;
+                surface.image_size = (room_w, room_h);
             }
+            surface.growing = false;
             let src = frame.pixmap.data();
             match &mut surface.shm {
                 Some(segment) => {
