@@ -3860,7 +3860,6 @@ function getCurrentSettingsPayload(): Record<string, unknown> {
         ['video_paintover_crf', (): number | null => getIntParam('video_paintover_crf', 18)],
         ['video_paintover_burst_frames', (): number | null => getIntParam('video_paintover_burst_frames', 5)],
         ['use_paint_over_quality', (): boolean => getBoolParam('use_paint_over_quality', true)],
-        ['scaling_dpi', (): number | null => getIntParam('scaling_dpi', 96)],
         ['enable_binary_clipboard', (): boolean => getBoolParam('enable_binary_clipboard', false)],
         ['rate_control_mode', (): string => getStringParam('rate_control_mode', 'cbr')],
         ['video_bitrate', (): number | null => getIntParam('video_bitrate', 8000)],
@@ -7933,7 +7932,7 @@ class WorkerWebSocket {
         'video_crf', 'encoder', 'manual_resolution',
         'audio_bitrate', 'video_fullcolor', 'video_10bit', 'video_streaming_mode',
         'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu', 'cpu_encode_threading', 'video_paintover_crf',
-        'video_paintover_burst_frames', 'use_paint_over_quality', 'scaling_dpi',
+        'video_paintover_burst_frames', 'use_paint_over_quality',
         'enable_binary_clipboard', 'rate_control_mode', 'video_bitrate',
         'force_aligned_resolution'
       ];
@@ -7945,7 +7944,7 @@ class WorkerWebSocket {
       const integerSettingKeys = [
         'video_crf', 'audio_bitrate', 'jpeg_quality',
         'paint_over_jpeg_quality', 'video_paintover_crf',
-        'video_paintover_burst_frames', 'scaling_dpi', 'video_bitrate'
+        'video_paintover_burst_frames', 'video_bitrate'
       ];
 
       for (const key in localStorage) {
@@ -7991,9 +7990,7 @@ class WorkerWebSocket {
         settingsToSend['initialClientHeight'] = alignResolution(rect.height * dpr);
       }
 
-      if (settingsToSend['scaling_dpi'] === undefined) {
-        settingsToSend['scaling_dpi'] = effectiveScalingDpi();
-      }
+      settingsToSend['scaling_dpi'] = effectiveScalingDpi();
       framerateAsked = requestedStreamFramerate();
       if (framerateAsked !== null) settingsToSend['framerate'] = framerateAsked;
       if (detectedKeyboardLayout) {

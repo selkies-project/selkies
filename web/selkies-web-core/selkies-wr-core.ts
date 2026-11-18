@@ -1413,7 +1413,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 
 		const knownSettings = [
 			'encoder', 'manual_resolution',
-			'audio_bitrate', 'video_bitrate', 'scaling_dpi', 'enable_binary_clipboard',
+			'audio_bitrate', 'video_bitrate', 'enable_binary_clipboard',
 			'rate_control_mode', 'video_crf', 'use_cpu', 'cpu_encode_threading', 'force_aligned_resolution',
 			'video_fullcolor', 'video_10bit', 'video_streaming_mode', 'use_paint_over_quality',
 			'video_paintover_crf', 'video_paintover_burst_frames'
@@ -1424,7 +1424,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			'force_aligned_resolution'
 		];
 		const integerSettingKeys = [
-			'audio_bitrate', 'scaling_dpi', 'video_crf',
+			'audio_bitrate', 'video_crf',
 			'video_paintover_crf', 'video_paintover_burst_frames', 'video_bitrate'
 		];
 
@@ -1473,9 +1473,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			settingsToSend['manual_width'] = alignResolution(manualWidth);
 			settingsToSend['manual_height'] = alignResolution(manualHeight);
 		}
-		if (settingsToSend['scaling_dpi'] === undefined) {
-			settingsToSend['scaling_dpi'] = effectiveScalingDpi();
-		}
+		settingsToSend['scaling_dpi'] = effectiveScalingDpi();
 		framerateAsked = requestedStreamFramerate();
 		if (framerateAsked !== null) settingsToSend['framerate'] = framerateAsked;
 		if (detectedKeyboardLayout) {
