@@ -837,6 +837,12 @@ impl DisplayLink {
         }
         let probed = self.link_probe.as_ref().is_some_and(|p| p.padding);
         let steer = self.link_steer.get_or_insert_with(CongestionSteer::default);
+        // Delivery reads a narrowed link on the tick its queue stands; held to the drain of the
+        // cut before, the target the faster path set would keep filling it until the hold ran
+        // out.
+        if queue_s > 0.0 && now < steer.hold_until && steer.narrowed(delivered_bps) {
+            steer.end_hold(now);
+        }
         let rate = steer
             .target(SteerTick {
                 current,

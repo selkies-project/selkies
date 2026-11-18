@@ -51,7 +51,8 @@ pub struct SteerTick {
 /// tick that shows it, once, to `HEADROOM` of what the path delivered while it stood, and the
 /// queue already written ahead drains through that headroom: no cut follows until it has had
 /// the time to, at most `DRAIN_MAX_S`, and `SETTLE_S` more, because the draining queue reads as
-/// a queue meanwhile and cutting on each such tick would compound the backoff. Only a backlog
+/// a queue meanwhile and cutting on each such tick would compound the backoff (over WebSockets a
+/// path delivering under `NARROWED` of what it did at the cut ends that wait, `narrowed`). Only a backlog
 /// deeper than `BACKLOG_S` (a start at a rate far over the path's, a link that slowed) drains
 /// faster, the target dipping by what lies past it per `DRAIN_S`, never under `DRAIN_FLOOR` of
 /// the capacity, and back to `HEADROOM` of it once that has drained: a target held under the
@@ -140,6 +141,7 @@ impl CongestionSteer {
     pub const DRAIN_S: f64 = 1.0;
     pub const DRAIN_FLOOR: f64 = 0.5;
     pub const SETTLE_S: f64 = 0.5;
+    pub const NARROWED: f64 = 0.6;
     pub const APP_LIMITED: f64 = 0.5;
     pub const APP_LIMITED_DELIVERED: f64 = 0.8;
     pub const PROBE_STEP: f64 = 1.3;
@@ -325,6 +327,24 @@ impl CongestionSteer {
             raised = raised.min(current.max(self.capacity_kbps.unwrap_or(current)));
         }
         clamp(raised.max(delivered * Self::HEADROOM))
+    }
+
+    /// Whether a path delivering `delivered_bps` under a standing queue narrowed since the cut
+    /// the hold drains: a drain delivers what the path did, so delivery under `NARROWED` of
+    /// the capacity the cut measured is a slower link, whose queue grows for as long as the hold
+    /// keeps the target the old path set (`end_hold`).
+    pub fn narrowed(&self, delivered_bps: f64) -> bool {
+        delivered_bps > 0.0
+            && self
+                .capacity_kbps
+                .is_some_and(|held| delivered_bps < held * 1_000.0 * Self::NARROWED)
+    }
+
+    /// End the hold and its drain now, so the next tick's queue backs off to what the path
+    /// delivers.
+    pub fn end_hold(&mut self, now: f64) {
+        self.hold_until = self.hold_until.min(now);
+        self.drain_until = self.drain_until.min(now);
     }
 
     /// The target a standing queue of `queue_s` backs off to, with the drain it plans.
@@ -1406,6 +1426,33 @@ pub(crate) mod tests {
                 [queue, None, None, None],
             ))
             .round() as i64
+    }
+
+    #[test]
+    fn a_path_that_narrows_during_the_drain_ends_the_hold() {
+        let q = Some(0.4);
+        let range = (100.0, 6000.0);
+        // Cut at 31.0 on 2121 kbps delivered: held to 1803 while that queue drains.
+        let mut steer = queued();
+        assert!(!steer.narrowed(1_500_000.0));
+        assert_eq!(
+            queue_tick(&mut steer, 31.5, q, 1803.0, 1_500_000.0, range, 0.0),
+            1803,
+            "a drain delivering most of what the path did cuts nothing more"
+        );
+        let mut steer = queued();
+        assert_eq!(
+            queue_tick(&mut steer, 31.5, q, 1803.0, 1_000_000.0, range, 0.0),
+            1803,
+            "the hold alone cuts nothing"
+        );
+        assert!(steer.narrowed(1_000_000.0));
+        steer.end_hold(31.5);
+        assert_eq!(
+            queue_tick(&mut steer, 31.5, q, 1803.0, 1_000_000.0, range, 0.0),
+            700,
+            "delivering under NARROWED of the cut's capacity backs off to what it delivers now"
+        );
     }
 
     #[test]
