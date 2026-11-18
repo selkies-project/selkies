@@ -258,7 +258,7 @@ pub static DEFINITIONS: &[SettingDef] = &[
         name: "webrtc_pacer",
         kind: Kind::Bool,
         default: "True",
-        help: "Pace outgoing WebRTC packets per transport with strict priorities (audio/RTCP > data-channel > video), an IDR-aware video queue budget, and GOP-reset recovery, so audio and interactive signaling are protected from video bursts on congested links. Enabled by default; set SELKIES_WEBRTC_PACER=false to disable. SELKIES_WEBRTC_PACER_STALE_MS sets the stale-GOP purge deadline in milliseconds (0 = disabled).",
+        help: "Pace outgoing WebRTC packets per transport with strict priorities (audio/RTCP > data-channel > video), an IDR-aware video queue budget, and GOP-reset recovery, so audio and interactive signaling are protected from video bursts on congested links. Enabled by default; set SELKIES_WEBRTC_PACER=false to disable.",
         env_vars: &[],
         allowed: &[],
         value_range: None,
