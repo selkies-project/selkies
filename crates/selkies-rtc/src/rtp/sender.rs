@@ -147,8 +147,10 @@ pub const FEC_CLEAR_WINDOWS: u32 = 3;
 /// Where congestion control bounds them (a target a queue cut), repairs (retransmissions and
 /// FlexFEC) take at most `REPAIR_SHARE` of the rate it steered the display to, over
 /// `REPAIR_WINDOW_S` (libwebrtc's retransmission rate limiter): a path that loses packets because
-/// it is full is sent no more than it was asked to carry (`set_repair_budget`).
-pub const REPAIR_SHARE: f64 = 1.0;
+/// it is full is sent half again what it was asked to carry at most (`set_repair_budget`). A
+/// peer's NACKs repeat for a round trip before a frame counts as lost, and behind a queue that
+/// round trip is long: at the whole rate their repairs alone could fill the path again.
+pub const REPAIR_SHARE: f64 = 0.5;
 pub const REPAIR_WINDOW_S: f64 = 0.5;
 /// The share of the repair budget FlexFEC leaves to retransmissions (`repair_room`).
 pub const FEC_RESERVE: f64 = 0.5;

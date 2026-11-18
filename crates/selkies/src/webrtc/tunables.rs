@@ -1001,10 +1001,10 @@ impl WebRtcService {
                     (allowance * 1000.0 / 8.0 * CLEANUP_FRAME_S * CLEANUP_FRAME_OVERHEAD) as usize,
                 );
             }
-            // Under a queue-measured cut repairs take no more than the rate steered to, so a path
-            // that loses because it is full is not sent more than it was asked to carry; where loss
-            // alone cut the target they are not bound, since the repairs a random loss asks for
-            // crowd nothing and the goodput they carry holds the target up.
+            // Under a queue-measured cut repairs take at most half the rate steered to, so a path
+            // that loses because it is full is sent at most half again what it was asked to carry;
+            // where loss alone cut the target they are not bound, since the repairs a random loss
+            // asks for crowd nothing and the goodput they carry holds the target up.
             for (_, peer) in padded.get(&did).map_or(&[][..], Vec::as_slice) {
                 peer.set_repair_budget(queued.then_some(target * 1000.0), Some(goodput));
             }
