@@ -400,6 +400,10 @@ pub struct Engine {
     press: Option<Press>,
     last_click: Option<(u32, Context, Option<WindowId>, u32)>,
     grab: Option<Grab>,
+    /// When a resize the engine drives last went out ([`Engine::grab_motion`]).
+    resized_at: Option<Instant>,
+    /// The pointer of a resize motion held for the next stream frame.
+    paced_resize: Option<(f64, f64)>,
     menu: Option<MenuState>,
     cycle: Option<Cycle>,
     effects: Effects,
@@ -497,6 +501,8 @@ impl Engine {
             press: None,
             last_click: None,
             grab: None,
+            resized_at: None,
+            paced_resize: None,
             menu: None,
             cycle: None,
             effects: Effects::default(),
@@ -2801,13 +2807,30 @@ impl Engine {
         });
     }
 
+    /// Follow a drag's pointer; a resize the engine drives itself goes out at most once a
+    /// stream frame, a motion inside the frame held for the next tick.
     fn grab_motion(&mut self, x: f64, y: f64) {
         let Some(grab) = self.grab.clone() else {
             return;
         };
         let id = grab.window;
-        let Some(win) = self.win(id) else {
+        if self.win(id).is_none() {
             self.grab = None;
+            return;
+        }
+        if matches!(grab.kind, GrabKind::Resize(_)) && !self.follows_commits(id) {
+            let period = Duration::from_secs_f64(1.0 / f64::from(self.config.policy.frame_rate.max(1)));
+            if let Some(due) = self.resized_at.map(|at| at + period)
+                && self.now < due
+            {
+                self.paced_resize = Some((x, y));
+                self.out.push(Command::WakeAt(due));
+                return;
+            }
+            self.resized_at = Some(self.now);
+            self.paced_resize = None;
+        }
+        let Some(win) = self.win(id) else {
             return;
         };
         let extents = self.extents_of(id);
@@ -2882,6 +2905,10 @@ impl Engine {
         self.tile_dwell = None;
         let preview = self.tile_preview.take();
         self.clear_tile_ghost();
+        if let Some((x, y)) = self.paced_resize.take() {
+            self.resized_at = None;
+            self.grab_motion(x, y);
+        }
         if let Some(grab) = self.grab.take() {
             let id = grab.window;
             if let GrabKind::Resize(edge) = grab.kind
@@ -4588,6 +4615,9 @@ impl Engine {
 
     fn tick(&mut self, now: Instant) {
         self.now = now;
+        if let Some((x, y)) = self.paced_resize.take() {
+            self.grab_motion(x, y);
+        }
         self.arm_tile_dwell(now);
         let (frames, done) = self.effects.tick(now);
         for (id, transform) in frames {
@@ -6412,6 +6442,63 @@ mod tests {
                 transform: None
             }
         )));
+    }
+
+    /// A resize the engine drives itself configures once a stream frame: a motion inside the
+    /// frame is held for the next tick, which applies it.
+    #[test]
+    fn a_resize_the_engine_drives_is_paced_to_the_stream() {
+        let mut engine = Engine::new(Backend::X11, Box::new(Recorder(Arc::new(Mutex::new(Vec::new())))));
+        engine.config = Config::default();
+        engine.menus = Menus::default();
+        engine.memory = WindowMemory::transient();
+        let mut out = Vec::new();
+        engine.handle(
+            Event::Outputs(vec![OutputInfo {
+                id: 0,
+                rect: Rect::new(0, 0, 1920, 1080),
+                workarea: Rect::new(0, 0, 1920, 1080),
+                scale: 1.0,
+                primary: true,
+            }]),
+            &mut out,
+        );
+        open(&mut engine, 1, 600, 400);
+        let start = engine.windows[&1].rect;
+        let at = (f64::from(start.right()), f64::from(start.y) + 200.0);
+        engine.pointer = at;
+        engine.run_action(&Action::Resize(Some(ResizeEdge::Right)), Some(1), at);
+        let motion = |engine: &mut Engine, x: f64| {
+            let mut out = Vec::new();
+            engine.handle(
+                Event::Pointer(
+                    PointerEvent {
+                        x,
+                        y: at.1,
+                        kind: PointerKind::Motion,
+                        modifiers: Modifiers::default(),
+                        time: 10,
+                    },
+                    Under::default(),
+                ),
+                &mut out,
+            );
+            out
+        };
+        let configures = |out: &[Command]| {
+            out.iter()
+                .filter(|c| matches!(c, Command::Configure { id: 1, .. }))
+                .count()
+        };
+        assert_eq!(configures(&motion(&mut engine, at.0 + 10.0)), 1);
+        let held = motion(&mut engine, at.0 + 20.0);
+        assert_eq!(configures(&held), 0, "a second motion in the frame waits");
+        assert!(held.iter().any(|c| matches!(c, Command::WakeAt(_))));
+        let mut out = Vec::new();
+        engine.handle(Event::Tick(Instant::now() + Duration::from_secs(1)), &mut out);
+        assert!(out.iter().any(
+            |c| matches!(c, Command::Configure { id: 1, rect, .. } if rect.right() == start.right() + 20)
+        ));
     }
 
     /// On X11 a borderless window the size of its output that never asked for fullscreen goes
