@@ -1349,19 +1349,6 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 	}
 
 	/**
-	 * Sends the persisted settings as the session's initial SETTINGS payload.
-	 *
-	 * Every display page sends its own: the server applies a payload to the
-	 * display whose channel delivered it, so a secondary configures only its
-	 * stream, its resolution still riding the resize message. Per-display keys
-	 * carry a `_display2` suffix and each display reads only its own variant.
-	 * Manual dimensions are exact physical pixels and go raw, as on the resize
-	 * path. The DPR-derived `scaling_dpi` is seeded into this first payload
-	 * unless a stored pick was collected: without it the desktop comes up at
-	 * the default DPI and the dashboard's correction a second later forces a
-	 * second capture restart on every HiDPI connect.
-	 */
-	/**
 	 * This page's remote pixels per CSS pixel: its decoded buffer over the box
 	 * drawing it, the ratio a neighbor scales a cross-display drag by
 	 * (lib/stream-density.ts). The requested density stands in until the
@@ -1401,6 +1388,23 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 		webrtc!.sendDataChannelMessage(`_arg_fps,${rate}`);
 	}
 
+	/**
+	 * Sends the persisted settings as the session's initial SETTINGS payload.
+	 *
+	 * Every display page sends its own: the server applies a payload to the
+	 * display whose channel delivered it, so a secondary configures only its
+	 * stream, its resolution still riding the resize message. Per-display keys
+	 * carry a `_display2` suffix and each display reads only its own variant.
+	 * Manual dimensions are exact physical pixels and go raw, as on the resize
+	 * path. `scaling_dpi` is always the DPI the desktop is asked for
+	 * (`effectiveScalingDpi`), the value a live change sends: 96 under CSS
+	 * scaling with an automatic resolution, where the stored pick divides the
+	 * requested resolution instead and sent as it stands would scale the
+	 * desktop a second time, else the stored pick or the DPR-derived default.
+	 * It rides this first payload because without it the desktop comes up at
+	 * the default DPI and the dashboard's correction a second later forces a
+	 * second capture restart on every HiDPI connect.
+	 */
 	function sendClientPersistedSettings(): void {
 		if (isSharedMode) {
 			console.log("Skipping sending client persisted settings in shared mode.");
@@ -1413,7 +1417,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 
 		const knownSettings = [
 			'encoder', 'manual_resolution',
-			'audio_bitrate', 'video_bitrate', 'scaling_dpi', 'enable_binary_clipboard',
+			'audio_bitrate', 'video_bitrate', 'enable_binary_clipboard',
 			'rate_control_mode', 'video_crf', 'use_cpu', 'cpu_encode_threading', 'force_aligned_resolution',
 			'video_fullcolor', 'video_10bit', 'video_streaming_mode', 'use_paint_over_quality',
 			'video_paintover_crf', 'video_paintover_burst_frames'
@@ -1424,7 +1428,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			'force_aligned_resolution'
 		];
 		const integerSettingKeys = [
-			'audio_bitrate', 'scaling_dpi', 'video_crf',
+			'audio_bitrate', 'video_crf',
 			'video_paintover_crf', 'video_paintover_burst_frames', 'video_bitrate'
 		];
 
@@ -1473,9 +1477,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			settingsToSend['manual_width'] = alignResolution(manualWidth);
 			settingsToSend['manual_height'] = alignResolution(manualHeight);
 		}
-		if (settingsToSend['scaling_dpi'] === undefined) {
-			settingsToSend['scaling_dpi'] = effectiveScalingDpi();
-		}
+		settingsToSend['scaling_dpi'] = effectiveScalingDpi();
 		framerateAsked = requestedStreamFramerate();
 		if (framerateAsked !== null) settingsToSend['framerate'] = framerateAsked;
 		if (detectedKeyboardLayout) {

@@ -3860,7 +3860,6 @@ function getCurrentSettingsPayload(): Record<string, unknown> {
         ['video_paintover_crf', (): number | null => getIntParam('video_paintover_crf', 18)],
         ['video_paintover_burst_frames', (): number | null => getIntParam('video_paintover_burst_frames', 5)],
         ['use_paint_over_quality', (): boolean => getBoolParam('use_paint_over_quality', true)],
-        ['scaling_dpi', (): number | null => getIntParam('scaling_dpi', 96)],
         ['enable_binary_clipboard', (): boolean => getBoolParam('enable_binary_clipboard', false)],
         ['rate_control_mode', (): string => getStringParam('rate_control_mode', 'cbr')],
         ['video_bitrate', (): number | null => getIntParam('video_bitrate', 8000)],
@@ -7878,12 +7877,16 @@ class WorkerWebSocket {
 
   /**
    * Sends the initial SETTINGS payload (every stored user pick, the client
-   * geometry or manual resolution, the DPR-derived `scaling_dpi` seeded into
-   * this very first payload so the desktop comes up at the right density
-   * without a second capture restart, the display identity, the keyboard
-   * layout, and the audio-RED capability; a secondary sends only its own
-   * suffixed per-display keys, never the primary's), advertises gzip,
+   * geometry or manual resolution, the `scaling_dpi` the desktop is asked for
+   * seeded into this very first payload so the desktop comes up at the right
+   * density without a second capture restart, the display identity, the
+   * keyboard layout, and the audio-RED capability; a secondary sends only its
+   * own suffixed per-display keys, never the primary's), advertises gzip,
    * requests the cache-only clipboard, and starts the metrics and ack timers.
+   * That `scaling_dpi` is `effectiveScalingDpi`, the value a live change
+   * sends, never the stored pick as it stands: under CSS scaling with an
+   * automatic resolution the pick already divides the requested resolution,
+   * so the desktop is asked for 96 rather than scaled a second time.
    */
   const onSocketOpen = async (): Promise<void> => {
     console.log('[websockets] Connection opened!');
@@ -7933,7 +7936,7 @@ class WorkerWebSocket {
         'video_crf', 'encoder', 'manual_resolution',
         'audio_bitrate', 'video_fullcolor', 'video_10bit', 'video_streaming_mode',
         'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu', 'cpu_encode_threading', 'video_paintover_crf',
-        'video_paintover_burst_frames', 'use_paint_over_quality', 'scaling_dpi',
+        'video_paintover_burst_frames', 'use_paint_over_quality',
         'enable_binary_clipboard', 'rate_control_mode', 'video_bitrate',
         'force_aligned_resolution'
       ];
@@ -7945,7 +7948,7 @@ class WorkerWebSocket {
       const integerSettingKeys = [
         'video_crf', 'audio_bitrate', 'jpeg_quality',
         'paint_over_jpeg_quality', 'video_paintover_crf',
-        'video_paintover_burst_frames', 'scaling_dpi', 'video_bitrate'
+        'video_paintover_burst_frames', 'video_bitrate'
       ];
 
       for (const key in localStorage) {
@@ -7991,9 +7994,7 @@ class WorkerWebSocket {
         settingsToSend['initialClientHeight'] = alignResolution(rect.height * dpr);
       }
 
-      if (settingsToSend['scaling_dpi'] === undefined) {
-        settingsToSend['scaling_dpi'] = effectiveScalingDpi();
-      }
+      settingsToSend['scaling_dpi'] = effectiveScalingDpi();
       framerateAsked = requestedStreamFramerate();
       if (framerateAsked !== null) settingsToSend['framerate'] = framerateAsked;
       if (detectedKeyboardLayout) {
