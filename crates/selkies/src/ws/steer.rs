@@ -92,6 +92,19 @@ pub struct SteerTick {
 /// a tick whose offer went unmeasured (the gate held it); one under it is a path that did slow
 /// and drops it. A backoff within `STALL_EPISODE_S` of a restore keeps nothing, so a path that
 /// did slow backs off on its real delivery rather than restoring each time the queue drains.
+///
+/// A transport that reads its path apart from the tick lands the steer on that reading
+/// ([`CongestionSteer::land`], the WebSocket link's path probe): the target and the capacity
+/// are the landing, with no drain to wait out, and the reading is a cap. A clean tick's
+/// delivery does not forget a landed capacity, nor lift the target over it: where a hop
+/// meters with a burst allowance, a tick sent past its rate still reads clean and delivered,
+/// which is how a capacity taken from a queue tick stands 10 to 60% over the path. The climb
+/// stops at the cap, until content has filled it for `CAP_WAIT_S` (doubling to
+/// `CAP_WAIT_MAX_S` while landings do not show the path grown by `CAP_GREW`): then the
+/// content probes past it (`cap_probing`, for the transport to watch its acks by),
+/// `STEP_NEAR` a second for `CAP_GENTLE_S`, the longest a burst allowance hides so small an
+/// overshoot, and `PROBE_STEP` a second from there, since a path that queued nothing
+/// through that has grown. A queue backoff ends the landing.
 #[derive(Clone, Debug, Default)]
 pub struct CongestionSteer {
     pub strikes: u32,
@@ -125,6 +138,16 @@ pub struct CongestionSteer {
     /// Whether a clean tick has seen the path carry the stream unconstrained: the target at its
     /// ceiling, or over what the stream offered (`holds_to_target`).
     pub carried: bool,
+    /// Until when the capacity is a landing's (`land`): for good, or briefly after a
+    /// provisional one.
+    landed_until: f64,
+    /// The rate the landing's reading showed, which the climb stays under.
+    landed_cap: Option<f64>,
+    /// Since when content has filled the cap, and how long it fills it before it probes.
+    cap_fill_since: Option<f64>,
+    cap_wait_s: f64,
+    /// Whether content is probing past the cap.
+    pub cap_probing: bool,
 }
 
 impl CongestionSteer {
@@ -149,6 +172,12 @@ impl CongestionSteer {
     pub const STALL_DELIVERY: f64 = 0.25;
     pub const STALL_EPISODE_S: f64 = 5.0;
     pub const CARRIED_S: f64 = 2.0;
+    pub const CAP_WAIT_S: f64 = 3.0;
+    pub const CAP_WAIT_MAX_S: f64 = 60.0;
+    pub const CAP_GREW: f64 = 1.05;
+    pub const CAP_GENTLE_S: f64 = 6.0;
+    /// How long a provisional landing holds its capacity against a clean tick's delivery.
+    pub const PROVISIONAL_S: f64 = 5.0;
 
     /// Whether the stream is held to its target past what its encoder meets it by (over WebRTC
     /// the bridge's budget, `PipelineBridge::set_budget`): until the path has carried it
@@ -303,9 +332,11 @@ impl CongestionSteer {
             return clamp(current);
         }
         let delivered = goodput_bps / 1_000.0;
-        if self
-            .capacity_kbps
-            .is_some_and(|capacity| delivered * Self::NEAR > capacity)
+        let landed = now < self.landed_until;
+        if !landed
+            && self
+                .capacity_kbps
+                .is_some_and(|capacity| delivered * Self::NEAR > capacity)
         {
             self.capacity_kbps = None;
         }
@@ -326,7 +357,72 @@ impl CongestionSteer {
         if !filled {
             raised = raised.min(current.max(self.capacity_kbps.unwrap_or(current)));
         }
+        if landed {
+            if !probed && let Some(cap) = self.landed_cap {
+                let since = filled.then(|| *self.cap_fill_since.get_or_insert(now));
+                let past = since.map(|since| now - since - self.cap_wait_s);
+                // At the ceiling there is nothing past the cap to probe for.
+                self.cap_probing = past.is_some_and(|past| past >= 0.0) && current < ceiling;
+                match past {
+                    Some(past) if self.cap_probing => {
+                        let step = if past < Self::CAP_GENTLE_S {
+                            Self::STEP_NEAR
+                        } else {
+                            Self::PROBE_STEP
+                        };
+                        raised = current * step.powf(dt);
+                    }
+                    Some(_) => raised = raised.min(cap.max(current)),
+                    None => {
+                        self.cap_fill_since = None;
+                        raised = raised.min(cap.max(current));
+                    }
+                }
+            }
+            return clamp(raised);
+        }
         clamp(raised.max(delivered * Self::HEADROOM))
+    }
+
+    /// Land the target on a capacity the transport read apart from the tick, with a queue
+    /// standing: the capacity is `kbps`, with no drain or hold to wait out, and `cap_kbps`,
+    /// the rate the reading showed, holds the climb until content probes past it.
+    pub fn land(&mut self, kbps: f64, cap_kbps: f64, now: f64) {
+        let grew = self
+            .landed_cap
+            .is_none_or(|old| cap_kbps > Self::CAP_GREW * old);
+        self.cap_wait_s = if grew || self.cap_wait_s <= 0.0 {
+            Self::CAP_WAIT_S
+        } else {
+            (self.cap_wait_s * 2.0).min(Self::CAP_WAIT_MAX_S)
+        };
+        self.landed_cap = Some(cap_kbps);
+        self.landed_until = f64::INFINITY;
+        self.settle(kbps, now);
+    }
+
+    /// Back the target off under a reading too short to land on, keeping the cap: the
+    /// transport reads the path through the drain and lands again.
+    pub fn land_provisional(&mut self, kbps: f64, now: f64) {
+        if now >= self.landed_until {
+            self.landed_until = now + Self::PROVISIONAL_S;
+        }
+        self.settle(kbps, now);
+    }
+
+    /// The state both landings leave: the capacity, nothing held, drained or to restore.
+    fn settle(&mut self, kbps: f64, now: f64) {
+        self.capacity_kbps = Some(kbps);
+        self.cruise_kbps = None;
+        self.restore_kbps = None;
+        self.hold_until = now;
+        self.drain_until = now;
+        self.strikes = 0;
+        self.congested = true;
+        self.met_queue = true;
+        self.tick_at = Some(now);
+        self.cap_fill_since = None;
+        self.cap_probing = false;
     }
 
     /// Whether a path delivering `delivered_bps` under a standing queue narrowed since the cut
@@ -350,6 +446,8 @@ impl CongestionSteer {
     /// The target a standing queue of `queue_s` backs off to, with the drain it plans.
     fn queue_backoff(&mut self, current: f64, delivered_kbps: f64, queue_s: f64, now: f64) -> f64 {
         self.congested = true;
+        self.landed_until = 0.0;
+        self.cap_probing = false;
         if delivered_kbps <= 0.0 {
             self.cruise_kbps = None;
             self.hold_until = now + Self::HOLD_S;
@@ -403,6 +501,14 @@ impl Default for PathProbe {
 impl PathProbe {
     pub const QUIET_S: f64 = 15.0;
     pub const QUIET_MAX_S: f64 = 240.0;
+
+    /// The transport ended the probe on a queue it read apart from the tick: the next one
+    /// waits as after a tick that read one.
+    pub fn ended(&mut self, now: f64) {
+        self.padding = false;
+        self.quiet_until = now + self.quiet_s;
+        self.quiet_s = (self.quiet_s * 2.0).min(Self::QUIET_MAX_S);
+    }
 
     /// The padding to send until the next tick, in bits per second.
     ///
@@ -812,6 +918,107 @@ pub(crate) mod tests {
             [current, CEILING, FLOOR, goodput, loss, now],
             [queue, offered, None, None],
         ))
+    }
+
+    /// A capacity the transport read with a queue standing holds against a clean tick's
+    /// over-read, and its cap holds the climb until content has filled it for the wait: then
+    /// the content climbs past it, and not once the target stands at the ceiling. A landing
+    /// that shows no growth doubles the wait.
+    #[test]
+    fn a_landed_capacity_caps_the_climb_until_content_probes_past_it() {
+        let mut steer = CongestionSteer::default();
+        steer.land(4000.0, 4100.0, 0.0);
+        let mut current = 4000.0;
+        let mut probing_from = None;
+        for i in 1..=5 {
+            // Delivery over-read by a burst allowance, the stream filling its target.
+            let now = f64::from(i) * 0.5;
+            current = tick(
+                &mut steer,
+                current,
+                6_000_000.0,
+                0.0,
+                now,
+                Some(0.0),
+                Some(current * 1_000.0),
+            );
+        }
+        assert!((current - 4100.0).abs() < 1.0, "held at the cap: {current}");
+        assert_eq!(steer.capacity_kbps, Some(4000.0), "not forgotten");
+        assert!(!steer.cap_probing);
+        for i in 6..=80 {
+            let now = f64::from(i) * 0.5;
+            current = tick(
+                &mut steer,
+                current,
+                4_000_000.0,
+                0.0,
+                now,
+                Some(0.0),
+                Some(current * 1_000.0),
+            );
+            if steer.cap_probing && probing_from.is_none() {
+                probing_from = Some(now);
+            }
+        }
+        assert!(
+            probing_from.is_some_and(|at| (CongestionSteer::CAP_WAIT_S
+                ..=CongestionSteer::CAP_WAIT_S + 1.0)
+                .contains(&at)),
+            "{probing_from:?}"
+        );
+        assert_eq!(current, CEILING, "content climbed past the cap");
+        assert!(!steer.cap_probing, "nothing to probe for at the ceiling");
+
+        // A light screen under the cap does not probe: the wait counts content that fills it.
+        let mut steer = CongestionSteer::default();
+        steer.land(4000.0, 4100.0, 0.0);
+        let mut current = 4000.0;
+        for i in 1..=40 {
+            current = tick(
+                &mut steer,
+                current,
+                300_000.0,
+                0.0,
+                f64::from(i) * 0.5,
+                Some(0.0),
+                Some(300_000.0),
+            );
+            assert!(!steer.cap_probing);
+        }
+        assert!(current <= 4100.0, "{current}");
+
+        // The same reading again doubles the wait, up to its ceiling; a grown one resets it.
+        let mut steer = CongestionSteer::default();
+        steer.land(4000.0, 4100.0, 0.0);
+        steer.land(4000.0, 4150.0, 10.0);
+        assert_eq!(steer.cap_wait_s, 2.0 * CongestionSteer::CAP_WAIT_S);
+        for at in 2..12 {
+            steer.land(4000.0, 4100.0, f64::from(at) * 10.0);
+        }
+        assert_eq!(steer.cap_wait_s, CongestionSteer::CAP_WAIT_MAX_S);
+        steer.land(6000.0, 6200.0, 200.0);
+        assert_eq!(steer.cap_wait_s, CongestionSteer::CAP_WAIT_S);
+    }
+
+    /// A queue backoff ends a landing: the capacity is the tick's again, and a clean tick's
+    /// delivery lifts the target as before.
+    #[test]
+    fn a_queue_backoff_ends_a_landing() {
+        let mut steer = CongestionSteer::default();
+        steer.land(4000.0, 4100.0, 0.0);
+        let cut = tick(
+            &mut steer,
+            4000.0,
+            3_000_000.0,
+            0.0,
+            0.5,
+            Some(0.2),
+            Some(4_000_000.0),
+        );
+        assert!(cut < 4000.0, "{cut}");
+        assert_eq!(steer.capacity_kbps, Some(3000.0));
+        assert!(!steer.cap_probing);
     }
 
     /// The stream is held to its target through the climb from its start, let go once a clean
