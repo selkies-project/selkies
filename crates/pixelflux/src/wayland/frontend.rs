@@ -251,6 +251,11 @@ pub struct WlCapture {
     /// A pending change held for the next change (`FramePace::merge_until`): since when, and
     /// until when at most; any frame rendered clears it.
     pub merge_hold: Option<(Instant, Instant)>,
+    /// Host capture: the damage and the host's stamp of the host's frame a hold began on, taken
+    /// as the display's content without a frame (`serve_changes`) so the host has a buffer to
+    /// copy its next frame into; the next frame rendered publishes it with that damage, the
+    /// hold's end among them.
+    pub host_merged: Option<(Vec<Rectangle<i32, smithay::utils::Physical>>, i64)>,
     /// The window boundary whose frame callbacks went out (`answer_frame_callbacks`).
     pub callbacks_at: Option<Instant>,
     /// A boundary's frame callbacks wait for the render of a change still pending at it.
