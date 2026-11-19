@@ -47,6 +47,7 @@ pub const CURSOR_HIDDEN: u32 = 1;
 pub const CURSOR_EMBEDDED: u32 = 2;
 pub const CURSOR_METADATA: u32 = 4;
 const SOURCE_MONITOR: u32 = 1;
+pub const SOURCE_VIRTUAL: u32 = 4;
 const PERSIST_UNTIL_REVOKED: u32 = 2;
 
 type Options<'a> = HashMap<&'a str, Variant<'a>>;
@@ -63,6 +64,8 @@ pub struct PortalStream {
     pub node_id: u32,
     pub position: Option<(i32, i32)>,
     pub size: Option<(i32, i32)>,
+    /// The portal source type behind the stream (1 monitor, 2 window, 4 virtual), when sent.
+    pub source_type: Option<u32>,
 }
 
 /// A started portal session: its streams, the devices it may drive, and the token that
@@ -74,7 +77,11 @@ pub struct PortalSession {
     session: OwnedObjectPath,
     pub streams: Vec<PortalStream>,
     pub devices: u32,
+    /// The cursor mode the session streams with, as [`resolve_cursor_mode`] chose it.
     pub cursor_mode: u32,
+    /// The `AvailableCursorModes` the portal offered when the session selected its sources;
+    /// [`CURSOR_EMBEDDED`] alone for a session that captures nothing.
+    pub cursor_modes: u32,
     pub restore_token: Option<String>,
     /// RemoteDesktop interface version, 0 when the session drives no input. `ConnectToEIS`
     /// exists from version 2.
@@ -92,6 +99,37 @@ pub struct PortalSession {
     notify_tx: OnceLock<mpsc::Sender<NotifyCall>>,
 }
 
+/// The `types` a session selects: every monitor, or one virtual monitor the compositor
+/// creates for the session and removes with it.
+pub fn source_types_options(virtual_only: bool) -> u32 {
+    if virtual_only {
+        SOURCE_VIRTUAL
+    } else {
+        SOURCE_MONITOR
+    }
+}
+
+/// The cursor mode a session asking for `want` gets from a portal offering `available`
+/// (`CURSOR_*` bits): `want` itself where offered, else the other mode that still shows a
+/// cursor (an embedded cursor for metadata, metadata the consumer draws from for an embedded
+/// one), then a hidden cursor, and an embedded one where the portal names no mode at all.
+pub fn resolve_cursor_mode(want: u32, available: u32) -> u32 {
+    [want, CURSOR_EMBEDDED, CURSOR_METADATA, CURSOR_HIDDEN]
+        .into_iter()
+        .find(|m| available & m != 0)
+        .unwrap_or(CURSOR_EMBEDDED)
+}
+
+/// A `session_handle_token` no other session of this process has used.
+fn next_session_token() -> String {
+    static COUNTER: AtomicU32 = AtomicU32::new(1);
+    format!(
+        "pixelflux{}s{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 fn opt_u32(o: &mut Options<'_>, key: &'static str, v: u32) {
     o.insert(key, Variant::U32(v));
 }
@@ -106,18 +144,30 @@ fn sound_path(path: &std::path::Path) -> bool {
 }
 
 /// Where the portal's restore token lives between runs: `$XDG_STATE_HOME/pixelflux`, or
-/// `~/.local/state/pixelflux` where that is unset or not absolute.
-fn token_path() -> Option<std::path::PathBuf> {
+/// `~/.local/state/pixelflux` where that is unset or not absolute. A session on a virtual
+/// monitor keeps its own (`virtual_only`): a token restores the selection it was handed out
+/// for, so the two kinds of session would otherwise replace each other's on every start.
+fn token_path(virtual_only: bool) -> Option<std::path::PathBuf> {
     let base = match std::env::var_os("XDG_STATE_HOME").map(std::path::PathBuf::from) {
         Some(dir) if sound_path(&dir) => dir,
         _ => std::path::PathBuf::from(std::env::var_os("HOME")?).join(".local/state"),
     };
-    Some(base.join("pixelflux/portal-restore-token"))
+    Some(base.join(token_file(virtual_only)))
 }
 
-/// The restore token saved by an earlier session, if any.
-pub fn saved_restore_token() -> Option<String> {
-    let path = token_path()?;
+/// The restore token's file under the state directory, for a session on the host's monitors
+/// or on a virtual monitor (`token_path`).
+fn token_file(virtual_only: bool) -> &'static str {
+    if virtual_only {
+        "pixelflux/portal-virtual-restore-token"
+    } else {
+        "pixelflux/portal-restore-token"
+    }
+}
+
+/// The restore token an earlier session of the same kind saved (`token_path`), if any.
+pub fn saved_restore_token(virtual_only: bool) -> Option<String> {
+    let path = token_path(virtual_only)?;
     if !sound_path(&path) {
         return None;
     }
@@ -128,8 +178,10 @@ pub fn saved_restore_token() -> Option<String> {
 
 /// Keep a restore token for the next session (a token is single-use, so the newest replaces
 /// the one that opened this session).
-pub fn save_restore_token(token: &str) {
-    let Some(path) = token_path() else { return };
+pub fn save_restore_token(virtual_only: bool, token: &str) {
+    let Some(path) = token_path(virtual_only) else {
+        return;
+    };
     if !sound_path(&path) {
         return;
     }
@@ -179,6 +231,7 @@ fn parse_streams(v: &Variant<'_>) -> Vec<PortalStream> {
             node_id: *node_id,
             position: None,
             size: None,
+            source_type: None,
         };
         if let Some(Variant::Dict(d)) = fields.get(1) {
             for (k, val) in d.iter() {
@@ -186,6 +239,16 @@ fn parse_streams(v: &Variant<'_>) -> Vec<PortalStream> {
                 match k.as_str() {
                     "position" => stream.position = value_pair(val),
                     "size" => stream.size = value_pair(val),
+                    "source_type" => {
+                        stream.source_type = match val {
+                            Variant::U32(t) => Some(*t),
+                            Variant::Variant(inner) => match &**inner {
+                                Variant::U32(t) => Some(*t),
+                                _ => None,
+                            },
+                            _ => None,
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -201,7 +264,7 @@ async fn next_message<S: Stream + Unpin>(stream: &mut S) -> Option<S::Item> {
 }
 
 /// Whether `name` has an owner on the bus `conn` is on.
-async fn name_owned(conn: &Connection, name: &str) -> bool {
+pub(crate) async fn name_owned(conn: &Connection, name: &str) -> bool {
     let Ok(bus) = zbus::fdo::DBusProxy::new(conn).await else {
         return false;
     };
@@ -225,7 +288,22 @@ impl PortalSession {
     ) -> Result<Self, String> {
         zbus::block_on(async {
             let mut this = Self::connect(devices, cursor_mode).await?;
-            if let Err(e) = this.start(capture, devices, restore_token).await {
+            if let Err(e) = this.start(capture, devices, restore_token, false).await {
+                this.close().await;
+                return Err(e);
+            }
+            this.armed = true;
+            Ok(this)
+        })
+    }
+
+    /// A capture-only session on one virtual monitor: the compositor creates the monitor
+    /// for this session, sizes it to the format its stream is consumed at, and removes it
+    /// when the session closes.
+    pub fn open_virtual(cursor_mode: u32, restore_token: Option<&str>) -> Result<Self, String> {
+        zbus::block_on(async {
+            let mut this = Self::connect(0, cursor_mode).await?;
+            if let Err(e) = this.start(true, 0, restore_token, true).await {
                 this.close().await;
                 return Err(e);
             }
@@ -260,6 +338,7 @@ impl PortalSession {
             streams: Vec::new(),
             devices: 0,
             cursor_mode,
+            cursor_modes: CURSOR_EMBEDDED,
             restore_token: None,
             rd_version: 0,
             kde: false,
@@ -275,6 +354,7 @@ impl PortalSession {
         capture: bool,
         devices: u32,
         restore_token: Option<&str>,
+        virtual_only: bool,
     ) -> Result<(), String> {
         let sc_version: u32 = self
             .screencast
@@ -294,10 +374,7 @@ impl PortalSession {
         };
         self.rd_version = rd_version;
         let mut options = Options::new();
-        options.insert(
-            "session_handle_token",
-            Variant::from(format!("pixelflux{}", std::process::id())),
-        );
+        options.insert("session_handle_token", Variant::from(next_session_token()));
         let (_, results) = self
             .request("CreateSession", options, async |o| {
                 opener.call("CreateSession", &(o,)).await
@@ -323,15 +400,11 @@ impl PortalSession {
                 .get_property("AvailableCursorModes")
                 .await
                 .unwrap_or(CURSOR_EMBEDDED);
-            if available & self.cursor_mode == 0 {
-                self.cursor_mode = [CURSOR_EMBEDDED, CURSOR_HIDDEN, CURSOR_METADATA]
-                    .into_iter()
-                    .find(|m| available & m != 0)
-                    .unwrap_or(CURSOR_EMBEDDED);
-            }
+            self.cursor_modes = available;
+            self.cursor_mode = resolve_cursor_mode(self.cursor_mode, available);
             let mut options = Options::new();
-            opt_u32(&mut options, "types", SOURCE_MONITOR);
-            options.insert("multiple", Variant::Bool(true));
+            opt_u32(&mut options, "types", source_types_options(virtual_only));
+            options.insert("multiple", Variant::Bool(!virtual_only));
             if sc_version >= 2 {
                 opt_u32(&mut options, "cursor_mode", self.cursor_mode);
             }
@@ -380,7 +453,7 @@ impl PortalSession {
         }
         if let Some(Variant::Str(t)) = results.get("restore_token").map(|v| &**v) {
             self.restore_token = Some(t.to_string());
-            save_restore_token(t);
+            save_restore_token(virtual_only, t);
         }
         if capture && self.streams.is_empty() {
             return Err("the portal started no monitor stream".into());
@@ -391,6 +464,23 @@ impl PortalSession {
         self.mutter =
             self.remote.is_some() && name_owned(&self.conn, "org.gnome.Mutter.RemoteDesktop").await;
         Ok(())
+    }
+
+    /// Whether the ScreenCast portal offers virtual monitors (`AvailableSourceTypes`).
+    pub fn virtual_available() -> bool {
+        zbus::block_on(async {
+            let Ok(conn) = Connection::session().await else {
+                return false;
+            };
+            let Ok(screencast) = Proxy::new(&conn, DESKTOP, DESKTOP_PATH, SCREENCAST_IFACE).await
+            else {
+                return false;
+            };
+            screencast
+                .get_property::<u32>("AvailableSourceTypes")
+                .await
+                .is_ok_and(|t| t & SOURCE_VIRTUAL != 0)
+        })
     }
 
     /// Whether a ScreenCast portal answers on the session bus; the error says which step
@@ -640,6 +730,28 @@ mod tests {
     use zbus::wire::StructureBuilder;
     use zbus::{Array, Dict, Structure};
 
+    /// A wanted mode the portal offers is taken; one it lacks falls to the other mode that
+    /// still shows a cursor before a hidden one, and a portal naming no mode streams embedded.
+    #[test]
+    fn a_cursor_mode_the_portal_lacks_falls_to_one_that_still_shows_the_cursor() {
+        let all = CURSOR_HIDDEN | CURSOR_EMBEDDED | CURSOR_METADATA;
+        assert_eq!(resolve_cursor_mode(CURSOR_METADATA, all), CURSOR_METADATA);
+        assert_eq!(resolve_cursor_mode(CURSOR_EMBEDDED, all), CURSOR_EMBEDDED);
+        assert_eq!(
+            resolve_cursor_mode(CURSOR_METADATA, CURSOR_HIDDEN | CURSOR_EMBEDDED),
+            CURSOR_EMBEDDED
+        );
+        assert_eq!(
+            resolve_cursor_mode(CURSOR_EMBEDDED, CURSOR_HIDDEN | CURSOR_METADATA),
+            CURSOR_METADATA
+        );
+        assert_eq!(
+            resolve_cursor_mode(CURSOR_METADATA, CURSOR_HIDDEN),
+            CURSOR_HIDDEN
+        );
+        assert_eq!(resolve_cursor_mode(CURSOR_METADATA, 0), CURSOR_EMBEDDED);
+    }
+
     fn stream_value(node: u32, props: Vec<(&'static str, Variant<'static>)>) -> Variant<'static> {
         let mut dict = Dict::new(<&str>::SIGNATURE, Variant::SIGNATURE);
         for (k, v) in props {
@@ -652,6 +764,28 @@ mod tests {
             .build()
             .unwrap();
         Variant::Structure(st)
+    }
+
+    #[test]
+    fn source_types_monitor_by_default() {
+        assert_eq!(source_types_options(false), SOURCE_MONITOR);
+    }
+
+    #[test]
+    fn source_types_virtual() {
+        assert_eq!(source_types_options(true), SOURCE_VIRTUAL);
+    }
+
+    /// A virtual-monitor session keeps its restore token apart from the monitors' session, so
+    /// neither start replaces the token the other restores with.
+    #[test]
+    fn a_virtual_session_keeps_its_own_restore_token() {
+        assert_ne!(token_file(true), token_file(false));
+    }
+
+    #[test]
+    fn session_tokens_are_unique() {
+        assert_ne!(next_session_token(), next_session_token());
     }
 
     /// A `Start` response's stream list parses into node ids with the optional geometry, as
@@ -682,12 +816,14 @@ mod tests {
                 PortalStream {
                     node_id: 113,
                     position: None,
-                    size: Some((1280, 720))
+                    size: Some((1280, 720)),
+                    source_type: Some(1),
                 },
                 PortalStream {
                     node_id: 42,
                     position: Some((1920, 0)),
-                    size: Some((1280, 720))
+                    size: Some((1280, 720)),
+                    source_type: None,
                 },
             ]
         );

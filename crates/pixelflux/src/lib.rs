@@ -89,7 +89,8 @@ use smithay::{
             damage::OutputDamageTracker,
             element::{
                 AsRenderElements, Element, Kind, RenderElement, Wrap,
-                memory::MemoryRenderBufferRenderElement, surface::WaylandSurfaceRenderElement,
+                memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
+                surface::WaylandSurfaceRenderElement,
             },
             gles::GlesRenderer,
             pixman::PixmanRenderer,
@@ -2410,7 +2411,7 @@ fn detach_retained_gpu(
     let Some((_, still)) = cap.host_still.as_mut() else {
         return;
     };
-    match compose_host_frame(renderer, None, &src, still, size) {
+    match compose_host_frame(renderer, None, None, &src, still, size) {
         Ok(sync) if wait_render_fence(&sync, display_id) => {}
         Ok(_) => return,
         Err(e) => {
@@ -3873,6 +3874,7 @@ fn draw_host_watermark(
 fn compose_host_frame(
     renderer: &mut GlesRenderer,
     overlay: Option<&crate::encoders::overlay::OverlayState>,
+    cursor: Option<(&wayland::host::CursorSprite, (i32, i32))>,
     src: &Dmabuf,
     target: &mut Dmabuf,
     size: (i32, i32),
@@ -3883,6 +3885,32 @@ fn compose_host_frame(
                 .get_watermark_element(renderer)
                 .ok_or("watermark element unavailable")?,
         ),
+        None => None,
+    };
+    // The host's cursor sprite over everything else, where this display paints it.
+    let cursor_elem = match cursor {
+        Some((sprite, at)) => {
+            let buffer = MemoryRenderBuffer::from_slice(
+                &sprite.rgba,
+                Fourcc::Abgr8888,
+                (sprite.width, sprite.height),
+                1,
+                Transform::Normal,
+                None,
+            );
+            Some(
+                MemoryRenderBufferRenderElement::from_buffer(
+                    renderer,
+                    Point::<f64, Physical>::from((f64::from(at.0), f64::from(at.1))),
+                    &buffer,
+                    Some(1.0),
+                    None,
+                    None,
+                    Kind::Cursor,
+                )
+                .map_err(|e| format!("cursor upload: {e:?}"))?,
+            )
+        }
         None => None,
     };
     let tex = renderer
@@ -3915,7 +3943,20 @@ fn compose_host_frame(
         elem.draw(&mut frame, elem.src(), dst, &[local], &[], None)
             .map_err(|e| format!("draw: {e:?}"))?;
     }
+    if let Some(elem) = cursor_elem {
+        let dst = elem.geometry(1.0.into());
+        let local = Rectangle::from_size(dst.size);
+        elem.draw(&mut frame, elem.src(), dst, &[local], &[], None)
+            .map_err(|e| format!("cursor draw: {e:?}"))?;
+    }
     frame.finish().map_err(|e| format!("finish: {e:?}"))
+}
+
+fn warn_once_host_cursor(e: &str) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!("[HostCapture] painting the host's cursor into the frames failed: {e}");
+    }
 }
 
 fn warn_once_host_watermark(e: &str) {
@@ -5004,6 +5045,11 @@ fn render_node_tick(
         };
         let have_new = new_frame.is_some();
         new_stamp = new_frame.as_ref().map(|f| f.stamp_ns);
+        // The host's cursor where this display paints it into the frames itself (a session that
+        // streams it as metadata while the consumer wants it painted): a move or a new sprite
+        // is published like a new frame, over the retained content, with its own damage.
+        let host_cursor = host.cursor_frame(host_idx, (width, height));
+        let cursor_moved = !host_cursor.damage.is_empty();
         // Streaming mode wants a constant-rate stream (the client's decoder pipeline
         // is built for it), so re-encode the retained frame every tick like the
         // compositor path does. Outside streaming mode, stay damage-driven, waking
@@ -5042,11 +5088,14 @@ fn render_node_tick(
             }
         }
         if !have_new
+            && !cursor_moved
             && !want_idr_for_host
             && !take_screenshot
             && !wm_animated
             && !(streaming && host_quiet)
         {
+            // Nothing the cursor draws changed: its pending news, if any, is served.
+            host.cursor_drawn(host_idx, &host_cursor);
             cancel_slots(node, &mut pool_slot, &mut gpu_slot);
             if let Some(cap) = node.capture.as_mut()
                 && let Some(period) = period
@@ -5078,6 +5127,8 @@ fn render_node_tick(
         // blends the watermark in place; the GPU path composites it below. Damage
         // is the fresh blit's; a re-encode of retained content has none of its own.
         let mut wm_drawn = false;
+        // Whether the frame carries `host_cursor` as it should look.
+        let mut cursor_painted = host_cursor.sprite().is_none();
         let outcome = host.with_retained(host_idx, |r| {
             let Some(f) = r else { return RETAINED_NONE };
             // A frame of another size waits for a capture of its size, and a screenshot asked
@@ -5112,6 +5163,7 @@ fn render_node_tick(
                         );
                         wm_drawn = true;
                     }
+                    host_cursor.blend_bgra(buf, (f.width as usize) * 4, (f.width, f.height));
                 }
                 cpu.write_bgra(f.width, f.height, &mut node.frame_buffer);
                 if wm_active {
@@ -5122,6 +5174,12 @@ fn render_node_tick(
                         f.height,
                     );
                 }
+                host_cursor.blend_bgra(
+                    &mut node.frame_buffer,
+                    (f.width as usize) * 4,
+                    (f.width, f.height),
+                );
+                cursor_painted = true;
             } else if let Some(dmabuf) = f.dmabuf.as_ref() {
                 if !gpu_encoder {
                     return RETAINED_GPU_FRAME;
@@ -5135,39 +5193,17 @@ fn render_node_tick(
         if have_new && let Some(src) = source_dmabuf.as_ref() {
             wayland::host::wait_gpu_done(src);
         }
-        // GPU path: composite the watermark and serve screenshot readbacks with
-        // the renderer. A bouncing watermark re-composes retained content into
-        // this display's offscreen target every tick (drawing in place would
-        // trail); anchored watermarks are stamped once onto each fresh blit and
-        // ride along with retained re-encodes.
+        // GPU path: composite the watermark and the host's cursor, and serve screenshot
+        // readbacks with the renderer. Anchored watermarks are stamped once onto each fresh
+        // blit and ride along with retained re-encodes. A bouncing watermark, or a cursor this
+        // display paints, re-composes retained content into this display's offscreen target
+        // every tick (drawing in place would trail).
         if let Some(src) = source_dmabuf.clone() {
             if take_screenshot && matches!(src.format().code, Fourcc::Xrgb8888 | Fourcc::Xbgr8888) {
                 screenshot_format = computer_use::ScreenshotPixelFormat::Rgbx;
             }
-            if wm_active && let Some(renderer) = state.gles_renderer.as_mut() {
-                if wm_animated {
-                    let target = match gpu_slot.as_mut() {
-                        Some((_, target)) => Some(target),
-                        None => node.offscreen_buffer.as_mut().map(|(_, target)| target),
-                    };
-                    if let Some(target) = target {
-                        match compose_host_frame(
-                            renderer,
-                            Some(&node.overlay_state),
-                            &src,
-                            target,
-                            (width, height),
-                        ) {
-                            Ok(sync) => {
-                                render_sync = Some(sync);
-                                source_dmabuf = Some(target.clone());
-                                host_enc_retained = false;
-                                wm_drawn = true;
-                            }
-                            Err(e) => warn_once_host_watermark(&e),
-                        }
-                    }
-                } else if have_new {
+            if let Some(renderer) = state.gles_renderer.as_mut() {
+                if wm_active && !wm_animated && have_new {
                     let mut target = src.clone();
                     match draw_host_watermark(
                         renderer,
@@ -5179,6 +5215,37 @@ fn render_node_tick(
                             render_sync = Some(sync);
                             wm_drawn = true;
                         }
+                        Err(e) => warn_once_host_watermark(&e),
+                    }
+                }
+                let cursor = host_cursor.sprite();
+                if (wm_active && wm_animated) || cursor.is_some() {
+                    let target = match gpu_slot.as_mut() {
+                        Some((_, target)) => Some(target),
+                        None => node.offscreen_buffer.as_mut().map(|(_, target)| target),
+                    };
+                    let overlay = (wm_active && wm_animated).then_some(&node.overlay_state);
+                    match target
+                        .ok_or_else(|| "no composite target".to_string())
+                        .and_then(|target| {
+                            compose_host_frame(
+                                renderer,
+                                overlay,
+                                cursor,
+                                &src,
+                                target,
+                                (width, height),
+                            )
+                            .map(|sync| (sync, target.clone()))
+                        }) {
+                        Ok((sync, target)) => {
+                            render_sync = Some(sync);
+                            source_dmabuf = Some(target);
+                            host_enc_retained = false;
+                            wm_drawn |= overlay.is_some();
+                            cursor_painted = true;
+                        }
+                        Err(e) if cursor.is_some() => warn_once_host_cursor(&e),
                         Err(e) => warn_once_host_watermark(&e),
                     }
                 }
@@ -5207,6 +5274,10 @@ fn render_node_tick(
         }
         if wm_drawn && let Some(rect) = node.overlay_state.damage_rect(width, height) {
             damage_rects.push(rect);
+        }
+        if outcome == RETAINED_OK && cursor_painted {
+            damage_rects.extend(host_cursor.damage.iter().copied());
+            host.cursor_drawn(host_idx, &host_cursor);
         }
         state.host = Some(host);
         if outcome != RETAINED_OK {
@@ -8127,16 +8198,17 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
     event_loop
         .handle()
         .insert_source(host_frame_rx, |event, _, state| {
-            // A host frame landed for one output: its display renders now, at most at frame
-            // pace (FramePace), rather than on a timer tick up to a period away. A wake the
-            // timer already served finds nothing queued and does nothing.
+            // A host frame landed for one output, or the cursor its display paints changed:
+            // its display renders now, at most at frame pace (FramePace), rather than on a
+            // timer tick up to a period away. A wake the timer already served finds nothing
+            // queued and does nothing.
             let smithay::reexports::calloop::channel::Event::Msg(index) = event else {
                 return;
             };
             let Some(id) = state
                 .host
                 .as_ref()
-                .filter(|h| h.has_queued_frame(index))
+                .filter(|h| h.has_queued_frame(index) || h.cursor_pending(index))
                 .and_then(|h| h.display_for_output(index))
             else {
                 return;

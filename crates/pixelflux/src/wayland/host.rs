@@ -30,6 +30,13 @@
 //! A host without those protocols (GNOME, KDE before ext-image-copy-capture) is captured
 //! through xdg-desktop-portal instead: one RemoteDesktop session hands out a PipeWire stream per
 //! monitor and takes the input the seat lacks a virtual device for (`portal`, `pwcapture`).
+//! Where that portal also serves virtual sources, Mutter's DisplayConfig can place a new
+//! monitor (`mutterclient`), and the host is unscaled, one display more than the host has
+//! outputs grows on a virtual monitor: its own ScreenCast session opens on the display's first
+//! Start, its stream is consumed at exactly the display's size (which sizes the monitor), and
+//! the session closes when the display goes idle or the host session ends, removing the
+//! monitor. While that display captures, the host's monitors are arranged as selkies laid the
+//! displays out; otherwise they stay where the host's owner put them.
 //! Each rung is chosen per capability, ordered by measured delivery cost: a socket write to the
 //! compositor (libei, then the virtual-input protocols) runs about 4 us, a uinput write reaching
 //! evdev about 12 us, and a portal `Notify*` D-Bus call about 2 ms, so the kernel serves as the
@@ -327,6 +334,8 @@ pub(crate) struct FrameSink {
     pub(crate) queued: Arc<AtomicI64>,
     pub(crate) wake: smithay::reexports::calloop::channel::Sender<usize>,
     pub(crate) index: usize,
+    /// The output's cursor as its stream's metas describe it, for the consumer to draw.
+    pub(crate) cursor: Arc<Mutex<HostCursor>>,
 }
 
 impl FrameSink {
@@ -338,6 +347,157 @@ impl FrameSink {
         self.queued.fetch_add(1, Ordering::AcqRel);
         let _ = self.wake.send(self.index);
         true
+    }
+
+    /// Apply `change` to the output's cursor, waking the consumer when what it draws changed:
+    /// a move on a screen that sends no frame meanwhile must still reach the frames.
+    pub(crate) fn update_cursor(&self, change: impl FnOnce(&mut HostCursor)) {
+        let changed = {
+            let mut cursor = self.cursor.lock().unwrap();
+            let before = cursor.look();
+            change(&mut cursor);
+            let changed = cursor.look() != before;
+            if changed {
+                cursor.serial += 1;
+            }
+            changed
+        };
+        if changed {
+            let _ = self.wake.send(self.index);
+        }
+    }
+}
+
+/// A cursor sprite from a portal stream's metas: RGBA rows of `width` pixels, premultiplied as
+/// Mutter hands them (the cursor callback gets the same bytes), with the hotspot inside it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CursorSprite {
+    pub(crate) width: i32,
+    pub(crate) height: i32,
+    pub(crate) hot: (i32, i32),
+    pub(crate) rgba: Vec<u8>,
+    pub(crate) hash: u64,
+}
+
+/// One output's cursor as its portal stream's metas last described it. The consumer draws it
+/// into the frames itself (`draw`) when it wants the cursor painted on a session that streams
+/// it as metadata: a grown display's session asks for metadata whatever the consumer wants
+/// (`session_cursor_request`), since the session cannot change its cursor mode without being
+/// reopened, and reopening it would remove its virtual monitor and make another.
+#[derive(Debug, Default)]
+pub(crate) struct HostCursor {
+    /// The consumer draws the cursor into this output's frames.
+    pub(crate) draw: bool,
+    /// The hotspot in the stream's pixels while the pointer is over the stream.
+    pub(crate) at: Option<(i32, i32)>,
+    /// The sprite, none while the host hides the cursor.
+    pub(crate) sprite: Option<Arc<CursorSprite>>,
+    /// Bumped by every change the consumer draws differently.
+    serial: u64,
+    /// The serial of the last state the consumer drew.
+    seen: u64,
+    /// Where the consumer last drew the sprite (frame pixels) and which one it was, for the
+    /// damage the cursor leaves behind when it moves, changes, or goes.
+    drawn: Option<(Rectangle<i32, Physical>, u64)>,
+}
+
+impl HostCursor {
+    /// What the consumer draws: the sprite and its top-left corner, while it draws one.
+    fn look(&self) -> Option<(Rectangle<i32, Physical>, u64)> {
+        if !self.draw {
+            return None;
+        }
+        let (at, sprite) = self.at.zip(self.sprite.as_ref())?;
+        Some((
+            Rectangle::new(
+                (at.0 - sprite.hot.0, at.1 - sprite.hot.1).into(),
+                (sprite.width, sprite.height).into(),
+            ),
+            sprite.hash,
+        ))
+    }
+
+    /// The cursor a frame of `size` pixels draws now, and the damage since the frame that was
+    /// drawn last: the old and new places of a cursor that moved, changed sprite, or went.
+    pub(crate) fn frame(&self, size: (i32, i32)) -> CursorFrame {
+        let look = self.look();
+        let full = Rectangle::<i32, Physical>::from_size(size.into());
+        let damage = if look == self.drawn {
+            Vec::new()
+        } else {
+            [self.drawn, look]
+                .into_iter()
+                .flatten()
+                .filter_map(|(r, _)| r.intersection(full))
+                .collect()
+        };
+        CursorFrame {
+            sprite: look
+                .and(self.sprite.clone())
+                .zip(look.map(|(r, _)| (r.loc.x, r.loc.y))),
+            damage,
+            look,
+            serial: self.serial,
+        }
+    }
+
+    /// Record that the consumer drew `frame` (or found nothing to draw again).
+    pub(crate) fn drew(&mut self, frame: &CursorFrame) {
+        self.drawn = frame.look;
+        self.seen = self.seen.max(frame.serial);
+    }
+
+    /// Whether a change the consumer has not drawn yet is waiting.
+    fn pending(&self) -> bool {
+        self.serial != self.seen
+    }
+}
+
+/// The cursor one host frame draws (`HostCursor::frame`).
+#[derive(Debug, Default)]
+pub struct CursorFrame {
+    /// The sprite and the frame pixel its top-left corner lands on, while one is drawn.
+    pub(crate) sprite: Option<(Arc<CursorSprite>, (i32, i32))>,
+    /// The frame's rectangles the cursor changed since the frame drawn before, clipped to it.
+    pub damage: Vec<Rectangle<i32, Physical>>,
+    look: Option<(Rectangle<i32, Physical>, u64)>,
+    serial: u64,
+}
+
+impl CursorFrame {
+    /// Blend the sprite into a BGRA frame of `size` pixels with `stride` bytes per row,
+    /// clipped to the frame.
+    pub fn blend_bgra(&self, frame: &mut [u8], stride: usize, size: (i32, i32)) {
+        let Some((sprite, (x0, y0))) = self.sprite.as_ref() else {
+            return;
+        };
+        for y in 0..sprite.height {
+            let ty = y0 + y;
+            if ty < 0 || ty >= size.1 {
+                continue;
+            }
+            for x in 0..sprite.width {
+                let tx = x0 + x;
+                if tx < 0 || tx >= size.0 {
+                    continue;
+                }
+                let src = ((y * sprite.width + x) * 4) as usize;
+                let off = ty as usize * stride + tx as usize * 4;
+                let (Some(px), Some(dst)) =
+                    (sprite.rgba.get(src..src + 4), frame.get_mut(off..off + 4))
+                else {
+                    continue;
+                };
+                crate::encoders::overlay::blend_pixel_premultiplied(
+                    dst, px[0], px[1], px[2], px[3],
+                );
+            }
+        }
+    }
+
+    /// The sprite and its top-left corner in the frame, for a GPU composite.
+    pub(crate) fn sprite(&self) -> Option<(&CursorSprite, (i32, i32))> {
+        self.sprite.as_ref().map(|(s, at)| (&**s, *at))
     }
 }
 
@@ -392,17 +552,25 @@ struct CtrlState {
     has_ext_capture: bool,
     has_ext_source: bool,
     outputs: Vec<(wl_output::WlOutput, Option<String>)>,
+    /// The registry global of each entry of `outputs`, to forget a removed one.
+    output_globals: Vec<u32>,
     /// Current mode per output, registry-indexed and shared with the session:
     /// when the host keeps its own size (refused or unmanageable layout), the
     /// capture follows this instead of gating on the size it asked for.
     sizes: Arc<Mutex<Vec<(i32, i32)>>>,
-    /// Layout position and integer scale per output, registry-indexed.
-    positions: Vec<(i32, i32)>,
+    /// Layout position per output, registry-indexed and shared with the session: an
+    /// arranged host moves its outputs, and the pointer aims by where they are now.
+    positions: Arc<Mutex<Vec<(i32, i32)>>>,
+    /// Integer scale per output, registry-indexed.
     scales: Vec<i32>,
     /// Registry indices in display order (natural name sort — registry
     /// announcement order is not guaranteed to match output creation order).
     order: Vec<usize>,
     output_mgr: Option<ZwlrOutputManagerV1>,
+    /// The session grows a display on a virtual monitor, which only Mutter's DisplayConfig
+    /// places: the host's monitors are arranged there while that display captures, and
+    /// otherwise left where the host's owner put them.
+    arrange_grown: bool,
     heads: Vec<(ZwlrOutputHeadV1, Option<String>)>,
     om_serial: Option<u32>,
     cfg_result: Option<bool>,
@@ -443,6 +611,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for CtrlState {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
+        if let wl_registry::Event::GlobalRemove { name } = event {
+            forget_output(&state.output_globals, &mut state.outputs, name);
+            return;
+        }
         if let wl_registry::Event::Global {
             name,
             interface,
@@ -466,6 +638,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for CtrlState {
                     let idx = state.outputs.len();
                     let out = registry.bind(name, version.min(4), qh, idx);
                     state.outputs.push((out, None));
+                    state.output_globals.push(name);
                 }
                 "zwlr_output_manager_v1" => state.output_mgr = Some(registry.bind(name, 1, qh, ())),
                 _ => {}
@@ -525,10 +698,11 @@ impl Dispatch<wl_output::WlOutput, usize> for CtrlState {
                 sizes[*idx] = (width, height);
             }
             wl_output::Event::Geometry { x, y, .. } => {
-                if state.positions.len() <= *idx {
-                    state.positions.resize(*idx + 1, (0, 0));
+                let mut positions = state.positions.lock().unwrap();
+                if positions.len() <= *idx {
+                    positions.resize(*idx + 1, (0, 0));
                 }
-                state.positions[*idx] = (x, y);
+                positions[*idx] = (x, y);
             }
             wl_output::Event::Scale { factor } => {
                 if state.scales.len() <= *idx {
@@ -928,6 +1102,8 @@ struct OutputHandle {
     /// static screen can re-encode current content like compositor mode does.
     retained: Mutex<Option<HostFrame>>,
     name: Option<String>,
+    /// The output's cursor, which its portal stream updates (`FrameSink::cursor`).
+    cursor: Arc<Mutex<HostCursor>>,
 }
 
 impl OutputHandle {
@@ -1036,6 +1212,8 @@ pub struct HostSession {
     uinput: Option<crate::uinput::Pair>,
     /// The portal session when frames or an input device come through xdg-desktop-portal.
     portal: Option<Arc<PortalCtl>>,
+    /// The grown display's own portal session, on the virtual monitor it exists by.
+    grown: Option<Arc<PortalCtl>>,
     /// Output geometry by rank, pairing portal streams with outputs.
     geoms: Vec<OutputGeom>,
     ctrl_tx: Sender<CtrlMsg>,
@@ -1045,6 +1223,8 @@ pub struct HostSession {
     /// Rank -> registry index, for looking a display's host output up in `sizes`.
     order: Vec<usize>,
     sizes: Arc<Mutex<Vec<(i32, i32)>>>,
+    /// Each host output's layout position as the host last announced it, registry-indexed.
+    positions: Arc<Mutex<Vec<(i32, i32)>>>,
     layouts: Arc<Mutex<LayoutLedger>>,
     alive: Arc<AtomicBool>,
     /// A finger's scroll the uinput wheels have not taken yet, in pixels (`pointer_scroll`).
@@ -1056,8 +1236,9 @@ pub struct HostSession {
 
 impl HostSession {
     /// Connect to `display`, bring up input devices, enumerate the host's
-    /// outputs, and spawn one capture thread per output (idle until
-    /// [`start_capture`]) plus the layout-control thread. `gbm_path` (this
+    /// outputs, and spawn one capture thread per output, and one more for a
+    /// display grown on a portal virtual monitor where the host allows it (each
+    /// idle until [`start_capture`]), plus the layout-control thread. `gbm_path` (this
     /// process's render node) enables the zero-copy path; `frame_wake` is told the
     /// output index every time a capture thread queues a frame.
     pub fn connect(
@@ -1163,13 +1344,15 @@ impl HostSession {
             order.iter().map(|&i| state.outputs[i].1.clone()).collect();
         let geoms: Vec<OutputGeom> = {
             let sizes = state.sizes.lock().unwrap();
+            let positions = state.positions.lock().unwrap();
             order
                 .iter()
                 .map(|&i| {
                     let scale = state.scales.get(i).copied().unwrap_or(1).max(1);
                     let size = sizes.get(i).copied().unwrap_or((0, 0));
                     OutputGeom {
-                        pos: state.positions.get(i).copied().unwrap_or((0, 0)),
+                        mode: size,
+                        pos: positions.get(i).copied().unwrap_or((0, 0)),
                         logical: (size.0 / scale, size.1 / scale),
                     }
                 })
@@ -1186,25 +1369,55 @@ impl HostSession {
                 .join(", ")
         );
 
+        let grow = portal.is_some()
+            && !native_capture
+            && host_capacity(
+                names.len(),
+                PortalSession::virtual_available(),
+                crate::wayland::mutterclient::available(),
+                state.scales.iter().all(|s| *s <= 1),
+            ) > names.len();
+        if grow {
+            println!("[HostCapture] one more display can grow on a portal virtual monitor.");
+        }
+        state.arrange_grown = grow;
         let mut outputs = Vec::new();
-        for (i, name) in names.iter().cloned().enumerate() {
+        let mut grown_ctl = None;
+        for i in 0..names.len() + usize::from(grow) {
+            let name = names.get(i).cloned().flatten();
+            let grown = i >= names.len();
             let (wake_rd, wake_wr) = wake_pipe()?;
             let (to_thread, from_main) = std::sync::mpsc::channel::<ToHost>();
             let (frame_tx, frames) = std::sync::mpsc::channel::<HostFrame>();
             let queued = Arc::new(AtomicI64::new(0));
+            let cursor = Arc::new(Mutex::new(HostCursor::default()));
             let sink = FrameSink {
                 tx: frame_tx,
                 queued: queued.clone(),
                 wake: frame_wake.clone(),
                 index: i,
+                cursor: cursor.clone(),
             };
             let display = display.to_string();
             let expect = name.clone();
             let gbm_path = gbm_path.clone();
             let alive = alive.clone();
-            let portal_ctl = portal.clone().filter(|_| !native_capture);
-            let (dma_formats, cursor_tx, geoms) =
-                (dma_formats.clone(), cursor_tx.clone(), geoms.clone());
+            let portal_ctl = if grown {
+                let ctl = PortalCtl::spawn_virtual();
+                grown_ctl = Some(ctl.clone());
+                Some(ctl)
+            } else {
+                portal.clone().filter(|_| !native_capture)
+            };
+            let (dma_formats, cursor_tx, geoms) = (
+                dma_formats.clone(),
+                cursor_tx.clone(),
+                if grown {
+                    vec![OutputGeom::default()]
+                } else {
+                    geoms.clone()
+                },
+            );
             std::thread::Builder::new()
                 .name(format!("pf-host-cap{i}"))
                 .spawn(move || {
@@ -1238,6 +1451,7 @@ impl HostSession {
                 queued,
                 retained: Mutex::new(None),
                 name,
+                cursor,
             });
         }
 
@@ -1245,6 +1459,7 @@ impl HostSession {
         let (ctrl_wake_rd, ctrl_wake) = wake_pipe()?;
         let order_for_session = state.order.clone();
         let sizes = state.sizes.clone();
+        let positions = state.positions.clone();
         let layouts = Arc::new(Mutex::new(LayoutLedger::default()));
         {
             let conn = conn.clone();
@@ -1285,6 +1500,7 @@ impl HostSession {
             vptr,
             uinput,
             portal,
+            grown: grown_ctl,
             geoms,
             ctrl_tx,
             ctrl_wake,
@@ -1292,6 +1508,7 @@ impl HostSession {
             layout,
             order: order_for_session,
             sizes,
+            positions,
             layouts,
             alive,
             scroll_carry: Mutex::new((0.0, 0.0)),
@@ -1334,6 +1551,29 @@ impl HostSession {
         self.outputs
             .get(index)
             .is_some_and(|h| h.queued.load(Ordering::Acquire) > 0)
+    }
+
+    /// Whether host output `index` has a change of the cursor drawn into its frames that no
+    /// render has drawn yet.
+    pub fn cursor_pending(&self, index: usize) -> bool {
+        self.outputs
+            .get(index)
+            .is_some_and(|h| h.cursor.lock().unwrap().pending())
+    }
+
+    /// The cursor `display_id`'s next frame of `size` pixels draws, where the consumer draws
+    /// the host's cursor itself (`HostCursor`); nothing to draw otherwise.
+    pub fn cursor_frame(&self, display_id: u32, size: (i32, i32)) -> CursorFrame {
+        self.output_index_for(display_id)
+            .map(|i| self.outputs[i].cursor.lock().unwrap().frame(size))
+            .unwrap_or_default()
+    }
+
+    /// Record that `display_id`'s frame went out with `frame`'s cursor.
+    pub fn cursor_drawn(&self, display_id: u32, frame: &CursorFrame) {
+        if let Some(i) = self.output_index_for(display_id) {
+            self.outputs[i].cursor.lock().unwrap().drew(frame);
+        }
     }
 
     /// Record where selkies laid out `display_id` (union coordinates); pushed
@@ -1777,7 +2017,12 @@ impl HostSession {
         Some(PortalPoint {
             node: stream.node_id,
             logical: stream_point(slot, stream.size.unwrap_or(slot.want), x, y),
-            position: stream.position,
+            position: region_origin(
+                &self.order,
+                &self.positions.lock().unwrap(),
+                rank,
+                stream.position,
+            ),
             output_fraction: output_fraction(slot, self.geoms.len(), rank, x, y),
         })
     }
@@ -1819,9 +2064,10 @@ impl HostSession {
     }
 
     /// Absolute motion to a union-layout point, the physical space selkies injects in. libei
-    /// takes it in the compositor's logical space, where EIS regions lie: the stream's
-    /// position plus the point in its logical size. A union layout with no stream position
-    /// to place it by goes as it is, which is that space on an unscaled host.
+    /// takes it in the compositor's logical space, where EIS regions lie: the output's position,
+    /// as the host announces it now (`region_origin`), plus the point in its stream's logical
+    /// size. A union layout with no position to place it by goes as it is, which is that space
+    /// on an unscaled host.
     ///
     /// The portal announces a stream's size once, at Start, so after the host changes the
     /// output's mode that logical point is off by the ratio of the two sizes. Where the
@@ -2133,8 +2379,11 @@ impl HostSession {
 }
 
 impl Drop for HostSession {
+    /// Close the portal sessions: their threads wait on the controllers, which the capture
+    /// threads keep alive, so only closing them here ends the sessions (and the grown
+    /// display's virtual monitor) with the host session.
     fn drop(&mut self) {
-        if let Some(ctl) = &self.portal {
+        for ctl in self.portal.iter().chain(&self.grown) {
             ctl.close();
         }
     }
@@ -2194,7 +2443,8 @@ struct PortalPoint {
 /// A union-layout point as a fraction of the display under it (`slot`, at `rank`), where that
 /// display is the host's only output (`host_outputs` of them): only there is the display the
 /// whole of the one region an EIS device covers. A host with more outputs may cover them with
-/// one region, so it keeps to the logical point. `None` for a display with no size yet.
+/// one region, so it keeps to the logical point, as does a display grown beside the host's
+/// outputs, which `host_outputs` does not count. `None` for a display with no size yet.
 fn output_fraction(
     slot: &LayoutSlot,
     host_outputs: usize,
@@ -2208,6 +2458,21 @@ fn output_fraction(
             (y - f64::from(slot.pos.1)) / f64::from(slot.want.1),
         )
     })
+}
+
+/// Where the output at `rank` lies in the compositor's logical space, which is where its EIS
+/// region lies: as the host announces it now, else as the portal announced its stream. An
+/// arranged host (Mutter places a grown monitor) moves outputs after the streams started.
+fn region_origin(
+    order: &[usize],
+    positions: &[(i32, i32)],
+    rank: usize,
+    announced: Option<(i32, i32)>,
+) -> Option<(i32, i32)> {
+    order
+        .get(rank)
+        .and_then(|&i| positions.get(i).copied())
+        .or(announced)
 }
 
 /// A union-layout point in the logical space of the stream behind `slot`: the slot captures
@@ -2253,6 +2518,25 @@ pub(crate) struct OutputGeom {
     pos: (i32, i32),
     /// Mode divided by the integer scale.
     logical: (i32, i32),
+    /// Current mode, physical pixels, as the host announced it at connect.
+    mode: (i32, i32),
+}
+
+/// The size a portal stream is read at, and whether exactly: a grown display's stream at the
+/// display's size; a stream of a host virtual monitor at the output's current mode, since a
+/// virtual monitor takes the size its readers ask for and the host's owner sizes it; any
+/// other stream offers the display's size within what the producer allows.
+fn consume_size(
+    grown: bool,
+    host_virtual: bool,
+    want: (i32, i32),
+    mode: Option<(i32, i32)>,
+) -> ((i32, i32), bool) {
+    match (grown, host_virtual, mode) {
+        (true, _, _) => (want, true),
+        (false, true, Some(m)) if m.0 > 0 && m.1 > 0 => (m, true),
+        _ => (want, false),
+    }
 }
 
 /// Which portal stream backs each output rank: the stream announcing the output's position,
@@ -2298,8 +2582,6 @@ pub(crate) struct PortalLive {
     pub(crate) core: Option<Arc<PwCore>>,
     /// Numbers the session so an output thread notices a reopened one.
     pub(crate) epoch: u64,
-    /// The cursor painting this session was opened for.
-    paint: bool,
     /// The libei injector when the portal handed out an EIS socket; input then rides it
     /// instead of the portal's `Notify*` methods, which the session refuses once EIS is on.
     ei: Option<EiInjector>,
@@ -2307,31 +2589,52 @@ pub(crate) struct PortalLive {
 
 #[derive(Default)]
 struct PortalInner {
-    /// The cursor painting the next session opens with; none until the first Start decides.
+    /// Whether the consumer wants the cursor painted into the frames; none until the first
+    /// Start decides, which is when the session opens.
     paint: Option<bool>,
     live: Option<Arc<PortalLive>>,
     epoch: u64,
     restore_token: Option<String>,
     dead: Option<String>,
     closed: bool,
+    /// Whether a session should be open: always for a host's monitors, only while its
+    /// display captures for a virtual monitor.
+    wanted: bool,
 }
 
-/// Session-wide portal state: the session thread opens (and, when the cursor mode changes,
-/// reopens) the portal session; the outputs and the input methods read the live one.
+/// Session-wide portal state: the session thread opens (and, when the host's monitors are to
+/// stream another cursor mode, reopens) the portal session; the outputs and the input methods
+/// read the live one.
 pub(crate) struct PortalCtl {
     inner: Mutex<PortalInner>,
     changed: Condvar,
     capture: bool,
     devices: u32,
+    /// The session selects one virtual monitor, which exists only while the session does.
+    virtual_src: bool,
 }
 
 impl PortalCtl {
     fn spawn(capture: bool, devices: u32) -> Arc<Self> {
+        Self::spawn_with(capture, devices, false)
+    }
+
+    /// A controller for a grown display: its session opens on the display's first Start and
+    /// closes when the display goes idle, taking its virtual monitor with it.
+    fn spawn_virtual() -> Arc<Self> {
+        Self::spawn_with(true, 0, true)
+    }
+
+    fn spawn_with(capture: bool, devices: u32, virtual_src: bool) -> Arc<Self> {
         let ctl = Arc::new(PortalCtl {
-            inner: Mutex::new(PortalInner::default()),
+            inner: Mutex::new(PortalInner {
+                wanted: !virtual_src,
+                ..PortalInner::default()
+            }),
             changed: Condvar::new(),
             capture,
             devices,
+            virtual_src,
         });
         let worker = ctl.clone();
         let _ = std::thread::Builder::new()
@@ -2340,14 +2643,28 @@ impl PortalCtl {
         ctl
     }
 
-    /// The cursor painting the session should carry (embedded cursor, or cursor metadata
-    /// for the consumer to draw); a change reopens the session.
+    /// Whether the consumer wants the cursor painted into the frames. The session is reopened
+    /// only where that changes the cursor mode it asks for (`reopens_for_cursor`).
     fn set_paint(&self, paint: bool) {
         let mut inner = self.inner.lock().unwrap();
         if inner.paint != Some(paint) {
             inner.paint = Some(paint);
             self.changed.notify_all();
         }
+    }
+
+    /// Open (`true`) or close the session; closing drops the live one at once.
+    fn set_wanted(&self, on: bool) {
+        let old = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.wanted == on {
+                return;
+            }
+            inner.wanted = on;
+            self.changed.notify_all();
+            if on { None } else { inner.live.take() }
+        };
+        drop(old);
     }
 
     pub(crate) fn live(&self) -> Option<Arc<PortalLive>> {
@@ -2376,9 +2693,50 @@ impl PortalCtl {
     }
 }
 
+/// The cursor mode a portal session asks for (`CURSOR_*`). The host's monitors outlive their
+/// session, so theirs asks for the cursor painted in (embedded) or for the metadata the page
+/// draws from, as the consumer wants. A grown display's virtual monitor lives only as long as
+/// its session, and a session's cursor mode is fixed when it selects its sources, so that
+/// session asks for the metadata whatever the consumer wants and the consumer paints the
+/// cursor into the frames itself (`HostCursor`): a cursor toggle then leaves the session, and
+/// the monitor, as they are. A session that captures nothing has no cursor to stream.
+fn session_cursor_request(capture: bool, virtual_src: bool, paint: bool) -> u32 {
+    if capture && (virtual_src || !paint) {
+        portal::CURSOR_METADATA
+    } else {
+        portal::CURSOR_EMBEDDED
+    }
+}
+
+/// Whether a live session streaming `live_mode`, on a portal that offered `available`, is
+/// reopened for a consumer that now wants `paint`: only when the mode it would ask for comes
+/// out other than the one it has. A grown display's session never is, and on a portal without
+/// metadata neither is the host's, whose cursor stays what the portal offers (embedded, or
+/// hidden where it offers only that) whatever the consumer wants.
+fn reopens_for_cursor(
+    capture: bool,
+    virtual_src: bool,
+    paint: bool,
+    live_mode: u32,
+    available: u32,
+) -> bool {
+    portal::resolve_cursor_mode(
+        session_cursor_request(capture, virtual_src, paint),
+        available,
+    ) != live_mode
+}
+
+/// Whether the consumer paints the cursor into a stream's frames itself: it wants the cursor
+/// painted, and the session streams it as metadata.
+fn consumer_paints_cursor(paint: bool, live_mode: u32) -> bool {
+    paint && live_mode == portal::CURSOR_METADATA
+}
+
 /// The portal thread: opens the session once the first Start has decided the cursor mode,
-/// reopens it (restoring with the token the backend gave) whenever that mode changes, and
-/// ends with the host session.
+/// reopens it (restoring with the token the backend gave) whenever the mode it asks for
+/// changes (`reopens_for_cursor`), and ends with the host session. A grown display's session is open only while the display
+/// wants it (`PortalCtl::set_wanted`), so one the portal finishes opening after that ended
+/// is closed rather than kept.
 fn portal_thread(ctl: Arc<PortalCtl>) {
     loop {
         let (paint, token) = {
@@ -2387,15 +2745,24 @@ fn portal_thread(ctl: Arc<PortalCtl>) {
                 if inner.closed || inner.dead.is_some() {
                     return;
                 }
-                if let Some(p) = inner.paint
-                    && inner.live.as_ref().is_none_or(|l| l.paint != p)
+                if inner.wanted
+                    && let Some(p) = inner.paint
+                    && inner.live.as_ref().is_none_or(|l| {
+                        reopens_for_cursor(
+                            ctl.capture,
+                            ctl.virtual_src,
+                            p,
+                            l.session.cursor_mode,
+                            l.session.cursor_modes,
+                        )
+                    })
                 {
                     break (
                         p,
                         inner
                             .restore_token
                             .clone()
-                            .or_else(portal::saved_restore_token),
+                            .or_else(|| portal::saved_restore_token(ctl.virtual_src)),
                     );
                 }
                 inner = ctl.changed.wait(inner).unwrap();
@@ -2405,22 +2772,21 @@ fn portal_thread(ctl: Arc<PortalCtl>) {
         // streams before the new session asks for them again.
         let old = ctl.inner.lock().unwrap().live.take();
         drop(old);
-        let cursor_mode = if ctl.capture && !paint {
-            portal::CURSOR_METADATA
-        } else {
-            portal::CURSOR_EMBEDDED
-        };
+        let cursor_mode = session_cursor_request(ctl.capture, ctl.virtual_src, paint);
         let open = |devices: u32| {
-            PortalSession::open(ctl.capture, devices, cursor_mode, token.as_deref()).and_then(
-                |session| {
-                    let core = if ctl.capture {
-                        Some(PwCore::connect(session.open_pipewire_remote()?)?)
-                    } else {
-                        None
-                    };
-                    Ok((session, core))
-                },
-            )
+            (if ctl.virtual_src {
+                PortalSession::open_virtual(cursor_mode, token.as_deref())
+            } else {
+                PortalSession::open(ctl.capture, devices, cursor_mode, token.as_deref())
+            })
+            .and_then(|session| {
+                let core = if ctl.capture {
+                    Some(PwCore::connect(session.open_pipewire_remote()?)?)
+                } else {
+                    None
+                };
+                Ok((session, core))
+            })
         };
         // A host that grants the screen but refuses the input devices answers the whole request as
         // a refusal, so asking again for capture alone is what turns that into a session with
@@ -2435,6 +2801,13 @@ fn portal_thread(ctl: Arc<PortalCtl>) {
             other => other,
         };
         let mut inner = ctl.inner.lock().unwrap();
+        if !inner.wanted || inner.closed {
+            // The display went idle, or the host session ended, while the portal answered:
+            // the session closes outside the lock, taking a virtual monitor nothing reads.
+            drop(inner);
+            drop(opened);
+            continue;
+        }
         match opened {
             Ok((session, core)) => {
                 inner.epoch += 1;
@@ -2482,9 +2855,12 @@ fn portal_thread(ctl: Arc<PortalCtl>) {
                     session,
                     core,
                     epoch: inner.epoch,
-                    paint,
                     ei,
                 }));
+            }
+            Err(e) if ctl.virtual_src => {
+                eprintln!("[HostCapture] virtual monitor session failed: {e}");
+                inner.wanted = false;
             }
             Err(e) => {
                 eprintln!("[HostCapture] portal session failed: {e}");
@@ -2531,6 +2907,8 @@ fn portal_capture_loop(
     dma_formats: Vec<(u32, Vec<u64>)>,
     geoms: Vec<OutputGeom>,
 ) -> Result<(), String> {
+    let grown = ctl.virtual_src;
+    let rank = if grown { 0 } else { index };
     let mut want: Option<Want> = None;
     let mut origin = (0, 0);
     let mut stream: Option<(PwStream, u64)> = None;
@@ -2562,6 +2940,10 @@ fn portal_capture_loop(
                         s.release_all();
                         s.set_active(false);
                     }
+                    if grown {
+                        stream = None;
+                        ctl.set_wanted(false);
+                    }
                 }
                 ToHost::Start {
                     width,
@@ -2578,6 +2960,10 @@ fn portal_capture_loop(
                         paint_cursor,
                         fps_milli,
                     });
+                    if grown {
+                        ctl.set_paint(paint_cursor);
+                        ctl.set_wanted(true);
+                    }
                 }
             }
         }
@@ -2592,24 +2978,37 @@ fn portal_capture_loop(
         let Some(core) = live.core.as_ref() else {
             continue;
         };
+        let assigned = assign_streams(&live.session.streams, &geoms)
+            .get(rank)
+            .copied()
+            .flatten();
+        let host_virtual = assigned.and_then(|i| live.session.streams[i].source_type)
+            == Some(crate::wayland::portal::SOURCE_VIRTUAL);
+        let (expect, exact_size) =
+            consume_size(grown, host_virtual, w.size, geoms.get(rank).map(|g| g.mode));
         let cfg = StreamConfig {
             zero_copy: w.zero_copy && !dma_formats.is_empty(),
             dma_formats: dma_formats.clone(),
             fps_milli: w.fps_milli,
-            expect: w.size,
+            expect,
             place: crate::wayland::pwcapture::CursorPlace {
                 origin,
                 size: w.size,
                 // The logical size the portal announces for the stream, as injection reads it
-                // (`HostSession::scale_at`), else the output's.
-                logical: assign_streams(&live.session.streams, &geoms)
-                    .get(index)
-                    .copied()
-                    .flatten()
-                    .and_then(|si| live.session.streams[si].size)
-                    .or_else(|| geoms.get(index).map(|g| g.logical))
-                    .unwrap_or((0, 0)),
+                // (`HostSession::scale_at`), else the output's. A grown monitor's is the
+                // display's: the host is unscaled, and the monitor takes its size from the
+                // stream after the portal announced one.
+                logical: if grown {
+                    w.size
+                } else {
+                    assigned
+                        .and_then(|si| live.session.streams[si].size)
+                        .or_else(|| geoms.get(rank).map(|g| g.logical))
+                        .unwrap_or((0, 0))
+                },
             },
+            exact_size,
+            draw_cursor: consumer_paints_cursor(w.paint_cursor, live.session.cursor_mode),
         };
         match &stream {
             Some((s, _)) => {
@@ -2621,11 +3020,7 @@ fn portal_capture_loop(
                 }
             }
             None => {
-                let Some(si) = assign_streams(&live.session.streams, &geoms)
-                    .get(index)
-                    .copied()
-                    .flatten()
-                else {
+                let Some(si) = assigned else {
                     if !warned_unshared {
                         warned_unshared = true;
                         eprintln!(
@@ -2652,9 +3047,9 @@ fn portal_capture_loop(
     }
 }
 
-// Dropping the session drops every channel sender and wake-pipe write end; the
-// capture and control threads observe the disconnect (poll sees POLLHUP) and
-// exit on their own.
+// Dropping the session closes its portal sessions (`HostSession`'s `Drop`) and drops
+// every channel sender and wake-pipe write end; the capture and control threads
+// observe the disconnect (poll sees POLLHUP) and exit on their own.
 
 // ---------------------------------------------------------------------------
 // Control thread: pumps the primary connection and applies layout requests.
@@ -2669,6 +3064,8 @@ fn control_loop(
     ledger: Arc<Mutex<LayoutLedger>>,
 ) {
     let qh = queue.handle();
+    let mut last_slots: Option<Vec<LayoutSlot>> = None;
+    let mut named = named_outputs(&state);
     loop {
         let mut pending: Option<(u64, Vec<LayoutSlot>)> = None;
         loop {
@@ -2681,9 +3078,20 @@ fn control_loop(
         if let Some((epoch, slots)) = pending {
             let realized = apply_layout(&conn, &mut queue, &mut state, &qh, &slots);
             ledger.lock().unwrap().decide(epoch, realized);
+            last_slots = Some(slots);
         }
         if queue.dispatch_pending(&mut state).is_err() {
             return;
+        }
+        let now_named = named_outputs(&state);
+        if now_named != named {
+            named = now_named;
+            if state.output_mgr.is_none()
+                && let Some(slots) = &last_slots
+            {
+                let slots = slots.clone();
+                apply_layout(&conn, &mut queue, &mut state, &qh, &slots);
+            }
         }
         let _ = queue.flush();
         if let Some(guard) = conn.prepare_read() {
@@ -2714,7 +3122,10 @@ fn control_loop(
 /// `LAYOUT_DEADLINE`, or no manager at all (KWin offers only its own kde_output_management
 /// protocol). Either answer settles the request, and the session owner then re-sizes its
 /// capture to the mode the host announces, so capture follows the host instead of gating
-/// forever on a size it will never produce.
+/// forever on a size it will never produce. A Mutter host growing a display has its monitors
+/// placed through DisplayConfig while that display captures (`mutterclient`), and still
+/// answers `false`: the arranger moves monitors and sets no mode, and the grown monitor takes
+/// its size from its stream.
 fn apply_layout(
     conn: &Connection,
     queue: &mut EventQueue<CtrlState>,
@@ -2723,6 +3134,16 @@ fn apply_layout(
     slots: &[LayoutSlot],
 ) -> bool {
     let Some(mgr) = state.output_mgr.clone() else {
+        if state.arrange_grown && slots.len() > state.order.len() {
+            let want = layout_request(state, slots);
+            match crate::wayland::mutterclient::apply(&want) {
+                Ok(true) => {
+                    eprintln!("[HostCapture] arranged the Mutter host's monitors: {want:?}.")
+                }
+                Ok(false) => {}
+                Err(e) => eprintln!("[HostCapture] Mutter refused the layout: {e}."),
+            }
+        }
         eprintln!(
             "[HostCapture] host lacks zwlr_output_manager_v1; capture follows the host's own size."
         );
@@ -2797,6 +3218,70 @@ fn apply_layout(
         return true;
     }
     false
+}
+
+/// How many host outputs have announced their name: a monitor the host adds later (a
+/// grown display's) is arranged once it can be named.
+fn named_outputs(state: &CtrlState) -> usize {
+    state.outputs.iter().filter(|(_, n)| n.is_some()).count()
+}
+
+/// How many displays a host backs: its outputs, and one more it grows on a virtual monitor
+/// when the portal serves virtual sources, an arranger can place the new monitor, and the
+/// host is unscaled (the arranger places a new monitor at scale 1, and a grown display's
+/// pointer goes by union-layout points, which equal logical ones only at scale 1).
+fn host_capacity(
+    real_outputs: usize,
+    virtual_ok: bool,
+    arranger_ok: bool,
+    unscaled: bool,
+) -> usize {
+    real_outputs + usize::from(virtual_ok && arranger_ok && unscaled)
+}
+
+/// Forget the name of the output the host removed (registry global `removed`): it no longer
+/// holds a rank, and the count of named outputs drops.
+fn forget_output<T>(globals: &[u32], outputs: &mut [(T, Option<String>)], removed: u32) {
+    if let Some(i) = globals.iter().position(|g| *g == removed)
+        && let Some(o) = outputs.get_mut(i)
+    {
+        o.1 = None;
+    }
+}
+
+/// The host output name of each display rank: ordered outputs first, then the outputs the
+/// host announced and named after the session started (a grown display's virtual monitor),
+/// in registry order.
+fn rank_names(order: &[usize], outputs: &[Option<String>], ranks: usize) -> Vec<Option<String>> {
+    let late = (0..outputs.len()).filter(|i| !order.contains(i) && outputs[*i].is_some());
+    order
+        .iter()
+        .copied()
+        .chain(late)
+        .take(ranks)
+        .map(|i| outputs.get(i).cloned().flatten())
+        .chain(std::iter::repeat(None))
+        .take(ranks)
+        .collect()
+}
+
+/// Every active output's host name and union-layout position, the primary first.
+fn layout_request(state: &CtrlState, slots: &[LayoutSlot]) -> Vec<(String, i32, i32)> {
+    let names: Vec<Option<String>> = state.outputs.iter().map(|(_, n)| n.clone()).collect();
+    let ranks = rank_names(&state.order, &names, slots.len());
+    slots
+        .iter()
+        .zip(ranks)
+        .enumerate()
+        .filter(|(_, (s, _))| s.active)
+        .map(|(i, (slot, name))| {
+            (
+                name.unwrap_or_else(|| format!("#{i}")),
+                slot.pos.0,
+                slot.pos.1,
+            )
+        })
+        .collect()
 }
 
 /// One bounded dispatch step for the control connection (false = connection died).
@@ -3890,6 +4375,48 @@ fn drain_ctl(
 
 #[cfg(test)]
 mod tests {
+    /// A host's own virtual monitor is sized by its owner: a stream of it is read at exactly
+    /// the output's current mode, never at the display's wish, which would resize the host's
+    /// monitor. A grown display's stream follows the display; any other stream offers the
+    /// display's wish within what the producer allows.
+    #[test]
+    fn a_host_virtual_monitor_is_read_at_its_current_mode() {
+        use super::consume_size;
+        assert_eq!(
+            consume_size(false, true, (2560, 1304), Some((2556, 1302))),
+            ((2556, 1302), true)
+        );
+        assert_eq!(
+            consume_size(true, true, (2544, 1318), Some((1, 1))),
+            ((2544, 1318), true)
+        );
+        assert_eq!(
+            consume_size(false, false, (2560, 1304), Some((2556, 1302))),
+            ((2560, 1304), false)
+        );
+        assert_eq!(
+            consume_size(false, true, (2560, 1304), None),
+            ((2560, 1304), false)
+        );
+    }
+
+    /// An arranged host moves its outputs after the portal announced their streams: the
+    /// pointer aims by where the output is now, the announced position only as a fallback.
+    #[test]
+    fn the_pointer_aims_by_the_output_position_the_host_reports_now() {
+        let order = [1, 0];
+        let positions = [(0, 0), (0, 1318)];
+        assert_eq!(
+            super::region_origin(&order, &positions, 0, Some((0, 0))),
+            Some((0, 1318))
+        );
+        assert_eq!(
+            super::region_origin(&order, &positions, 2, Some((5, 5))),
+            Some((5, 5))
+        );
+        assert_eq!(super::region_origin(&order, &[], 0, None), None);
+    }
+
     /// A finger's travel turns into whole notches with the fraction carried, both ways.
     #[test]
     fn a_finger_scroll_turns_into_whole_notches_with_the_rest_carried() {
@@ -3957,6 +4484,314 @@ mod tests {
         let mut dst = vec![0u8; 8];
         convert_shm_row(&src, &mut dst, 4, true);
         assert_eq!(dst, vec![2, 1, 0, 3, 6, 5, 4, 7]);
+    }
+
+    /// A grown display's session asks for the cursor metadata whatever the page wants, so a
+    /// cursor toggle reopens neither it nor, with it, its virtual monitor: the page's wish for
+    /// a painted cursor is met by painting the metadata's cursor into the frames.
+    #[test]
+    fn a_cursor_toggle_keeps_a_grown_session_and_its_monitor() {
+        use super::{consumer_paints_cursor, reopens_for_cursor, session_cursor_request};
+        use crate::wayland::portal::{
+            CURSOR_EMBEDDED, CURSOR_HIDDEN, CURSOR_METADATA, resolve_cursor_mode,
+        };
+        let all = CURSOR_HIDDEN | CURSOR_EMBEDDED | CURSOR_METADATA;
+        for opened_painted in [false, true] {
+            let live = resolve_cursor_mode(session_cursor_request(true, true, opened_painted), all);
+            assert_eq!(live, CURSOR_METADATA);
+            for paint in [false, true] {
+                assert!(!reopens_for_cursor(true, true, paint, live, all));
+                assert_eq!(consumer_paints_cursor(paint, live), paint);
+            }
+        }
+    }
+
+    /// Without metadata on the portal, a grown display's session streams the cursor the portal
+    /// paints and keeps it whatever the page wants: nothing is reopened and nothing painted
+    /// over it.
+    #[test]
+    fn without_metadata_a_grown_session_keeps_the_portals_cursor() {
+        use super::{consumer_paints_cursor, reopens_for_cursor, session_cursor_request};
+        use crate::wayland::portal::{
+            CURSOR_EMBEDDED, CURSOR_HIDDEN, CURSOR_METADATA, resolve_cursor_mode,
+        };
+        for (available, mode) in [
+            (CURSOR_HIDDEN | CURSOR_EMBEDDED, CURSOR_EMBEDDED),
+            (CURSOR_HIDDEN, CURSOR_HIDDEN),
+        ] {
+            let live = resolve_cursor_mode(session_cursor_request(true, true, false), available);
+            assert_eq!(live, mode);
+            assert_ne!(live, CURSOR_METADATA);
+            for paint in [false, true] {
+                assert!(!reopens_for_cursor(true, true, paint, live, available));
+                assert!(!consumer_paints_cursor(paint, live));
+            }
+        }
+    }
+
+    /// The host's monitors outlive their session, so theirs is reopened for the cursor mode
+    /// the page wants, but only where the portal offers both: without metadata the mode it
+    /// asks for comes out embedded either way, and a session that captures nothing has no
+    /// cursor mode to change.
+    #[test]
+    fn a_monitor_session_reopens_only_for_a_cursor_mode_it_can_get() {
+        use super::{consumer_paints_cursor, reopens_for_cursor, session_cursor_request};
+        use crate::wayland::portal::{
+            CURSOR_EMBEDDED, CURSOR_HIDDEN, CURSOR_METADATA, resolve_cursor_mode,
+        };
+        let all = CURSOR_HIDDEN | CURSOR_EMBEDDED | CURSOR_METADATA;
+        let drawn_by_page = resolve_cursor_mode(session_cursor_request(true, false, false), all);
+        assert_eq!(drawn_by_page, CURSOR_METADATA);
+        assert!(!reopens_for_cursor(true, false, false, drawn_by_page, all));
+        assert!(reopens_for_cursor(true, false, true, drawn_by_page, all));
+        let painted = resolve_cursor_mode(session_cursor_request(true, false, true), all);
+        assert_eq!(painted, CURSOR_EMBEDDED);
+        assert!(reopens_for_cursor(true, false, false, painted, all));
+        assert!(!consumer_paints_cursor(true, painted));
+
+        let no_metadata = CURSOR_HIDDEN | CURSOR_EMBEDDED;
+        let live = resolve_cursor_mode(session_cursor_request(true, false, false), no_metadata);
+        assert_eq!(live, CURSOR_EMBEDDED);
+        for paint in [false, true] {
+            assert!(!reopens_for_cursor(true, false, paint, live, no_metadata));
+        }
+
+        // A portal with metadata and no embedded cursor: the painted cursor is drawn from
+        // the metadata rather than lost to a hidden one.
+        let no_embedded = CURSOR_HIDDEN | CURSOR_METADATA;
+        let live = resolve_cursor_mode(session_cursor_request(true, false, true), no_embedded);
+        assert_eq!(live, CURSOR_METADATA);
+        assert!(!reopens_for_cursor(true, false, false, live, no_embedded));
+        assert!(consumer_paints_cursor(true, live));
+
+        let input_only =
+            resolve_cursor_mode(session_cursor_request(false, false, false), CURSOR_EMBEDDED);
+        for paint in [false, true] {
+            assert!(!reopens_for_cursor(
+                false,
+                false,
+                paint,
+                input_only,
+                CURSOR_EMBEDDED
+            ));
+        }
+    }
+
+    fn cursor_sink() -> (
+        super::FrameSink,
+        smithay::reexports::calloop::channel::Channel<usize>,
+    ) {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let (wake, woken) = smithay::reexports::calloop::channel::channel();
+        (
+            super::FrameSink {
+                tx,
+                queued: Default::default(),
+                wake,
+                index: 3,
+                cursor: Default::default(),
+            },
+            woken,
+        )
+    }
+
+    fn sprite(hash: u64) -> std::sync::Arc<super::CursorSprite> {
+        std::sync::Arc::new(super::CursorSprite {
+            width: 4,
+            height: 4,
+            hot: (1, 1),
+            rgba: vec![0xff; 64],
+            hash,
+        })
+    }
+
+    /// While the page draws the cursor, a meta's move wakes no render; once the consumer paints
+    /// it, every move does, until a render draws it.
+    #[test]
+    fn a_painted_cursor_wakes_the_render_only_while_painted() {
+        let (sink, _woken) = cursor_sink();
+        sink.update_cursor(|c| {
+            c.at = Some((10, 10));
+            c.sprite = Some(sprite(1));
+        });
+        assert!(!sink.cursor.lock().unwrap().pending());
+        sink.update_cursor(|c| c.draw = true);
+        assert!(sink.cursor.lock().unwrap().pending());
+        let frame = sink.cursor.lock().unwrap().frame((100, 100));
+        sink.cursor.lock().unwrap().drew(&frame);
+        assert!(!sink.cursor.lock().unwrap().pending());
+        sink.update_cursor(|c| c.at = Some((10, 10)));
+        assert!(
+            !sink.cursor.lock().unwrap().pending(),
+            "the same place is no news"
+        );
+        sink.update_cursor(|c| c.at = Some((20, 10)));
+        assert!(sink.cursor.lock().unwrap().pending());
+    }
+
+    /// A painted cursor's frame damages where it was and where it is, clipped to the frame, by
+    /// the hotspot; one that did not change damages nothing; one that goes (off the stream, or
+    /// the page drawing it again) damages where it was.
+    #[test]
+    fn a_painted_cursor_damages_its_old_and_new_place() {
+        use smithay::utils::Rectangle;
+        let mut cursor = super::HostCursor {
+            draw: true,
+            at: Some((10, 10)),
+            sprite: Some(sprite(1)),
+            ..Default::default()
+        };
+        let first = cursor.frame((100, 100));
+        assert_eq!(
+            first.damage,
+            vec![Rectangle::new((9, 9).into(), (4, 4).into())]
+        );
+        assert_eq!(
+            first.sprite().map(|(s, at)| ((s.width, s.height), at)),
+            Some(((4, 4), (9, 9)))
+        );
+        cursor.drew(&first);
+        assert!(cursor.frame((100, 100)).damage.is_empty());
+
+        cursor.at = Some((99, 50));
+        let moved = cursor.frame((100, 100));
+        assert_eq!(
+            moved.damage,
+            vec![
+                Rectangle::new((9, 9).into(), (4, 4).into()),
+                Rectangle::new((98, 49).into(), (2, 4).into()),
+            ]
+        );
+        cursor.drew(&moved);
+
+        cursor.sprite = Some(sprite(2));
+        assert_eq!(
+            cursor.frame((100, 100)).damage,
+            vec![
+                Rectangle::new((98, 49).into(), (2, 4).into()),
+                Rectangle::new((98, 49).into(), (2, 4).into()),
+            ],
+            "a new sprite in the same place"
+        );
+        cursor.drew(&cursor.frame((100, 100)));
+
+        cursor.at = None;
+        let gone = cursor.frame((100, 100));
+        assert!(gone.sprite().is_none());
+        assert_eq!(
+            gone.damage,
+            vec![Rectangle::new((98, 49).into(), (2, 4).into())]
+        );
+        cursor.drew(&gone);
+
+        cursor.at = Some((50, 50));
+        cursor.draw = false;
+        let unpainted = cursor.frame((100, 100));
+        assert!(unpainted.sprite().is_none() && unpainted.damage.is_empty());
+    }
+
+    /// The sprite blends over a BGRA frame at its top-left corner, clipped to the frame: an
+    /// opaque pixel replaces the frame's, a clear one leaves it.
+    #[test]
+    fn a_painted_cursor_blends_into_the_frame_clipped() {
+        let sprite = std::sync::Arc::new(super::CursorSprite {
+            width: 2,
+            height: 2,
+            hot: (0, 0),
+            // RGBA: opaque red, clear, clear, opaque blue.
+            rgba: vec![255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255],
+            hash: 1,
+        });
+        let cursor = super::HostCursor {
+            draw: true,
+            at: Some((2, -1)),
+            sprite: Some(sprite),
+            ..Default::default()
+        };
+        let mut frame = vec![7u8; 3 * 2 * 4];
+        cursor.frame((3, 2)).blend_bgra(&mut frame, 3 * 4, (3, 2));
+        let px = |x: usize, y: usize| frame[(y * 3 + x) * 4..(y * 3 + x) * 4 + 4].to_vec();
+        // Row -1 is clipped; the sprite's second row lands on frame row 0, its blue pixel
+        // past the right edge.
+        assert_eq!(px(2, 0), vec![7, 7, 7, 7]);
+        assert_eq!(px(1, 0), vec![7, 7, 7, 7]);
+        assert_eq!(px(2, 1), vec![7, 7, 7, 7]);
+
+        let cursor = super::HostCursor {
+            at: Some((1, 0)),
+            ..cursor
+        };
+        let mut frame = vec![7u8; 3 * 2 * 4];
+        cursor.frame((3, 2)).blend_bgra(&mut frame, 3 * 4, (3, 2));
+        let px = |x: usize, y: usize| frame[(y * 3 + x) * 4..(y * 3 + x) * 4 + 4].to_vec();
+        assert_eq!(
+            px(1, 0),
+            vec![0, 0, 255, 7],
+            "opaque red over the frame, alpha kept"
+        );
+        assert_eq!(px(2, 0), vec![7, 7, 7, 7], "a clear pixel leaves the frame");
+        assert_eq!(px(2, 1), vec![255, 0, 0, 7], "opaque blue");
+        assert_eq!(px(0, 0), vec![7, 7, 7, 7]);
+    }
+
+    #[test]
+    fn capacity_adds_one_with_virtual_and_arranger() {
+        assert_eq!(host_capacity(1, true, true, true), 2);
+    }
+
+    #[test]
+    fn capacity_unchanged_without_arranger() {
+        assert_eq!(host_capacity(1, true, false, true), 1);
+    }
+
+    #[test]
+    fn capacity_unchanged_without_virtual() {
+        assert_eq!(host_capacity(1, false, true, true), 1);
+    }
+
+    /// A scaled host is not grown: the arranger places a new virtual monitor at scale 1 and
+    /// the pointer reaches a grown display through union-layout points, both wrong there.
+    #[test]
+    fn capacity_unchanged_on_a_scaled_host() {
+        assert_eq!(host_capacity(1, true, true, false), 1);
+    }
+
+    /// A monitor the host removed (a closed grown display) gives up its name, so the next
+    /// grown monitor takes its rank and a close counts as a change of named outputs.
+    #[test]
+    fn a_removed_output_gives_up_its_rank() {
+        let mut outputs = vec![
+            ((), Some("Meta-0".to_string())),
+            ((), Some("Meta-1".to_string())),
+        ];
+        let globals = [10, 11];
+        forget_output(&globals, &mut outputs, 11);
+        let names: Vec<Option<String>> = outputs.iter().map(|(_, n)| n.clone()).collect();
+        assert_eq!(
+            rank_names(&[0], &names, 2),
+            vec![Some("Meta-0".to_string()), None]
+        );
+        outputs.push(((), Some("Meta-2".to_string())));
+        let names: Vec<Option<String>> = outputs.iter().map(|(_, n)| n.clone()).collect();
+        assert_eq!(
+            rank_names(&[0], &names, 2),
+            vec![Some("Meta-0".to_string()), Some("Meta-2".to_string())]
+        );
+        forget_output(&globals, &mut outputs, 99);
+        assert_eq!(outputs[0].1.as_deref(), Some("Meta-0"));
+    }
+
+    #[test]
+    fn rank_names_take_late_outputs_after_the_ordered_ones() {
+        let outputs = [Some("Meta-0".to_string()), None, Some("Meta-1".to_string())];
+        assert_eq!(
+            rank_names(&[0], &outputs, 2),
+            [Some("Meta-0".to_string()), Some("Meta-1".to_string())]
+        );
+        assert_eq!(
+            rank_names(&[0], &outputs[..1], 2),
+            [Some("Meta-0".to_string()), None]
+        );
     }
 
     #[test]
