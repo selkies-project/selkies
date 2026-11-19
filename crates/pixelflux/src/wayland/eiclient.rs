@@ -202,6 +202,45 @@ struct Device {
     scroll: Option<ei::Scroll>,
     keyboard: Option<ei::Keyboard>,
     keymap: Option<KeymapPolicy>,
+    /// The logical rectangles this device's absolute motion may land in; none means anywhere.
+    regions: Vec<Rect>,
+}
+
+/// A logical rectangle (x, y, width, height) of the compositor's space, where EIS regions lie.
+type Rect = (u32, u32, u32, u32);
+
+/// Whether `r` holds the logical point (`x`, `y`), its far edges excluded. The edges are summed
+/// in `f64`, which holds any `u32` sum exactly.
+fn holds(r: &Rect, x: f32, y: f32) -> bool {
+    let (x, y) = (f64::from(x), f64::from(y));
+    let (left, top) = (f64::from(r.0), f64::from(r.1));
+    x >= left && y >= top && x < left + f64::from(r.2) && y < top + f64::from(r.3)
+}
+
+/// The absolute device for a point, as an index into `devices` (whether each can take motion
+/// now, and its regions): the first ready one whose region holds the point, else the first
+/// ready one without regions, which takes a point anywhere, else the first ready one. Mutter
+/// gives each screencast stream its own absolute device and drops motion outside a device's
+/// regions, so a second monitor needs its own device picked.
+fn abs_target<'a>(
+    devices: impl IntoIterator<Item = (bool, &'a [Rect])>,
+    x: f32,
+    y: f32,
+) -> Option<usize> {
+    devices
+        .into_iter()
+        .enumerate()
+        .filter(|(_, (ready, _))| *ready)
+        .min_by_key(|(_, (_, regions))| {
+            if regions.iter().any(|r| holds(r, x, y)) {
+                0
+            } else if regions.is_empty() {
+                1
+            } else {
+                2
+            }
+        })
+        .map(|(i, _)| i)
 }
 
 struct Worker {
@@ -378,6 +417,11 @@ impl Worker {
                     scroll: device.interface(),
                     keyboard: device.interface(),
                     keymap,
+                    regions: device
+                        .regions()
+                        .iter()
+                        .map(|r| (r.x, r.y, r.width, r.height))
+                        .collect(),
                     device: device.device().clone(),
                     resumed: false,
                     emulating: false,
@@ -427,7 +471,11 @@ impl Worker {
     fn emit(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::MotionAbsolute { x, y } => {
-                if let Some(i) = self.ready_index(|d| d.pointer_abs.is_some()) {
+                let devices = self
+                    .devices
+                    .iter()
+                    .map(|d| (d.resumed && d.pointer_abs.is_some(), d.regions.as_slice()));
+                if let Some(i) = abs_target(devices, x, y) {
                     self.start(i);
                     self.devices[i]
                         .pointer_abs
@@ -638,6 +686,51 @@ fn key_state(pressed: bool) -> ei::keyboard::KeyState {
 mod tests {
     use super::*;
     use crate::wayland::keymap::compile_rmlvo;
+    use reis::eis;
+    use reis::handshake::EisHandshaker;
+    use reis::request::{EisRequest, EisRequestConverter};
+    use std::os::unix::net::UnixStream;
+    use std::thread::JoinHandle;
+    use std::time::Duration;
+
+    /// Mutter gives each screencast stream its own absolute device, and drops motion
+    /// outside a device's regions: a point goes to the device whose region holds it.
+    #[test]
+    fn absolute_motion_goes_to_the_device_whose_region_holds_it() {
+        let top: &[Rect] = &[(0, 0, 2544, 1318)];
+        let bottom: &[Rect] = &[(0, 1318, 2556, 1302)];
+        let devices = [(true, top), (true, bottom), (false, bottom)];
+        assert_eq!(abs_target(devices, 100.0, 1400.0), Some(1));
+        assert_eq!(abs_target(devices, 100.0, 100.0), Some(0));
+        assert_eq!(abs_target(devices, 9000.0, 9000.0), Some(0));
+        assert_eq!(abs_target([(true, &[][..])], 5.0, 5.0), Some(0));
+        assert_eq!(abs_target([(false, &[][..])], 5.0, 5.0), None);
+    }
+
+    /// A device without regions takes a point anywhere, so a point no region holds goes to it
+    /// rather than to a device that would drop it; a device whose region holds the point still
+    /// comes first.
+    #[test]
+    fn a_device_without_regions_takes_a_point_no_region_holds() {
+        let left: &[Rect] = &[(0, 0, 100, 100)];
+        let anywhere: &[Rect] = &[];
+        assert_eq!(
+            abs_target([(true, left), (true, anywhere)], 500.0, 500.0),
+            Some(1)
+        );
+        assert_eq!(
+            abs_target([(true, anywhere), (true, left)], 50.0, 50.0),
+            Some(1)
+        );
+    }
+
+    /// A region reaching past `u32::MAX` holds its points instead of overflowing its edge.
+    #[test]
+    fn a_region_at_the_end_of_the_space_holds_its_points() {
+        let far = (u32::MAX - 10, u32::MAX - 10, 100, 100);
+        assert!(holds(&far, u32::MAX as f32, u32::MAX as f32));
+        assert!(!holds(&far, 0.0, 0.0));
+    }
 
     /// A base keysym present in the compositor keymap resolves to that keymap's keycode with the
     /// modifiers its level needs; a Shift-level glyph carries the keymap's own Shift keycode, and
@@ -664,25 +757,17 @@ mod tests {
         );
     }
 
-    /// The injector, run against a minimal in-process EIS server, emits the protocol a
-    /// compositor expects: it binds the seat, starts emulating before the first event, and
-    /// sends absolute motion, buttons, keys, and discrete scroll with the values handed to it,
-    /// each committed by a frame.
-    #[test]
-    fn injector_emits_the_expected_eis_protocol() {
-        use reis::eis;
-        use reis::handshake::EisHandshaker;
-        use reis::request::{EisRequest, EisRequestConverter};
-        use std::os::fd::OwnedFd;
-        use std::os::unix::net::UnixStream;
-        use std::time::Duration;
-
-        let (server_sock, client_sock) = UnixStream::pair().unwrap();
-        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
-        let recorded = seen.clone();
-
-        let server = std::thread::spawn(move || {
-            let ctx = eis::Context::new(server_sock).unwrap();
+    /// A minimal in-process EIS server on `sock`: it completes the handshake, offers one seat,
+    /// and on the client's bind adds one resumed device per entry of `regions`, with those
+    /// regions, in one flush. Every request it then receives is recorded in `seen`, motion
+    /// naming the device (by its entry) it arrived on.
+    fn eis_server(
+        sock: UnixStream,
+        regions: Vec<Vec<Rect>>,
+        seen: Arc<Mutex<Vec<String>>>,
+    ) -> JoinHandle<()> {
+        std::thread::spawn(move || {
+            let ctx = eis::Context::new(sock).unwrap();
             let mut handshaker = EisHandshaker::new(&ctx, 1);
             let resp = 'hs: loop {
                 if ctx.read().is_err() {
@@ -707,7 +792,7 @@ mod tests {
                     | DeviceCapability::Keyboard,
             );
             let _ = handle.flush();
-            let mut device = None;
+            let mut devices = Vec::new();
             loop {
                 if ctx.read().is_err() {
                     return;
@@ -718,24 +803,33 @@ mod tests {
                     }
                 }
                 while let Some(req) = converter.next_request() {
-                    let mut log = recorded.lock().unwrap();
+                    let mut log = seen.lock().unwrap();
                     match req {
-                        EisRequest::Bind(b) if device.is_none() => {
-                            let dev = seat.add_device(
-                                Some("virt"),
-                                eis::device::DeviceType::Virtual,
-                                b.capabilities,
-                                |_| {},
-                            );
-                            dev.resumed();
+                        EisRequest::Bind(b) if devices.is_empty() => {
+                            for rects in &regions {
+                                let dev = seat.add_device(
+                                    Some("virt"),
+                                    eis::device::DeviceType::Virtual,
+                                    b.capabilities,
+                                    |device| {
+                                        for r in rects {
+                                            device.device().region(r.0, r.1, r.2, r.3, 1.0);
+                                        }
+                                    },
+                                );
+                                dev.resumed();
+                                devices.push(dev);
+                            }
                             let _ = handle.flush();
-                            device = Some(dev);
                         }
                         EisRequest::DeviceStartEmulating(_) => log.push("start".into()),
                         EisRequest::PointerMotionAbsolute(m) => {
+                            let on = devices.iter().position(|d| *d == m.device);
                             log.push(format!(
-                                "abs {} {}",
-                                m.dx_absolute as i32, m.dy_absolute as i32
+                                "abs {} {} {}",
+                                on.map_or(-1, |i| i as i32),
+                                m.dx_absolute as i32,
+                                m.dy_absolute as i32
                             ));
                         }
                         EisRequest::Button(b) => log.push(format!(
@@ -755,7 +849,18 @@ mod tests {
                     }
                 }
             }
-        });
+        })
+    }
+
+    /// The injector, run against a minimal in-process EIS server, emits the protocol a
+    /// compositor expects: it binds the seat, starts emulating before the first event, and
+    /// sends absolute motion, buttons, keys, and discrete scroll with the values handed to it,
+    /// each committed by a frame.
+    #[test]
+    fn injector_emits_the_expected_eis_protocol() {
+        let (server_sock, client_sock) = UnixStream::pair().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let server = eis_server(server_sock, vec![Vec::new()], seen.clone());
 
         let injector =
             EiInjector::spawn(OwnedFd::from(client_sock)).expect("injector binds a device");
@@ -775,7 +880,7 @@ mod tests {
             "start_emulating: {got:?}"
         );
         assert!(
-            got.contains(&"abs 400 300".to_string()),
+            got.contains(&"abs 0 400 300".to_string()),
             "absolute motion: {got:?}"
         );
         assert!(
@@ -797,6 +902,35 @@ mod tests {
         assert!(
             got.contains(&"scroll 0 120".to_string()),
             "discrete scroll: {got:?}"
+        );
+    }
+
+    /// With one absolute device per monitor, as Mutter gives each screencast stream, the
+    /// injector sends each point on the device whose region holds it, so the second monitor's
+    /// motion is not dropped on the first one's device.
+    #[test]
+    fn injector_sends_each_point_on_the_device_of_its_monitor() {
+        let (server_sock, client_sock) = UnixStream::pair().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let regions = vec![vec![(0, 0, 2544, 1318)], vec![(0, 1318, 2556, 1302)]];
+        let server = eis_server(server_sock, regions, seen.clone());
+
+        let injector =
+            EiInjector::spawn(OwnedFd::from(client_sock)).expect("injector binds a device");
+        injector.pointer_motion_abs(100.0, 1400.0);
+        injector.pointer_motion_abs(100.0, 100.0);
+        std::thread::sleep(Duration::from_millis(400));
+        drop(injector);
+        server.join().unwrap();
+
+        let got = seen.lock().unwrap().clone();
+        assert!(
+            got.contains(&"abs 1 100 1400".to_string()),
+            "bottom monitor's device: {got:?}"
+        );
+        assert!(
+            got.contains(&"abs 0 100 100".to_string()),
+            "top monitor's device: {got:?}"
         );
     }
 }
