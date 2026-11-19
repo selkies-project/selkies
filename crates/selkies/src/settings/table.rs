@@ -1647,7 +1647,7 @@ pub static DEFINITIONS: &[SettingDef] = &[
         name: "session_switch",
         kind: Kind::Bool,
         default: "True",
-        help: "Offer the switch between the desktop and the application alone in the window manager's root menu and window menu, where the shell is installed and --desktop is not locked: the shell starts or stops, the application keeps running, and the choice is kept for the next session.",
+        help: "Offer the switch between the desktop and the application alone in the window manager's root menu and window menu, where the shell is installed and --desktop is not locked: the shell starts or stops, the application keeps running, and the choice is kept for the next session. The master token switches through /api/session whatever this says.",
         env_vars: &[],
         allowed: &[],
         value_range: None,

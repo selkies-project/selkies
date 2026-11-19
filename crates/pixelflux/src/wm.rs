@@ -481,6 +481,9 @@ pub enum Event {
     /// A client (a pager) asked, through the workspace protocol, to switch to this virtual
     /// desktop, counted from zero.
     ActivateDesktop(u32),
+    /// The server asked for the session as its desktop (`true`) or as its application alone;
+    /// what each is, and whether the session allows the switch, is the policy's to decide.
+    DesktopMode(bool),
 }
 
 /// The xdg states a configure carries, which the compositor also publishes to taskbars.

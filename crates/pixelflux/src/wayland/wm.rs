@@ -968,6 +968,16 @@ pub fn activate_desktop(state: &mut AppState, index: u32) {
     }
 }
 
+/// The server asked for the session's desktop or its application alone; false where no policy
+/// is installed to hear it.
+pub fn desktop_mode(state: &mut AppState, on: bool) -> bool {
+    if !active(state) {
+        return false;
+    }
+    dispatch(state, Event::DesktopMode(on));
+    true
+}
+
 /// The modifiers the seat's keyboard holds.
 fn modifiers(state: &AppState) -> Modifiers {
     let mods: Option<ModifiersState> = state.seat.get_keyboard().map(|k| k.modifier_state());

@@ -20,7 +20,9 @@
 //! ([`application_preload`]), so what the menus and the shell launch finds the same desktop and
 //! the session's gamepads and camera. The bus is started in that environment too, so an
 //! application it activates gets them as well, and what the server launches from elsewhere (the
-//! apps panel, a client's command) starts in it as well ([`launch_env`]). The backend's
+//! apps panel, a client's command) starts in it as well ([`launch_env`]); what runs beside the
+//! server as the same user reads it from [`SESSION_ENV_FILE`] in the runtime directory, written
+//! once the session's displays are known ([`publish_session_env`]). The backend's
 //! `autostart` file is the session's application: it runs once the manager is up, with that
 //! environment, and again when everything it started exited where `--app-restart` asks
 //! ([`selkies_wm::session::start_autostart`]). The handles live for the process, since the
@@ -35,7 +37,10 @@
 //! starts in. Unless `--session-switch` is off or the desktop setting is locked, the window
 //! manager's root menu and window menu switch between the two at runtime: the shell is started
 //! or stopped, the application keeps running, and the choice is kept for the next session
-//! ([`selkies_wm::session::SessionControl`]).
+//! ([`selkies_wm::session::SessionControl`]). The server's operator switches it too, through
+//! `/api/session` ([`set_desktop_mode`]), wherever the desktop setting is not locked, whether or
+//! not the menus offer it; that switch goes through the window manager as the menus' does, so it
+//! lays the windows out the same way, and is not kept for the next session.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -43,6 +48,7 @@ use std::time::{Duration, Instant};
 
 use log::{debug, error, info, warn};
 use selkies_wm::config::{Backend, Policy};
+use selkies_wm::core::SessionMode;
 use selkies_wm::frame::Buttons;
 use selkies_wm::session::{
     SessionBus, SessionControl, SessionEnv, SessionPolicy, ShellLauncher, ShellSupervisor,
@@ -58,10 +64,16 @@ const SHELL: &str = "selkies-desktop";
 /// How long the shell waits for Xwayland's display before it starts without one.
 const XWAYLAND_WAIT: Duration = Duration::from_secs(15);
 
+/// The file in `$XDG_RUNTIME_DIR` the session's launch environment ([`launch_env`]) is written
+/// to, a JSON object of the variables, readable by the session user alone.
+pub const SESSION_ENV_FILE: &str = "selkies-session-env.json";
+
 /// What the mode keeps alive: the session bus, and on X11 the manager's thread.
 struct Session {
     /// The environment every program the manager starts runs in.
     env: Arc<Mutex<SessionEnv>>,
+    /// The session's mode, as the window manager switches it.
+    control: Arc<SessionControl>,
     _bus: Option<SessionBus>,
     _x11: Option<selkies_wm::x11::ManagerHandle>,
     /// What reaches the X11 manager's thread.
@@ -93,6 +105,56 @@ pub fn window_request(id: pixelflux::wm::WindowId, request: pixelflux::wm::Reque
         Some((false, Some(remote))) => remote.request(id, request),
         _ => false,
     }
+}
+
+/// The session's mode: whether the shell runs, whether the menus or the server may switch it,
+/// and whether the session's application runs; `None` where no window manager runs.
+pub fn session_mode() -> Option<SessionMode> {
+    let slot = SESSION.get()?.lock().ok()?;
+    Some(slot.as_ref()?.control.mode())
+}
+
+/// Why the server's switch of the session's mode was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ModeRefusal {
+    #[error("No window manager runs")]
+    NoWindowManager,
+    #[error("The session's mode is locked or no desktop shell is installed")]
+    Locked,
+    #[error("The window manager did not answer")]
+    NoAnswer,
+}
+
+/// Switch the session to the desktop or to the application alone for the server's operator,
+/// through the window manager as its menus switch it, so the shell starts or stops and the
+/// windows are laid out the same way; the switch is not kept for the next session. Answers the
+/// mode as it stands after the switch. Blocks as [`desktop_view`] does.
+pub fn set_desktop_mode(on: bool) -> Result<SessionMode, ModeRefusal> {
+    let (wayland, x11_remote, control) = {
+        let slot = SESSION
+            .get()
+            .ok_or(ModeRefusal::NoWindowManager)?
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let session = slot.as_ref().ok_or(ModeRefusal::NoWindowManager)?;
+        (
+            session.wayland,
+            session.x11_remote.clone(),
+            session.control.clone(),
+        )
+    };
+    if !control.mode().server_switch {
+        return Err(ModeRefusal::Locked);
+    }
+    let answered = if wayland {
+        pixelflux::desktop_mode(on)
+    } else {
+        x11_remote.is_some_and(|remote| remote.desktop_mode(on))
+    };
+    if !answered {
+        return Err(ModeRefusal::NoAnswer);
+    }
+    Ok(control.mode())
 }
 
 /// The address of the session bus the session's programs are started on, which is the one the
@@ -145,6 +207,50 @@ pub fn launch_env() -> Option<HashMap<String, String>> {
     let slot = SESSION.get()?.lock().unwrap_or_else(|p| p.into_inner());
     let env = slot.as_ref()?.env.lock().unwrap_or_else(|p| p.into_inner());
     Some(env.vars().into_iter().collect())
+}
+
+/// Write the launch environment to [`SESSION_ENV_FILE`] in the runtime directory, for what runs
+/// beside the server as the same user and starts programs into the session.
+///
+/// The file is written to a temporary name of mode 0600 and renamed over the old one, so a
+/// reader never sees half of it. It holds what the process environment holds, which every
+/// process of the session user reads from `/proc` anyway, so it widens no one's reach. Nothing
+/// is written without a runtime directory.
+fn publish_session_env(env: &SessionEnv) {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let Some(dir) = env
+        .get("XDG_RUNTIME_DIR")
+        .filter(|dir| dir.starts_with('/'))
+        .map(std::path::PathBuf::from)
+    else {
+        debug!(target: "wm", "no runtime directory; the session's launch environment is not written");
+        return;
+    };
+    let vars: std::collections::BTreeMap<String, String> = env.vars().into_iter().collect();
+    let Ok(text) = serde_json::to_string_pretty(&vars) else {
+        return;
+    };
+    let target = dir.join(SESSION_ENV_FILE);
+    let tmp = dir.join(format!(".{SESSION_ENV_FILE}.{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .and_then(|mut file| file.write_all(text.as_bytes()))
+        .and_then(|()| std::fs::rename(&tmp, &target));
+    match written {
+        Ok(()) => {
+            debug!(target: "wm", "the session's launch environment is in {}", target.display())
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            warn!(target: "wm", "{}: the session's launch environment is not written: {e}", target.display());
+        }
+    }
 }
 
 /// Start the window manager and, under `--desktop`, the shell, for the backend in use. Runs on
@@ -200,6 +306,7 @@ pub fn start(is_wayland: bool) {
     selkies_wm::appearance::start(&env);
     let env = Arc::new(Mutex::new(env));
     let session_env = env.clone();
+    let session_control = control.clone();
     let x11 = if is_wayland {
         if !start_wayland(env, control) {
             return;
@@ -213,6 +320,7 @@ pub fn start(is_wayland: bool) {
         match selkies_wm::x11::spawn(&display, env.clone(), control.clone()) {
             Ok(handle) => {
                 info!(target: "wm", "window manager on {display}{}", mode_words(&control));
+                publish_session_env(&env.lock().unwrap_or_else(|p| p.into_inner()));
                 start_autostart(env, Backend::X11, control);
                 Some(handle)
             }
@@ -225,6 +333,7 @@ pub fn start(is_wayland: bool) {
     let slot = SESSION.get_or_init(|| Mutex::new(None));
     *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(Session {
         env: session_env,
+        control: session_control,
         _bus: bus,
         x11_remote: x11.as_ref().map(selkies_wm::x11::ManagerHandle::remote),
         _x11: x11,
@@ -298,6 +407,7 @@ fn start_wayland(env: Arc<Mutex<SessionEnv>>, control: Arc<SessionControl>) -> b
                 }
                 Err(_) => warn!(target: "wm", "Xwayland gave no display within {XWAYLAND_WAIT:?}; the desktop starts without one"),
             }
+            publish_session_env(&env.lock().unwrap_or_else(|p| p.into_inner()));
             start_autostart(env.clone(), Backend::Wayland, control.clone());
             let mut supervisor = ShellSupervisor::new(env, control);
             loop {

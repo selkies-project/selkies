@@ -813,6 +813,12 @@ pub enum ThreadCommand {
         request: wm::Request,
         reply: std::sync::mpsc::Sender<bool>,
     },
+    /// Hand the installed window policy the server's ask for the session's desktop or its
+    /// application alone; reply whether a policy took it.
+    DesktopMode {
+        on: bool,
+        reply: std::sync::mpsc::Sender<bool>,
+    },
     SetCursorCallback(Option<Arc<dyn crate::sink::CursorSink>>),
     SetClipboardCallback(Arc<dyn crate::sink::ClipboardSink>),
     /// Install the window policy that manages the compositor's windows from here on.
@@ -7408,6 +7414,9 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 let known = wayland::wm::rect_of(state, id).is_some();
                 let _ = reply.send(known && wayland::wm::request(state, id, request));
             }
+            ThreadCommand::DesktopMode { on, reply } => {
+                let _ = reply.send(wayland::wm::desktop_mode(state, on));
+            }
             ThreadCommand::ListWindows { reply } => {
                 use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
                 let mut list = Vec::new();
@@ -8794,6 +8803,21 @@ impl Compositor {
             .unwrap_or(false))
     }
 
+    /// Ask the installed window policy for the session's desktop or its application alone
+    /// ([`wm::Event::DesktopMode`]). False with no policy installed or where the compositor
+    /// does not answer; the policy decides what becomes of the ask.
+    pub fn desktop_mode(&self, on: bool) -> Result<bool, Error> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        self.send(ThreadCommand::DesktopMode {
+            on,
+            reply: reply_tx,
+        })
+        .map_err(|e| Error::Compositor(format!("Failed to send a desktop mode request: {e}")))?;
+        Ok(reply_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or(false))
+    }
+
     /// Recreate the cursor theme at `size` pixels — no restart: subsequent named-cursor
     /// callbacks and the burned-in cursor overlay render at the new size. False for a
     /// non-positive size.
@@ -9456,6 +9480,12 @@ pub fn desktop_view() -> Option<wm::DesktopView> {
 /// no compositor runs or none has a policy.
 pub fn window_request(id: wm::WindowId, request: wm::Request) -> bool {
     running_compositor().is_some_and(|be| be.window_request(id, request).unwrap_or(false))
+}
+
+/// Ask the window policy installed on the running compositor for the session's desktop or its
+/// application alone; false where no compositor runs or none has a policy.
+pub fn desktop_mode(on: bool) -> bool {
+    running_compositor().is_some_and(|be| be.desktop_mode(on).unwrap_or(false))
 }
 
 /// The variable naming the Xwayland a caller ships, found ahead of the host's

@@ -297,6 +297,9 @@ enum Ask {
     View(mpsc::Sender<DesktopView>),
     /// A request about a window, answered with whether the window is managed.
     Request(WindowId, Request, mpsc::Sender<bool>),
+    /// The server's ask for the desktop or the application alone, answered once the engine
+    /// has run it.
+    DesktopMode(bool, mpsc::Sender<bool>),
 }
 
 /// How another thread reaches the manager's thread: what it asks goes on a channel and a byte
@@ -330,6 +333,14 @@ impl Remote {
         let (reply, answer) = mpsc::channel();
         self.ask(Ask::Request(id, request, reply), answer)
             .unwrap_or(false)
+    }
+
+    /// Ask the engine for the session's desktop or its application alone
+    /// ([`Event::DesktopMode`]), which it grants where the session allows the server's switch.
+    /// False where the manager does not answer.
+    pub fn desktop_mode(&self, on: bool) -> bool {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Ask::DesktopMode(on, reply), answer).unwrap_or(false)
     }
 }
 
@@ -873,8 +884,8 @@ impl Manager {
         self.shutdown();
     }
 
-    /// Answer everything waiting on the channel, a view with the engine's and a request by
-    /// running it through the engine, and drain the bytes that woke the loop for them.
+    /// Answer everything waiting on the channel, a view with the engine's and a request or a
+    /// desktop mode by running it through the engine, and drain the bytes that woke the loop for them.
     fn answer_queries(&mut self) {
         let mut asked = Vec::new();
         if let Some((receiver, woken)) = self.queries.as_mut() {
@@ -893,6 +904,10 @@ impl Manager {
                         self.dispatch(Event::Request { id, request });
                     }
                     let _ = reply.send(managed);
+                }
+                Ask::DesktopMode(on, reply) => {
+                    self.dispatch(Event::DesktopMode(on));
+                    let _ = reply.send(true);
                 }
             }
         }

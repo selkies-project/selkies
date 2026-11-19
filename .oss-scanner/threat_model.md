@@ -51,8 +51,13 @@
   `$XDG_RUNTIME_DIR/selkies-autostart.lock` that what it starts inherits, and run again when that lock frees under
   `--app-restart`, the session's mode is read from `~/.config/selkies-wm/session` (the one word `desktop` or
   `application`; anything else is the image's mode) and written when the root menu or the window menu switches
-  it, which they offer unless `--session-switch` is off or `--desktop` is locked; a locked mode only keeps the
-  window manager from starting the shell, since the session user can start any program; `--wm-menus` or
+  it, which they offer unless `--session-switch` is off or `--desktop` is locked; `POST /api/session` switches it
+  for the master token wherever `--desktop` is not locked, and for a controller only where the menus offer the
+  switch, never for a viewer, and that switch is not written; a locked mode only keeps the
+  window manager from starting the shell, since the session user can start any program; the environment the
+  window manager starts programs in, the process's own with the display sockets, bus, and interposers, is
+  written to `$XDG_RUNTIME_DIR/selkies-session-env.json` with mode 0600, nothing a session user's process cannot
+  already read from `/proc`; `--wm-menus` or
   `--wm-keybinds` turned off take the menu, close, kill, and run bindings away and have the window manager read
   only the system's `rc.xml`, `menu.xml`, and no key bind overrides, which narrows what a session user reaches
   through the window manager and nothing else, since the session user can still run programs and write files; a
