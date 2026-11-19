@@ -285,6 +285,11 @@ async fn main() -> Result<(), String> {
                 // the modeled path rather than in an autotuned relay buffer.
                 let _ = recv_buffer(&client, depth);
             }
+            // The relay forwards what it has at once: with Nagle on, a small write behind
+            // unacked data (an audio frame, a ping) waits for the peer's delayed ack and
+            // reads as 20-40 ms of queue the modeled path never had.
+            let _ = client.set_nodelay(true);
+            let _ = server.set_nodelay(true);
             let (client_r, client_w) = client.into_split();
             let (server_r, server_w) = server.into_split();
             let (client_w, server_w) = (
