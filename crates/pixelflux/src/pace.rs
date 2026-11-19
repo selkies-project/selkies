@@ -13,7 +13,8 @@
 //! (`FramePace::windowed`): one frame a period, a change taking its period's frame as it lands,
 //! as the NvFBC driver pushes frames, and a change landing in a period a frame already took
 //! sent as an extra frame from a budget that refills slowly, so a source drawing at the cadence
-//! keeps its own periods.
+//! keeps its own periods. A screen whose damage outpaces the cadence gets no extra frames: its
+//! change in a taken period goes out with its next one, and the rate stays the cadence's.
 
 use std::time::{Duration, Instant};
 
@@ -69,10 +70,22 @@ const EXTRA_MIN_FRACTION: f64 = 0.5;
 /// The extra frames a capture paced in windows holds in reserve.
 const EXTRA_CAP: f64 = 2.0;
 /// The share of an extra frame each period adds to that reserve: the sustained rate rises
-/// above the configured one by at most this share. A slower refill leaves a source at the
-/// cadence locked behind a keystroke's extra frame for longer (a 60 Hz animation with a
-/// keystroke every 0.7 s waited 7.6 ms a frame at the median at 1/64, 12.5 ms at 1/128).
+/// above the configured one by at most this share, and a source drawing faster than the
+/// cadence by more than it earns none (`FramePace::outpaced`). A slower refill leaves fewer
+/// extras for keystrokes beside a source at the cadence, and a keystroke finding none waits
+/// for the source's next frame (`FramePace::merge_until`): over a 60 Hz animation at 60 fps
+/// with a keystroke about every 0.7 s, landing at any phase of it, the keystrokes waited 6.0 ms
+/// at p90 at 1/32, 7.8 ms at 1/64 and 12.6 ms at 1/128.
 const EXTRA_REFILL: f64 = 1.0 / 32.0;
+/// The bound of the count by which a capture paced in windows judges whether its changes
+/// outpace the cadence (`FramePace::outpaced`): each window a damage frame takes moves it one
+/// toward the bound where that frame came sooner than `1 - EXTRA_REFILL` of a period after the
+/// damage frame that took a window before it, and one toward zero otherwise, and the changes
+/// outpace the cadence while it stands above half the bound. Whichever kind most windows'
+/// changes are wins out within a few periods of the screen turning to it; a keystroke now and
+/// then, which takes a window ahead of the source's frame and leaves the source's next take a
+/// period after that, moves it no further either way.
+const OUTPACED_MAX: u8 = 16;
 /// The periods without a reported change after which the screen counts as still
 /// (`FramePace::still`): more than the timer waits after a change's frame.
 const STILL_PERIODS: f64 = 1.5;
@@ -138,6 +151,10 @@ pub struct FramePace {
     /// Paced in windows, the extra frames left when one was last sent, when, and the period
     /// that owns the elapsed time since then; a fresh capture holds the cap.
     extra: Option<(f64, Instant, Duration)>,
+    /// Paced in windows, the last damage frame that took a window, and the count by which the
+    /// screen's damage outpaces the cadence or not (`OUTPACED_MAX`, `Self::outpaced`).
+    last_take: Option<Instant>,
+    outpacing: u8,
 }
 
 impl FramePace {
@@ -160,7 +177,8 @@ impl FramePace {
     /// application on its own clock under a 60 fps capture waited a median 6 ms a frame and up
     /// to 15, and one keystroke during a 60 Hz animation held each of its frames 12.5 ms. With
     /// the reserve spent, such a change is held for the source's next frame instead of taking
-    /// the next window from it (`Self::merge_until`).
+    /// the next window from it (`Self::merge_until`), and so is one beside a source whose damage
+    /// outpaces the cadence, which earns no extra frames (`Self::outpaced`).
     pub fn windowed() -> Self {
         Self {
             windowed: true,
@@ -215,6 +233,18 @@ impl FramePace {
                     self.window_closed_by(period, now)
                 },
             );
+            if trigger == TickTrigger::Damage
+                && let Some(prev) = self.last_take
+            {
+                self.outpacing = if now - prev < period.mul_f64(1.0 - EXTRA_REFILL) {
+                    (self.outpacing + 1).min(OUTPACED_MAX)
+                } else {
+                    self.outpacing.saturating_sub(1)
+                };
+            }
+            if trigger == TickTrigger::Damage {
+                self.last_take = Some(now);
+            }
         }
         if sent {
             if trigger == TickTrigger::Damage {
@@ -415,7 +445,7 @@ impl FramePace {
         if self.windowed {
             let window = self.window_pull(period, now);
             return match self.last_tick {
-                Some(last) if self.extra_frames(now) >= 1.0 => {
+                Some(last) if self.extra_open(now) => {
                     window.min(last + period.mul_f64(EXTRA_MIN_FRACTION))
                 }
                 _ => window,
@@ -427,13 +457,15 @@ impl FramePace {
     }
 
     /// Paced in windows, until when a change found waiting as its pull comes is held for the
-    /// next frame of a source drawing at the cadence; None where it goes as it is.
+    /// next frame of a source drawing at the cadence or faster; None where it goes as it is.
     ///
-    /// With the extra-frame reserve spent, a change landing in a window a frame already took (a
-    /// keystroke during an animation) can only take the next window, ahead of the source's own
-    /// frame there, which then waits for the window after, and so on: every frame of the source
-    /// runs late until an extra frame is left again, and typing faster than the reserve refills
-    /// (about two keys a second at 60 fps) keeps it spent. Such a change is held instead until
+    /// With no extra frame open to it (the reserve spent, or the screen's changes outpacing the
+    /// cadence, `Self::outpaced`), a change landing in a window a frame already took (a
+    /// keystroke during an animation, a frame of a source drawing faster than the cadence) can
+    /// only take the next window, ahead of the source's own frame there, which then waits for
+    /// the window after, and so on: every frame of the source runs late until an extra frame is
+    /// left again, and typing faster than the reserve refills (about two keys a second at 60
+    /// fps) keeps it spent. Such a change is held instead until
     /// the source's next frame, which captures the screen whole and so carries the change too.
     /// The source keeps its windows and the rate stays the cadence's; what it costs is a frame
     /// of the source where a change took its window just ahead of it and the source's frame is
@@ -442,13 +474,19 @@ impl FramePace {
     /// keystrokes 0 to 0.1 ms where they waited 10.6, and 92 % of the animation's frames reached
     /// the screen where all of them did.
     ///
-    /// A change is held only while the screen's frames have been coming at the cadence
+    /// A change is held only while the screen's damage frames have been coming at the cadence
     /// (`damage_spacing`, `Self::input_paced`), as they do under a source drawing at it or
     /// faster, never on a screen whose frames come further apart, and for no longer than
-    /// `PACED_INPUT_MAX_FRACTION` of a period after the last frame; the capture sends the held
-    /// change with the next change it sees, or at the time returned.
+    /// `PACED_INPUT_MAX_FRACTION` of a period after the last frame, or, where the changes
+    /// outpace the cadence, a period after the hold starts if that is later: the held change is
+    /// then a frame of the source itself, whose next one comes within a period of it, and a hold
+    /// that ended sooner would send it into the next window ahead of that frame, which would
+    /// then wait in its turn. The capture sends the held change with the next change
+    /// it sees, or at the time returned. A host's frames count as no damage frames, so a host
+    /// capture's are not held; holding them, live with the encoder saturated, sent fewer frames
+    /// than not (45.7 against 47.3 fps under a 50 fps lock).
     pub fn merge_until(&self, period: Duration, now: Instant) -> Option<Instant> {
-        if !self.windowed || self.extra_frames(now) >= 1.0 {
+        if !self.windowed || self.extra_open(now) {
             return None;
         }
         let end = self.window_end?;
@@ -456,7 +494,12 @@ impl FramePace {
         if now >= end || !Self::input_paced(self.damage_spacing, period) {
             return None;
         }
-        Some(last + period.mul_f64(PACED_INPUT_MAX_FRACTION))
+        let until = last + period.mul_f64(PACED_INPUT_MAX_FRACTION);
+        Some(if self.outpaced() {
+            until.max(now + period)
+        } else {
+            until
+        })
     }
 
     /// Paced in windows, when a change may take the window after the one the last frame
@@ -490,6 +533,29 @@ impl FramePace {
         self.extra.map_or(EXTRA_CAP, |(left, at, period)| {
             Self::extra_refill(left, at, period, now)
         })
+    }
+
+    /// Whether a change landing in a window a frame already took may go out as an extra frame
+    /// at `now`: the reserve holds one, and the screen's changes do not outpace the cadence.
+    fn extra_open(&self, now: Instant) -> bool {
+        self.extra_frames(now) >= 1.0 && !self.outpaced()
+    }
+
+    /// Paced in windows, whether the screen's changes outpace the cadence: most of the windows
+    /// lately were taken by a damage frame that came less than `1 - EXTRA_REFILL` of a period
+    /// after the damage frame that took a window before it (`OUTPACED_MAX`), as under a source
+    /// drawing faster than the cadence by more than the refill. Such a source would spend every
+    /// extra frame the reserve earns, each one of its own frames, raising the rate by the refill
+    /// in frames that a display at the source's rate mostly cannot paint, so the screen gets
+    /// none: its frames that land in a taken window go out with its next frame
+    /// (`Self::merge_until`), and the rate stays the cadence's. A source at the cadence, give or
+    /// take its jitter, or one a hair faster, keeps the extras for a change beside it, and so
+    /// does a still screen. A host's frames do not count, and a host capture keeps the extras:
+    /// its frames are not held for the next (`Self::merge_until`), and one that takes the next
+    /// window instead leaves the windows a period apart, which the count could not tell from a
+    /// source at the cadence.
+    fn outpaced(&self) -> bool {
+        self.outpacing > OUTPACED_MAX / 2
     }
 
     /// When the timer is next due for this capture: a period after the last frame, and the
@@ -704,8 +770,8 @@ mod pacing_tests {
         }
     }
 
-    /// Changes faster than the cadence are published one a window, and the extra frames the
-    /// reserve and its refill allow.
+    /// Changes faster than the cadence are published one a window, and no more extra frames
+    /// than the reserve and its refill allow.
     #[test]
     fn windowed_changes_faster_than_the_cadence_raise_its_rate_by_the_refill_at_most() {
         let base = Instant::now();
@@ -1641,7 +1707,7 @@ mod pacing_tests {
             trigger: TickTrigger::HostFrame,
             ..sim
         };
-        let rows: [(&str, Sim); 13] = [
+        let rows: [(&str, Sim); 15] = [
             ("60 Hz at 60, keys 0.7 s", Sim::new(60.0, 60.0, 0.7)),
             (
                 "60 Hz at 60, keys 0.7 s ±25 %",
@@ -1692,6 +1758,22 @@ mod pacing_tests {
                 Sim {
                     src_jitter: 0.001,
                     ..Sim::new(60.0, 60.0, 0.0)
+                },
+            ),
+            (
+                "60.06 Hz ±1 ms at 60, keys 0.7 s ±25 %",
+                Sim {
+                    src_jitter: 0.001,
+                    key_jitter: 0.25,
+                    ..Sim::new(60.06, 60.0, 0.7)
+                },
+            ),
+            (
+                "60.06 Hz ±1 ms at 60, keys 0.15 s ±25 %",
+                Sim {
+                    src_jitter: 0.001,
+                    key_jitter: 0.25,
+                    ..Sim::new(60.06, 60.0, 0.15)
                 },
             ),
             (
@@ -1752,15 +1834,118 @@ mod pacing_tests {
         }
     }
 
-    /// The keystroke every 0.7 s `EXTRA_REFILL` was tuned with goes out on an extra frame as
-    /// before, and a source drawing faster than the cadence is held to it within the refill.
+    /// The keystroke every 0.7 s `EXTRA_REFILL` was tuned with goes out on an extra frame, at
+    /// every phase of the keystrokes against the animation.
     #[test]
-    fn slow_typing_and_a_source_faster_than_the_cadence_keep_their_pacing() {
+    fn slow_typing_over_an_animation_at_the_cadence_keeps_its_extras() {
         let (_, src, key) = drive(60.0, 60.0, 0.7, 0.0031, 10.0);
         assert!(src < 0.2 && key < 0.2, "{src:.2} and {key:.2} ms");
-        let (fps, _, _) = drive(60.0, 57.0, 0.0, 0.0031, 10.0);
-        let bound = 57.0 * (1.0 + EXTRA_REFILL) + EXTRA_CAP / 10.0 + 0.02;
-        assert!(fps <= bound, "{fps:.2} fps over a 57 fps lock");
+        // A keystroke less than `EXTRA_MIN_FRACTION` of a period after the animation's frame
+        // waits until then.
+        let run = simulate(Sim {
+            key_jitter: 0.25,
+            secs: 30.0,
+            ..Sim::new(60.0, 60.0, 0.7)
+        });
+        let most = 1e3 / 60.0 * EXTRA_MIN_FRACTION + 0.2;
+        assert!(
+            run.key(0.5) < 0.2,
+            "keystrokes waited {:.2} ms",
+            run.key(0.5)
+        );
+        assert!(
+            run.key(0.9) < most,
+            "keystrokes waited {:.2} ms at p90",
+            run.key(0.9)
+        );
+        assert!(
+            run.src(0.9) < 0.2,
+            "the animation waited {:.2} ms at p90",
+            run.src(0.9)
+        );
+    }
+
+    /// A source drawing faster than the cadence earns no extra frames: every 5 s of it sends
+    /// the cadence's frames, whether its frames come on time or a millisecond either side, and
+    /// its frames that land in a window a frame already took go out with its next frame rather
+    /// than waiting a window.
+    #[test]
+    fn a_source_faster_than_the_cadence_is_held_to_it() {
+        for sim in [
+            Sim::new(60.0, 57.0, 0.0),
+            Sim {
+                src_jitter: 0.001,
+                ..Sim::new(60.0, 57.0, 0.0)
+            },
+            Sim::new(75.0, 60.0, 0.0),
+        ] {
+            let run = simulate(Sim { secs: 60.0, ..sim });
+            // The first 5 s include the reserve a fresh capture holds.
+            let late = &run.buckets[1..];
+            let most = late.iter().copied().max().unwrap_or(0);
+            let lock = sim.cap_fps * 5.0;
+            assert!(
+                f64::from(most) <= lock + 1.0,
+                "{} Hz over {} fps: {most} frames in 5 s",
+                sim.src_hz,
+                sim.cap_fps,
+            );
+            // Of a source a share faster than the cadence, that share of its frames go out with
+            // the next one; the rest go as they land.
+            let q = 1.0 - 2.0 * (1.0 - sim.cap_fps / sim.src_hz);
+            assert!(
+                run.src(q) < 1.0,
+                "{} Hz: waited {:.2} ms at the {q:.2} quantile",
+                sim.src_hz,
+                run.src(q)
+            );
+        }
+    }
+
+    /// A source drawing at the cadence, or one a hair faster, keeps the extra frames for a
+    /// change beside it, its frames a millisecond either side of their slots or not, and one
+    /// faster than the cadence by more than the refill does not. A change landing where no
+    /// frame may go is left out, as the source's next frame carries it.
+    #[test]
+    fn only_a_source_faster_than_the_cadence_outpaces_it() {
+        let base = Instant::now();
+        for (spacing_us, jitter_us, outpaced) in [
+            (20_000, 0, false),
+            (20_000, 1_000, false),
+            (19_800, 1_000, false),
+            (19_000, 0, true),
+        ] {
+            let mut pace = FramePace::windowed();
+            pace.record_tick(TickTrigger::Timer, PERIOD, base, true);
+            let mut seed = 7u64;
+            for k in 1..200u64 {
+                let jitter = (wobble(&mut seed) * f64::from(jitter_us)) as i64 + 1_000;
+                let t = base
+                    + Duration::from_micros((2_000 + k * spacing_us).saturating_add_signed(jitter));
+                if t >= pace.pull_at(TickTrigger::Damage, PERIOD, t) {
+                    pace.record_tick(TickTrigger::Damage, PERIOD, t, true);
+                }
+            }
+            assert_eq!(
+                pace.outpaced(),
+                outpaced,
+                "changes every {spacing_us} us, {jitter_us} us either side"
+            );
+        }
+    }
+
+    /// A still screen's keystrokes each take their window as they land.
+    #[test]
+    fn keystrokes_on_a_still_screen_go_out_as_they_land() {
+        let run = simulate(Sim {
+            key_jitter: 0.25,
+            ..Sim::new(0.0, 60.0, 0.3)
+        });
+        assert!(
+            run.key(1.0) < 0.2,
+            "a keystroke waited {:.2} ms",
+            run.key(1.0)
+        );
     }
 
     /// A change in a window a source at the cadence took is held for the source's next frame
