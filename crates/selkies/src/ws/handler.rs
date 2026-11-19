@@ -623,7 +623,7 @@ impl Connection {
             return Flow::Continue(());
         }
         if message.starts_with("CLIENT_FRAME_ACK") {
-            self.handle_ack(message);
+            self.handle_ack(message).await;
             return Flow::Continue(());
         }
         match message {
@@ -692,7 +692,7 @@ impl Connection {
     /// `CLIENT_FRAME_ACK <id> [<held_ms>]`: only the display's registered client acks the frames
     /// its relay stamped; a viewer's ack would throttle the controller against a stream it never
     /// got. The -1 sentinel is server-internal: accepted from the wire it would disable the gate.
-    fn handle_ack(&mut self, message: &str) {
+    async fn handle_ack(&mut self, message: &str) {
         let Some(display_id) = self.display_id.clone() else {
             return;
         };
@@ -718,7 +718,14 @@ impl Connection {
                 .flatten()
         };
         if let Some(link) = link {
-            link.lock().note_ack(frame_id, held_ms, now());
+            let land = {
+                let mut state = link.lock();
+                state.note_ack(frame_id, held_ms, now());
+                state.sounding.land_due
+            };
+            if land {
+                self.service.land_sounding(&display_id, &link).await;
+            }
         }
     }
 
