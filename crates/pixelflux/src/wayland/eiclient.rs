@@ -49,9 +49,12 @@ type Ready = Arc<(Mutex<Option<Result<(), String>>>, std::sync::Condvar)>;
 
 /// One injection request, produced on selkies' input threads and drained on the EIS thread.
 enum Cmd {
+    /// A point in the compositor's logical space, and where the host knows it, the point as a
+    /// fraction of the one output under it (`HostSession::pointer_motion_abs`).
     MotionAbsolute {
         x: f32,
         y: f32,
+        output_fraction: Option<(f64, f64)>,
     },
     MotionRelative {
         dx: f32,
@@ -132,10 +135,15 @@ impl EiInjector {
         let _ = nix_write(self.wake.as_raw_fd());
     }
 
-    pub(crate) fn pointer_motion_abs(&self, x: f64, y: f64) {
+    /// Queue absolute motion to the logical point (`x`, `y`). `output_fraction`, the point as a
+    /// fraction of the output under it, is placed in the region of the device the point goes to
+    /// where that device has exactly one: the device's region follows the output's mode, where
+    /// the logical point is built from the stream geometry the portal announced at Start.
+    pub(crate) fn pointer_motion_abs(&self, x: f64, y: f64, output_fraction: Option<(f64, f64)>) {
         self.push(Cmd::MotionAbsolute {
             x: x as f32,
             y: y as f32,
+            output_fraction,
         });
     }
 
@@ -215,6 +223,16 @@ fn holds(r: &Rect, x: f32, y: f32) -> bool {
     let (x, y) = (f64::from(x), f64::from(y));
     let (left, top) = (f64::from(r.0), f64::from(r.1));
     x >= left && y >= top && x < left + f64::from(r.2) && y < top + f64::from(r.3)
+}
+
+/// The point at fraction (`fx`, `fy`) of region `r`, clamped inside it, or `None` for an empty
+/// region.
+fn place_in_region(r: &Rect, (fx, fy): (f64, f64)) -> Option<(f32, f32)> {
+    let axis = |fraction: f64, offset: u32, length: u32| {
+        let size = f64::from(length);
+        (f64::from(offset) + (fraction * size).clamp(0.0, size - 1.0)) as f32
+    };
+    (r.2 > 0 && r.3 > 0).then(|| (axis(fx, r.0, r.2), axis(fy, r.1, r.3)))
 }
 
 /// The absolute device for a point, as an index into `devices` (whether each can take motion
@@ -470,12 +488,22 @@ impl Worker {
 
     fn emit(&mut self, cmd: Cmd) {
         match cmd {
-            Cmd::MotionAbsolute { x, y } => {
+            Cmd::MotionAbsolute {
+                x,
+                y,
+                output_fraction,
+            } => {
                 let devices = self
                     .devices
                     .iter()
                     .map(|d| (d.resumed && d.pointer_abs.is_some(), d.regions.as_slice()));
                 if let Some(i) = abs_target(devices, x, y) {
+                    let (x, y) = match (output_fraction, self.devices[i].regions.as_slice()) {
+                        (Some(fraction), [region]) => {
+                            place_in_region(region, fraction).unwrap_or((x, y))
+                        }
+                        _ => (x, y),
+                    };
                     self.start(i);
                     self.devices[i]
                         .pointer_abs
@@ -855,16 +883,18 @@ mod tests {
     /// The injector, run against a minimal in-process EIS server, emits the protocol a
     /// compositor expects: it binds the seat, starts emulating before the first event, and
     /// sends absolute motion, buttons, keys, and discrete scroll with the values handed to it,
-    /// each committed by a frame.
+    /// each committed by a frame. A move carrying its fraction of the output is placed in the
+    /// device's region, whose size and origin differ from the logical point's.
     #[test]
     fn injector_emits_the_expected_eis_protocol() {
         let (server_sock, client_sock) = UnixStream::pair().unwrap();
         let seen = Arc::new(Mutex::new(Vec::<String>::new()));
-        let server = eis_server(server_sock, vec![Vec::new()], seen.clone());
+        let server = eis_server(server_sock, vec![vec![(12, 24, 2176, 2160)]], seen.clone());
 
         let injector =
             EiInjector::spawn(OwnedFd::from(client_sock)).expect("injector binds a device");
-        injector.pointer_motion_abs(400.0, 300.0);
+        injector.pointer_motion_abs(400.0, 300.0, None);
+        injector.pointer_motion_abs(1440.0, 672.0, Some((0.75, 0.75)));
         injector.pointer_button(0x110, true);
         injector.pointer_button(0x110, false);
         injector.key(38, None, true);
@@ -882,6 +912,10 @@ mod tests {
         assert!(
             got.contains(&"abs 0 400 300".to_string()),
             "absolute motion: {got:?}"
+        );
+        assert!(
+            got.contains(&"abs 0 1644 1644".to_string()),
+            "absolute motion placed in the device region: {got:?}"
         );
         assert!(
             got.contains(&"button 272 true".to_string()),
@@ -907,7 +941,8 @@ mod tests {
 
     /// With one absolute device per monitor, as Mutter gives each screencast stream, the
     /// injector sends each point on the device whose region holds it, so the second monitor's
-    /// motion is not dropped on the first one's device.
+    /// motion is not dropped on the first one's device, and a fraction is placed in the region
+    /// of the device the point went to.
     #[test]
     fn injector_sends_each_point_on_the_device_of_its_monitor() {
         let (server_sock, client_sock) = UnixStream::pair().unwrap();
@@ -917,8 +952,9 @@ mod tests {
 
         let injector =
             EiInjector::spawn(OwnedFd::from(client_sock)).expect("injector binds a device");
-        injector.pointer_motion_abs(100.0, 1400.0);
-        injector.pointer_motion_abs(100.0, 100.0);
+        injector.pointer_motion_abs(100.0, 1400.0, None);
+        injector.pointer_motion_abs(100.0, 100.0, None);
+        injector.pointer_motion_abs(100.0, 1400.0, Some((0.5, 0.5)));
         std::thread::sleep(Duration::from_millis(400));
         drop(injector);
         server.join().unwrap();
@@ -931,6 +967,10 @@ mod tests {
         assert!(
             got.contains(&"abs 0 100 100".to_string()),
             "top monitor's device: {got:?}"
+        );
+        assert!(
+            got.contains(&"abs 1 1278 1969".to_string()),
+            "fraction placed in the bottom monitor's region: {got:?}"
         );
     }
 }

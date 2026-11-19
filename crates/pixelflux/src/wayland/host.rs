@@ -1778,6 +1778,7 @@ impl HostSession {
             node: stream.node_id,
             logical: stream_point(slot, stream.size.unwrap_or(slot.want), x, y),
             position: stream.position,
+            output_fraction: output_fraction(slot, self.geoms.len(), rank, x, y),
         })
     }
 
@@ -1821,17 +1822,30 @@ impl HostSession {
     /// takes it in the compositor's logical space, where EIS regions lie: the stream's
     /// position plus the point in its logical size. A union layout with no stream position
     /// to place it by goes as it is, which is that space on an unscaled host.
+    ///
+    /// The portal announces a stream's size once, at Start, so after the host changes the
+    /// output's mode that logical point is off by the ratio of the two sizes. Where the
+    /// display sits on the host's only output, the motion also carries the point as a fraction
+    /// of the display (`output_fraction`), and the injector places it in the region of the
+    /// EIS device the logical point chose, which the compositor keeps at the output's current
+    /// mode, wherever that device has exactly one region.
     pub fn pointer_motion_abs(&self, x: f64, y: f64) {
         *self.pointer_at.lock().unwrap() = (x, y);
         if let Some(live) = self.portal_ei() {
             let ei = live.ei.as_ref().unwrap();
+            let target = self.portal_target(x, y);
+            let output_fraction = target.as_ref().and_then(|point| point.output_fraction);
             if let Some(PortalPoint {
                 logical,
                 position: Some(pos),
                 ..
-            }) = self.portal_target(x, y)
+            }) = target
             {
-                ei.pointer_motion_abs(f64::from(pos.0) + logical.0, f64::from(pos.1) + logical.1);
+                ei.pointer_motion_abs(
+                    f64::from(pos.0) + logical.0,
+                    f64::from(pos.1) + logical.1,
+                    output_fraction,
+                );
                 return;
             }
             let (w, h) = self.extent();
@@ -1839,6 +1853,7 @@ impl HostSession {
                 ei.pointer_motion_abs(
                     x.clamp(0.0, f64::from(w - 1)),
                     y.clamp(0.0, f64::from(h - 1)),
+                    output_fraction,
                 );
             }
             return;
@@ -2171,6 +2186,28 @@ struct PortalPoint {
     logical: (f64, f64),
     /// The stream's position in the compositor's logical space, where the portal gave one.
     position: Option<(i32, i32)>,
+    /// The point as a fraction of its display (`output_fraction`), where that display is the
+    /// host's only output.
+    output_fraction: Option<(f64, f64)>,
+}
+
+/// A union-layout point as a fraction of the display under it (`slot`, at `rank`), where that
+/// display is the host's only output (`host_outputs` of them): only there is the display the
+/// whole of the one region an EIS device covers. A host with more outputs may cover them with
+/// one region, so it keeps to the logical point. `None` for a display with no size yet.
+fn output_fraction(
+    slot: &LayoutSlot,
+    host_outputs: usize,
+    rank: usize,
+    x: f64,
+    y: f64,
+) -> Option<(f64, f64)> {
+    (host_outputs == 1 && rank == 0 && slot.want.0 > 0 && slot.want.1 > 0).then(|| {
+        (
+            (x - f64::from(slot.pos.0)) / f64::from(slot.want.0),
+            (y - f64::from(slot.pos.1)) / f64::from(slot.want.1),
+        )
+    })
 }
 
 /// A union-layout point in the logical space of the stream behind `slot`: the slot captures
@@ -4072,6 +4109,32 @@ mod tests {
         assert_eq!(ledger.outcome(third), Some(false));
         let fourth = ledger.issue();
         assert_eq!(ledger.outcome(fourth), None);
+    }
+
+    /// A point on the display on a host's only output is its fraction of that display, which the
+    /// injector places in the EIS region at the output's current mode; on a host of two
+    /// outputs, on a display past the first, or on a display with no size yet, there is none.
+    #[test]
+    fn a_point_on_the_only_output_is_its_fraction_of_the_display() {
+        let slot = LayoutSlot {
+            want: (1280, 720),
+            pos: (100, 50),
+            active: true,
+            zero_copy: false,
+            paint_cursor: false,
+            fps_milli: 60_000,
+        };
+        assert_eq!(
+            output_fraction(&slot, 1, 0, 100.0 + 960.0, 50.0 + 540.0),
+            Some((0.75, 0.75))
+        );
+        assert_eq!(output_fraction(&slot, 2, 0, 500.0, 300.0), None);
+        assert_eq!(output_fraction(&slot, 1, 1, 500.0, 300.0), None);
+        let empty = LayoutSlot {
+            want: (0, 0),
+            ..slot
+        };
+        assert_eq!(output_fraction(&empty, 1, 0, 500.0, 300.0), None);
     }
 
     /// A point on a display captured at an output's mode, scale 2, beside another: the
