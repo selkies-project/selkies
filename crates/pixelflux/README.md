@@ -197,6 +197,11 @@ self-compositing, where outputs are created on demand), and `create_output` refu
 host cannot back rather than minting an output that would never receive a frame. An unscaled
 Mutter host whose portal serves virtual sources backs one display more, on a virtual monitor
 that exists while that display captures and that DisplayConfig places where the layout puts it.
+Its session streams the cursor as metadata whatever the consumer wants, since the cursor mode is
+fixed when a session selects its sources and reopening the session would remove the monitor:
+with the cursor wanted in the video, pixelflux paints the metadata's sprite into that display's
+frames itself, so toggling it leaves the session and the monitor as they are. A portal without
+metadata streams the grown display with the cursor it paints (or hides) whatever the toggle.
 
 A capture's size is asked of the host through `wlr-output-management`, but what it captures is
 the mode the host ends up running. A host that refuses the request, offers no layout management

@@ -334,6 +334,8 @@ pub(crate) struct FrameSink {
     pub(crate) queued: Arc<AtomicI64>,
     pub(crate) wake: smithay::reexports::calloop::channel::Sender<usize>,
     pub(crate) index: usize,
+    /// The output's cursor as its stream's metas describe it, for the consumer to draw.
+    pub(crate) cursor: Arc<Mutex<HostCursor>>,
 }
 
 impl FrameSink {
@@ -345,6 +347,157 @@ impl FrameSink {
         self.queued.fetch_add(1, Ordering::AcqRel);
         let _ = self.wake.send(self.index);
         true
+    }
+
+    /// Apply `change` to the output's cursor, waking the consumer when what it draws changed:
+    /// a move on a screen that sends no frame meanwhile must still reach the frames.
+    pub(crate) fn update_cursor(&self, change: impl FnOnce(&mut HostCursor)) {
+        let changed = {
+            let mut cursor = self.cursor.lock().unwrap();
+            let before = cursor.look();
+            change(&mut cursor);
+            let changed = cursor.look() != before;
+            if changed {
+                cursor.serial += 1;
+            }
+            changed
+        };
+        if changed {
+            let _ = self.wake.send(self.index);
+        }
+    }
+}
+
+/// A cursor sprite from a portal stream's metas: RGBA rows of `width` pixels, premultiplied as
+/// Mutter hands them (the cursor callback gets the same bytes), with the hotspot inside it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CursorSprite {
+    pub(crate) width: i32,
+    pub(crate) height: i32,
+    pub(crate) hot: (i32, i32),
+    pub(crate) rgba: Vec<u8>,
+    pub(crate) hash: u64,
+}
+
+/// One output's cursor as its portal stream's metas last described it. The consumer draws it
+/// into the frames itself (`draw`) when it wants the cursor painted on a session that streams
+/// it as metadata: a grown display's session asks for metadata whatever the consumer wants
+/// (`session_cursor_request`), since the session cannot change its cursor mode without being
+/// reopened, and reopening it would remove its virtual monitor and make another.
+#[derive(Debug, Default)]
+pub(crate) struct HostCursor {
+    /// The consumer draws the cursor into this output's frames.
+    pub(crate) draw: bool,
+    /// The hotspot in the stream's pixels while the pointer is over the stream.
+    pub(crate) at: Option<(i32, i32)>,
+    /// The sprite, none while the host hides the cursor.
+    pub(crate) sprite: Option<Arc<CursorSprite>>,
+    /// Bumped by every change the consumer draws differently.
+    serial: u64,
+    /// The serial of the last state the consumer drew.
+    seen: u64,
+    /// Where the consumer last drew the sprite (frame pixels) and which one it was, for the
+    /// damage the cursor leaves behind when it moves, changes, or goes.
+    drawn: Option<(Rectangle<i32, Physical>, u64)>,
+}
+
+impl HostCursor {
+    /// What the consumer draws: the sprite and its top-left corner, while it draws one.
+    fn look(&self) -> Option<(Rectangle<i32, Physical>, u64)> {
+        if !self.draw {
+            return None;
+        }
+        let (at, sprite) = self.at.zip(self.sprite.as_ref())?;
+        Some((
+            Rectangle::new(
+                (at.0 - sprite.hot.0, at.1 - sprite.hot.1).into(),
+                (sprite.width, sprite.height).into(),
+            ),
+            sprite.hash,
+        ))
+    }
+
+    /// The cursor a frame of `size` pixels draws now, and the damage since the frame that was
+    /// drawn last: the old and new places of a cursor that moved, changed sprite, or went.
+    pub(crate) fn frame(&self, size: (i32, i32)) -> CursorFrame {
+        let look = self.look();
+        let full = Rectangle::<i32, Physical>::from_size(size.into());
+        let damage = if look == self.drawn {
+            Vec::new()
+        } else {
+            [self.drawn, look]
+                .into_iter()
+                .flatten()
+                .filter_map(|(r, _)| r.intersection(full))
+                .collect()
+        };
+        CursorFrame {
+            sprite: look
+                .and(self.sprite.clone())
+                .zip(look.map(|(r, _)| (r.loc.x, r.loc.y))),
+            damage,
+            look,
+            serial: self.serial,
+        }
+    }
+
+    /// Record that the consumer drew `frame` (or found nothing to draw again).
+    pub(crate) fn drew(&mut self, frame: &CursorFrame) {
+        self.drawn = frame.look;
+        self.seen = self.seen.max(frame.serial);
+    }
+
+    /// Whether a change the consumer has not drawn yet is waiting.
+    fn pending(&self) -> bool {
+        self.serial != self.seen
+    }
+}
+
+/// The cursor one host frame draws (`HostCursor::frame`).
+#[derive(Debug, Default)]
+pub struct CursorFrame {
+    /// The sprite and the frame pixel its top-left corner lands on, while one is drawn.
+    pub(crate) sprite: Option<(Arc<CursorSprite>, (i32, i32))>,
+    /// The frame's rectangles the cursor changed since the frame drawn before, clipped to it.
+    pub damage: Vec<Rectangle<i32, Physical>>,
+    look: Option<(Rectangle<i32, Physical>, u64)>,
+    serial: u64,
+}
+
+impl CursorFrame {
+    /// Blend the sprite into a BGRA frame of `size` pixels with `stride` bytes per row,
+    /// clipped to the frame.
+    pub fn blend_bgra(&self, frame: &mut [u8], stride: usize, size: (i32, i32)) {
+        let Some((sprite, (x0, y0))) = self.sprite.as_ref() else {
+            return;
+        };
+        for y in 0..sprite.height {
+            let ty = y0 + y;
+            if ty < 0 || ty >= size.1 {
+                continue;
+            }
+            for x in 0..sprite.width {
+                let tx = x0 + x;
+                if tx < 0 || tx >= size.0 {
+                    continue;
+                }
+                let src = ((y * sprite.width + x) * 4) as usize;
+                let off = ty as usize * stride + tx as usize * 4;
+                let (Some(px), Some(dst)) =
+                    (sprite.rgba.get(src..src + 4), frame.get_mut(off..off + 4))
+                else {
+                    continue;
+                };
+                crate::encoders::overlay::blend_pixel_premultiplied(
+                    dst, px[0], px[1], px[2], px[3],
+                );
+            }
+        }
+    }
+
+    /// The sprite and its top-left corner in the frame, for a GPU composite.
+    pub(crate) fn sprite(&self) -> Option<(&CursorSprite, (i32, i32))> {
+        self.sprite.as_ref().map(|(s, at)| (&**s, *at))
     }
 }
 
@@ -949,6 +1102,8 @@ struct OutputHandle {
     /// static screen can re-encode current content like compositor mode does.
     retained: Mutex<Option<HostFrame>>,
     name: Option<String>,
+    /// The output's cursor, which its portal stream updates (`FrameSink::cursor`).
+    cursor: Arc<Mutex<HostCursor>>,
 }
 
 impl OutputHandle {
@@ -1235,11 +1390,13 @@ impl HostSession {
             let (to_thread, from_main) = std::sync::mpsc::channel::<ToHost>();
             let (frame_tx, frames) = std::sync::mpsc::channel::<HostFrame>();
             let queued = Arc::new(AtomicI64::new(0));
+            let cursor = Arc::new(Mutex::new(HostCursor::default()));
             let sink = FrameSink {
                 tx: frame_tx,
                 queued: queued.clone(),
                 wake: frame_wake.clone(),
                 index: i,
+                cursor: cursor.clone(),
             };
             let display = display.to_string();
             let expect = name.clone();
@@ -1294,6 +1451,7 @@ impl HostSession {
                 queued,
                 retained: Mutex::new(None),
                 name,
+                cursor,
             });
         }
 
@@ -1393,6 +1551,29 @@ impl HostSession {
         self.outputs
             .get(index)
             .is_some_and(|h| h.queued.load(Ordering::Acquire) > 0)
+    }
+
+    /// Whether host output `index` has a change of the cursor drawn into its frames that no
+    /// render has drawn yet.
+    pub fn cursor_pending(&self, index: usize) -> bool {
+        self.outputs
+            .get(index)
+            .is_some_and(|h| h.cursor.lock().unwrap().pending())
+    }
+
+    /// The cursor `display_id`'s next frame of `size` pixels draws, where the consumer draws
+    /// the host's cursor itself (`HostCursor`); nothing to draw otherwise.
+    pub fn cursor_frame(&self, display_id: u32, size: (i32, i32)) -> CursorFrame {
+        self.output_index_for(display_id)
+            .map(|i| self.outputs[i].cursor.lock().unwrap().frame(size))
+            .unwrap_or_default()
+    }
+
+    /// Record that `display_id`'s frame went out with `frame`'s cursor.
+    pub fn cursor_drawn(&self, display_id: u32, frame: &CursorFrame) {
+        if let Some(i) = self.output_index_for(display_id) {
+            self.outputs[i].cursor.lock().unwrap().drew(frame);
+        }
     }
 
     /// Record where selkies laid out `display_id` (union coordinates); pushed
@@ -2401,8 +2582,6 @@ pub(crate) struct PortalLive {
     pub(crate) core: Option<Arc<PwCore>>,
     /// Numbers the session so an output thread notices a reopened one.
     pub(crate) epoch: u64,
-    /// The cursor painting this session was opened for.
-    paint: bool,
     /// The libei injector when the portal handed out an EIS socket; input then rides it
     /// instead of the portal's `Notify*` methods, which the session refuses once EIS is on.
     ei: Option<EiInjector>,
@@ -2410,7 +2589,8 @@ pub(crate) struct PortalLive {
 
 #[derive(Default)]
 struct PortalInner {
-    /// The cursor painting the next session opens with; none until the first Start decides.
+    /// Whether the consumer wants the cursor painted into the frames; none until the first
+    /// Start decides, which is when the session opens.
     paint: Option<bool>,
     live: Option<Arc<PortalLive>>,
     epoch: u64,
@@ -2422,8 +2602,9 @@ struct PortalInner {
     wanted: bool,
 }
 
-/// Session-wide portal state: the session thread opens (and, when the cursor mode changes,
-/// reopens) the portal session; the outputs and the input methods read the live one.
+/// Session-wide portal state: the session thread opens (and, when the host's monitors are to
+/// stream another cursor mode, reopens) the portal session; the outputs and the input methods
+/// read the live one.
 pub(crate) struct PortalCtl {
     inner: Mutex<PortalInner>,
     changed: Condvar,
@@ -2462,8 +2643,8 @@ impl PortalCtl {
         ctl
     }
 
-    /// The cursor painting the session should carry (embedded cursor, or cursor metadata
-    /// for the consumer to draw); a change reopens the session.
+    /// Whether the consumer wants the cursor painted into the frames. The session is reopened
+    /// only where that changes the cursor mode it asks for (`reopens_for_cursor`).
     fn set_paint(&self, paint: bool) {
         let mut inner = self.inner.lock().unwrap();
         if inner.paint != Some(paint) {
@@ -2512,9 +2693,48 @@ impl PortalCtl {
     }
 }
 
+/// The cursor mode a portal session asks for (`CURSOR_*`). The host's monitors outlive their
+/// session, so theirs asks for the cursor painted in (embedded) or for the metadata the page
+/// draws from, as the consumer wants. A grown display's virtual monitor lives only as long as
+/// its session, and a session's cursor mode is fixed when it selects its sources, so that
+/// session asks for the metadata whatever the consumer wants and the consumer paints the
+/// cursor into the frames itself (`HostCursor`): a cursor toggle then leaves the session, and
+/// the monitor, as they are. A session that captures nothing has no cursor to stream.
+fn session_cursor_request(capture: bool, virtual_src: bool, paint: bool) -> u32 {
+    if capture && (virtual_src || !paint) {
+        portal::CURSOR_METADATA
+    } else {
+        portal::CURSOR_EMBEDDED
+    }
+}
+
+/// Whether a live session streaming `live_mode`, on a portal that offered `available`, is
+/// reopened for a consumer that now wants `paint`: only when the mode it would ask for comes
+/// out other than the one it has. A grown display's session never is, and on a portal without
+/// metadata neither is the host's, whose cursor stays what the portal offers (embedded, or
+/// hidden where it offers only that) whatever the consumer wants.
+fn reopens_for_cursor(
+    capture: bool,
+    virtual_src: bool,
+    paint: bool,
+    live_mode: u32,
+    available: u32,
+) -> bool {
+    portal::resolve_cursor_mode(
+        session_cursor_request(capture, virtual_src, paint),
+        available,
+    ) != live_mode
+}
+
+/// Whether the consumer paints the cursor into a stream's frames itself: it wants the cursor
+/// painted, and the session streams it as metadata.
+fn consumer_paints_cursor(paint: bool, live_mode: u32) -> bool {
+    paint && live_mode == portal::CURSOR_METADATA
+}
+
 /// The portal thread: opens the session once the first Start has decided the cursor mode,
-/// reopens it (restoring with the token the backend gave) whenever that mode changes, and
-/// ends with the host session. A grown display's session is open only while the display
+/// reopens it (restoring with the token the backend gave) whenever the mode it asks for
+/// changes (`reopens_for_cursor`), and ends with the host session. A grown display's session is open only while the display
 /// wants it (`PortalCtl::set_wanted`), so one the portal finishes opening after that ended
 /// is closed rather than kept.
 fn portal_thread(ctl: Arc<PortalCtl>) {
@@ -2527,7 +2747,15 @@ fn portal_thread(ctl: Arc<PortalCtl>) {
                 }
                 if inner.wanted
                     && let Some(p) = inner.paint
-                    && inner.live.as_ref().is_none_or(|l| l.paint != p)
+                    && inner.live.as_ref().is_none_or(|l| {
+                        reopens_for_cursor(
+                            ctl.capture,
+                            ctl.virtual_src,
+                            p,
+                            l.session.cursor_mode,
+                            l.session.cursor_modes,
+                        )
+                    })
                 {
                     break (
                         p,
@@ -2544,11 +2772,7 @@ fn portal_thread(ctl: Arc<PortalCtl>) {
         // streams before the new session asks for them again.
         let old = ctl.inner.lock().unwrap().live.take();
         drop(old);
-        let cursor_mode = if ctl.capture && !paint {
-            portal::CURSOR_METADATA
-        } else {
-            portal::CURSOR_EMBEDDED
-        };
+        let cursor_mode = session_cursor_request(ctl.capture, ctl.virtual_src, paint);
         let open = |devices: u32| {
             (if ctl.virtual_src {
                 PortalSession::open_virtual(cursor_mode, token.as_deref())
@@ -2631,7 +2855,6 @@ fn portal_thread(ctl: Arc<PortalCtl>) {
                     session,
                     core,
                     epoch: inner.epoch,
-                    paint,
                     ei,
                 }));
             }
@@ -2785,6 +3008,7 @@ fn portal_capture_loop(
                 },
             },
             exact_size,
+            draw_cursor: consumer_paints_cursor(w.paint_cursor, live.session.cursor_mode),
         };
         match &stream {
             Some((s, _)) => {
@@ -4260,6 +4484,254 @@ mod tests {
         let mut dst = vec![0u8; 8];
         convert_shm_row(&src, &mut dst, 4, true);
         assert_eq!(dst, vec![2, 1, 0, 3, 6, 5, 4, 7]);
+    }
+
+    /// A grown display's session asks for the cursor metadata whatever the page wants, so a
+    /// cursor toggle reopens neither it nor, with it, its virtual monitor: the page's wish for
+    /// a painted cursor is met by painting the metadata's cursor into the frames.
+    #[test]
+    fn a_cursor_toggle_keeps_a_grown_session_and_its_monitor() {
+        use super::{consumer_paints_cursor, reopens_for_cursor, session_cursor_request};
+        use crate::wayland::portal::{
+            CURSOR_EMBEDDED, CURSOR_HIDDEN, CURSOR_METADATA, resolve_cursor_mode,
+        };
+        let all = CURSOR_HIDDEN | CURSOR_EMBEDDED | CURSOR_METADATA;
+        for opened_painted in [false, true] {
+            let live = resolve_cursor_mode(session_cursor_request(true, true, opened_painted), all);
+            assert_eq!(live, CURSOR_METADATA);
+            for paint in [false, true] {
+                assert!(!reopens_for_cursor(true, true, paint, live, all));
+                assert_eq!(consumer_paints_cursor(paint, live), paint);
+            }
+        }
+    }
+
+    /// Without metadata on the portal, a grown display's session streams the cursor the portal
+    /// paints and keeps it whatever the page wants: nothing is reopened and nothing painted
+    /// over it.
+    #[test]
+    fn without_metadata_a_grown_session_keeps_the_portals_cursor() {
+        use super::{consumer_paints_cursor, reopens_for_cursor, session_cursor_request};
+        use crate::wayland::portal::{
+            CURSOR_EMBEDDED, CURSOR_HIDDEN, CURSOR_METADATA, resolve_cursor_mode,
+        };
+        for (available, mode) in [
+            (CURSOR_HIDDEN | CURSOR_EMBEDDED, CURSOR_EMBEDDED),
+            (CURSOR_HIDDEN, CURSOR_HIDDEN),
+        ] {
+            let live = resolve_cursor_mode(session_cursor_request(true, true, false), available);
+            assert_eq!(live, mode);
+            assert_ne!(live, CURSOR_METADATA);
+            for paint in [false, true] {
+                assert!(!reopens_for_cursor(true, true, paint, live, available));
+                assert!(!consumer_paints_cursor(paint, live));
+            }
+        }
+    }
+
+    /// The host's monitors outlive their session, so theirs is reopened for the cursor mode
+    /// the page wants, but only where the portal offers both: without metadata the mode it
+    /// asks for comes out embedded either way, and a session that captures nothing has no
+    /// cursor mode to change.
+    #[test]
+    fn a_monitor_session_reopens_only_for_a_cursor_mode_it_can_get() {
+        use super::{consumer_paints_cursor, reopens_for_cursor, session_cursor_request};
+        use crate::wayland::portal::{
+            CURSOR_EMBEDDED, CURSOR_HIDDEN, CURSOR_METADATA, resolve_cursor_mode,
+        };
+        let all = CURSOR_HIDDEN | CURSOR_EMBEDDED | CURSOR_METADATA;
+        let drawn_by_page = resolve_cursor_mode(session_cursor_request(true, false, false), all);
+        assert_eq!(drawn_by_page, CURSOR_METADATA);
+        assert!(!reopens_for_cursor(true, false, false, drawn_by_page, all));
+        assert!(reopens_for_cursor(true, false, true, drawn_by_page, all));
+        let painted = resolve_cursor_mode(session_cursor_request(true, false, true), all);
+        assert_eq!(painted, CURSOR_EMBEDDED);
+        assert!(reopens_for_cursor(true, false, false, painted, all));
+        assert!(!consumer_paints_cursor(true, painted));
+
+        let no_metadata = CURSOR_HIDDEN | CURSOR_EMBEDDED;
+        let live = resolve_cursor_mode(session_cursor_request(true, false, false), no_metadata);
+        assert_eq!(live, CURSOR_EMBEDDED);
+        for paint in [false, true] {
+            assert!(!reopens_for_cursor(true, false, paint, live, no_metadata));
+        }
+
+        // A portal with metadata and no embedded cursor: the painted cursor is drawn from
+        // the metadata rather than lost to a hidden one.
+        let no_embedded = CURSOR_HIDDEN | CURSOR_METADATA;
+        let live = resolve_cursor_mode(session_cursor_request(true, false, true), no_embedded);
+        assert_eq!(live, CURSOR_METADATA);
+        assert!(!reopens_for_cursor(true, false, false, live, no_embedded));
+        assert!(consumer_paints_cursor(true, live));
+
+        let input_only =
+            resolve_cursor_mode(session_cursor_request(false, false, false), CURSOR_EMBEDDED);
+        for paint in [false, true] {
+            assert!(!reopens_for_cursor(
+                false,
+                false,
+                paint,
+                input_only,
+                CURSOR_EMBEDDED
+            ));
+        }
+    }
+
+    fn cursor_sink() -> (
+        super::FrameSink,
+        smithay::reexports::calloop::channel::Channel<usize>,
+    ) {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let (wake, woken) = smithay::reexports::calloop::channel::channel();
+        (
+            super::FrameSink {
+                tx,
+                queued: Default::default(),
+                wake,
+                index: 3,
+                cursor: Default::default(),
+            },
+            woken,
+        )
+    }
+
+    fn sprite(hash: u64) -> std::sync::Arc<super::CursorSprite> {
+        std::sync::Arc::new(super::CursorSprite {
+            width: 4,
+            height: 4,
+            hot: (1, 1),
+            rgba: vec![0xff; 64],
+            hash,
+        })
+    }
+
+    /// While the page draws the cursor, a meta's move wakes no render; once the consumer paints
+    /// it, every move does, until a render draws it.
+    #[test]
+    fn a_painted_cursor_wakes_the_render_only_while_painted() {
+        let (sink, _woken) = cursor_sink();
+        sink.update_cursor(|c| {
+            c.at = Some((10, 10));
+            c.sprite = Some(sprite(1));
+        });
+        assert!(!sink.cursor.lock().unwrap().pending());
+        sink.update_cursor(|c| c.draw = true);
+        assert!(sink.cursor.lock().unwrap().pending());
+        let frame = sink.cursor.lock().unwrap().frame((100, 100));
+        sink.cursor.lock().unwrap().drew(&frame);
+        assert!(!sink.cursor.lock().unwrap().pending());
+        sink.update_cursor(|c| c.at = Some((10, 10)));
+        assert!(
+            !sink.cursor.lock().unwrap().pending(),
+            "the same place is no news"
+        );
+        sink.update_cursor(|c| c.at = Some((20, 10)));
+        assert!(sink.cursor.lock().unwrap().pending());
+    }
+
+    /// A painted cursor's frame damages where it was and where it is, clipped to the frame, by
+    /// the hotspot; one that did not change damages nothing; one that goes (off the stream, or
+    /// the page drawing it again) damages where it was.
+    #[test]
+    fn a_painted_cursor_damages_its_old_and_new_place() {
+        use smithay::utils::Rectangle;
+        let mut cursor = super::HostCursor {
+            draw: true,
+            at: Some((10, 10)),
+            sprite: Some(sprite(1)),
+            ..Default::default()
+        };
+        let first = cursor.frame((100, 100));
+        assert_eq!(
+            first.damage,
+            vec![Rectangle::new((9, 9).into(), (4, 4).into())]
+        );
+        assert_eq!(
+            first.sprite().map(|(s, at)| ((s.width, s.height), at)),
+            Some(((4, 4), (9, 9)))
+        );
+        cursor.drew(&first);
+        assert!(cursor.frame((100, 100)).damage.is_empty());
+
+        cursor.at = Some((99, 50));
+        let moved = cursor.frame((100, 100));
+        assert_eq!(
+            moved.damage,
+            vec![
+                Rectangle::new((9, 9).into(), (4, 4).into()),
+                Rectangle::new((98, 49).into(), (2, 4).into()),
+            ]
+        );
+        cursor.drew(&moved);
+
+        cursor.sprite = Some(sprite(2));
+        assert_eq!(
+            cursor.frame((100, 100)).damage,
+            vec![
+                Rectangle::new((98, 49).into(), (2, 4).into()),
+                Rectangle::new((98, 49).into(), (2, 4).into()),
+            ],
+            "a new sprite in the same place"
+        );
+        cursor.drew(&cursor.frame((100, 100)));
+
+        cursor.at = None;
+        let gone = cursor.frame((100, 100));
+        assert!(gone.sprite().is_none());
+        assert_eq!(
+            gone.damage,
+            vec![Rectangle::new((98, 49).into(), (2, 4).into())]
+        );
+        cursor.drew(&gone);
+
+        cursor.at = Some((50, 50));
+        cursor.draw = false;
+        let unpainted = cursor.frame((100, 100));
+        assert!(unpainted.sprite().is_none() && unpainted.damage.is_empty());
+    }
+
+    /// The sprite blends over a BGRA frame at its top-left corner, clipped to the frame: an
+    /// opaque pixel replaces the frame's, a clear one leaves it.
+    #[test]
+    fn a_painted_cursor_blends_into_the_frame_clipped() {
+        let sprite = std::sync::Arc::new(super::CursorSprite {
+            width: 2,
+            height: 2,
+            hot: (0, 0),
+            // RGBA: opaque red, clear, clear, opaque blue.
+            rgba: vec![255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255],
+            hash: 1,
+        });
+        let cursor = super::HostCursor {
+            draw: true,
+            at: Some((2, -1)),
+            sprite: Some(sprite),
+            ..Default::default()
+        };
+        let mut frame = vec![7u8; 3 * 2 * 4];
+        cursor.frame((3, 2)).blend_bgra(&mut frame, 3 * 4, (3, 2));
+        let px = |x: usize, y: usize| frame[(y * 3 + x) * 4..(y * 3 + x) * 4 + 4].to_vec();
+        // Row -1 is clipped; the sprite's second row lands on frame row 0, its blue pixel
+        // past the right edge.
+        assert_eq!(px(2, 0), vec![7, 7, 7, 7]);
+        assert_eq!(px(1, 0), vec![7, 7, 7, 7]);
+        assert_eq!(px(2, 1), vec![7, 7, 7, 7]);
+
+        let cursor = super::HostCursor {
+            at: Some((1, 0)),
+            ..cursor
+        };
+        let mut frame = vec![7u8; 3 * 2 * 4];
+        cursor.frame((3, 2)).blend_bgra(&mut frame, 3 * 4, (3, 2));
+        let px = |x: usize, y: usize| frame[(y * 3 + x) * 4..(y * 3 + x) * 4 + 4].to_vec();
+        assert_eq!(
+            px(1, 0),
+            vec![0, 0, 255, 7],
+            "opaque red over the frame, alpha kept"
+        );
+        assert_eq!(px(2, 0), vec![7, 7, 7, 7], "a clear pixel leaves the frame");
+        assert_eq!(px(2, 1), vec![255, 0, 0, 7], "opaque blue");
+        assert_eq!(px(0, 0), vec![7, 7, 7, 7]);
     }
 
     #[test]

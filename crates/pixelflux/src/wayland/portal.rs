@@ -77,7 +77,11 @@ pub struct PortalSession {
     session: OwnedObjectPath,
     pub streams: Vec<PortalStream>,
     pub devices: u32,
+    /// The cursor mode the session streams with, as [`resolve_cursor_mode`] chose it.
     pub cursor_mode: u32,
+    /// The `AvailableCursorModes` the portal offered when the session selected its sources;
+    /// [`CURSOR_EMBEDDED`] alone for a session that captures nothing.
+    pub cursor_modes: u32,
     pub restore_token: Option<String>,
     /// RemoteDesktop interface version, 0 when the session drives no input. `ConnectToEIS`
     /// exists from version 2.
@@ -103,6 +107,17 @@ pub fn source_types_options(virtual_only: bool) -> u32 {
     } else {
         SOURCE_MONITOR
     }
+}
+
+/// The cursor mode a session asking for `want` gets from a portal offering `available`
+/// (`CURSOR_*` bits): `want` itself where offered, else the other mode that still shows a
+/// cursor (an embedded cursor for metadata, metadata the consumer draws from for an embedded
+/// one), then a hidden cursor, and an embedded one where the portal names no mode at all.
+pub fn resolve_cursor_mode(want: u32, available: u32) -> u32 {
+    [want, CURSOR_EMBEDDED, CURSOR_METADATA, CURSOR_HIDDEN]
+        .into_iter()
+        .find(|m| available & m != 0)
+        .unwrap_or(CURSOR_EMBEDDED)
 }
 
 /// A `session_handle_token` no other session of this process has used.
@@ -323,6 +338,7 @@ impl PortalSession {
             streams: Vec::new(),
             devices: 0,
             cursor_mode,
+            cursor_modes: CURSOR_EMBEDDED,
             restore_token: None,
             rd_version: 0,
             kde: false,
@@ -384,12 +400,8 @@ impl PortalSession {
                 .get_property("AvailableCursorModes")
                 .await
                 .unwrap_or(CURSOR_EMBEDDED);
-            if available & self.cursor_mode == 0 {
-                self.cursor_mode = [CURSOR_EMBEDDED, CURSOR_HIDDEN, CURSOR_METADATA]
-                    .into_iter()
-                    .find(|m| available & m != 0)
-                    .unwrap_or(CURSOR_EMBEDDED);
-            }
+            self.cursor_modes = available;
+            self.cursor_mode = resolve_cursor_mode(self.cursor_mode, available);
             let mut options = Options::new();
             opt_u32(&mut options, "types", source_types_options(virtual_only));
             options.insert("multiple", Variant::Bool(!virtual_only));
@@ -717,6 +729,28 @@ mod tests {
     use zbus::Type as _;
     use zbus::wire::StructureBuilder;
     use zbus::{Array, Dict, Structure};
+
+    /// A wanted mode the portal offers is taken; one it lacks falls to the other mode that
+    /// still shows a cursor before a hidden one, and a portal naming no mode streams embedded.
+    #[test]
+    fn a_cursor_mode_the_portal_lacks_falls_to_one_that_still_shows_the_cursor() {
+        let all = CURSOR_HIDDEN | CURSOR_EMBEDDED | CURSOR_METADATA;
+        assert_eq!(resolve_cursor_mode(CURSOR_METADATA, all), CURSOR_METADATA);
+        assert_eq!(resolve_cursor_mode(CURSOR_EMBEDDED, all), CURSOR_EMBEDDED);
+        assert_eq!(
+            resolve_cursor_mode(CURSOR_METADATA, CURSOR_HIDDEN | CURSOR_EMBEDDED),
+            CURSOR_EMBEDDED
+        );
+        assert_eq!(
+            resolve_cursor_mode(CURSOR_EMBEDDED, CURSOR_HIDDEN | CURSOR_METADATA),
+            CURSOR_METADATA
+        );
+        assert_eq!(
+            resolve_cursor_mode(CURSOR_METADATA, CURSOR_HIDDEN),
+            CURSOR_HIDDEN
+        );
+        assert_eq!(resolve_cursor_mode(CURSOR_METADATA, 0), CURSOR_EMBEDDED);
+    }
 
     fn stream_value(node: u32, props: Vec<(&'static str, Variant<'static>)>) -> Variant<'static> {
         let mut dict = Dict::new(<&str>::SIGNATURE, Variant::SIGNATURE);

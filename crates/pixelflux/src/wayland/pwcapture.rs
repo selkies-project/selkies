@@ -39,7 +39,7 @@ use smithay::utils::{Physical, Rectangle};
 
 use crate::pipewire::*;
 use crate::wayland::cursor::CursorJob;
-use crate::wayland::host::{FrameSink, HostCpuFrame, HostFrame, now_ns, trace};
+use crate::wayland::host::{CursorSprite, FrameSink, HostCpuFrame, HostFrame, now_ns, trace};
 
 const FOURCC_XR24: u32 = 0x3432_5258;
 const FOURCC_AR24: u32 = 0x3432_5241;
@@ -166,6 +166,11 @@ pub struct StreamConfig {
     /// Ask for `expect` exactly, renegotiating when it changes: a virtual monitor takes its
     /// size from the format its stream is consumed at.
     pub exact_size: bool,
+    /// The consumer paints the cursor of the stream's metas into the frames itself
+    /// (`host::HostCursor`), so the sprites go there instead of to the cursor callback, and
+    /// the pointer is not reported (`HOST_POINTER`) any more than where the host paints it.
+    /// Not a format matter: a change alone never renegotiates.
+    pub draw_cursor: bool,
 }
 
 /// Where a stream's output sits for its cursor metas: the display's origin in the union layout
@@ -431,6 +436,7 @@ fn renegotiates(cur: &StreamConfig, new: &StreamConfig, negotiated: bool) -> boo
     let size_only = StreamConfig {
         expect: cur.expect,
         place: cur.place,
+        draw_cursor: cur.draw_cursor,
         ..new.clone()
     } == *cur;
     !size_only || !negotiated || (new.exact_size && new.expect != cur.expect)
@@ -559,20 +565,30 @@ unsafe extern "C" fn on_remove_buffer(data: *mut c_void, b: *mut PwBuffer) {
 }
 
 /// Read the cursor meta of a buffer: position, and a changed sprite forwarded to the cursor
-/// worker (an empty sprite hides it).
+/// worker (an empty sprite hides it). Where the consumer paints the cursor into the frames
+/// itself (`StreamConfig::draw_cursor`), both go to the output's `HostCursor` alone, which
+/// keeps them either way; a meta without a cursor (id 0, the pointer off the stream) leaves
+/// nothing there to paint.
 unsafe fn read_cursor(shared: &Shared, meta: &SpaMeta, motion: u64) {
     if meta.size < std::mem::size_of::<SpaMetaCursor>() as u32 || meta.data.is_null() {
         return;
     }
     let cursor = unsafe { &*(meta.data as *const SpaMetaCursor) };
     if cursor.id == 0 {
+        shared.sink.update_cursor(|c| c.at = None);
         return;
     }
+    let draw = shared.cfg.lock().unwrap().draw_cursor;
     shared.cursor_pos.store(
         (i64::from(cursor.x) << 32) | i64::from(cursor.y as u32),
         Ordering::Relaxed,
     );
-    publish_host_pointer(shared, cursor.x, cursor.y, motion);
+    if !draw {
+        publish_host_pointer(shared, cursor.x, cursor.y, motion);
+    }
+    shared
+        .sink
+        .update_cursor(|c| c.at = Some((cursor.x, cursor.y)));
     if cursor.bitmap_offset < std::mem::size_of::<SpaMetaCursor>() as u32
         || cursor.bitmap_offset + std::mem::size_of::<SpaMetaBitmap>() as u32 > meta.size
     {
@@ -586,7 +602,8 @@ unsafe fn read_cursor(shared: &Shared, meta: &SpaMeta, motion: u64) {
     }
     let (w, h) = (bitmap.width, bitmap.height);
     if w == 0 || h == 0 || bitmap.offset == 0 {
-        if shared.cursor_hash.swap(0, Ordering::Relaxed) != 0 {
+        shared.sink.update_cursor(|c| c.sprite = None);
+        if !draw && shared.cursor_hash.swap(0, Ordering::Relaxed) != 0 {
             let _ = shared.cursor_tx.send(CursorJob::Hide);
         }
         return;
@@ -634,23 +651,59 @@ unsafe fn read_cursor(shared: &Shared, meta: &SpaMeta, motion: u64) {
         }
     }
     let hash = xxhash_rust::xxh3::xxh3_64(&rgba) ^ (u64::from(w) << 32 | u64::from(h));
-    let previous = shared.cursor_hash.swap(hash, Ordering::Relaxed);
-    if previous != hash {
-        if previous == 0 {
-            eprintln!(
-                "[HostCapture] output {}: portal cursor sprites arrive ({w}x{h}, hotspot {},{})",
-                shared.sink.index, cursor.hot_x, cursor.hot_y
-            );
+    let kept = shared.sink.cursor.lock().unwrap().sprite.clone();
+    let sprite = match kept {
+        Some(s) if s.hash == hash && s.hot == (cursor.hot_x, cursor.hot_y) => s,
+        _ => {
+            if kept.is_none() {
+                eprintln!(
+                    "[HostCapture] output {}: portal cursor sprites arrive ({w}x{h}, hotspot {},{}){}",
+                    shared.sink.index,
+                    cursor.hot_x,
+                    cursor.hot_y,
+                    if draw {
+                        ", painted into the frames"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            let sprite = Arc::new(CursorSprite {
+                width: w as i32,
+                height: h as i32,
+                hot: (cursor.hot_x, cursor.hot_y),
+                rgba,
+                hash,
+            });
+            shared
+                .sink
+                .update_cursor(|c| c.sprite = Some(sprite.clone()));
+            sprite
         }
-        let _ = shared.cursor_tx.send(CursorJob::Gles {
-            hash,
-            width: w as i32,
-            height: h as i32,
-            bytes: rgba,
-            hot_x: cursor.hot_x,
-            hot_y: cursor.hot_y,
-        });
+    };
+    if !draw {
+        send_sprite(shared, Some(&sprite));
     }
+}
+
+/// Hand the cursor callback `sprite` (`None` hides the cursor) unless it already has it.
+fn send_sprite(shared: &Shared, sprite: Option<&CursorSprite>) {
+    let hash = sprite.map_or(0, |s| s.hash);
+    let previous = shared.cursor_hash.swap(hash, Ordering::Relaxed);
+    if previous == hash {
+        return;
+    }
+    let _ = shared.cursor_tx.send(match sprite {
+        None => CursorJob::Hide,
+        Some(s) => CursorJob::Gles {
+            hash,
+            width: s.width,
+            height: s.height,
+            bytes: s.rgba.clone(),
+            hot_x: s.hot.0,
+            hot_y: s.hot.1,
+        },
+    });
 }
 
 /// The damage regions of a buffer, or the whole frame when the compositor sent none.
@@ -963,6 +1016,12 @@ impl PwStream {
     ) -> Result<Self, String> {
         let api = core.api;
         let pods = enum_format_pods(&cfg);
+        // A new stream's metas describe the cursor afresh.
+        sink.update_cursor(|c| {
+            c.draw = cfg.draw_cursor;
+            c.at = None;
+            c.sprite = None;
+        });
         let shared = Arc::new(Shared {
             api,
             stream: AtomicPtr::new(ptr::null_mut()),
@@ -1047,6 +1106,24 @@ impl PwStream {
             let mut cur = self.shared.cfg.lock().unwrap();
             if *cur == cfg {
                 return;
+            }
+            if cur.draw_cursor != cfg.draw_cursor {
+                println!(
+                    "[HostCapture] output {}: the host's cursor is {}; the session keeps its cursor mode.",
+                    self.shared.sink.index,
+                    if cfg.draw_cursor {
+                        "painted into the frames"
+                    } else {
+                        "drawn by the page"
+                    }
+                );
+                self.shared.sink.update_cursor(|c| c.draw = cfg.draw_cursor);
+                if !cfg.draw_cursor {
+                    // The cursor callback had no sprite while the consumer painted the cursor,
+                    // and the host sends one only when it changes: hand over the one it has.
+                    let kept = self.shared.sink.cursor.lock().unwrap().sprite.clone();
+                    send_sprite(&self.shared, kept.as_deref());
+                }
             }
             let renegotiate =
                 renegotiates(&cur, &cfg, self.shared.negotiated.lock().unwrap().is_some());
@@ -1338,6 +1415,7 @@ mod tests {
                 logical: (1920, 1080),
             },
             exact_size: false,
+            draw_cursor: false,
         }
     }
 
