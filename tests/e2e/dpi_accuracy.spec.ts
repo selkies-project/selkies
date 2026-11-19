@@ -12,9 +12,15 @@
 //
 // A resolution the operator sets answers the question instead of the display:
 // that framebuffer decides how large the desktop draws its UI, and the screen
-// showing it says nothing about it. So the last blocks drive manual
+// showing it says nothing about it. So the next blocks drive manual
 // resolutions at dpr 1, where the density would ask for 96 whatever the size,
 // and pin that a stored pick outranks both.
+//
+// Under CSS scaling with an automatic resolution a pick divides the
+// resolution the page asks for instead, so the desktop has to stay at 96: the
+// last block loads and reloads a 2x page that stored HiDPI off and 200%, on
+// both transports, and the first settings it sends must not scale the desktop
+// a second time.
 import { spawnSync } from 'node:child_process';
 
 import type { Browser, BrowserContext, Page } from '@playwright/test';
@@ -24,7 +30,7 @@ import { launchChromium } from '../lib/browsers.ts';
 import { Checks } from '../lib/checks.ts';
 import { DASHBOARD_DIST, suiteOf } from '../lib/env.ts';
 import { Host } from '../lib/host.ts';
-import { within } from '../lib/stream.ts';
+import { waitWrVideo, waitWsVideo, within } from '../lib/stream.ts';
 
 // The scaling_dpi stops the clients offer, in 25% steps.
 const STOPS = [96, 120, 144, 168, 192, 216, 240, 264, 288];
@@ -41,6 +47,21 @@ const PINNED_INIT = `(() => {
     .replace(/[^a-zA-Z0-9._-]/g, '_');
   localStorage.setItem(prefix + '_scaling_dpi', '${PINNED_DPI}');
 })()`;
+
+// HiDPI off and 200% stored as a page that picked them leaves them, before the
+// core reads its settings: the choice marked explicit, so the server's default
+// does not resolve over it.
+const CSS_SCALED_INIT = `(() => {
+  const prefix = (window.location.origin + window.location.pathname)
+    .replace(/[^a-zA-Z0-9._-]/g, '_');
+  localStorage.setItem(prefix + '_useCssScaling', 'true');
+  localStorage.setItem(prefix + '_useCssScaling_explicit_choice', 'true');
+  localStorage.setItem(prefix + '_scaling_dpi', '192');
+})()`;
+
+// A server line applying 192 to the desktop: the WebSockets server's change
+// line, or either transport's line for a density it wrote.
+const APPLIED_192 = /(?:DPI changed from \S+ to 192\b|Successfully set DPI to 192\b)/;
 
 /** The scaling stop nearest to a devicePixelRatio's implied DPI, quantized to quarter steps. */
 function expected(dpr: number): number {
@@ -65,6 +86,13 @@ async function open(browser: Browser, url: string, dpr: number, init = ''): Prom
     await page.waitForTimeout(9000);
     return [ctx, page];
 }
+
+/**
+ * Whether a page streams on its transport: one that never connected sent no
+ * settings, so the desktop's density says nothing about it.
+ */
+const streams = async (page: Page, mode: string): Promise<boolean> =>
+    (mode === 'webrtc' ? await waitWrVideo(page, 60) : await waitWsVideo(page, 45)) !== null;
 
 const post = (page: Page, message: Record<string, unknown>): Promise<void> => within(page.evaluate((m) => { window.postMessage(m, window.location.origin); }, message));
 
@@ -117,6 +145,25 @@ test('dpi_accuracy', async () => {
             await page.waitForTimeout(9000);
             res.check('and a manual resolution does not re-derive over it', xftDpi() === PINNED_DPI, `got ${xftDpi()}`);
             await ctx.close();
+
+            // CSS scaling with an automatic resolution: the stored 200% divides
+            // the resolution the page asks for, so the desktop is asked for 96
+            // from the first settings on, a reload included.
+            for (const mode of ['websockets', 'webrtc']) {
+                const started = mode === 'websockets' ? url
+                    : (await host.start({ label: 'dpi-webrtc', mode, env: { SELKIES_WEB_ROOT: DASHBOARD_DIST } })).url;
+                const mark = await host.mark();
+                [ctx, page] = await open(browser, started, 2.0, `window.__SELKIES_STREAMING_MODE__ = '${mode}';\n${CSS_SCALED_INIT}`);
+                res.check(`${mode}: a 2x page at 200% under CSS scaling streams`, await streams(page, mode), '');
+                res.check(`${mode}: and keeps Xft.dpi 96`, xftDpi() === 96, `got ${xftDpi()}`);
+                await page.reload({ waitUntil: 'load', timeout: 60_000 });
+                await page.waitForTimeout(9000);
+                res.check(`${mode}: reloaded, it streams again`, await streams(page, mode), '');
+                res.check(`${mode}: and still keeps Xft.dpi 96`, xftDpi() === 96, `got ${xftDpi()}`);
+                const applied = (await host.log(mark)).split('\n').filter((l) => APPLIED_192.test(l));
+                res.check(`${mode}: no settings it sent applied 192`, applied.length === 0, applied.join(' | '));
+                await ctx.close();
+            }
         } finally {
             await browser.close();
         }

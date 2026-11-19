@@ -7877,12 +7877,16 @@ class WorkerWebSocket {
 
   /**
    * Sends the initial SETTINGS payload (every stored user pick, the client
-   * geometry or manual resolution, the DPR-derived `scaling_dpi` seeded into
-   * this very first payload so the desktop comes up at the right density
-   * without a second capture restart, the display identity, the keyboard
-   * layout, and the audio-RED capability; a secondary sends only its own
-   * suffixed per-display keys, never the primary's), advertises gzip,
+   * geometry or manual resolution, the `scaling_dpi` the desktop is asked for
+   * seeded into this very first payload so the desktop comes up at the right
+   * density without a second capture restart, the display identity, the
+   * keyboard layout, and the audio-RED capability; a secondary sends only its
+   * own suffixed per-display keys, never the primary's), advertises gzip,
    * requests the cache-only clipboard, and starts the metrics and ack timers.
+   * That `scaling_dpi` is `effectiveScalingDpi`, the value a live change
+   * sends, never the stored pick as it stands: under CSS scaling with an
+   * automatic resolution the pick already divides the requested resolution,
+   * so the desktop is asked for 96 rather than scaled a second time.
    */
   const onSocketOpen = async (): Promise<void> => {
     console.log('[websockets] Connection opened!');

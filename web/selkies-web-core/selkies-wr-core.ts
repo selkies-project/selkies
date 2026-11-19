@@ -1349,19 +1349,6 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 	}
 
 	/**
-	 * Sends the persisted settings as the session's initial SETTINGS payload.
-	 *
-	 * Every display page sends its own: the server applies a payload to the
-	 * display whose channel delivered it, so a secondary configures only its
-	 * stream, its resolution still riding the resize message. Per-display keys
-	 * carry a `_display2` suffix and each display reads only its own variant.
-	 * Manual dimensions are exact physical pixels and go raw, as on the resize
-	 * path. The DPR-derived `scaling_dpi` is seeded into this first payload
-	 * unless a stored pick was collected: without it the desktop comes up at
-	 * the default DPI and the dashboard's correction a second later forces a
-	 * second capture restart on every HiDPI connect.
-	 */
-	/**
 	 * This page's remote pixels per CSS pixel: its decoded buffer over the box
 	 * drawing it, the ratio a neighbor scales a cross-display drag by
 	 * (lib/stream-density.ts). The requested density stands in until the
@@ -1401,6 +1388,23 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 		webrtc!.sendDataChannelMessage(`_arg_fps,${rate}`);
 	}
 
+	/**
+	 * Sends the persisted settings as the session's initial SETTINGS payload.
+	 *
+	 * Every display page sends its own: the server applies a payload to the
+	 * display whose channel delivered it, so a secondary configures only its
+	 * stream, its resolution still riding the resize message. Per-display keys
+	 * carry a `_display2` suffix and each display reads only its own variant.
+	 * Manual dimensions are exact physical pixels and go raw, as on the resize
+	 * path. `scaling_dpi` is always the DPI the desktop is asked for
+	 * (`effectiveScalingDpi`), the value a live change sends: 96 under CSS
+	 * scaling with an automatic resolution, where the stored pick divides the
+	 * requested resolution instead and sent as it stands would scale the
+	 * desktop a second time, else the stored pick or the DPR-derived default.
+	 * It rides this first payload because without it the desktop comes up at
+	 * the default DPI and the dashboard's correction a second later forces a
+	 * second capture restart on every HiDPI connect.
+	 */
 	function sendClientPersistedSettings(): void {
 		if (isSharedMode) {
 			console.log("Skipping sending client persisted settings in shared mode.");
