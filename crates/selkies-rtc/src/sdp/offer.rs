@@ -306,6 +306,25 @@ impl Session {
             .or(self.current_remote.as_ref())
     }
 
+    /// The formats the transceiver at `index` receives: those this side's own description named
+    /// for its section, under the payload types it gave them. The peer sends under those numbers
+    /// (RFC 3264, 6.1: an answerer uses the offer's, even where its answer lists others), and a
+    /// browser can send a format of the offer its answer left out: a Chrome page answered a
+    /// microphone offered RED and Opus with Opus alone and sent RED. The negotiated codecs where
+    /// this side has not described the section.
+    pub fn receive_codecs(&self, index: usize) -> Vec<Codec> {
+        let transceiver = &self.transceivers[index];
+        self.local_description()
+            .and_then(|d| {
+                d.media
+                    .iter()
+                    .find(|m| m.mid.is_some() && m.mid == transceiver.mid)
+            })
+            .map(|m| m.codecs.clone())
+            .filter(|codecs| !codecs.is_empty())
+            .unwrap_or_else(|| transceiver.codecs.clone())
+    }
+
     fn allocate_mid(&self, mids: &mut HashSet<String>) -> String {
         let mut i = 0;
         loop {
