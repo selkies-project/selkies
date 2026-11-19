@@ -136,6 +136,7 @@ pub static SUITES: &[Suite] = &[
     suite("tools/frame_num_range_log_audit.ts", "unit", 60),
     suite("tools/cursor_scaling_audit.ts", "unit", 120),
     suite("tools/udprelay_audit.ts", "unit", 120),
+    suite("tools/auth_proxy_audit.ts", "unit", 120),
     Suite {
         path: rust!("stall_recovery.rs"),
         tier: "integration",
@@ -198,7 +199,14 @@ pub static SUITES: &[Suite] = &[
         path: "e2e/matrix.spec.ts",
         tier: "e2e",
         timeout: 1200,
-        selectors: &["ws-x11", "wr-x11", "ws-wl", "wr-wl"],
+        selectors: &[
+            "ws-x11",
+            "wr-x11",
+            "ws-wl",
+            "wr-wl",
+            "ws-x11-proxy",
+            "wr-x11-proxy",
+        ],
         name: None,
     },
     Suite {
