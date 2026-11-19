@@ -1,5 +1,7 @@
 //! The bar: start button, quick launch buttons, taskbar, system tray slot,
 //! pager, notifications bell, volume, clock and the show desktop button.  The
+//! tray slot holds the D-Bus tray items' buttons, which the shell draws, and
+//! to their right the strip the XEmbed icons dock into.  The
 //! start button, quick launch and taskbar sit at the left, or in the middle of
 //! the bar when the layout is centered; the tray, a separator, the pager, the
 //! bell, volume, clock and show desktop button stay at the right.  The bell is
@@ -73,6 +75,8 @@ pub struct Layout {
     pub pager: Vec<Rect>,
     /// Each taskbar button with its window index.
     pub tasks: Vec<(usize, Rect)>,
+    /// Each D-Bus tray item's button with its position among the items.
+    pub status: Vec<(usize, Rect)>,
     /// The volume button, when shown.
     pub volume: Option<Rect>,
     /// The notifications bell, when the shell serves notifications.
@@ -94,6 +98,7 @@ impl Layout {
             Hover::Launcher(i) => self.launchers.get(i).map(|(_, r)| *r),
             Hover::Pager(i) => self.pager.get(i).copied(),
             Hover::Task(i) => self.tasks.iter().find(|(t, _)| *t == i).map(|(_, r)| *r),
+            Hover::StatusItem(i) => self.status.iter().find(|(s, _)| *s == i).map(|(_, r)| *r),
             Hover::Volume => self.volume,
             Hover::Bell => self.notifications,
             Hover::Clock => self.clock,
@@ -226,7 +231,8 @@ pub fn layout(d: &mut Desktop) -> Layout {
     } else {
         Vec::new()
     };
-    let tray = if d.config.show_tray && d.tray_icons > 0 && d.is_primary_bar() && !d.primary_bar_covered() {
+    let tray_shown = d.config.show_tray && d.is_primary_bar();
+    let tray = if tray_shown && d.tray_icons > 0 && !d.primary_bar_covered() {
         let size = d.panel_icon_size() + 4;
         let width = d.tray_icons as i32 * (size + GAP) + GAP;
         right -= width;
@@ -236,6 +242,16 @@ pub fn layout(d: &mut Desktop) -> Layout {
     } else {
         None
     };
+    let mut status = Vec::new();
+    if tray_shown {
+        let size = d.panel_icon_size() + 4;
+        for index in (0..d.status_items.len()).rev() {
+            right -= size;
+            status.push((index, Rect::new(right, bar.y + 3, size, bar.h - 6)));
+            right -= GAP;
+        }
+        status.reverse();
+    }
     let left_edge = bar.x + GAP;
     let fixed_width = start_width + GAP + launchers_width + GAP;
     let available = (right - GAP - (left_edge + fixed_width)).max(0);
@@ -279,6 +295,7 @@ pub fn layout(d: &mut Desktop) -> Layout {
         launchers,
         pager,
         tasks,
+        status,
         volume,
         notifications,
         clock,
@@ -314,6 +331,9 @@ pub fn hit(d: &mut Desktop, x: f64, y: f64) -> Hover {
         if rect.contains(x, y) {
             return Hover::Task(*index);
         }
+    }
+    if let Some((index, _)) = layout.status.iter().find(|(_, r)| r.contains(x, y)) {
+        return Hover::StatusItem(*index);
     }
     if layout.volume.is_some_and(|r| r.contains(x, y)) {
         return Hover::Volume;
@@ -364,6 +384,7 @@ pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button, _time: u32) {
             Button::Middle => d.window_action(index, WindowAction::Close),
             Button::Right => d.open_popup(Popup::TaskMenu(index)),
         },
+        Hover::StatusItem(index) => ui::tray_menu::click_item(d, index, button),
         Hover::Volume => match button {
             Button::Left => d.open_popup(Popup::Volume),
             Button::Middle => d.toggle_mute(),
@@ -410,6 +431,7 @@ pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button, _time: u32) {
 pub fn scroll(d: &mut Desktop, x: f64, y: f64, delta: f64) {
     match hit(d, x, y) {
         Hover::Volume => d.adjust_volume(if delta < 0.0 { 5 } else { -5 }),
+        Hover::StatusItem(index) => ui::tray_menu::scroll_item(d, index, delta),
         Hover::Pager(_) => cycle_desktops(d, delta > 0.0),
         Hover::Task(_) => cycle_windows(d, delta > 0.0),
         _ => {
@@ -627,6 +649,35 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
                 false,
                 Align::Left,
                 color,
+            );
+        }
+    }
+
+    for (index, rect) in layout.status.iter().copied() {
+        let open = d.popup == Popup::TrayMenu
+            && d.tray_menu.as_ref().map(|m| &m.key) == d.status_items.get(index).map(|i| &i.key);
+        if open {
+            canvas.fill_rounded(rect, 5.0, ui::active_bg());
+        } else if d.hover == Hover::StatusItem(index) {
+            canvas.fill_rounded(rect, 5.0, ui::hover_bg());
+        }
+        let size = d.panel_icon_size();
+        let icon_rect = Rect::new(
+            rect.x + (rect.w - size) / 2,
+            rect.y + (rect.h - size) / 2,
+            size,
+            size,
+        );
+        let item = d.status_items[index].clone();
+        match ui::tray_menu::icon(d, &item, size) {
+            Some(icon) => canvas.draw_image_fit(&icon, icon_rect),
+            None => canvas.fill_rounded(icon_rect.inflate(-3), 3.0, ui::field_bg()),
+        }
+        if item.status == crate::sni::Status::NeedsAttention {
+            canvas.fill_rounded(
+                Rect::new(rect.x + 6, rect.bottom() - 4, rect.w - 12, 3),
+                1.5,
+                ui::accent(),
             );
         }
     }

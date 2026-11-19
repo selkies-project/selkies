@@ -1987,7 +1987,8 @@ fn draw_toolbar(
     draw_sort_glyph(canvas, layout.sort, ui::text());
 }
 
-/// Draws the sidebar places.
+/// Draws the sidebar places, each icon a monochrome glyph at this size recolored to the
+/// label's text color so it shows on a dark window as on a light one.
 fn draw_sidebar(
     d: &mut Desktop,
     index: usize,
@@ -2030,10 +2031,11 @@ fn draw_sidebar(
             ui::ICON_SIZE,
             ui::ICON_SIZE,
         );
+        let px = (ui::ICON_SIZE * scale) as u32;
         if let Some(icon) = d
             .icons
-            .get(place.icon, (ui::ICON_SIZE * scale) as u32)
-            .or_else(|| d.icons.get("folder", (ui::ICON_SIZE * scale) as u32))
+            .get_colored(place.icon, px, ui::text())
+            .or_else(|| d.icons.get_colored("folder", px, ui::text()))
         {
             canvas.draw_image_fit(&icon, icon_rect);
         }

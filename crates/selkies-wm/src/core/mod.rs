@@ -75,14 +75,16 @@ pub trait Launcher: Send {
         SessionMode {
             desktop: true,
             switchable: false,
+            server_switch: false,
             maximize: false,
             keep_maximized: false,
             application: None,
         }
     }
-    /// Switch the session to the desktop or to the application alone; asked only of a session
-    /// that reports itself switchable.
-    fn set_desktop(&mut self, _on: bool) {}
+    /// Switch the session to the desktop or to the application alone: from the menus
+    /// (`by_server` false), asked only of a session that reports itself switchable, or for the
+    /// server (`by_server`), asked only of one that reports [`SessionMode::server_switch`].
+    fn set_desktop(&mut self, _on: bool, _by_server: bool) {}
     /// Run the session's application again, once everything it started has ended.
     fn relaunch(&mut self) {}
     /// What the image takes away from the window manager over its files.
@@ -99,6 +101,9 @@ pub struct SessionMode {
     pub desktop: bool,
     /// The menus offer the switch between the two.
     pub switchable: bool,
+    /// The server may switch between the two ([`Event::DesktopMode`]): the mode is not locked
+    /// and the shell is installed, whether or not the menus offer the switch.
+    pub server_switch: bool,
     /// The application alone has its windows maximized as they open, and tiled as the session
     /// switches to it.
     pub maximize: bool,
@@ -1403,12 +1408,19 @@ impl Engine {
     /// window has no way back, and laid out as [`Engine::tile_application`] tiles them. The
     /// shell's own windows, a file manager's among them, are closed rather than laid out, since
     /// they leave with the shell and would leave their tiles empty. A switch to the desktop lays
-    /// the application's windows out as [`Engine::cascade_for_desktop`] does.
-    fn set_desktop(&mut self, on: bool) {
-        if !self.session.switchable || self.session.desktop == on {
+    /// the application's windows out as [`Engine::cascade_for_desktop`] does. The menus switch
+    /// where the session is switchable, the server (`by_server`) where
+    /// [`SessionMode::server_switch`] allows it.
+    fn set_desktop(&mut self, on: bool, by_server: bool) {
+        let allowed = if by_server {
+            self.session.server_switch
+        } else {
+            self.session.switchable
+        };
+        if !allowed || self.session.desktop == on {
             return;
         }
-        self.launcher.set_desktop(on);
+        self.launcher.set_desktop(on, by_server);
         self.session = self.launcher.session();
         if self.session.desktop {
             self.cascade_for_desktop();
@@ -3643,7 +3655,7 @@ impl Engine {
             Action::Reconfigure => self.reconfigure(),
             Action::SetDesktop(on) => {
                 let on = on.unwrap_or(!self.session.desktop);
-                self.set_desktop(on);
+                self.set_desktop(on, false);
             }
             Action::Relaunch => self.launcher.relaunch(),
             Action::Unknown(name) => {
@@ -5090,6 +5102,10 @@ impl WindowPolicy for Engine {
                 self.switch_desktop(index);
                 Verdict::Pass
             }
+            Event::DesktopMode(on) => {
+                self.set_desktop(on, true);
+                Verdict::Pass
+            }
         };
         self.tell_bar_edge();
         if !self.out.iter().any(|c| matches!(c, Command::WakeAt(_))) {
@@ -5186,7 +5202,7 @@ mod tests {
         fn session(&self) -> SessionMode {
             *self.0.lock().unwrap()
         }
-        fn set_desktop(&mut self, on: bool) {
+        fn set_desktop(&mut self, on: bool, _by_server: bool) {
             self.0.lock().unwrap().desktop = on;
         }
     }
@@ -5197,6 +5213,7 @@ mod tests {
         let mode = Arc::new(Mutex::new(SessionMode {
             desktop,
             switchable: true,
+            server_switch: true,
             maximize: true,
             keep_maximized: false,
             application: None,
@@ -5257,6 +5274,25 @@ mod tests {
         assert!(!engine.win(1).unwrap().maximized);
         let frame = engine.frame_rect(1);
         assert_eq!((frame.x, frame.y), (STACK_PADDING, STACK_PADDING));
+    }
+
+    /// The server switches a session whose menus do not offer the switch, laying its windows
+    /// out as a switch from the menus does, and never one whose mode is locked.
+    #[test]
+    fn the_server_switches_the_session_where_only_a_lock_forbids_it() {
+        let (mut engine, mode) = session_engine(true);
+        mode.lock().unwrap().switchable = false;
+        engine.session = engine.launcher.session();
+        open(&mut engine, 1, 400, 300);
+        engine.run_action(&Action::SetDesktop(Some(false)), None, (0.0, 0.0));
+        assert!(mode.lock().unwrap().desktop, "the menus cannot switch it");
+        engine.handle(Event::DesktopMode(false), &mut Vec::new());
+        assert!(!mode.lock().unwrap().desktop);
+        assert!(engine.win(1).unwrap().maximized);
+        mode.lock().unwrap().server_switch = false;
+        engine.session = engine.launcher.session();
+        engine.handle(Event::DesktopMode(true), &mut Vec::new());
+        assert!(!mode.lock().unwrap().desktop, "a locked mode stays");
     }
 
     /// The application alone whose autostart ended opens no menu of its own: its root menu

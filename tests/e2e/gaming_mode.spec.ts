@@ -372,6 +372,11 @@ async function enterByButton(res: Checks, desk: Desk, page: Page, tag: string): 
     if (handle) {
         await desk.click(...handle);
         await sleep(1000);
+        const modes = await screenAt(page, '.sidebar-menu-button');
+        if (modes) {
+            await desk.click(...modes);
+            await sleep(800);
+        }
     }
     for (let i = 0; i < 2; i++) {
         const edge = await screenAt(page, '.edge-button');

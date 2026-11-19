@@ -10,7 +10,7 @@
  * pad from `navigator.getGamepads()` into the status panel.
  * @module
  */
-import './universalTouchGamepad.ts';
+import { TOUCH_GAMEPAD_ID } from './universalTouchGamepad.ts';
 
 /**
  * An element of the test page.
@@ -75,7 +75,7 @@ toggleButton.addEventListener('click', () => {
 
 /** Copies the synthetic pad's axes and buttons into the panel every animation frame. */
 function updateStatusDisplay() {
-    const activeGamepad = navigator.getGamepads().find((pad) => pad && pad.id === "Universal Touch Gamepad") ?? null;
+    const activeGamepad = navigator.getGamepads().find((pad) => pad && pad.id === TOUCH_GAMEPAD_ID) ?? null;
 
     if (activeGamepad && activeGamepad.connected) {
         gamepadInfoIdDiv.textContent = `ID: ${activeGamepad.id}`;

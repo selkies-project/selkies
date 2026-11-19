@@ -1407,7 +1407,10 @@ fn draw_settings_button(d: &mut Desktop, canvas: &mut Canvas<'_>, rect: Rect) {
     let size = CATEGORY_ICON;
     let icon_rect = Rect::new(rect.x + 10, rect.y + (rect.h - size) / 2, size, size);
     let scale = d.panel.scale.max(1);
-    if let Some(icon) = d.icons.get("preferences-system", (size * scale) as u32) {
+    if let Some(icon) = d
+        .icons
+        .get_colored("preferences-system", (size * scale) as u32, ui::text())
+    {
         canvas.draw_image_fit(&icon, icon_rect);
     }
     let text = Rect::new(
@@ -1428,7 +1431,8 @@ fn draw_settings_button(d: &mut Desktop, canvas: &mut Canvas<'_>, rect: Rect) {
     );
 }
 
-/// Draws the category column.
+/// Draws the category column, each row's theme icon a monochrome glyph recolored to the
+/// label's text color so it shows on a dark menu as on a light one.
 fn draw_categories(d: &mut Desktop, canvas: &mut Canvas<'_>, layout: &Layout) {
     canvas.clip(layout.categories);
     let rows = category_rows(d);
@@ -1470,10 +1474,11 @@ fn draw_categories(d: &mut Desktop, canvas: &mut Canvas<'_>, layout: &Layout) {
                     CATEGORY_ICON,
                 );
                 let scale = d.panel.scale.max(1);
-                if let Some(icon) = d
-                    .icons
-                    .get(section_icon(d, *section), (CATEGORY_ICON * scale) as u32)
-                {
+                if let Some(icon) = d.icons.get_colored(
+                    section_icon(d, *section),
+                    (CATEGORY_ICON * scale) as u32,
+                    ui::text(),
+                ) {
                     canvas.draw_image_fit(&icon, icon_rect);
                 }
                 let name = section_name(d, *section);

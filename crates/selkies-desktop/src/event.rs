@@ -281,4 +281,6 @@ pub enum Request {
     /// Signal that the user invoked a notification's action, for the
     /// notification server.
     ActionInvoked { id: u32, key: String },
+    /// Make a call on a D-Bus tray item, for the tray host.
+    Tray(crate::sni::Command),
 }

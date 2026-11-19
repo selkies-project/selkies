@@ -53,6 +53,47 @@ export async function sidebarClose(page: Page): Promise<void> {
 }
 
 /**
+ * The sidebar header's menu button, whose menu holds fullscreen, gaming mode,
+ * a touch client's switches, and the layout, translucency, and theme controls.
+ */
+export const SIDEBAR_MENU = '.sidebar-menu-button';
+/** The open header menu. */
+const SIDEBAR_MENU_POPUP = '.sidebar-menu-popup';
+
+/**
+ * Find the item `selector` names in the open drawer's header menu, opening the
+ * menu the way a click does. A menu without it is left shut, so a touch made
+ * next reaches the stream, and is opened again on the next call, since what
+ * it offers changes once the page sees a touch.
+ * @param page The dashboard, its drawer open.
+ * @param selector The item's class, as its action names it.
+ * @returns The item, or null where the menu does not offer it.
+ */
+export async function sidebarMenuItem(page: Page, selector: string): Promise<Locator | null> {
+    const item = page.locator(`${SIDEBAR_MENU_POPUP} ${selector}`);
+    if (await item.count()) return item.first();
+    await sidebarMenuClose(page);
+    const button = page.locator(`.sidebar.is-open ${SIDEBAR_MENU}`);
+    if (!(await button.count())) return null;
+    await button.first().click();
+    await sleep(400);
+    if (await item.count()) return item.first();
+    await sidebarMenuClose(page);
+    return null;
+}
+
+/**
+ * Shut the sidebar's header menu where it is open.
+ * @param page The dashboard.
+ */
+export async function sidebarMenuClose(page: Page): Promise<void> {
+    if (await page.locator(SIDEBAR_MENU_POPUP).count()) {
+        await page.keyboard.press('Escape');
+        await sleep(300);
+    }
+}
+
+/**
  * Unfold (or fold) the sidebar section whose header carries `name`, the
  * drawer opened first.
  * @param page The dashboard.
@@ -479,15 +520,16 @@ export async function switchOn(sw: Locator): Promise<boolean> {
     return (await sw.getAttribute('aria-checked')) === 'true';
 }
 
-/** Open the sidebar's apps panel; false when it never appears. */
+/** The sidebar's apps row, which opens the apps dialog. */
+export const SIDEBAR_APPS = '.sidebar-section-link:has-text("Apps")';
+
+/** Open the apps dialog from the sidebar's apps row; false when it never appears. */
 export async function openAppsModal(page: Page): Promise<boolean> {
     await page.locator('.toggle-handle').first().click();
     await sleep(600);
-    const header = page.locator('.sidebar-section-header:has-text("Apps")').first();
-    if ((await header.count()) === 0) return false;
-    await header.click();
-    await sleep(600);
-    await page.locator('#apps-content button').first().click();
+    const row = page.locator(SIDEBAR_APPS).first();
+    if ((await row.count()) === 0) return false;
+    await row.click();
     await sleep(1000);
     return (await page.locator('[role="dialog"]:has-text("Apps")').count()) > 0;
 }

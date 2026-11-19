@@ -24,7 +24,7 @@ import { Apps } from "@/panels/apps";
 import { FilesDialog } from "@/panels/files";
 import { VirtualKeyboardButton } from "@/panels/gamepads";
 import { ConnectionIndicator, Notices, Toaster } from "@/panels/notices";
-import PlayerGamepadButton from "@/panels/player-gamepad-button";
+import { ViewerControls } from "@/panels/viewer-controls";
 import { ScreenPlacement } from "@/panels/screen-placement";
 import { SettingsProvider } from "@/state/settings-context";
 import { DashboardProvider, useDashboard } from "@/state/dashboard";
@@ -41,7 +41,7 @@ function Chrome() {
     document.documentElement.dataset.translucency = String(translucency);
   }, [translucency]);
   const { component: Layout, stats: Stats } = d.layout;
-  if (d.isViewer) return <PlayerGamepadButton touchOnly isActive={d.touchGamepad} onToggle={d.toggleTouchGamepad} />;
+  if (d.isViewer) return <ViewerControls />;
   if (!d.renderable.chrome) return null;
   return (
     <>

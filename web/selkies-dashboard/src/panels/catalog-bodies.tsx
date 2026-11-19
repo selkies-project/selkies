@@ -6,12 +6,12 @@
 
 /**
  * The bodies of the catalog's panels (`catalog.ts`) that are no panel of
- * their own: the files' actions, the apps button, the sharing and gamepad
+ * their own: the files' actions, the sharing and gamepad
  * panels as each place draws them, the Pelorus chat, and a settings panel's
  * cards as a list.
  * @module
  */
-import { FileUp, FolderOpen, LayoutGrid } from "lucide-react";
+import { FileUp, FolderOpen } from "lucide-react";
 import type { PanelCard, PanelPlace } from "@/panels/catalog";
 import { ActionButton, Clip } from "@/panels/controls";
 import { GamepadControls } from "@/panels/gamepads";
@@ -37,16 +37,6 @@ export function FilesActions() {
         </ActionButton>
       )}
     </div>
-  );
-}
-
-/** The button that opens the apps catalog. */
-export function AppsAction() {
-  const d = useDashboard();
-  return (
-    <ActionButton className="w-full" title={t("sections.apps.openButton")} onClick={() => d.openDialog("apps")}>
-      <LayoutGrid /><Clip>{t("sections.apps.openButton")}</Clip>
-    </ActionButton>
   );
 }
 

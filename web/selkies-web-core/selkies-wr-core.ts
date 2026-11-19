@@ -85,7 +85,8 @@
 
 import { WebRTCClient } from "./lib/webrtc.ts";
 import { WebRTCSignaling } from "./lib/signaling.ts";
-import { Input, slotPlayerIndex } from "./lib/input.ts";
+import { Input, slotList, slotPlayerIndex } from "./lib/input.ts";
+import { publishViewerGrants } from "./lib/viewer-grants.ts";
 import { streamDensity as streamDensityOf, autoScalingDpi, resolutionScalingDpi, publishedScale, capStreamSize, STREAM_SIDE_CAP } from "./lib/stream-density.ts";
 import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, createIncomingClipboard, createLocalClipboardSender, createTaggedClipboardFetch, clipboardPreviewMessage, reencodeBlobAsPng, localClipboardBlocker, digestedPayload } from "./lib/clipboard-sync.ts";
 import { createFileUploader } from "./lib/file-upload.ts";
@@ -615,6 +616,9 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 
 	const isSharedMode = detectedSharedModeType !== null;
 	const isStrictViewer = detectedSharedModeType === "shared";
+	/** A token's verdict names the page's slots; without one, its keyword does. */
+	const slotsFromVerdict = getSessionToken() !== '';
+	publishViewerGrants({ pad: !slotsFromVerdict && clientRole === CLIENT_VIEWER && slotList(clientSlot) !== null, input: false });
 	/** Whether the server's `mk_access` action granted this viewer the full input context. */
 	let collabInputGranted = false;
 
@@ -3589,6 +3593,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 				} else if (action.startsWith('mk_access,')) {
 					const granted = action.slice('mk_access,'.length) === '1';
 					collabInputGranted = granted;
+					publishViewerGrants({ input: granted });
 					if (input) {
 						if (granted) {
 							if (!input.isInputAttached()) {
@@ -3631,6 +3636,7 @@ perms = parsed;
 					clientSlot = (perms.slot === null || perms.slot === undefined) ? null : perms.slot;
 					playerInputTargetIndex = slotPlayerIndex(clientSlot);
 					console.log(`Server role verdict: role=${clientRole}, slot=${clientSlot}`);
+					if (slotsFromVerdict) publishViewerGrants({ pad: slotList(clientSlot) !== null });
 					if (input) {
 						input.updateControllerSlot(clientSlot);
 						if (clientRole === CLIENT_VIEWER) input.setSharedMode(true);

@@ -86,6 +86,15 @@ const CONTROL: i32 = 28;
 const CARD_PAD: i32 = 12;
 /// Corner radius of a card.
 const CARD_RADIUS: f32 = 10.0;
+/// How far a whole row's hover highlight reaches past the row into the
+/// card's padding, so it floats inside the card rather than ending at the
+/// row's first and last pixels.
+const ROW_BLEED: i32 = CARD_PAD - 4;
+/// How far a whole row's hover highlight stays clear of the row's top and
+/// bottom edges, where the separators run.
+const ROW_INSET: i32 = 3;
+/// Corner radius of a whole row's hover highlight.
+const ROW_RADIUS: f32 = CARD_RADIUS - 2.0;
 /// Height of a group's caption line.
 const CAPTION: i32 = 28;
 /// Space between a card and the next caption.
@@ -2980,7 +2989,7 @@ fn dropper_glyph(rect: Rect) -> (Vec<tiny_skia::Path>, Vec<(tiny_skia::Path, f32
 fn draw_switch(canvas: &mut Canvas<'_>, control: &Control, hovered: bool) {
     let rect = control.rect;
     if hovered {
-        canvas.fill_rounded(rect, 6.0, ui::hover_bg());
+        canvas.fill_rounded(row_highlight(rect), ROW_RADIUS, ui::hover_bg());
     }
     let pill = Rect::new(
         rect.right() - SWITCH_WIDTH,
@@ -2989,6 +2998,17 @@ fn draw_switch(canvas: &mut Canvas<'_>, control: &Control, hovered: bool) {
         SWITCH_HEIGHT,
     );
     draw_pill_switch(canvas, pill, control.active);
+}
+
+/// The hover highlight of a whole row: reaching into the card's padding on
+/// both sides and clear of the separators above and below.
+fn row_highlight(row: Rect) -> Rect {
+    Rect::new(
+        row.x - ROW_BLEED,
+        row.y + ROW_INSET,
+        row.w + 2 * ROW_BLEED,
+        row.h - 2 * ROW_INSET,
+    )
 }
 
 /// Draws a toggle switch: an accent pill with its knob at the right when on,
@@ -3368,7 +3388,11 @@ fn draw_control(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hov
         Kind::Keys => draw_keys(d, canvas, control, hovered),
         Kind::AppRow => {
             if hovered {
-                canvas.fill_rounded(rect, 5.0, ui::hover_bg());
+                canvas.fill_rounded(
+                    Rect::new(rect.x + 4, rect.y + 1, rect.w - 8, rect.h - 2),
+                    6.0,
+                    ui::hover_bg(),
+                );
             }
             let icon_rect = Rect::new(
                 rect.x + 8,
@@ -3477,8 +3501,8 @@ fn draw_control(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hov
         Kind::Segment => {
             if control.active {
                 canvas.fill_rounded(rect, 7.0, ui::accent());
-            } else if hovered {
-                canvas.fill_rounded(rect, 7.0, ui::hover_bg());
+            } else {
+                canvas.fill_rounded(rect, 7.0, ui::text_alpha(if hovered { 0x22 } else { 0x0c }));
             }
             ui::label(
                 canvas,
@@ -3546,8 +3570,21 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
     for card in &layout.cards {
         canvas.fill_rounded(*card, CARD_RADIUS, ui::field_bg());
     }
+    let lit = match d.hover {
+        Hover::Control(index) => layout
+            .controls
+            .get(index)
+            .filter(|c| c.kind == Kind::Switch)
+            .map(|c| row_highlight(c.rect)),
+        _ => None,
+    };
     for line in &layout.lines {
-        canvas.fill_rect(*line, ui::separator());
+        let touches_lit = lit.is_some_and(|r| {
+            line.y >= r.y - 2 * ROW_INSET && line.y <= r.bottom() + 2 * ROW_INSET && line.x < r.right()
+        });
+        if !touches_lit {
+            canvas.fill_rect(*line, ui::separator());
+        }
     }
     for text in &layout.texts {
         draw_text(d, canvas, text);

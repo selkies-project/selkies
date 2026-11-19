@@ -155,18 +155,23 @@ const isCoarsePointer = () => coarsePointer?.matches ?? false;
 /** Pointer travel in pixels before a press on the keyboard button is a drag rather than a tap. */
 const DRAG_THRESHOLD = 10;
 
+/** Where a floating button starts, in pixels from the window's bottom right corner. */
+export type Corner = { right: number; bottom: number };
+
 /**
  * The button that raises the virtual keyboard, in its own click, while the
  * primary pointer is coarse (a phone, a tablet, a convertible in its tablet
  * posture) and no keyboard is attached, unless the keyboard toggle has hidden it.
+ * A viewer gets it while it holds input, whatever the page's chrome.
  *
  * A press that travels drags the button off whatever it covers, and the
  * click that ends a drag raises nothing. Only its colors transition, so it
  * stays under the finger instead of easing toward it.
+ * @param props.start Where it starts; the bottom right corner by default.
  */
-export function VirtualKeyboardButton() {
+export function VirtualKeyboardButton({ start = { right: 16, bottom: 16 } }: { start?: Corner }) {
   const d = useDashboard();
-  const [place, setPlace] = React.useState({ right: 16, bottom: 16 });
+  const [place, setPlace] = React.useState(start);
   const drag = React.useRef({ pointerId: -1, moved: false, x: 0, y: 0, right: 0, bottom: 0 });
   const onPointerDown = (e: React.PointerEvent) => {
     drag.current = { pointerId: e.pointerId, moved: false, x: e.clientX, y: e.clientY, ...place };
@@ -193,7 +198,7 @@ export function VirtualKeyboardButton() {
   // On its own setting, not on the gamepads, and only while the primary pointer is coarse: a fine one on a touch
   // screen is a convertible with its keyboard attached (Edge on a Surface turns it fine with the type cover), where
   // the system keeps its on-screen keyboard down, a touch on the screen notwithstanding.
-  if (!d.keyboardButton || !coarse || d.isSecondaryDisplay || d.isViewer || !d.renderable.chrome
+  if (!d.keyboardButton || !coarse || d.isSecondaryDisplay || (d.isViewer ? !d.viewerGrants.input : !d.renderable.chrome)
     || !d.renderable.keyboardButton) return null;
   return (
     <Button variant="default" size="icon" className="virtual-keyboard-button fixed z-[2050] touch-none transition-colors" data-virtual-keyboard-button=""

@@ -16,7 +16,8 @@
 //! environment is kept.
 //!
 //! The shell is started with its own keeping of the session's appearance off, since the manager
-//! keeps it in both session modes ([`crate::appearance`]).
+//! keeps it in both session modes ([`crate::appearance`]), and tagged with a fresh [`SHELL_ID`]
+//! each start, which what it launches inherits.
 //!
 //! The shell is a child process on purpose: its file manager decodes images from the user's home
 //! and scans directories, untrusted-file parsing that does not belong beside the stream, and a
@@ -50,6 +51,11 @@ use crate::core::{Launcher, SessionMode};
 /// The shell's setting by which it keeps the session's appearance, off for the shell this
 /// manager starts: the manager keeps it in both session modes ([`crate::appearance`]).
 const SHELL_TOOLKITS: &str = "SELKIES_DESKTOP_TOOLKITS";
+
+/// The variable each start of the shell is tagged with, a fresh random value per start, which
+/// the programs the shell launches inherit: what launched from a desktop that has since gone
+/// is told apart by it.
+pub const SHELL_ID: &str = "SELKIES_SHELL_ID";
 
 /// The environment the session's children run in.
 #[derive(Clone, Debug, Default)]
@@ -255,6 +261,10 @@ pub struct SessionPolicy {
 /// the start where no choice was kept, and the only mode where the image locks it. The switch is
 /// offered only where the image allows it, the mode is not locked, and the shell's program is
 /// installed, so a session without the shell never offers a desktop it cannot start.
+///
+/// The server switches too, whether or not the menus offer it, wherever the mode is not locked
+/// and the shell is installed: that is the operator's choice for the session at hand, never kept
+/// for the next one, which starts in the image's mode or the user's kept choice.
 #[derive(Debug)]
 pub struct SessionControl {
     desktop: AtomicBool,
@@ -263,6 +273,7 @@ pub struct SessionControl {
     /// The user asked for the autostart to run again.
     relaunch: AtomicBool,
     switchable: bool,
+    server_switch: bool,
     maximize: bool,
     keep_maximized: bool,
     restart_app: bool,
@@ -308,6 +319,7 @@ impl SessionControl {
             application: AtomicU8::new(NO_AUTOSTART),
             relaunch: AtomicBool::new(false),
             switchable: policy.switch && !policy.locked && installed,
+            server_switch: !policy.locked && installed,
             maximize: policy.maximize,
             keep_maximized: policy.maximize && policy.keep_maximized,
             restart_app: policy.restart_app,
@@ -327,6 +339,7 @@ impl SessionControl {
         SessionMode {
             desktop: self.desktop(),
             switchable: self.switchable,
+            server_switch: self.server_switch,
             maximize: self.maximize,
             keep_maximized: self.keep_maximized,
             application: match self.application.load(Ordering::Relaxed) {
@@ -364,13 +377,28 @@ impl SessionControl {
         &self.shell
     }
 
-    /// Switch to the desktop or to the application alone and keep the choice for the next
-    /// session; refused where the session is not switchable.
-    pub fn set_desktop(&self, on: bool) {
-        if !self.switchable || self.desktop.swap(on, Ordering::Relaxed) == on {
+    /// Switch to the desktop or to the application alone: from the menus, kept for the next
+    /// session and refused where the session is not switchable, or for the server
+    /// (`by_server`), not kept and refused only where the mode is locked or the shell missing.
+    pub fn set_desktop(&self, on: bool, by_server: bool) {
+        let allowed = if by_server {
+            self.server_switch
+        } else {
+            self.switchable
+        };
+        if !allowed || self.desktop.swap(on, Ordering::Relaxed) == on {
             return;
         }
-        log::info!(target: "wm", "session switched to {}", if on { "the desktop" } else { "the application alone" });
+        let mode = if on {
+            "the desktop"
+        } else {
+            "the application alone"
+        };
+        if by_server {
+            log::info!(target: "wm", "session switched to {mode} by the server");
+            return;
+        }
+        log::info!(target: "wm", "session switched to {mode}");
         let word = if on { "desktop\n" } else { "application\n" };
         let written = self
             .state_file
@@ -587,8 +615,8 @@ impl Launcher for ShellLauncher {
         self.control.mode()
     }
 
-    fn set_desktop(&mut self, on: bool) {
-        self.control.set_desktop(on);
+    fn set_desktop(&mut self, on: bool, by_server: bool) {
+        self.control.set_desktop(on, by_server);
     }
 
     fn relaunch(&mut self) {
@@ -726,6 +754,7 @@ impl ShellSupervisor {
         let mut command = env.command(&self.program);
         command
             .env(SHELL_TOOLKITS, "false")
+            .env(SHELL_ID, shell_id())
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
@@ -760,6 +789,21 @@ impl ShellSupervisor {
     pub fn running(&self) -> bool {
         self.child.is_some()
     }
+}
+
+/// A fresh [`SHELL_ID`]: 128 bits from `/dev/urandom` in hex, or this process's id and the
+/// time where that cannot be read.
+fn shell_id() -> String {
+    use std::io::Read;
+    let mut bytes = [0u8; 16];
+    let read = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes));
+    if read.is_ok() {
+        return bytes.iter().map(|b| format!("{b:02x}")).collect();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{:x}-{:x}", std::process::id(), now.as_nanos())
 }
 
 impl Drop for ShellSupervisor {
@@ -806,7 +850,7 @@ mod tests {
         let state = dir.join("selkies-wm/session");
         let first = SessionControl::with_state_file(policy("sh", false), state.clone());
         assert!(first.mode().switchable);
-        first.set_desktop(true);
+        first.set_desktop(true, false);
         assert_eq!(std::fs::read_to_string(&state).unwrap(), "desktop\n");
         let next = SessionControl::with_state_file(policy("sh", false), state.clone());
         assert!(next.desktop());
@@ -819,8 +863,31 @@ mod tests {
         );
         assert!(!locked.desktop());
         assert!(!locked.mode().switchable);
-        locked.set_desktop(true);
+        locked.set_desktop(true, false);
         assert!(!locked.desktop());
+        locked.set_desktop(true, true);
+        assert!(!locked.desktop());
+    }
+
+    /// The server switches a session whose menus do not offer the switch, and its switch is
+    /// not kept for the next session.
+    #[test]
+    fn the_servers_switch_works_without_the_menus_and_is_not_kept() {
+        let dir = scratch("server-switch");
+        let state = dir.join("selkies-wm/session");
+        let control = SessionControl::with_state_file(
+            SessionPolicy {
+                switch: false,
+                ..policy("sh", false)
+            },
+            state.clone(),
+        );
+        assert!(!control.mode().switchable && control.mode().server_switch);
+        control.set_desktop(true, false);
+        assert!(!control.desktop(), "the menus' switch is off");
+        control.set_desktop(true, true);
+        assert!(control.desktop());
+        assert!(!state.exists(), "the server's switch is not kept");
     }
 
     /// A session whose shell is not installed never offers a desktop it cannot start.
@@ -855,12 +922,20 @@ mod tests {
     }
 
     /// The shell runs only while the session is the desktop: a switch to the application
-    /// alone stops it, and one back starts it again.
+    /// alone stops it, and one back starts it again, each start tagged with a value of its own.
     #[test]
     fn the_shell_follows_the_mode() {
         let dir = scratch("shell-follows");
         let shell = dir.join("shell");
-        std::fs::write(&shell, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        let ids = dir.join("ids");
+        std::fs::write(
+            &shell,
+            format!(
+                "#!/bin/sh\necho \"${SHELL_ID}\" >> '{}'\nexec sleep 30\n",
+                ids.display()
+            ),
+        )
+        .unwrap();
         std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let control = Arc::new(SessionControl::with_state_file(
             policy(&shell.to_string_lossy(), true),
@@ -871,7 +946,19 @@ mod tests {
         let mut now = Instant::now();
         supervisor.poll(now);
         assert!(supervisor.running());
-        control.set_desktop(false);
+        let tags = |count: usize| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let text = std::fs::read_to_string(&ids).unwrap_or_default();
+                let tags: Vec<String> = text.lines().map(str::to_string).collect();
+                if tags.len() >= count || Instant::now() >= deadline {
+                    return tags;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        assert_eq!(tags(1).len(), 1, "the first start wrote its tag");
+        control.set_desktop(false, false);
         for _ in 0..50 {
             now += Duration::from_millis(100);
             supervisor.poll(now);
@@ -881,9 +968,13 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!supervisor.running());
-        control.set_desktop(true);
+        control.set_desktop(true, false);
         supervisor.poll(now);
         assert!(supervisor.running());
+        let tags = tags(2);
+        assert_eq!(tags.len(), 2, "each start wrote its tag: {tags:?}");
+        assert!(tags.iter().all(|t| t.len() == 32), "{tags:?}");
+        assert_ne!(tags[0], tags[1], "each start is tagged afresh");
     }
 
     /// The environment names the displays it is given and drops the ones it is not.

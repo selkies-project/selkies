@@ -14,9 +14,10 @@
  * (whether the server serves Pelorus, which decides whether its panel is offered), waits
  * for the runtime-served core script to expose `window.selkiesCoreInitialize`
  * and starts it, then mounts the dashboard: the full `App` under `#root` for
- * the primary display, only the floating gamepad button for the `#player2`
- * to `#player4` hashes, and the same button once touch is detected for
- * `#shared`. The touch gamepad is bundled straight from the
+ * the primary display and for any page holding a session token, whose role
+ * and grants the server's verdict decides; without a token, only the floating
+ * gamepad button for the `#player2` to `#player4` hashes, and nothing for
+ * `#shared`, which holds no slot. The touch gamepad is bundled straight from the
  * universal-touch-gamepad addon, so a fresh checkout builds without a
  * vendored copy.
  * @module
@@ -28,6 +29,7 @@ import PlayerGamepadButton from './panels/player-gamepad-button';
 import './index.css';
 import { getRoutePrefix } from './utils';
 import { urlFragmentKeyword } from '../../selkies-web-core/lib/page-url.ts';
+import { getSessionToken } from '../../selkies-web-core/lib/session-token.ts';
 import "../../universal-touch-gamepad/universalTouchGamepad.ts";
 import { fields, stringOr } from '../../selkies-web-core/lib/narrow.ts';
 
@@ -95,7 +97,7 @@ const playerClientModes = ['#player2', '#player3', '#player4'];
     console.error(err);
   }
 
-  if (!noDashboardModes.includes(currentHash)) {
+  if (getSessionToken() !== '' || !noDashboardModes.includes(currentHash)) {
     const dashboardRoot = document.createElement('div');
     dashboardRoot.id = 'dashboard-root';
     // Keystrokes on dashboard controls (slider arrows, menu navigation) drive
@@ -109,12 +111,10 @@ const playerClientModes = ['#player2', '#player3', '#player4'];
       return;
     }
     ReactDOM.createRoot(mount).render(<React.StrictMode><App dashboardRoot={dashboardRoot} /></React.StrictMode>);
-  } else {
+  } else if (playerClientModes.includes(currentHash)) {
     const playerRoot = document.createElement('div');
     playerRoot.id = 'player-ui-root';
     document.body.appendChild(playerRoot);
-    ReactDOM.createRoot(playerRoot).render(
-      <React.StrictMode><PlayerGamepadButton touchOnly={!playerClientModes.includes(currentHash)} /></React.StrictMode>,
-    );
+    ReactDOM.createRoot(playerRoot).render(<React.StrictMode><PlayerGamepadButton /></React.StrictMode>);
   }
 })();

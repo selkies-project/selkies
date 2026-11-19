@@ -2683,7 +2683,8 @@ impl Backend for X11Backend {
             Request::SetVolume(_)
             | Request::ToggleMute
             | Request::NotificationClosed { .. }
-            | Request::ActionInvoked { .. } => {}
+            | Request::ActionInvoked { .. }
+            | Request::Tray(_) => {}
         }
     }
 }

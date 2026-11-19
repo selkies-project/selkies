@@ -1573,6 +1573,71 @@ async fn operator_routes() {
     app.stop().await;
 }
 
+/// The session mode route takes the master token in either header, refuses a viewer's switch
+/// and a body naming no mode, and answers 404 where no window manager runs.
+#[tokio::test]
+async fn the_session_mode_route_is_a_control_endpoint() {
+    let (app, _state) = stub_server(secure_config()).await;
+    let r = app.call("GET", "/api/session", &[]).await;
+    assert_eq!(r.status, 401, "no credential is challenged");
+    let r = app
+        .call(
+            "GET",
+            "/api/session",
+            &[(MASTER_TOKEN_HEADER, &bearer(MASTER))],
+        )
+        .await;
+    assert!(
+        r.status == 404 && r.json()["message"] == "No window manager runs",
+        "the named-header master token reads the mode: {} {}",
+        r.status,
+        r.body
+    );
+    let desktop = br#"{"desktop": true}"#;
+    let r = app
+        .call_body(
+            "POST",
+            "/api/session",
+            &[("authorization", &bearer(VIEW))],
+            desktop,
+        )
+        .await;
+    assert_eq!(r.status, 403, "a viewer cannot switch the session");
+    for body in [&br#"{"desktop": "yes"}"#[..], b"{}", b"[]", b"not json"] {
+        let r = app
+            .call_body(
+                "POST",
+                "/api/session",
+                &[("authorization", &bearer(MASTER))],
+                body,
+            )
+            .await;
+        assert_eq!(r.status, 400, "{}", String::from_utf8_lossy(body));
+    }
+    let r = app
+        .call_body(
+            "POST",
+            "/api/session",
+            &[("authorization", &bearer(MASTER))],
+            desktop,
+        )
+        .await;
+    assert_eq!(r.status, 404, "nothing to switch without a window manager");
+    let r = app
+        .call_body(
+            "POST",
+            "/api/session",
+            &[("cookie", &cookie(CTRL)), ("origin", "http://evil.example")],
+            desktop,
+        )
+        .await;
+    assert_eq!(
+        r.status, 403,
+        "another site's page cannot switch the session"
+    );
+    app.stop().await;
+}
+
 /// A table POSTed through the real route replaces the table and reconciles.
 #[tokio::test]
 async fn tokens_route() {

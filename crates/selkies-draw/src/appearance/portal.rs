@@ -25,9 +25,12 @@
 //! writes to the GTK files and GSettings, so every path a toolkit takes
 //! reads the same scheme.  The name is requested without replacing its owner
 //! and without queuing, so an image that runs a portal of its own keeps it
-//! and nothing is served here.  Only the Settings interface is served: a
-//! toolkit that probes another portal interface's `version` finds none and
-//! keeps its own dialogs.
+//! and nothing is served here.  Only the Settings interface is implemented.
+//! Chromium and Electron read it only once the portal answers the `version`
+//! of `org.freedesktop.portal.FileChooser`, so that interface is served with
+//! a version and nothing else ([`FILE_CHOOSER_VERSION`]): version 1, below the
+//! 3 Chromium's portal dialogs need, so it keeps its own dialogs, as does a
+//! toolkit that probes any other portal interface and finds none.
 //!
 //! zbus serves calls on its own executor thread, so the decision sits behind
 //! a mutex the interface reads and [`Portal::update`] replaces; each call
@@ -52,6 +55,14 @@ const NAME: &str = "org.freedesktop.portal.Desktop";
 const PATH: &str = "/org/freedesktop/portal/desktop";
 /// The version of the Settings interface served, the one with `ReadOne`.
 const VERSION: u32 = 2;
+/// The `org.freedesktop.portal.FileChooser` version advertised: present, so
+/// Chromium goes on to read the Settings interface, and below the version
+/// Chromium routes its file dialogs through the portal at.
+const FILE_CHOOSER_VERSION: u32 = 1;
+const _: () = assert!(
+    FILE_CHOOSER_VERSION < 3,
+    "Chromium sends its dialogs to a portal at 3"
+);
 /// The toolkit-neutral namespace of the scheme and the accent.
 const APPEARANCE: &str = "org.freedesktop.appearance";
 /// The GSettings schema the portal relays for GTK.
@@ -138,6 +149,18 @@ enum PortalError {
     ZBus(zbus::Error),
     /// The namespace has no such key.
     NotFound(String),
+}
+
+/// `org.freedesktop.portal.FileChooser`, with its version alone.
+struct FileChooser;
+
+#[zbus::interface(name = "org.freedesktop.portal.FileChooser")]
+impl FileChooser {
+    /// The interface version.
+    #[zbus(property(emits_changed_signal = "const"), name = "version")]
+    fn version(&self) -> u32 {
+        FILE_CHOOSER_VERSION
+    }
 }
 
 /// The `org.freedesktop.portal.Settings` interface over the shared decision.
@@ -247,7 +270,11 @@ impl Portal {
             decision: decision.clone(),
         };
         zbus::block_on(async {
-            let connection = builder.serve_at(PATH, settings).build().await?;
+            let connection = builder
+                .serve_at(PATH, settings)
+                .serve_at(PATH, FileChooser)
+                .build()
+                .await?;
             connection
                 .request_name_with_flags(NAME, RequestNameFlags::DO_NOT_QUEUE)
                 .await?;
@@ -423,6 +450,31 @@ mod tests {
         .unwrap();
         let value: OwnedVariant = reply.body().deserialize().unwrap();
         assert_eq!(*value, Variant::U32(VERSION));
+
+        let chooser = "org.freedesktop.portal.FileChooser";
+        let reply = call(
+            &client,
+            "org.freedesktop.DBus.Properties",
+            "Get",
+            &(chooser, "version"),
+        )
+        .unwrap();
+        let value: OwnedVariant = reply.body().deserialize().unwrap();
+        assert_eq!(
+            *value,
+            Variant::U32(FILE_CHOOSER_VERSION),
+            "Chromium reads the Settings only once the file chooser answers a version"
+        );
+        assert!(
+            call(
+                &client,
+                chooser,
+                "OpenFile",
+                &("", "", HashMap::<&str, Variant<'_>>::new())
+            )
+            .is_err(),
+            "no dialog is served"
+        );
 
         assert!(matches!(
             Portal::serve(bus.builder(), &decision(true)),

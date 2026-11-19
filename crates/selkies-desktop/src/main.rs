@@ -14,9 +14,14 @@ mod files;
 mod i18n;
 mod ipc;
 mod keybinds;
+mod mailbox;
 mod notify;
+mod sni;
+#[cfg(test)]
+mod test_bus;
 mod tray;
 mod ui;
+mod variant;
 mod wallpapers;
 mod watch;
 mod wmtheme;
@@ -114,13 +119,14 @@ fn main() {
 }
 
 /// Carries out a request: the volume on the sound server, the notification
-/// signals on the notification server, and everything else on the display
-/// backend.
+/// signals on the notification server, the tray items' calls on the tray
+/// host, and everything else on the display backend.
 fn route(
     request: Request,
     backend: &mut dyn backend::Backend,
     audio: Option<&mut audio::Audio>,
     notify: Option<&notify::Server>,
+    status: Option<&sni::Host>,
 ) {
     match request {
         Request::SetVolume(percent) => {
@@ -141,6 +147,11 @@ fn route(
         Request::ActionInvoked { id, key } => {
             if let Some(server) = notify {
                 server.invoked(id, &key);
+            }
+        }
+        Request::Tray(command) => {
+            if let Some(host) = status {
+                host.send(command);
             }
         }
         other => backend.perform(&other),
@@ -183,6 +194,11 @@ fn run() -> i32 {
     if debug && tray.is_none() {
         eprintln!("selkies-desktop: no system tray host");
     }
+    let status = if desktop.config.show_tray {
+        sni::Host::start()
+    } else {
+        None
+    };
     let notify = notify::Server::start();
     desktop.notifications_served = notify.is_some();
 
@@ -199,7 +215,13 @@ fn run() -> i32 {
         }
 
         for request in desktop.take_requests() {
-            route(request, backend.as_mut(), audio.as_mut(), notify.as_ref());
+            route(
+                request,
+                backend.as_mut(),
+                audio.as_mut(),
+                notify.as_ref(),
+                status.as_ref(),
+            );
         }
         let layered = backend.layered_desktop();
         for id in desktop.background_ids() {
@@ -259,7 +281,13 @@ fn run() -> i32 {
             backend.present(SurfaceId::Notifications, &frame);
         }
         for request in desktop.take_requests() {
-            route(request, backend.as_mut(), audio.as_mut(), notify.as_ref());
+            route(
+                request,
+                backend.as_mut(),
+                audio.as_mut(),
+                notify.as_ref(),
+                status.as_ref(),
+            );
         }
 
         if let Err(error) = backend.prepare() {
@@ -315,6 +343,14 @@ fn run() -> i32 {
         let tray_index = tray.as_ref().map(|t| {
             fds.push(libc::pollfd {
                 fd: t.fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+            fds.len() - 1
+        });
+        let status_index = status.as_ref().map(|s| {
+            fds.push(libc::pollfd {
+                fd: s.fd(),
                 events: libc::POLLIN,
                 revents: 0,
             });
@@ -411,6 +447,14 @@ fn run() -> i32 {
             && t.dispatch()
         {
             desktop.set_tray_icons(t.count());
+        }
+        if let Some(index) = status_index
+            && fds[index].revents & libc::POLLIN != 0
+            && let Some(host) = status.as_ref()
+        {
+            for incoming in host.drain() {
+                ui::tray_menu::receive(&mut desktop, incoming);
+            }
         }
         if let Some(index) = notify_index
             && fds[index].revents & libc::POLLIN != 0
