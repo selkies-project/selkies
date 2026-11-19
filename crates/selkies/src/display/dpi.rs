@@ -672,7 +672,7 @@ pub async fn desktop_dpi() -> Option<i32> {
 /// is applied only here and a page's density is not applied while it is operator-set.
 ///
 /// MATE is not waited for. Its density also goes to `xrdb`, which needs no session, so
-/// `set_dpi` succeeds ahead of `mate-session` and the gsettings half of the write, which
+/// [`set_dpi`] succeeds ahead of `mate-session` and the gsettings half of the write, which
 /// needs the session's bus, is not made again once the session runs.
 pub async fn restore_dpi(configured: i32, locked: bool) -> i32 {
     let (target, apply) = restore_plan(desktop_dpi().await, configured, locked);
