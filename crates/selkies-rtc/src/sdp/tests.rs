@@ -490,7 +490,25 @@ fn format(encoder: &str, fullcolor: bool, ten_bit: bool) -> StreamFormat {
         ten_bit,
         openh264: false,
         opus_frame_ms: 10.0,
+        webcam_max_kbps: 2500,
     }
+}
+
+#[test]
+fn the_webcams_section_carries_the_configured_ceiling() {
+    let (_, raw) = offer("h264enc", 2);
+    let mut configured = format("h264enc", false, false);
+    configured.webcam_max_kbps = 1500;
+    let out = munge_sdp(&raw, &configured);
+    let display = sections(&out, "video", "sendrecv")[0];
+    let webcam = sections(&out, "video", "recvonly")[0];
+    assert!(webcam.contains("b=AS:1500\r\n"), "{webcam}");
+    let hints = "x-google-max-bitrate=1500;x-google-min-bitrate=0";
+    let payloads = webcam.matches("x-google-max-bitrate=").count();
+    assert!(payloads > 0, "{webcam}");
+    assert_eq!(webcam.matches(hints).count(), payloads, "{webcam}");
+    assert!(display.contains("b=AS:300000"), "{display}");
+    assert!(!display.contains("x-google-max-bitrate=1500"), "{display}");
 }
 
 fn dynamic(section: &str) -> std::collections::BTreeSet<u32> {

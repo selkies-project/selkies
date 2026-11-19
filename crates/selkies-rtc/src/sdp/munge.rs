@@ -131,6 +131,8 @@ pub struct StreamFormat {
     pub openh264: bool,
     /// The Opus frame duration pcmflux emits, in milliseconds (`audio_frame_duration_ms`).
     pub opus_frame_ms: f64,
+    /// The ceiling on the camera the browser sends, in kbit/s (`webcam_max_bitrate`).
+    pub webcam_max_kbps: u32,
 }
 
 fn is_h264(encoder: &str) -> bool {
@@ -290,7 +292,7 @@ pub fn munge_sdp(sdp: &str, format: &StreamFormat) -> String {
             text = parts.concat();
         }
     }
-    munge_video_bandwidth(&text)
+    munge_video_bandwidth(&text, format.webcam_max_kbps)
 }
 
 fn rewrite_sps_pps(section: &str) -> String {
@@ -311,23 +313,19 @@ fn rewrite_sps_pps(section: &str) -> String {
 /// The ceiling on a display's video section, in kbit/s: high enough never to bind.
 const DISPLAY_CEILING_KBPS: u32 = 300_000;
 
-/// The ceiling on the webcam's video section, in kbit/s: the 2.5 Mbit/s the WebSockets
-/// uplink encodes the same camera at (`webcam-capture.ts`).
-const WEBCAM_CEILING_KBPS: u32 = 2_500;
-
 /// Set the bandwidth ceiling of every video section.
 ///
 /// A generous `b=AS` on a display's section keeps the browser's REMB from throttling a
 /// high-bitrate desktop stream (a cap hint, not a target), and `x-google-max-bitrate`
 /// mirrors it on the Chrome receive side. The one section this side only receives is the
 /// client's webcam, where the same two lines bound what the browser sends: there they carry
-/// the rate the WebSockets uplink encodes the camera at, rather than letting the camera
+/// `webcam_max_kbps` (the `webcam_max_bitrate` setting), rather than letting the camera
 /// take as much of the client's upload as the browser's estimate allows. Both are scoped to
 /// each video section: the `b=AS` check looks only inside it, and the line goes after the
 /// section's own `c=`, or right after the `m=video` line when the section inherits the
 /// session-level `c=`. The x-google hints go on the fmtp of every video payload type except
 /// RTX; a codec without an fmtp gets one carrying just the hints.
-pub fn munge_video_bandwidth(sdp: &str) -> String {
+pub fn munge_video_bandwidth(sdp: &str, webcam_max_kbps: u32) -> String {
     let lines: Vec<&str> = sdp.split("\r\n").collect();
     let mut out: Vec<String> = Vec::with_capacity(lines.len() + 8);
     let mut i = 0;
@@ -345,7 +343,7 @@ pub fn munge_video_bandwidth(sdp: &str) -> String {
             i += 1;
         }
         let kbps = if section.iter().any(|s| s == "a=recvonly") {
-            WEBCAM_CEILING_KBPS
+            webcam_max_kbps
         } else {
             DISPLAY_CEILING_KBPS
         };

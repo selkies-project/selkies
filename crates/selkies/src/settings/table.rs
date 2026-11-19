@@ -2344,6 +2344,20 @@ pub static DEFINITIONS: &[SettingDef] = &[
         client_excluded: false,
     },
     SettingDef {
+        name: "webcam_max_bitrate",
+        kind: Kind::Int,
+        default: "2500",
+        help: "Ceiling, in kilobits per second (kbps), on the camera a browser sends. Over WebRTC it is the b=AS and x-google-max-bitrate lines of the offer's webcam section, which bound the browser's send rate whatever its bandwidth estimate allows; over WebSockets the page's WebCodecs encoder targets it and its send queue is sized by it, while the JPEG fallback, used where no codec keeps up, sends whole frames at the camera's rate. On a narrow client uplink a lower ceiling leaves room for the microphone and for the feedback the display's stream relies on.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: Some(50.0),
+        max: Some(300000.0),
+        default_value: None,
+        sensitive: false,
+        client_excluded: false,
+    },
+    SettingDef {
         name: "webcam_device",
         kind: Kind::Str,
         default: "auto",
@@ -3361,6 +3375,12 @@ impl Settings {
 
     pub fn webcam_encoder(&self) -> &str {
         self.str_value("webcam_encoder")
+    }
+
+    /// `webcam_max_bitrate` in kbit/s. Parsing clamps it to its definition's 50 to 300000, so
+    /// the conversion cannot fail; `u32::MAX`, no ceiling, stands for a value it could not hold.
+    pub fn webcam_max_bitrate(&self) -> u32 {
+        u32::try_from(self.int_value("webcam_max_bitrate")).unwrap_or(u32::MAX)
     }
 
     pub fn webcam_device(&self) -> &str {
