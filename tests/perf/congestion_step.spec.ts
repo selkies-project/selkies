@@ -35,10 +35,28 @@
 // are written out beside them (congestion-step-*.json in the work directory)
 // for the runs that change it.
 //
+// Over WebSockets a second step follows with the scene turned light as the
+// link returns, to a rate under the configured one: a light screen sends far
+// under its cut target, so the server pads the stream to learn what the
+// returned link carries, and the picture is not to age behind that padding.
+// The scene's frame clock shows its age (the page reads each frame's index
+// off the picture, lib/scene.ts).
+//
 // CONGESTION_STEP_HIGH_KBIT and _LOW_KBIT set the link (20000 and 1500),
-// CONGESTION_STEP_LOW_S how long it stays low (5); SELKIES_ENCODER,
-// SELKIES_VIDEO_BITRATE, SELKIES_CONGESTION_CONTROL and SELKIES_AUDIO_BITRATE
-// pass to the server.
+// CONGESTION_STEP_LOW_S how long it stays low (5), CONGESTION_STEP_BACK_KBIT
+// what it returns to (the high rate), CONGESTION_STEP_LIGHT_KBIT what the
+// second step returns to (4000); SELKIES_ENCODER, SELKIES_VIDEO_BITRATE,
+// SELKIES_CONGESTION_CONTROL and SELKIES_AUDIO_BITRATE pass to the server.
+// For measuring how the rate comes back, over WebSockets:
+// CONGESTION_STEP_NOISE is the height of the scene's noise band (a heavy
+// scene that fills the rate); CONGESTION_STEP_RESUME_S has the scene turn
+// light as the link returns (its noise band off, or with
+// CONGESTION_STEP_STILL=1 no painting at all) and heavy again that many
+// seconds later, for CONGESTION_STEP_RESUMED_S (20), and
+// CONGESTION_STEP_GROW_KBIT has the link grow to that rate
+// CONGESTION_STEP_GROW_AT_S (8) into the heavy stretch. The row then carries
+// `resume`: the picture's age over the light stretch, the first five seconds
+// of the heavy one and the rest, and the relay's rate each second.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -51,6 +69,7 @@ import { Checks } from '../lib/checks.ts';
 import { pulseSine, pulseUnload } from '../lib/desktop.ts';
 import { sleep, suiteOf, WORKDIR } from '../lib/env.ts';
 import { Host, suitesBin } from '../lib/host.ts';
+import { pictureAge, SHOWN_JS } from '../lib/scene.ts';
 import { closeBrowser, waitWrVideo, waitWsVideo, within } from '../lib/stream.ts';
 import { makeRelay, SHAPED_JS, SteppedShaper, type Relay } from '../lib/udprelay.ts';
 
@@ -60,6 +79,20 @@ const RELAY_PORT = Number(process.env.E2E_CONGESTION_STEP_PORT ?? '18215');
 const HIGH_KBIT = Number(process.env.CONGESTION_STEP_HIGH_KBIT ?? '20000');
 const LOW_KBIT = Number(process.env.CONGESTION_STEP_LOW_KBIT ?? '1500');
 const LOW_S = Number(process.env.CONGESTION_STEP_LOW_S ?? '5');
+const BACK_KBIT = Number(process.env.CONGESTION_STEP_BACK_KBIT ?? String(HIGH_KBIT));
+const NOISE = process.env.CONGESTION_STEP_NOISE;
+const RESUME_S = Number(process.env.CONGESTION_STEP_RESUME_S ?? '0');
+const RESUMED_S = Number(process.env.CONGESTION_STEP_RESUMED_S ?? '20');
+const STILL = process.env.CONGESTION_STEP_STILL === '1';
+const GROW_KBIT = Number(process.env.CONGESTION_STEP_GROW_KBIT ?? '0');
+const GROW_AT_S = Number(process.env.CONGESTION_STEP_GROW_AT_S ?? '8');
+/** The second step: the link returns to this, under the configured rate, for this long, the scene light. */
+const LIGHT_KBIT = Number(process.env.CONGESTION_STEP_LIGHT_KBIT ?? '4000');
+const LIGHT_S = 20;
+/** The oldest picture a light screen may show while the server sounds the returned link. */
+const LIGHT_AGE_MS = 250;
+/** The narrowed link's own queue drains first: the light screen is read from here on. */
+const DRAINED_MS = 5000;
 const SETTLE_S = 10;
 const BEFORE_S = 10;
 const AFTER_S = 15;
@@ -171,20 +204,79 @@ function phase(arrivals: readonly Arrival[], samples: readonly Sample[], from: n
     };
 }
 
+interface Scene {
+    child: ChildProcess;
+    /** The scene's first frame in wall-clock ms and its frame interval, once it has printed them. */
+    clock: { t0: number; interval: number } | null;
+}
+
+function startScene(): Scene {
+    const args = [process.env.E2E_DISPLAY ?? '', String(WIDTH), String(HEIGHT), '60', ...(NOISE === undefined ? [] : [NOISE])];
+    const child = spawn(suitesBin('motion-scene'), args, { stdio: ['pipe', 'pipe', 'ignore'] });
+    const scene: Scene = { child, clock: null };
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk: string) => {
+        const m = /t0 ([\d.]+) interval (\d+)/.exec(chunk);
+        if (m && !scene.clock) scene.clock = { t0: Number(m[1]), interval: Number(m[2]) };
+    });
+    return scene;
+}
+
+/** [page clock, wall clock, frame index or -1] */
+type Shown = [number, number, number];
+
+function asShown(v: unknown): Shown[] {
+    return Array.isArray(v) ? v.flatMap((a): Shown[] => (Array.isArray(a) ? [[num(a[0]) ?? 0, num(a[1]) ?? 0, num(a[2]) ?? -1]] : [])) : [];
+}
+
+interface Age {
+    /** The median age of the picture on screen, in ms. */
+    p50Ms: number | null;
+    /** The oldest it was. */
+    maxMs: number | null;
+    /** Samples whose picture could not be read. */
+    unread: number;
+}
+
+/** How old the picture on screen was from `from` to `to` on the page's clock. */
+function ageOf(shown: readonly Shown[], scene: Scene, from: number, to: number): Age {
+    const inside = shown.filter(([t]) => t >= from && t < to);
+    const { clock } = scene;
+    const ages = clock
+        ? inside.flatMap(([, wall, index]) => { const a = pictureAge(wall, index, clock.t0, clock.interval); return a === null ? [] : [a]; }).sort((a, b) => a - b)
+        : [];
+    return {
+        p50Ms: ages.length ? Math.round(ages[Math.floor(ages.length / 2)]) : null,
+        maxMs: ages.length ? Math.round(ages[ages.length - 1]) : null,
+        unread: inside.filter(([, , index]) => index < 0).length,
+    };
+}
+
 async function wsStep(res: Checks, host: Host): Promise<void> {
     const { port } = await host.start({ label: 'websockets', mode: 'websockets', env: ENV });
     const tone = pulseSine();
-    const painter: ChildProcess = spawn(suitesBin('motion-scene'), [process.env.E2E_DISPLAY ?? '', String(WIDTH), String(HEIGHT), '60'], { stdio: 'ignore' });
+    const scene = startScene();
+    const painter = scene.child;
     const relay = spawn(suitesBin('bwrelay'), [String(RELAY_PORT), String(port), String(HIGH_KBIT)], { stdio: ['pipe', 'pipe', 'ignore'] });
     const link: string[] = [];
+    /** [Node's clock in s, downlink Mbit/s] each second the relay reports. */
+    const rates: [number, number][] = [];
     relay.stdout.setEncoding('utf8');
-    relay.stdout.on('data', (chunk: string) => { link.push(...chunk.split('\n').filter(Boolean).map((l) => `${(performance.now() / 1000).toFixed(1)} ${l}`)); });
+    relay.stdout.on('data', (chunk: string) => {
+        for (const l of chunk.split('\n').filter(Boolean)) {
+            const at = performance.now() / 1000;
+            link.push(`${at.toFixed(1)} ${l}`);
+            const m = /down=([\d.]+) Mbit/.exec(l);
+            if (m) rates.push([at, Number(m[1])]);
+        }
+    });
     let browser: Browser | null = null;
     try {
         browser = await launchBrowser('chromium');
         const ctx = await browser.newContext({ viewport: { width: WIDTH, height: HEIGHT }, deviceScaleFactor: 1 });
         await ctx.addInitScript({ content: "window.__SELKIES_STREAMING_MODE__ = 'websockets';" });
         await ctx.addInitScript({ content: TAP_JS });
+        await ctx.addInitScript({ content: SHOWN_JS });
         const page: Page = await ctx.newPage();
         await page.goto(`http://127.0.0.1:${RELAY_PORT}/?socket_worker=false`, { waitUntil: 'load', timeout: 90_000 });
         res.check('the page streams the scene through the link', (await waitWsVideo(page, 90)) !== null);
@@ -195,26 +287,67 @@ async function wsStep(res: Checks, host: Host): Promise<void> {
         relay.stdin.write(`down ${LOW_KBIT}\n`);
         const down = await now();
         await sleep(LOW_S * 1000);
-        relay.stdin.write(`down ${HIGH_KBIT}\n`);
+        relay.stdin.write(`down ${BACK_KBIT}\n`);
+        if (RESUME_S > 0) painter.stdin?.write(STILL ? 'noise off\nstill on\n' : 'noise off\n');
         const back = await now();
-        await sleep(AFTER_S * 1000);
+        await sleep((RESUME_S > 0 ? RESUME_S : AFTER_S) * 1000);
         const end = await now();
+        let resume = null;
+        if (RESUME_S > 0) {
+            painter.stdin?.write('still off\nnoise on\n');
+            const heavy = await now();
+            const nodeHeavy = performance.now() / 1000;
+            if (GROW_KBIT > 0) {
+                await sleep(GROW_AT_S * 1000);
+                relay.stdin.write(`down ${GROW_KBIT}\n`);
+                await sleep((RESUMED_S - GROW_AT_S) * 1000);
+            } else await sleep(RESUMED_S * 1000);
+            const done = await now();
+            const shownAll = asShown(await within(page.evaluate('window.__shown')));
+            resume = {
+                rates: rates.filter(([at]) => at >= nodeHeavy).map(([, r]) => r),
+                light: ageOf(shownAll, scene, back, heavy),
+                climb: ageOf(shownAll, scene, heavy, heavy + 5000),
+                resumed: ageOf(shownAll, scene, heavy + 5000, done),
+            };
+        }
+        let light = null;
+        if (RESUME_S <= 0) {
+            relay.stdin.write(`down ${LOW_KBIT}\n`);
+            await sleep(LOW_S * 1000);
+            relay.stdin.write(`down ${LIGHT_KBIT}\n`);
+            painter.stdin?.write('noise off\n');
+            const from = await now();
+            await sleep(LIGHT_S * 1000);
+            light = ageOf(asShown(await within(page.evaluate('window.__shown'))), scene, from + DRAINED_MS, await now());
+        }
         const arrivals = asArrivals(await within(page.evaluate('window.__arrivals'))).filter(([t]) => t >= t0);
         const samples = asSamples(await within(page.evaluate('window.__samples'))).filter(([t]) => t >= t0);
+        const shown = asShown(await within(page.evaluate('window.__shown'))).filter(([t]) => t >= t0);
+        const age = {
+            before: ageOf(shown, scene, t0, down),
+            congested: ageOf(shown, scene, down, back),
+            recovery: ageOf(shown, scene, back, back + DRAINED_MS),
+            after: ageOf(shown, scene, back + DRAINED_MS, end),
+        };
         const phases = {
             before: phase(arrivals, samples, t0, down),
             congested: phase(arrivals, samples, down, back),
             recovery: phase(arrivals, samples, back, back + RECOVERY_MS),
             after: phase(arrivals, samples, back + RECOVERY_MS, end),
         };
-        const row = { link: { highKbit: HIGH_KBIT, lowKbit: LOW_KBIT, lowS: LOW_S }, phases };
+        const row = { link: { highKbit: HIGH_KBIT, lowKbit: LOW_KBIT, lowS: LOW_S, backKbit: BACK_KBIT }, noise: NOISE ?? null, phases, age, light, resume };
         process.stdout.write(`${JSON.stringify(row)}\n`);
-        writeFileSync(join(WORKDIR, 'congestion-step-websockets.json'), JSON.stringify({ ...row, t0, down, back, end, arrivals, samples, link }, null, 0));
+        writeFileSync(join(WORKDIR, 'congestion-step-websockets.json'), JSON.stringify({ ...row, t0, down, back, end, arrivals, samples, shown: asShown(await within(page.evaluate('window.__shown'))), clock: scene.clock, link }, null, 0));
         const { before, congested, recovery } = phases;
         res.check('audio crosses the link at its rate before the step', before.audioPerS >= 0.8 * (1000 / FRAME_MS), before);
         res.check('audio keeps arriving while the link is narrow', congested.longestGapMs < 200, congested);
         res.check('the recovery delivers no audio backlog in a burst', recovery.densest100ms <= 2 * (100 / FRAME_MS), recovery);
         res.check('the player sheds no backlog packet by packet after the recovery', recovery.dropped <= 2, recovery);
+        if (light) {
+            res.check('a light screen shows no picture held behind the padding that sounds the returned link',
+                light.maxMs !== null && light.maxMs <= LIGHT_AGE_MS, light);
+        }
         await closeBrowser(browser);
         browser = null;
     } finally {
