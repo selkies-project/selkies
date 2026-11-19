@@ -30,6 +30,23 @@ Selkies' own desktop shell, over HTTPS behind a login whose password you set
   own services. `--runtime-dir DIR` runs the isolated session in `DIR` rather
   than a directory made for it and removed with it: a container names the one its
   shells are given, and the session empties it when it starts.
+- **Configuration**: what the session writes for its desktop stays out of the
+  configuration of a desktop the same home logs into, under
+  `~/.local/state/selkies/quarantine` (`--quarantine-xdg`,
+  `SELKIES_QUARANTINE_XDG`, `targeted` unless named; `HOME` stays the user's
+  either way). `targeted` moves only Selkies' own writes, the GTK
+  `settings.ini`, the file manager's desktop entries and folder handler, an
+  openbox or labwc theme and `rc.xml`, and an X11 density, which the session
+  reads beneath the user's own configuration through `XDG_CONFIG_DIRS` and
+  `XDG_DATA_DIRS`; the applications keep the user's XDG homes, and what would
+  land in them (the `gtk.css` accent, GSettings, and the xfconf, MATE, and
+  LXQt density, which reaches those desktops through the X resources alone)
+  is not written. `full` moves `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
+  `XDG_STATE_HOME`, and `XDG_CACHE_HOME` there, the applications' own
+  configuration and GSettings included (under `--host` the GSettings writes
+  still go through the host's session bus, to the host's own settings).
+  `off` writes into the user's XDG homes, for a home that is the session's
+  own: the container images set it.
 - **Buses**: a session bus at `$XDG_RUNTIME_DIR/bus`, where D-Bus clients look
   when no address is named, that Selkies, its window manager, and the desktop all
   join, and a system bus of the session's own (`DBUS_SYSTEM_BUS_ADDRESS`).

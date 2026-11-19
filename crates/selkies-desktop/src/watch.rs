@@ -15,9 +15,10 @@ use crate::entries;
 /// many files causes one reload rather than one per file.
 const SETTLE: Duration = Duration::from_millis(400);
 
-/// The legacy trigger file; touching it forces a reload.
+/// The legacy trigger file, `panel-reload` in the session's configuration directory (the
+/// quarantine's in a quarantined session); touching it forces a reload.
 pub fn trigger_file() -> PathBuf {
-    config::home().join(".config/panel-reload")
+    selkies_draw::dirs::session_config_home().join("panel-reload")
 }
 
 /// The inotify watch set.

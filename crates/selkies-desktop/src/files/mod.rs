@@ -1062,11 +1062,7 @@ pub fn places() -> Vec<Place> {
 /// Reads the XDG user directories file.
 fn read_user_dirs() -> HashMap<String, PathBuf> {
     let mut dirs = HashMap::new();
-    let path = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| config::home().join(".config"))
-        .join("user-dirs.dirs");
+    let path = selkies_draw::dirs::config_home().join("user-dirs.dirs");
     if !(path.is_absolute() && !path.components().any(|c| c == Component::ParentDir)) {
         return dirs;
     }

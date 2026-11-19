@@ -203,6 +203,61 @@ fn a_restart_reads_the_density_the_home_persists() {
     }
 }
 
+#[test]
+#[ignore = "run by a_quarantined_session_keeps_its_density_in_the_quarantine, in a process of its own"]
+fn a_quarantined_session_keeps_its_density_in_its_process() {
+    if !isolated() {
+        return;
+    }
+    let quarantine = selkies_draw::dirs::dotfile_home();
+    assert_ne!(
+        quarantine,
+        home(),
+        "the density is kept apart from the home"
+    );
+    std::fs::write(in_home(".Xresources"), "Xft.dpi: 120\n").expect("Xresources");
+    assert_eq!(
+        desktop_dpi_from_files(),
+        None,
+        "the density the user's own desktop keeps is not the session's"
+    );
+    std::fs::create_dir_all(&quarantine).expect("the quarantine's home");
+    std::fs::write(quarantine.join(".xsettingsd"), "Xft/DPI 147456\n").expect("xsettingsd");
+    assert_eq!(desktop_dpi_from_files(), Some(144));
+    write_xresources_dpi(&quarantine.join(".Xresources"), 192).expect("Xresources");
+    assert_eq!(
+        desktop_dpi_from_files(),
+        Some(192),
+        "the session reads back what it persisted"
+    );
+    assert_eq!(
+        std::fs::read_to_string(in_home(".Xresources")).expect("Xresources"),
+        "Xft.dpi: 120\n",
+        "the user's own resources are untouched"
+    );
+}
+
+#[test]
+fn a_quarantined_session_keeps_its_density_in_the_quarantine() {
+    let home = Scratch::new("density-quarantine");
+    run_isolated(
+        "display::dpi::session_density::a_quarantined_session_keeps_its_density_in_its_process",
+        &[
+            ("HOME", &home.text()),
+            (
+                "XDG_CONFIG_HOME",
+                &home.path(".config").display().to_string(),
+            ),
+            (
+                selkies_draw::dirs::QUARANTINE_VAR,
+                &home.path("quarantine").display().to_string(),
+            ),
+            ("XDG_CURRENT_DESKTOP", ""),
+            ("DESKTOP_SESSION", ""),
+        ],
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "run by a_density_no_session_could_take_stays_in_effect, in a process of its own"]
 async fn a_density_no_session_could_take_in_its_process() {

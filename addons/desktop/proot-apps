@@ -93,8 +93,9 @@ get_blob_sha() {
 
 # Trigger panel reload for selkies-desktop
 function trigger_panel_reload() {
-  if [ -f "$HOME/.config/panel-reload" ]; then
-    touch "$HOME/.config/panel-reload"
+  local trigger="${XDG_CONFIG_HOME:-$HOME/.config}/panel-reload"
+  if [ -f "${trigger}" ]; then
+    touch "${trigger}"
   fi
   if ls "$HOME"/Desktop/*.desktop >/dev/null 2>&1; then
     (sleep 6; touch "$HOME"/Desktop/*.desktop) >/dev/null 2>&1 &

@@ -336,11 +336,7 @@ fn mimeapps_files() -> Vec<PathBuf> {
 
 /// The user's own `mimeapps.list`.
 pub fn user_mimeapps() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| config::home().join(".config"))
-        .join("mimeapps.list")
+    selkies_draw::dirs::config_home().join("mimeapps.list")
 }
 
 /// Reads the three groups of a `mimeapps.list` into the maps, keeping earlier

@@ -598,6 +598,10 @@ ENV SELKIES_PORT="8080"
 # a real one, and SELKIES_ENABLE_HTTPS=false serves plain HTTP for a
 # deployment that terminates TLS in front of the container.
 ENV SELKIES_ENABLE_HTTPS="true"
+# The home is the session's own, so what it writes for its desktop (the GTK
+# theme, GSettings, the folder handler) belongs there: no quarantine, also
+# for `selkies session` started inside the image, which defaults to one
+ENV SELKIES_QUARANTINE_XDG="off"
 
 # ssl-cert generates its snakeoil pair during the image build, so every pull
 # would hold the same private key and any of them could impersonate any other.

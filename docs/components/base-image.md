@@ -34,6 +34,8 @@ The image is built for Ubuntu 26.04 and Debian Trixie, on `x86_64` and `aarch64`
 8. Derives the service set from the toggles by holding services down (`/etc/service/<name>/down`) rather than deleting them, so a restarted container that keeps its filesystem can still change backend: the X11 framebuffer is parked on Wayland, the nested compositor on X11 or under `SELKIES_WAYLAND_COMPOSITOR=none`, and coTURN when an external TURN server is configured; the desktop and its window manager are the server's own under `SELKIES_DESKTOP`, so no service carries them.
 9. Hands over to `s6-svscan -t5000 /etc/service`.
 
+The home is the session's own, so what the session writes for its desktop (the GTK theme, GSettings, the folder handler, a density) is written there: the image sets `SELKIES_QUARANTINE_XDG=off`, which the server alone defaults to anyway and which also keeps a `selkies session` started inside the image from quarantining those writes as it does on a machine with a desktop of its own ([settings](../settings.md)). An image not built on this one that runs `selkies session` sets it the same way.
+
 The services under `/etc/service` are, each a `run` script and a `finish` script:
 
 | Service | Runs |

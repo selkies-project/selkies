@@ -516,6 +516,15 @@ pub fn search_dirs(backend: Backend) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The search directories that are not the user's: none under the configuration home, nor under
+/// the home itself, where a session whose configuration home is a quarantine lists the user's
+/// own configuration directory among the system ones it reads through.
+fn system_dirs(dirs: Vec<PathBuf>, config_home: &Path, home: &Path) -> Vec<PathBuf> {
+    dirs.into_iter()
+        .filter(|dir| !dir.starts_with(config_home) && (home == Path::new("/") || !dir.starts_with(home)))
+        .collect()
+}
+
 /// The first existing file of this name along the search directories.
 pub fn find_file(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
     let name = Path::new(name);
@@ -543,8 +552,11 @@ impl Config {
     pub fn load(backend: Backend, policy: Policy) -> Config {
         let mut dirs = search_dirs(backend);
         if policy.locks_user_files() {
-            let home = selkies_draw::dirs::config_home();
-            dirs.retain(|dir| !dir.starts_with(&home));
+            dirs = system_dirs(
+                dirs,
+                &selkies_draw::dirs::config_home(),
+                &selkies_draw::dirs::home(),
+            );
         }
         let mut config = Config::default();
         if let Some(path) = find_file(&dirs, "rc.xml") {
@@ -1615,6 +1627,31 @@ mod tests {
         );
         assert!(config.policy.locks_user_files());
         assert!(!Policy::default().locks_user_files());
+    }
+
+    /// A policy that passes over the user's files reads none under the home, the user's own
+    /// configuration directory a quarantined session reads through included, and keeps the
+    /// system's.
+    #[test]
+    fn a_locked_policy_keeps_only_the_system_directories() {
+        let dirs = vec![
+            PathBuf::from("/home/u/.local/state/selkies/quarantine/config/openbox"),
+            PathBuf::from("/home/u/.config/openbox"),
+            PathBuf::from("/etc/xdg/openbox"),
+        ];
+        let quarantine = Path::new("/home/u/.local/state/selkies/quarantine/config");
+        assert_eq!(
+            system_dirs(dirs.clone(), quarantine, Path::new("/home/u")),
+            [PathBuf::from("/etc/xdg/openbox")]
+        );
+        assert_eq!(
+            system_dirs(dirs, quarantine, Path::new("/")),
+            [
+                PathBuf::from("/home/u/.config/openbox"),
+                PathBuf::from("/etc/xdg/openbox")
+            ],
+            "a home that is the root holds nothing of the user's alone"
+        );
     }
 
     /// Each backend looks under its own window manager's name first and the other's second,

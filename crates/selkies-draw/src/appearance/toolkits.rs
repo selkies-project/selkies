@@ -10,8 +10,8 @@
 //! * GTK 3 and plain GTK 4 read `settings.ini` under `~/.config/gtk-3.0` and `~/.config/gtk-4.0`
 //!   for the theme, icon and cursor names and the dark preference; only those keys of its
 //!   `[Settings]` group are replaced, so every other line stays the user's. On X11 a running
-//!   `xsettingsd` overrides that file, so its configuration takes the same names and the daemon
-//!   is told to reread it.
+//!   `xsettingsd` overrides that file, so the configuration of the one serving the session's
+//!   display takes the same names and the daemon is told to reread it.
 //! * GTK on Wayland and libadwaita read GSettings' `org.gnome.desktop.interface` instead
 //!   (`color-scheme`, `gtk-theme`, `icon-theme`, `cursor-theme`), which `gsettings` sets. Those
 //!   writes go through a D-Bus service, so they are made only when the decision differs from the
@@ -30,6 +30,15 @@
 //! * libadwaita, Qt 6, Chromium, and Electron read the Settings portal's
 //!   `org.freedesktop.appearance` scheme and accent first, which [`super::portal`] serves from the
 //!   same [`Decision`] where no portal of the image's own holds the name.
+//!
+//! A session with a targeted quarantine keeps the user's own XDG homes for its applications
+//! (`crate::dirs::keeps_user_homes`), so what lands there reaches the desktop the user logs
+//! into. There `settings.ini` is written in the quarantine's `config`, which GTK reads beneath
+//! the user's own through `XDG_CONFIG_DIRS`, so the session's theme applies where the user named
+//! none; the style sheets and GSettings are left alone, since GTK reads `gtk.css` from the
+//! configuration home alone and dconf keeps its one database there; and an `xsettingsd` is
+//! given the names only where its configuration is in the quarantine. libadwaita, Qt 6,
+//! Chromium, and Electron still take the scheme and the accent from the portal.
 //!
 //! Every file is written only when its content changes. What was updated and what failed comes
 //! back to the caller as lines to log, and a failure is never fatal.
@@ -414,7 +423,7 @@ fn own_processes(command: &str) -> Vec<i32> {
 
 /// The configuration file a running `xsettingsd` reads: the one its command
 /// line names, else its XDG file, else `~/.xsettingsd` where only that one
-/// exists.
+/// exists (the quarantine's, [`dirs::dotfile_home`], in a quarantined session).
 fn xsettingsd_config(pid: i32) -> PathBuf {
     let proc = PathBuf::from(format!("/proc/{pid}"));
     let cmdline = std::fs::read(proc.join("cmdline")).unwrap_or_default();
@@ -436,7 +445,7 @@ fn xsettingsd_config(pid: i32) -> PathBuf {
         }
     }
     let xdg = dirs::config_home().join("xsettingsd/xsettingsd.conf");
-    let legacy = dirs::home().join(".xsettingsd");
+    let legacy = dirs::dotfile_home().join(".xsettingsd");
     if !xdg.exists() && legacy.exists() {
         legacy
     } else {
@@ -444,12 +453,27 @@ fn xsettingsd_config(pid: i32) -> PathBuf {
     }
 }
 
-/// Sets the theme names in each running `xsettingsd`'s configuration and
-/// tells it to reread the file when it changed.
-fn apply_xsettings(decision: &Decision) -> std::io::Result<()> {
+/// Sets the theme names in the configuration of each `xsettingsd` serving the session's X
+/// display and tells it to reread the file when it changed. One serving another display (the
+/// user's own desktop, sharing the home) is left alone: it would hand that desktop this theme.
+/// Without a display nothing is written.
+///
+/// # Arguments
+/// * `decision` - The theme names to set.
+/// * `display` - The session's X display.
+fn apply_xsettings(decision: &Decision, display: Option<&str>) -> std::io::Result<()> {
+    let Some(display) = display.filter(|d| !d.is_empty()) else {
+        return Ok(());
+    };
     let values = decision.xsettings();
-    for pid in own_processes("xsettingsd") {
+    for pid in own_processes("xsettingsd")
+        .into_iter()
+        .filter(|pid| super::on_session_display(*pid, Some(display)))
+    {
         let path = xsettingsd_config(pid);
+        if dirs::keeps_user_homes() && !dirs::quarantine().is_some_and(|root| path.starts_with(root)) {
+            continue;
+        }
         let text = read_or_empty(&path)?;
         if write_if_changed(&path, &merged_xsettings(&text, &values))? {
             unsafe {
@@ -458,6 +482,20 @@ fn apply_xsettings(decision: &Decision) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// The session's X display: the one the session's environment names, none where it names none
+/// (a Wayland session without Xwayland yet), and this process's own only where the caller gave
+/// no session environment at all, which a shell keeping the appearance itself does. A server
+/// started from a terminal on the user's desktop inherits that desktop's display, which is not
+/// the session's.
+fn session_display(env: &[(String, String)], own: impl FnOnce() -> Option<String>) -> Option<String> {
+    if env.is_empty() {
+        return own();
+    }
+    env.iter()
+        .find(|(key, _)| key == "DISPLAY")
+        .map(|(_, value)| value.clone())
 }
 
 /// How long the `gsettings` writes of one decision may take before they count as failed.
@@ -528,7 +566,8 @@ fn apply_gsettings(decision: &Decision, env: &[(String, String)]) -> std::io::Re
 }
 
 /// Writes the toolkit settings, style sheets, XSETTINGS, and GSettings the desktop's colors and
-/// icon theme imply, each only where it changed.
+/// icon theme imply, each only where it changed, and under a targeted quarantine only those
+/// that stay out of the user's own configuration (see the module docblock).
 ///
 /// # Arguments
 /// * `theme` - The desktop's four colors.
@@ -548,7 +587,8 @@ pub fn apply(theme: Theme, icon_theme: Option<&str>, env: &[(String, String)]) -
     };
     let decision = decide(theme, icon_theme);
     let settings = decision.settings_ini();
-    let config_home = dirs::config_home();
+    let config_home = dirs::session_config_home();
+    let users_own = dirs::keeps_user_homes();
     let own = desktop_config_dir();
     let accent = decision.accent;
     let sheets = [
@@ -561,6 +601,9 @@ pub fn apply(theme: Theme, icon_theme: Option<&str>, env: &[(String, String)]) -
             &format!("{gtk}/settings.ini"),
             write_settings_ini(&dir.join("settings.ini"), &settings),
         );
+        if users_own {
+            continue;
+        }
         let written = write_if_changed(&own.join(name), &css);
         let imported = written.is_ok();
         report(name, written);
@@ -572,8 +615,14 @@ pub fn apply(theme: Theme, icon_theme: Option<&str>, env: &[(String, String)]) -
             );
         }
     }
-    report("xsettingsd", apply_xsettings(&decision).map(|()| false));
-    report("GSettings", apply_gsettings(&decision, env));
+    let display = session_display(env, || std::env::var("DISPLAY").ok());
+    report(
+        "xsettingsd",
+        apply_xsettings(&decision, display.as_deref()).map(|()| false),
+    );
+    if !users_own {
+        report("GSettings", apply_gsettings(&decision, env));
+    }
     (decision, notes)
 }
 
@@ -621,6 +670,20 @@ mod tests {
             ..Theme::default()
         };
         assert_eq!(decide_in(light, None, &[root], &[]).gtk_theme, "Adwaita");
+    }
+
+    #[test]
+    fn a_session_without_an_x_display_reaches_no_xsettingsd() {
+        let host = || Some(":0".to_string());
+        let wayland = [("WAYLAND_DISPLAY".to_string(), "wayland-1".to_string())];
+        assert_eq!(session_display(&wayland, host), None, "not the host's :0");
+        let x11 = [("DISPLAY".to_string(), ":20".to_string())];
+        assert_eq!(session_display(&x11, host).as_deref(), Some(":20"));
+        assert_eq!(
+            session_display(&[], host).as_deref(),
+            Some(":0"),
+            "a shell's own display"
+        );
     }
 
     #[test]

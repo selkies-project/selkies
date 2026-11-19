@@ -388,9 +388,10 @@ pub fn applications_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// The user's Desktop directory, from `user-dirs.dirs` where it names one.
+/// The user's Desktop directory, from `user-dirs.dirs` in the configuration home where it names
+/// one.
 pub fn desktop_dir() -> PathBuf {
-    let user_dirs = dirs::home().join(".config/user-dirs.dirs");
+    let user_dirs = dirs::config_home().join("user-dirs.dirs");
     if let Ok(text) = std::fs::read_to_string(user_dirs) {
         for line in text.lines() {
             if let Some(value) = line.trim().strip_prefix("XDG_DESKTOP_DIR=") {

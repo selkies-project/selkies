@@ -268,8 +268,9 @@ For labwc, in `rc.xml`:
 <keybind key="Super_L"><action name="Execute" command="selkies-desktop --launcher" /></keybind>
 ```
 
-Touching `~/.config/panel-reload`, the trigger earlier versions used, still
-forces a reload.
+Touching `panel-reload` in the configuration directory (`~/.config/panel-reload`
+where `XDG_CONFIG_HOME` is unset), the trigger earlier versions used, still forces
+a reload.
 
 ## Releases
 

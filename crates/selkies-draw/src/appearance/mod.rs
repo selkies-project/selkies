@@ -38,6 +38,38 @@ pub const FOLLOW_BROWSER: &str = "scheme_follows_browser";
 /// the shell with it off.
 pub const TOOLKITS: &str = "toolkits";
 
+/// An X display name without its screen number (`:20` for `:20.0`), so two names of one server
+/// compare equal.
+fn display_server(name: &str) -> &str {
+    match name.rfind(':') {
+        Some(colon) => match name[colon..].find('.') {
+            Some(dot) => &name[..colon + dot],
+            None => name,
+        },
+        None => name,
+    }
+}
+
+/// Whether a process runs on the session's X display, by the `DISPLAY` its environment holds: a
+/// desktop of the user's own sharing the home runs on another, and a setting written into its
+/// configuration or a reload sent to it would change that desktop. A display that is `None` or
+/// empty matches nothing.
+pub fn on_session_display(pid: i32, display: Option<&str>) -> bool {
+    let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+    shares_display(&environ, display)
+}
+
+/// [`on_session_display`] over a process's environment as `/proc/<pid>/environ` holds it.
+fn shares_display(environ: &[u8], display: Option<&str>) -> bool {
+    let Some(display) = display.filter(|name| !name.is_empty()).map(display_server) else {
+        return false;
+    };
+    environ
+        .split(|b| *b == 0)
+        .filter_map(|pair| pair.strip_prefix(b"DISPLAY="))
+        .any(|value| display_server(&String::from_utf8_lossy(value)) == display)
+}
+
 /// Whether the desktop's settings let the browser's scheme set its colors.
 pub fn follows_browser(values: &HashMap<String, String>) -> bool {
     truthy(values, FOLLOW_BROWSER, true)
@@ -106,6 +138,18 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn a_process_shares_the_display_only_by_the_name_its_environment_holds() {
+        let on_x = b"HOME=/h\0DISPLAY=:20.0\0";
+        assert!(shares_display(on_x, Some(":20")));
+        assert!(shares_display(on_x, Some(":20.0")));
+        assert!(!shares_display(on_x, Some(":0")), "the user's own desktop");
+        assert!(!shares_display(on_x, Some(":2")));
+        assert!(!shares_display(on_x, None));
+        assert!(!shares_display(on_x, Some("")));
+        assert!(!shares_display(b"WAYLAND_DISPLAY=wayland-1\0", Some(":20")));
     }
 
     #[test]

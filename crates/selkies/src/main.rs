@@ -98,7 +98,11 @@ fn main() -> ExitCode {
             warn!(target: "settings", "Ignoring unrecognized argument {}", token.split('=').next().unwrap_or(token));
         }
     }
+    let quarantine = selkies::quarantine::Mode::parse(resolved.quarantine_xdg());
     settings::install(resolved);
+    if let Some(root) = selkies::quarantine::apply_to_process(quarantine) {
+        info!(target: "main", "The session's writes are quarantined ({}) under {}", quarantine.name(), root.display());
+    }
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()

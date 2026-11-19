@@ -1672,6 +1672,20 @@ pub static DEFINITIONS: &[SettingDef] = &[
         client_excluded: true,
     },
     SettingDef {
+        name: "quarantine_xdg",
+        kind: Kind::Enum,
+        default: "off",
+        help: "Keep what the session writes out of the configuration of a desktop the user already logs into, in a directory of Selkies' own, selkies/quarantine under the user's XDG_STATE_HOME, kept for the next session; HOME stays the user's either way. \"targeted\" moves only what Selkies writes for the desktop: the GTK settings.ini, the file manager's desktop entries and folder handler in mimeapps.list, the openbox or labwc theme and rc.xml, and an X11 density, which the session reads beneath the user's own configuration through XDG_CONFIG_DIRS and XDG_DATA_DIRS, while its applications keep the user's XDG homes and profiles; what would land in the user's own configuration (the gtk.css accent import, GSettings, and the xfconf, MATE, and LXQt density) is not written, a density reaching those desktops through the X resources alone. \"full\" moves the session's XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_STATE_HOME, and XDG_CACHE_HOME there, the applications' profiles and GSettings included, reading the user's own configuration and data beneath them. \"off\" writes into the user's XDG homes, as a container's session does. selkies session and a bare selkies default to \"targeted\"; the server run alone, as the container images run it, to \"off\".",
+        env_vars: &[],
+        allowed: &["off", "targeted", "full"],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
         name: "app_logs",
         kind: Kind::Bool,
         default: "True",
@@ -3197,6 +3211,10 @@ impl Settings {
 
     pub fn app_logs(&self) -> BoolSetting {
         self.bool_setting("app_logs")
+    }
+
+    pub fn quarantine_xdg(&self) -> &str {
+        self.str_value("quarantine_xdg")
     }
 
     pub fn wm_maximize(&self) -> BoolSetting {

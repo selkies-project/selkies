@@ -6,8 +6,22 @@
 
 //! The XDG base directories, read from the environment with the specification's defaults, so
 //! the icon lookup and every caller searching user files agree on where they are.
+//!
+//! A session the server quarantined carries [`QUARANTINE_VAR`], naming the quarantine: a
+//! directory of Selkies' own that the session reads and the user's own desktop does not. In
+//! its full form the session's XDG homes are in it, so every file named through the homes here
+//! lands there by itself. In its targeted form the homes stay the user's and the quarantine's
+//! `config` and `data` lead the system directories the session searches: what Selkies writes
+//! for the desktop's toolkits and window managers goes there ([`session_config_home`],
+//! [`session_data_home`]), beneath anything the user configured, and a write that can only land
+//! in the user's own configuration is left out ([`keeps_user_homes`]). Either way
+//! [`dotfile_home`] is where the few files a desktop reads from the home itself
+//! (`~/.Xresources`, `~/.xsettingsd`) are written instead.
 
 use std::path::{Component, Path, PathBuf};
+
+/// The variable a quarantined session carries: the quarantine's root.
+pub const QUARANTINE_VAR: &str = "SELKIES_QUARANTINE";
 
 /// `dir` where it is absolute and names no parent. The XDG Base Directory specification has a
 /// relative path in its variables ignored, and no file these directories hold is named through
@@ -22,6 +36,42 @@ pub fn home() -> PathBuf {
         .map(PathBuf::from)
         .and_then(usable)
         .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// The root of the session's quarantine where [`QUARANTINE_VAR`] names a usable one, else
+/// `None`.
+pub fn quarantine() -> Option<PathBuf> {
+    std::env::var_os(QUARANTINE_VAR)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .and_then(usable)
+}
+
+/// The directory the files a desktop reads from the home itself are written in: the home, or
+/// `home` under the quarantine where the session has one, which nothing outside the session
+/// reads.
+pub fn dotfile_home() -> PathBuf {
+    quarantine().map_or_else(home, |root| root.join("home"))
+}
+
+/// Whether the session keeps the user's own XDG homes beside its quarantine (the targeted
+/// quarantine): a file written in the configuration home, or through a service that writes
+/// there (dconf, xfconfd), reaches the desktop the user logs into, so the session writes none.
+pub fn keeps_user_homes() -> bool {
+    quarantine().is_some_and(|root| !config_home().starts_with(root))
+}
+
+/// Where the session writes the configuration it hands the desktop's toolkits and window
+/// managers (`settings.ini`, `mimeapps.list`, `rc.xml`): the quarantine's `config` in a
+/// quarantined session, which it reads beneath the user's own, else the configuration home.
+pub fn session_config_home() -> PathBuf {
+    quarantine().map_or_else(config_home, |root| root.join("config"))
+}
+
+/// Where the session writes the data it hands the desktop (desktop entries, window themes): the
+/// quarantine's `data` in a quarantined session, else the data home.
+pub fn session_data_home() -> PathBuf {
+    quarantine().map_or_else(data_home, |root| root.join("data"))
 }
 
 /// The user's configuration directory (`XDG_CONFIG_HOME`, else `~/.config`).

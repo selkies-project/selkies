@@ -10,7 +10,11 @@
 //! everything else -- named or not -- reads it from there: XFCE takes xfconf-query alone so
 //! scaling is never applied twice, MATE takes gsettings plus xrdb for wider coverage, and
 //! every other session gets `Xft.dpi` merged into the resource database and written to
-//! `~/.Xresources` and `~/.xsettingsd`. The LXQt font repolish runs whichever branch was
+//! `~/.Xresources` and `~/.xsettingsd` (under the quarantine's `home` in a quarantined session,
+//! `selkies_draw::dirs::dotfile_home`, so a density never reaches the user's own desktop's next
+//! login). Under a targeted quarantine, whose desktop keeps its settings in the user's own
+//! configuration, every desktop takes that last branch and neither xfconf, GSettings, nor
+//! `lxqt.conf` is written (`ladder`). The LXQt font repolish runs whichever branch was
 //! taken: the session that owns the windows decides whether anything already drawn follows,
 //! and it is the only one that can repolish them. On success the root pane's physical size
 //! is stamped with the same density, because xdpyinfo/RandR consumers (Qt's fallback
@@ -339,7 +343,7 @@ async fn run_xrdb(dpi: i32) -> bool {
         debug!(target: "display", "xrdb not found. Skipping Xresources DPI setting.");
         return false;
     }
-    let xresources = home().join(".Xresources");
+    let xresources = selkies_draw::dirs::dotfile_home().join(".Xresources");
     let written = tokio::task::spawn_blocking({
         let path = xresources.clone();
         move || write_xresources_dpi(&path, dpi)
@@ -365,7 +369,7 @@ async fn run_xrdb(dpi: i32) -> bool {
     } else {
         warn!(target: "display", "Failed to load {} using xrdb. Error: {}", xresources.display(), out.stderr.trim());
     }
-    let xsettingsd = home().join(".xsettingsd");
+    let xsettingsd = selkies_draw::dirs::dotfile_home().join(".xsettingsd");
     let written = tokio::task::spawn_blocking({
         let path = xsettingsd.clone();
         move || {
@@ -635,10 +639,11 @@ fn desktop_dpi_from(resource_db: Option<String>) -> Option<i32> {
     {
         return Some(dpi);
     }
-    if let Some(dpi) = last_dpi(&xft, &persisted(home().join(".Xresources"))) {
+    let dotfiles = selkies_draw::dirs::dotfile_home();
+    if let Some(dpi) = last_dpi(&xft, &persisted(dotfiles.join(".Xresources"))) {
         return Some(dpi);
     }
-    last_dpi(&xsettings, &persisted(home().join(".xsettingsd"))).map(|v| v / 1024)
+    last_dpi(&xsettings, &persisted(dotfiles.join(".xsettingsd"))).map(|v| v / 1024)
 }
 
 /// The density the X11 desktop has before this process applies one.
@@ -762,6 +767,34 @@ fn restore_plan(current: Option<i32>, configured: i32, locked: bool) -> (i32, bo
     (target, target != 96 || !matches!(current, None | Some(96)))
 }
 
+/// Which branch of the density ladder a session takes (see the module docblock).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ladder {
+    /// XFCE's xfconf channel alone.
+    Xfconf,
+    /// MATE's GSettings and the X resources.
+    MateAndXrdb,
+    /// The X resources alone.
+    Xrdb,
+}
+
+/// The branch for a session running XFCE or MATE, where `settings` says the desktop's own
+/// settings may be written: where they may not, every desktop takes the X resources alone.
+fn ladder(xfce: bool, mate: bool, settings: bool) -> Ladder {
+    match (settings, xfce, mate) {
+        (true, true, _) => Ladder::Xfconf,
+        (true, false, true) => Ladder::MateAndXrdb,
+        _ => Ladder::Xrdb,
+    }
+}
+
+/// Whether the desktop's own settings stores (xfconf, GSettings, `lxqt.conf`) may take a
+/// density: not under a targeted quarantine, where they are the user's own and the density
+/// would reach the desktop they log into (`selkies_draw::dirs::keeps_user_homes`).
+fn desktop_settings_writable() -> bool {
+    !selkies_draw::dirs::keeps_user_homes()
+}
+
 /// Set the X11 display DPI using DE-specific methods (see the module docblock). Returns
 /// whether at least one method succeeded; false on the Wayland backend, where a DPI is an
 /// output scale.
@@ -785,19 +818,30 @@ pub async fn set_dpi(dpi: i32) -> bool {
         declared
     };
     let mut any = false;
-    if running_desktop("xfce", "xfce4-session") {
-        debug!(target: "display", "XFCE session ({desktop}): applying xfconf-query for DPI {dpi}.");
-        any |= run_xfconf(dpi).await;
-    } else if running_desktop("mate", "mate-session") {
-        debug!(target: "display", "MATE session ({desktop}): applying gsettings and xrdb for DPI {dpi}.");
-        let mate = run_mate_gsettings(dpi).await;
-        let xrdb = run_xrdb(dpi).await;
-        any |= mate || xrdb;
-    } else {
-        debug!(target: "display", "{desktop} session: applying xrdb for DPI {dpi}.");
-        any |= run_xrdb(dpi).await;
+    let settings = desktop_settings_writable();
+    match ladder(
+        running_desktop("xfce", "xfce4-session"),
+        running_desktop("mate", "mate-session"),
+        settings,
+    ) {
+        Ladder::Xfconf => {
+            debug!(target: "display", "XFCE session ({desktop}): applying xfconf-query for DPI {dpi}.");
+            any |= run_xfconf(dpi).await;
+        }
+        Ladder::MateAndXrdb => {
+            debug!(target: "display", "MATE session ({desktop}): applying gsettings and xrdb for DPI {dpi}.");
+            let mate = run_mate_gsettings(dpi).await;
+            let xrdb = run_xrdb(dpi).await;
+            any |= mate || xrdb;
+        }
+        Ladder::Xrdb => {
+            debug!(target: "display", "{desktop} session: applying xrdb for DPI {dpi}.");
+            any |= run_xrdb(dpi).await;
+        }
     }
-    any |= run_lxqt_font(dpi).await;
+    if settings {
+        any |= run_lxqt_font(dpi).await;
+    }
     if !any {
         warn!(target: "display", "No DPI setting method succeeded for DPI {dpi} ({desktop} session).");
     } else if let Err(e) = on_x11(move |x| x.stamp_root_dpi(dpi)).await {
@@ -829,7 +873,7 @@ async fn set_xcursor_resource(size: i32) -> bool {
 /// Set the X cursor size through every applicable settings channel.
 ///
 /// Merges `Xcursor.size` via xrdb, then tries the XFCE and GNOME settings daemons serving
-/// this display, each through its session's own environment (`session_env`: the session
+/// this display where their settings may be written (`desktop_settings_writable`), each through its session's own environment (`session_env`: the session
 /// manager for XFCE, the xsettings daemon that publishes the GNOME key); desktop-aware
 /// toolkits follow their daemon while plain X apps follow the Xcursor resource, so daemon
 /// success returns immediately and the xrdb merge alone still counts as success. Returns
@@ -841,7 +885,9 @@ pub async fn set_cursor_size(size: i32) -> bool {
     }
     let xrdb_ok = set_xcursor_resource(size).await;
     let size_text = size.to_string();
-    if which("xfconf-query")
+    let settings = desktop_settings_writable();
+    if settings
+        && which("xfconf-query")
         && let Some(env) = tokio::task::spawn_blocking(|| session_env("xfce4-session"))
             .await
             .unwrap_or(None)
@@ -868,7 +914,8 @@ pub async fn set_cursor_size(size: i32) -> bool {
         }
         warn!(target: "display", "Failed to set XFCE cursor size.");
     }
-    if which("gsettings")
+    if settings
+        && which("gsettings")
         && let Some(env) = tokio::task::spawn_blocking(|| session_env("gsd-xsettings"))
             .await
             .unwrap_or(None)
@@ -1000,6 +1047,15 @@ mod tests {
             merge_xsettings_font("", 96),
             "Xft/Antialias 1\nXft/Hinting 1\nXft/HintStyle \"hintfull\"\nXft/RGBA \"rgb\"\nXft/DPI 98304\n"
         );
+    }
+
+    #[test]
+    fn a_desktop_whose_settings_are_the_users_own_takes_the_x_resources_alone() {
+        assert_eq!(ladder(true, false, true), Ladder::Xfconf);
+        assert_eq!(ladder(false, true, true), Ladder::MateAndXrdb);
+        assert_eq!(ladder(false, false, true), Ladder::Xrdb);
+        assert_eq!(ladder(true, false, false), Ladder::Xrdb);
+        assert_eq!(ladder(false, true, false), Ladder::Xrdb);
     }
 
     #[test]

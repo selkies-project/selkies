@@ -13,7 +13,9 @@
 //! Selkies' own desktop, the selkies-desktop shell over the window manager on the Wayland
 //! backend, and serve it over HTTPS. So a bare `selkies` re-executes itself as `selkies session`
 //! with [`defaults`] added to its environment: the backend, the shell, and HTTPS on the port,
-//! which the server gives a self-signed certificate it keeps under the state directory. Each
+//! which the server gives a self-signed certificate it keeps under the state directory. The
+//! session it starts keeps what it writes out of the configuration of the desktop the user logs
+//! into, as `selkies session` does by default ([`crate::quarantine`]). Each
 //! default is the environment's own `SELKIES_` setting, set only where the environment leaves it
 //! unset, so a variable the user exports still wins and the server's settings parser stays the
 //! one place they are read.

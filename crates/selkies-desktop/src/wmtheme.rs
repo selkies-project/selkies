@@ -1,15 +1,20 @@
 //! The window manager's theme, generated from the interface colors and the
 //! window style so title bars, borders and the right-click menus of labwc
 //! and openbox match the bar and the popups.  Both read Openbox 3 theme
-//! files and both look under `~/.themes` before the system theme
-//! directories, so a theme written there under the name the window
-//! manager's `rc.xml` selects shadows the one the image ships, button
-//! bitmaps included, and goes away again when it is removed.  The side the
-//! buttons sit on and the corner radius are not theme settings but `rc.xml`
-//! ones, so those are edited in place: labwc's user file, which the image
-//! regenerates at every start, and for openbox a marked copy of the system
-//! file under the user's config directory.  A file the user owns or one the
-//! image has locked read-only is left alone.  The labwc edit also turns the
+//! files and both look under `~/.themes` and the data home's `themes`
+//! before the system theme directories, so a theme written there under the
+//! name the window manager's `rc.xml` selects shadows the one the image
+//! ships, button bitmaps included, and goes away again when it is removed;
+//! a quarantined session has it written in the quarantine's data, which
+//! the window managers in it search.  Only a window manager on the shell's
+//! own display is themed and reloaded: the labwc serving its Wayland
+//! socket, an openbox on its X display.  The side the buttons sit on and
+//! the corner radius are not theme settings but `rc.xml` ones, so those are
+//! edited in place: labwc's user file, which the image regenerates at every
+//! start, and for openbox a marked copy of the system file under the user's
+//! config directory, both the quarantine's configuration in a quarantined
+//! session, where a file of the user's own shadows them.  A file the user
+//! owns or one the image has locked read-only is left alone.  The labwc edit also turns the
 //! image's rule that forces server-side decorations on every window into
 //! the default, so a client that negotiates its own frame, as browsers,
 //! Steam and GTK applications do, is not given a second one over it.
@@ -434,13 +439,55 @@ pub fn bitmaps(glyphs: Glyphs) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The user's theme directory.
+/// The theme directory the theme is written in: `~/.themes`, or the themes directory of the
+/// session's data home in a quarantined session, which both window managers also search and
+/// which keeps the theme inside the quarantine.
 fn themes_dir() -> PathBuf {
-    config::home().join(".themes")
+    if selkies_draw::dirs::quarantine().is_some() {
+        selkies_draw::dirs::session_data_home().join("themes")
+    } else {
+        config::home().join(".themes")
+    }
 }
 
-/// The window managers running as this user, with their process numbers.
+/// The process serving the shell's Wayland display, by the credentials of its socket's peer:
+/// a nested labwc's own environment names the display it is a client of, not the one it serves,
+/// so the socket is what tells it apart. `None` without a display or where nothing answers.
+fn wayland_compositor() -> Option<i32> {
+    let name = std::env::var_os("WAYLAND_DISPLAY").filter(|v| !v.is_empty())?;
+    let socket = if Path::new(&name).is_absolute() {
+        PathBuf::from(name)
+    } else {
+        PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty())?).join(name)
+    };
+    let stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: the descriptor is the stream's own for the length of the call, and `cred` and `len`
+    // are a buffer of the size `len` states.
+    let got = unsafe {
+        libc::getsockopt(
+            std::os::fd::AsRawFd::as_raw_fd(&stream),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut cred).cast(),
+            &raw mut len,
+        )
+    };
+    (got == 0 && cred.pid > 0).then_some(cred.pid)
+}
+
+/// The window managers running as this user on the shell's own display, with their process
+/// numbers: the labwc serving its Wayland display, an openbox on its X display. One on another
+/// display is a desktop of the user's own sharing the home, whose theme and `rc.xml` this
+/// shell's settings are not for.
 pub fn running() -> Vec<(Manager, i32)> {
+    let mut compositor: Option<Option<i32>> = None;
+    let x11 = std::env::var("DISPLAY").ok();
     let uid = unsafe { libc::getuid() };
     let mut found = Vec::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -466,30 +513,33 @@ pub fn running() -> Vec<(Manager, i32)> {
             .find_map(|line| line.strip_prefix("Uid:"))
             .and_then(|rest| rest.split_whitespace().next())
             .and_then(|v| v.parse::<u32>().ok());
-        if owner == Some(uid) {
+        let ours = match manager {
+            Manager::Labwc => *compositor.get_or_insert_with(wayland_compositor) == Some(pid),
+            Manager::Openbox => selkies_draw::appearance::on_session_display(pid, x11.as_deref()),
+        };
+        if owner == Some(uid) && ours {
             found.push((manager, pid));
         }
     }
     found
 }
 
-/// The window manager's `rc.xml`: labwc's user file, and for openbox the
-/// user file when there is one, else the system file.
+/// The window manager's `rc.xml` as it reads it, for the theme it names: the first of the
+/// user's configuration directory and the session's (the quarantine's in a quarantined session,
+/// which it reads beneath the user's), else for openbox the system file.
 fn rc_path(manager: Manager) -> PathBuf {
-    let user = config::config_dir()
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| config::home().join(".config"));
-    match manager {
-        Manager::Labwc => user.join("labwc/rc.xml"),
-        Manager::Openbox => {
-            let own = user.join("openbox/rc.xml");
-            if own.is_file() {
-                own
-            } else {
-                PathBuf::from(OPENBOX_SYSTEM_RC)
-            }
-        }
+    let name = match manager {
+        Manager::Labwc => "labwc/rc.xml",
+        Manager::Openbox => "openbox/rc.xml",
+    };
+    let user = selkies_draw::dirs::config_home().join(name);
+    let found = [user.clone(), selkies_draw::dirs::session_config_home().join(name)]
+        .into_iter()
+        .find(|path| path.is_file());
+    match (found, manager) {
+        (Some(path), _) => path,
+        (None, Manager::Labwc) => user,
+        (None, Manager::Openbox) => PathBuf::from(OPENBOX_SYSTEM_RC),
     }
 }
 
@@ -700,7 +750,7 @@ fn write_theme(name: &str, theme: Theme, style: WindowStyle) -> std::io::Result<
 fn write_rc(manager: Manager, style: WindowStyle) -> std::io::Result<bool> {
     match manager {
         Manager::Labwc => {
-            let path = rc_path(manager);
+            let path = selkies_draw::dirs::session_config_home().join("labwc/rc.xml");
             let Ok(rc) = std::fs::read_to_string(&path) else {
                 return Ok(false);
             };
@@ -712,11 +762,7 @@ fn write_rc(manager: Manager, style: WindowStyle) -> std::io::Result<bool> {
             Ok(true)
         }
         Manager::Openbox => {
-            let user = config::config_dir()
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| config::home().join(".config"))
-                .join("openbox/rc.xml");
+            let user = selkies_draw::dirs::session_config_home().join("openbox/rc.xml");
             let existing = std::fs::read_to_string(&user).ok();
             if existing.as_ref().is_some_and(|text| !text.contains(RC_MARKER)) {
                 return Ok(false);

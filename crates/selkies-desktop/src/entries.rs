@@ -4,7 +4,7 @@
 //! names, the terminal setting, the recent list, the launches, and the file
 //! manager's own entry.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use selkies_draw::apps::{
     Apps, Entry, applications_dirs, desktop_dir, exec_argv, exec_argv_files, icon_for_app_id, load_entry,
@@ -89,7 +89,18 @@ pub const SETTINGS_APP_ID: &str = "selkies-desktop-settings";
 /// directory when it is missing, so the menu lists it and `xdg-open` hands
 /// folders to it, and makes it the folder handler when none is set.
 pub fn ensure_files_entry() {
-    let dir = config::data_home().join("applications");
+    ensure_files_entry_in(
+        &selkies_draw::dirs::session_data_home(),
+        &selkies_draw::dirs::session_config_home().join("mimeapps.list"),
+    );
+}
+
+/// [`ensure_files_entry`] against a data home and a `mimeapps.list`: in a quarantined session
+/// both are the quarantine's, which the session reads beneath the user's own, so the entry and
+/// the folder handler never reach the desktop the user logs into, and a folder handler the user
+/// chose still wins.
+fn ensure_files_entry_in(data_home: &Path, mimeapps: &Path) {
+    let dir = data_home.join("applications");
     let path = dir.join(FILES_ID);
     if !path.is_file() && std::fs::create_dir_all(&dir).is_ok() {
         let mut text = String::from("[Desktop Entry]\nType=Application\nName=Files\n");
@@ -106,13 +117,12 @@ pub fn ensure_files_entry() {
         );
         let _ = std::fs::write(&path, text);
     }
-    let mimeapps = crate::files::mime::user_mimeapps();
-    let text = std::fs::read_to_string(&mimeapps).unwrap_or_default();
+    let text = std::fs::read_to_string(mimeapps).unwrap_or_default();
     if !default_set(&text, "inode/directory")
         && let Some(parent) = mimeapps.parent()
         && std::fs::create_dir_all(parent).is_ok()
     {
-        let _ = std::fs::write(&mimeapps, add_default(&text, "inode/directory", FILES_ID));
+        let _ = std::fs::write(mimeapps, add_default(&text, "inode/directory", FILES_ID));
     }
 }
 
@@ -120,7 +130,7 @@ pub fn ensure_files_entry() {
 /// and the window manager's frames know the window by its entry: its name, its icon, and the
 /// command that opens it.
 pub fn ensure_settings_entry() {
-    let dir = config::data_home().join("applications");
+    let dir = selkies_draw::dirs::session_data_home().join("applications");
     let path = dir.join(SETTINGS_ID);
     if path.is_file() || std::fs::create_dir_all(&dir).is_err() {
         return;
@@ -265,6 +275,30 @@ mod tests {
         assert!(!selkies_draw::apps::shell_window("selkies-desktopish"));
     }
     use super::*;
+
+    /// The file manager's entry and the folder handler land in the data home and the
+    /// `mimeapps.list` given, a quarantine's, and the user's own configuration, which the session
+    /// reads beneath it, is left as it was.
+    #[test]
+    fn the_file_managers_entry_lands_in_the_quarantine_alone() {
+        let root = std::env::temp_dir().join(format!("selkies-desktop-entries-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let user = root.join("home/.config");
+        std::fs::create_dir_all(&user).unwrap();
+        let mine = "[Default Applications]\ntext/plain=mine.desktop\n";
+        std::fs::write(user.join("mimeapps.list"), mine).unwrap();
+        let quarantine = root.join("quarantine");
+        let mimeapps = quarantine.join("config/mimeapps.list");
+        ensure_files_entry_in(&quarantine.join("data"), &mimeapps);
+        assert!(quarantine.join("data/applications").join(FILES_ID).is_file());
+        assert!(default_set(
+            &std::fs::read_to_string(&mimeapps).unwrap(),
+            "inode/directory"
+        ));
+        assert_eq!(std::fs::read_to_string(user.join("mimeapps.list")).unwrap(), mine);
+        assert!(!root.join("home/.local").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn adds_mimeapps_default() {

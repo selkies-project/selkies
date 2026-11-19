@@ -13,9 +13,12 @@
 //! sound server ([`Session::sound`]), and its own display, in a runtime directory of its own
 //! or the one `--runtime-dir` names, so the host's buses, sound server, and login session
 //! never reach it ([`HOST_SERVICE_VARS`]). `--host` ([`Options::host`]) shares the host's
-//! runtime directory, buses, and sound server instead, Selkies still being the display.
+//! runtime directory, buses, and sound server instead, Selkies still being the display. What the
+//! session writes for its desktop is kept out of the user's own configuration as well, the home
+//! still the user's: Selkies' `--quarantine-xdg`, `targeted` unless named ([`launcher_defaults`],
+//! [`Session::quarantine`], [`crate::quarantine`]).
 //!
-//! In order: the buses, the sound server, the GPU the session's processes get
+//! In order: the quarantine, the buses, the sound server, the GPU the session's processes get
 //! ([`super::session_gpu`]), which may move a Wayland session whose compositor cannot reach the
 //! GPU to X11, an Xvfb on the X11 backend, its screen started at the images' size inside a
 //! framebuffer resizes can grow it to, then the desktop and Selkies with every argument it was
@@ -54,6 +57,7 @@ use serde_json::{Value as Json, json};
 use super::bundle::{self, Bundle};
 use super::session_gpu;
 use super::sessions::{Desktops, Entry, which};
+use crate::quarantine::Mode;
 use crate::settings::Settings;
 
 /// Xvfb's arguments: the framebuffer bounds the sizes Selkies can resize the screen to, and
@@ -263,6 +267,25 @@ pub fn selkies_settings(args: &[String]) -> Settings {
     Settings::parse(args, &|name| std::env::var(name).ok())
 }
 
+/// The setting a session takes by default where neither `args` (Selkies' arguments) nor the
+/// environment `get` reads names it: a quarantine of what the session writes, targeted
+/// ([`crate::quarantine`]). The launcher runs on a machine whose user may well log into a desktop
+/// of their own with the same home, and the container images, whose home is the session's own,
+/// run the server alone or set it off.
+pub fn launcher_defaults(
+    args: &[String],
+    get: impl Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
+    const VAR: &str = "SELKIES_QUARANTINE_XDG";
+    let named = args
+        .iter()
+        .any(|arg| arg == "--quarantine-xdg" || arg.starts_with("--quarantine-xdg="));
+    if named || get(VAR).is_some() {
+        return Vec::new();
+    }
+    vec![(VAR.to_string(), Mode::Targeted.name().to_string())]
+}
+
 /// One `FamilyWild` entry of an X authority file: the display number is the server's to pick,
 /// and a wildcard cookie matches it on any display as libXau does.
 pub fn xauth_wildcard_entry(cookie: &[u8; 16]) -> Vec<u8> {
@@ -419,6 +442,36 @@ impl Session {
             env,
             false,
         ))
+    }
+
+    /// Quarantine what the session writes ([`crate::quarantine`]) in `mode` before anything of it
+    /// starts, so its buses, sound server, desktop, and server all share the quarantine; an
+    /// environment quarantined already, one without a home, or [`Mode::Off`] is left as it is.
+    /// Returns the quarantine's root where this call quarantined the environment.
+    pub fn quarantine(&mut self, mode: Mode) -> Option<PathBuf> {
+        let vars = crate::quarantine::env(mode, |name| self.env.get(name).cloned());
+        let root = vars
+            .iter()
+            .find(|(var, _)| var == crate::quarantine::QUARANTINE_VAR)
+            .map(|(_, root)| PathBuf::from(root))?;
+        if let Err(err) = crate::quarantine::prepare(&vars, |name| self.env.get(name).cloned()) {
+            log(&format!(
+                "the quarantine under {} was not prepared ({err})",
+                root.display()
+            ));
+        }
+        self.env.extend(vars);
+        log(&format!(
+            "the session's writes are quarantined ({}) under {}{}",
+            mode.name(),
+            root.display(),
+            if self.host && mode == Mode::Full {
+                "; its GSettings still go through the host's session bus, to the host's own"
+            } else {
+                ""
+            }
+        ));
+        Some(root)
     }
 
     /// A session sharing the host's runtime directory `dir`, buses, and sound server.
@@ -1458,7 +1511,14 @@ pub fn main(argv: &[String], prog: &str) -> i32 {
         }
         Parsed::Run(options, rest) => (options, rest),
     };
-    let settings = selkies_settings(&selkies_args);
+    let defaults = launcher_defaults(&selkies_args, |name| std::env::var(name).ok());
+    let settings = Settings::parse(&selkies_args, &|name| {
+        defaults
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+            .or_else(|| std::env::var(name).ok())
+    });
     let wayland = settings.wayland().on;
     if options.follow {
         follow_parent();
@@ -1473,6 +1533,8 @@ pub fn main(argv: &[String], prog: &str) -> i32 {
         }
     };
     session.quiet_desktop = !settings.app_logs().on;
+    session.env.extend(defaults);
+    session.quarantine(Mode::parse(settings.quarantine_xdg()));
     let mut status = 1;
     let run = |session: &mut Session, status: &mut i32| -> Result<(), String> {
         let exe = std::env::current_exe()
@@ -1964,6 +2026,88 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o700);
+    }
+
+    #[test]
+    fn a_session_is_quarantined_targeted_unless_its_settings_name_a_mode() {
+        let none = |_: &str| None;
+        assert_eq!(
+            launcher_defaults(&[], none),
+            [("SELKIES_QUARANTINE_XDG".to_string(), "targeted".to_string())]
+        );
+        let settings = |args: &[String], get: &dyn Fn(&str) -> Option<String>| {
+            let defaults = launcher_defaults(args, get);
+            Settings::parse(args, &|name| {
+                defaults
+                    .iter()
+                    .find(|(k, _)| k == name)
+                    .map(|(_, v)| v.clone())
+                    .or_else(|| get(name))
+            })
+            .quarantine_xdg()
+            .to_string()
+        };
+        assert_eq!(settings(&[], &none), "targeted");
+        assert_eq!(
+            settings(&["--quarantine-xdg=full".to_string()], &none),
+            "full"
+        );
+        assert_eq!(
+            settings(&["--quarantine-xdg".to_string(), "off".to_string()], &none),
+            "off"
+        );
+        let off = |name: &str| (name == "SELKIES_QUARANTINE_XDG").then(|| "off".to_string());
+        assert_eq!(
+            settings(&[], &off),
+            "off",
+            "a container's image sets it off"
+        );
+        assert_eq!(
+            Settings::parse(&[], &|_| None).quarantine_xdg(),
+            "off",
+            "the server alone, as the images run it"
+        );
+        let mut session = Session::new_in(
+            None,
+            Env::from([("HOME".to_string(), "/nonexistent".to_string())]),
+        )
+        .unwrap();
+        assert_eq!(session.quarantine(Mode::Off), None);
+        assert!(!session.env.contains_key(crate::quarantine::QUARANTINE_VAR));
+    }
+
+    #[test]
+    fn a_quarantined_session_starts_everything_in_xdg_homes_of_its_own_once() {
+        let home = tempfile::tempdir().unwrap();
+        let home_text = home.path().to_string_lossy().into_owned();
+        let runtime = tempfile::tempdir().unwrap();
+        let mut session = Session::new_in(
+            Some(runtime.path()),
+            Env::from([("HOME".to_string(), home_text.clone())]),
+        )
+        .unwrap();
+        let root = session
+            .quarantine(Mode::Full)
+            .expect("the session is quarantined");
+        assert_eq!(root, home.path().join(".local/state/selkies/quarantine"));
+        assert!(root.join("config").is_dir() && root.join("home").is_dir());
+        let selkies = for_selkies(&session.env, "");
+        for env in [&session.env, &selkies] {
+            assert_eq!(env["HOME"], home_text, "the home is the user's");
+            assert_eq!(
+                env["XDG_CONFIG_HOME"],
+                root.join("config").to_string_lossy()
+            );
+            assert_eq!(env["XDG_DATA_HOME"], root.join("data").to_string_lossy());
+            assert!(env["XDG_CONFIG_DIRS"].starts_with(&format!("{home_text}/.config:")));
+        }
+        let before = session.env.clone();
+        assert_eq!(
+            session.quarantine(Mode::Targeted),
+            None,
+            "a second call changes nothing"
+        );
+        assert_eq!(session.env, before);
     }
 
     #[test]
