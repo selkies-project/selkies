@@ -28,7 +28,7 @@ import { test } from '@playwright/test';
 
 import { firefoxPersistentContext, launchBrowser, type Engine } from '../lib/browsers.ts';
 import { Checks } from '../lib/checks.ts';
-import { barTool } from '../lib/dashboard.ts';
+import { barTool, sidebarMenuItem } from '../lib/dashboard.ts';
 import { DASHBOARD_DIST, sleep, suiteOf } from '../lib/env.ts';
 import { Host, monotonic, type Observer } from '../lib/host.ts';
 import { PC_TAP_JS } from '../lib/page.ts';
@@ -354,7 +354,7 @@ async function keyboardButtonBlock(host: Host, res: Checks, dashboard: string, e
         res.check(`${tag}: a key only a keyboard has takes it away`, !(await visible(button)));
         if (dashboard === 'default') {
             await openSidebar(page);
-            await page.locator('.keyboard-toggle-button').first().click();
+            await (await sidebarMenuItem(page, '.keyboard-toggle-button'))?.click();
         } else {
             await (await barTool(page, '.keyboard-toggle-button'))?.click();
         }
@@ -537,14 +537,9 @@ async function trackpadButton(client: { client: Client; engine: Engine } | null,
     let button: Locator | null = null;
     for (let attempt = 0; attempt < 3; attempt++) {
         if (dashboard === 'default') {
-            const b = page.locator('.trackpad-mode-button').first();
-            try {
-                await b.waitFor({ state: 'attached', timeout: 3000 });
-                button = b;
-                break;
-            } catch {
-                // not drawn yet
-            }
+            button = await sidebarMenuItem(page, '.trackpad-mode-button');
+            if (button !== null) break;
+            await sleep(3000);
         } else {
             button = await barTool(page, '.trackpad-mode-button');
             if (button !== null) break;

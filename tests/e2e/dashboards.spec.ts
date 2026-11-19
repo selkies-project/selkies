@@ -22,8 +22,8 @@ import { Checks } from '../lib/checks.ts';
 import {
     BAR_MENU_TRIGGERS, barCloseMenus, barClosePanel, barGamepadPanel, barMenuText, barOpenMenuItem, barShow, barTool, CHROME,
     closeDialogs, EDGE_BUTTON, EDGE_FAN, EDGE_MORE, edgeCloseFan, edgeFanOpen, edgeFanPage, edgeOpenFan, isEdge,
-    openClipboardPanel, openScreenSettings, openVideoSettings, pickClipboardImage, pickRateControl, sidebarClose, sidebarOpen,
-    sidebarSection, switchOn, waitChunk,
+    openClipboardPanel, openScreenSettings, openVideoSettings, pickClipboardImage, pickRateControl, sidebarClose, sidebarMenuItem,
+    sidebarMenuClose, sidebarOpen, sidebarSection, switchOn, waitChunk,
 } from '../lib/dashboard.ts';
 import { DASHBOARD_DIST, sleep, suiteOf } from '../lib/env.ts';
 import { Host } from '../lib/host.ts';
@@ -352,8 +352,8 @@ interface Present {
 
 /**
  * Gaming mode stays reachable on a touch client, and by its chord. The
- * sidebar's mode buttons carry the fullscreen and gaming-mode pair on every
- * client; the trackpad toggle joins the keyboard button there (in a bar layout
+ * sidebar header's menu carries the fullscreen and gaming-mode pair on
+ * every client; the trackpad switch joins the keyboard button's there (in a bar layout
  * the bar's touch group, or the edge fan's, with no second one in the soft
  * keys), and appears only once touch is seen. The Ctrl+Shift+X chord is the
  * core's own, so it works whatever the dashboard shows.
@@ -361,11 +361,14 @@ interface Present {
 async function gamingModeCheck(page: Page, res: Checks, dashboard: string): Promise<void> {
     const present = async (): Promise<Present> => {
         if (dashboard === 'default') {
-            return within(page.evaluate((): Present => ({
-                gaming: Boolean(document.querySelector('.sidebar-mode-actions .gaming-mode-button')),
-                trackpad: Boolean(document.querySelector('.sidebar-mode-actions .trackpad-mode-button')),
-                headerTrackpad: Boolean(document.querySelector('.header-controls .trackpad-mode-button')),
-            })));
+            await sidebarOpen(page);
+            const got = {
+                gaming: (await sidebarMenuItem(page, '.gaming-mode-button')) !== null,
+                trackpad: (await sidebarMenuItem(page, '.trackpad-mode-button')) !== null,
+                headerTrackpad: (await page.locator('.header-controls .trackpad-mode-button').count()) > 0,
+            };
+            await sidebarMenuClose(page);
+            return got;
         }
         return {
             gaming: (await barTool(page, '.gaming-mode-button')) !== null,
@@ -379,7 +382,7 @@ async function gamingModeCheck(page: Page, res: Checks, dashboard: string): Prom
     const after = await present();
     res.check('gaming mode button shown without touch', before.gaming, before);
     res.check('gaming mode button survives touch detection', after.gaming, after);
-    res.check('trackpad button appears with touch, among the mode buttons', after.trackpad, after);
+    res.check('trackpad button appears with touch, among the modes', after.trackpad, after);
     res.check('the header carries no trackpad button', !after.headerTrackpad, after);
 
     // requestFullscreen needs a real display; the mode the input handler
@@ -414,12 +417,6 @@ interface Tiles {
     n: number;
     widths: number[];
     rows: number;
-    modes: number;
-    modeWidths: number[];
-    modeRows: number;
-    modeHeight: number;
-    tileHeight: number;
-    modesAbove: boolean;
     keyRow: number;
     keyRowIcons: number;
 }
@@ -427,15 +424,21 @@ interface Tiles {
 const spread = (v: number[]): number => (v.length ? Math.max(...v) - Math.min(...v) : Infinity);
 
 /**
- * Pin the sidebar layout: icon parity of the fullscreen and gaming mode
- * buttons, the mode buttons above the stream tiles and shaped apart from
- * them, uniform tiles, and a files dialog that follows the theme. Runs after
- * gamingModeCheck: the touchstart it dispatches is what makes the keyboard
- * and trackpad mode buttons render, so the mode buttons are at their fullest
- * four here, sharing their one row.
+ * Pin the sidebar layout: the header's one menu, holding the modes and the
+ * appearance controls, icon parity of its fullscreen and gaming mode items,
+ * uniform stream tiles, and a files dialog that follows the theme. Runs after
+ * gamingModeCheck: the touchstart it dispatches is what makes the keyboard and
+ * trackpad switches render, so the menu's modes are at their fullest four here.
  */
 async function sidebarLayoutCheck(page: Page, res: Checks): Promise<void> {
     if (!(await sidebarIsOpen(page))) await toggleDashboard(page);
+    await sidebarMenuItem(page, '.fullscreen-button');
+    const popup = '.sidebar-menu-popup';
+    const items = await page.locator(`${popup} :is(.fullscreen-button, .gaming-mode-button, .keyboard-toggle-button, .trackpad-mode-button)`).count();
+    const appearance = await page.locator(`${popup} :is(.layout-toggle, .translucency-button, .theme-toggle)`).count();
+    const header = await page.locator('.sidebar-header .header-controls > *').count();
+    res.check("the header carries one menu, holding the four modes and the layout, translucency, and theme controls",
+        header === 1 && items === 4 && appearance === 3, { header, items, appearance });
     const icons = await within(page.evaluate((): { fs: Ink; gm: Ink } | null => {
         const ink = (svg: SVGSVGElement, strokeUnits: number): Ink => {
             const b = svg.getBBox();
@@ -450,29 +453,21 @@ async function sidebarLayoutCheck(page: Page, res: Checks): Promise<void> {
     }));
     const same = icons !== null && icons.fs.box === icons.gm.box && Math.abs(icons.fs.w - icons.gm.w) <= 1 && Math.abs(icons.fs.h - icons.gm.h) <= 1;
     res.check('fullscreen and gaming icons draw at one size', same, icons);
+    await sidebarMenuClose(page);
 
     const tiles = await within(page.evaluate((): Tiles => {
         const box = (sel: string): DOMRect[] => [...document.querySelectorAll(sel)].map((e) => e.getBoundingClientRect());
         const r = box('.sidebar-action-buttons .action-button');
-        const m = box('.sidebar-mode-actions .mode-button');
         return {
             n: r.length,
             widths: r.map((x) => Math.round(x.width * 10) / 10),
             rows: new Set(r.map((x) => Math.round(x.top))).size,
-            modes: m.length,
-            modeWidths: m.map((x) => Math.round(x.width * 10) / 10),
-            modeRows: new Set(m.map((x) => Math.round(x.top))).size,
-            modeHeight: Math.max(0, ...m.map((x) => x.height)),
-            tileHeight: Math.min(...r.map((x) => x.height)),
-            modesAbove: m.length > 0 && r.length > 0 && Math.max(...m.map((x) => x.bottom)) <= Math.min(...r.map((x) => x.top)),
             keyRow: document.querySelectorAll('.sidebar-mobile-key-actions .mobile-key-button:not(.key-palette-toggle)').length,
             // The palette's disclosure carries a chevron; every other icon would be an icon button in the key row.
             keyRowIcons: [...document.querySelectorAll('.sidebar-mobile-key-actions svg')].filter((s) => !s.closest('.key-palette-toggle')).length,
         };
     }));
     res.check('the five stream tiles stand in one row at one width', tiles.n === 5 && tiles.rows === 1 && spread(tiles.widths) <= 1, tiles);
-    const modes = tiles.modes === 4 && tiles.modeRows === 1 && tiles.modesAbove && spread(tiles.modeWidths) <= 1 && tiles.modeHeight < tiles.tileHeight;
-    res.check('the four mode buttons share one row above the tiles, lower than a tile', modes, tiles);
     res.check('the key row holds the five soft keys and no icon buttons', tiles.keyRow === 5 && tiles.keyRowIcons === 0, tiles);
 
     let opened = false;
@@ -499,18 +494,29 @@ async function sidebarLayoutCheck(page: Page, res: Checks): Promise<void> {
     }));
     const before = await palette();
     res.check("the files dialog's close control sits inside the panel", before?.closeInside, before);
-    // The mirror is live: the dashboard's own toggle restyles the open dialog.
-    // The dialog is modal, its overlay over the drawer, so the toggle is
-    // pressed from the page, not the pointer.
-    await page.locator('.theme-toggle').first().dispatchEvent('click');
-    await sleep(600);
-    const after = await palette();
-    res.check('the files dialog follows a live theme flip', before !== null && after !== null && before.dark !== after.dark && before.bg !== after.bg, [before, after]);
-    await page.locator('.theme-toggle').first().dispatchEvent('click');
-    await sleep(400);
     await page.keyboard.press('Escape');
     await sleep(500);
     res.check('Escape closes the files dialog', (await page.locator('[role="dialog"]').count()) === 0);
+    // The dialog is modal over the drawer, so the theme is flipped from the
+    // header menu between two openings of it.
+    const flipTheme = async (): Promise<void> => {
+        await (await sidebarMenuItem(page, '.theme-toggle'))?.click();
+        await sleep(400);
+        await sidebarMenuClose(page);
+    };
+    await flipTheme();
+    let after: Awaited<ReturnType<typeof palette>> = null;
+    try {
+        await page.locator('button:has-text("Download Files")').first().click();
+        await page.locator('[role="dialog"]:has-text("Files")').first().waitFor({ timeout: 10_000 });
+        after = await palette();
+        await page.keyboard.press('Escape');
+        await sleep(500);
+    } catch {
+        // reported below
+    }
+    res.check('the files dialog follows a theme flip', before !== null && after !== null && before.dark !== after.dark && before.bg !== after.bg, [before, after]);
+    await flipTheme();
     // Leave the sidebar as found: the blocks after this one open it themselves.
     if (await sidebarIsOpen(page)) await toggleDashboard(page, 600);
 }
@@ -686,8 +692,8 @@ function barPrefs(page: Page): Promise<Prefs> {
 }
 
 /**
- * The layout's translucency button: in the sidebar's header, beside the theme
- * and layout toggles, the drawer opened first; in the toolbar menu's footer,
+ * The layout's translucency button: in the footer of the sidebar header's
+ * menu, the drawer and the menu opened first; in the toolbar menu's footer,
  * beside the layout and theme toggles, the menu opened first; or a button of
  * the edge fan.
  */
@@ -695,7 +701,7 @@ async function translucencyButton(page: Page, dashboard: string): Promise<Locato
     let found: Locator;
     if (dashboard === 'default') {
         await sidebarOpen(page);
-        found = page.locator('.sidebar .header-controls .translucency-button');
+        return sidebarMenuItem(page, '.translucency-button');
     } else if (dashboard === 'wish') {
         found = page.locator('[role="menu"] .translucency-button');
         if (!(await found.count())) {
@@ -1231,8 +1237,9 @@ async function arrowThemeCheck(page: Page, res: Checks): Promise<void> {
     const seen = new Map<string, string>();
     for (const flip of [false, true]) {
         if (flip) {
-            await ev(page, "document.querySelector('.theme-toggle').click()");
+            await (await sidebarMenuItem(page, '.theme-toggle'))?.click();
             await sleep(500);
+            await sidebarMenuClose(page);
         }
         const theme = await ev<string>(page, "document.documentElement.classList.contains('light') ? 'light' : 'dark'");
         const colors = await within(page.evaluate(() => {
@@ -2235,9 +2242,9 @@ async function layoutToggleBlock(host: Host): Promise<Checks> {
             let shown = await shownLayout(page);
             res.check('the page opens on the sidebar', shown === 'default', shown);
             await sidebarOpen(page);
-            let toggle = page.locator('.sidebar .layout-toggle');
-            if (await toggle.count()) {
-                await toggle.first().click();
+            let toggle: Locator | null = await sidebarMenuItem(page, '.layout-toggle');
+            if (toggle !== null) {
+                await toggle.click();
                 await sleep(1500);
             }
             shown = await shownLayout(page);

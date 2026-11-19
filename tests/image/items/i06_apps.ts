@@ -16,7 +16,7 @@
 import type { Page } from '@playwright/test';
 
 import { fields } from '../../../web/selkies-web-core/lib/narrow.ts';
-import { openAppsModal } from '../../lib/dashboard.ts';
+import { openAppsModal, SIDEBAR_APPS } from '../../lib/dashboard.ts';
 import { sleep } from '../../lib/env.ts';
 import { openSidebar, type Cell } from '../lib.ts';
 
@@ -45,7 +45,7 @@ export async function run(cell: Cell): Promise<void> {
     const log = await cell.target.selkiesLog(4000);
     const hidden = log.split('\n').filter((l) => l.includes('Apps panel hidden')).slice(-1);
     await openSidebar(page);
-    let shown = (await page.locator('.sidebar-section-header:has-text("Apps")').count()) > 0;
+    let shown = (await page.locator(SIDEBAR_APPS).count()) > 0;
     if (!enabled) {
         R.check('SELKIES_COMMAND_ENABLED is off and the Apps panel is not offered', !shown, `panel shown=${shown}`);
         R.skip('app install', 'SELKIES_COMMAND_ENABLED is off in this image');
