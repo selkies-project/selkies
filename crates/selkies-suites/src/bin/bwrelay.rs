@@ -16,6 +16,10 @@
 //! default models a shallow hop, and a fat one (a modem holding seconds of data) is what turns an
 //! upload into input lag. Every second it prints what each direction carried.
 //!
+//! `BWRELAY_DELAY_MS` adds a propagation delay behind each direction, one way, and
+//! `BWRELAY_JITTER_MS` up to that much more per piece with the order kept: a path with a
+//! round trip of its own, which a loopback relay otherwise lacks.
+//!
 //! A line on stdin changes a shaped direction's rate from then on (`down KBIT_S`, `up KBIT_S`),
 //! the step a congested stretch and its recovery are: what is queued stays queued and drains at
 //! the new rate.
@@ -100,6 +104,65 @@ impl Bucket {
 /// A piece of one connection's bytes queued on a link, with where it goes.
 type Piece = (Arc<Mutex<OwnedWriteHalf>>, Vec<u8>);
 
+/// A propagation delay behind a direction (`BWRELAY_DELAY_MS` one way, with up to
+/// `BWRELAY_JITTER_MS` more per piece, order kept): pieces leave it that long after entering.
+#[derive(Clone)]
+struct DelayLine {
+    queue: mpsc::UnboundedSender<(Instant, Piece)>,
+    delay: Duration,
+    jitter_us: u64,
+    seed: Arc<AtomicU64>,
+}
+
+impl DelayLine {
+    fn from_env(carried: Arc<AtomicU64>) -> Option<DelayLine> {
+        let ms = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .unwrap_or(0.0)
+        };
+        let (delay, jitter) = (ms("BWRELAY_DELAY_MS"), ms("BWRELAY_JITTER_MS"));
+        if delay <= 0.0 && jitter <= 0.0 {
+            return None;
+        }
+        let (queue, mut pieces) = mpsc::unbounded_channel::<(Instant, Piece)>();
+        tokio::spawn(async move {
+            while let Some((at, (writer, piece))) = pieces.recv().await {
+                tokio::time::sleep_until(at.into()).await;
+                if writer.lock().await.write_all(&piece).await.is_ok() {
+                    carried.fetch_add(piece.len() as u64, Ordering::Relaxed);
+                }
+            }
+        });
+        Some(DelayLine {
+            queue,
+            delay: Duration::from_secs_f64(delay / 1000.0),
+            jitter_us: (jitter * 1000.0) as u64,
+            seed: Arc::new(AtomicU64::new(0x9E37_79B9_7F4A_7C15)),
+        })
+    }
+
+    fn send(&self, piece: Piece) -> bool {
+        let mut x = self.seed.load(Ordering::Relaxed);
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.seed.store(x, Ordering::Relaxed);
+        let extra = if self.jitter_us > 0 {
+            x % self.jitter_us
+        } else {
+            0
+        };
+        self.queue
+            .send((
+                Instant::now() + self.delay + Duration::from_micros(extra),
+                piece,
+            ))
+            .is_ok()
+    }
+}
+
 /// One direction of the modeled link: a bounded FIFO queue drained at the rate. A sender that
 /// fills it stops being read, the back-pressure a full buffer applies.
 struct Link {
@@ -110,9 +173,14 @@ impl Link {
     fn start(rate: Arc<AtomicU64>, depth: usize, carried: Arc<AtomicU64>) -> Link {
         let (queue, mut pieces) = mpsc::channel::<Piece>((depth / GRAIN).max(1));
         let mut bucket = Bucket::new(rate);
+        let delay = DelayLine::from_env(Arc::clone(&carried));
         tokio::spawn(async move {
             while let Some((writer, piece)) = pieces.recv().await {
                 bucket.take(piece.len()).await;
+                if let Some(delay) = &delay {
+                    delay.send((writer, piece));
+                    continue;
+                }
                 if writer.lock().await.write_all(&piece).await.is_ok() {
                     carried.fetch_add(piece.len() as u64, Ordering::Relaxed);
                 }
@@ -150,10 +218,20 @@ async fn pass(
     mut reader: OwnedReadHalf,
     writer: Arc<Mutex<OwnedWriteHalf>>,
     carried: Arc<AtomicU64>,
+    delay: Option<DelayLine>,
 ) {
     let mut buf = vec![0u8; CHUNK];
     while let Ok(n) = reader.read(&mut buf).await {
-        if n == 0 || writer.lock().await.write_all(&buf[..n]).await.is_err() {
+        if n == 0 {
+            break;
+        }
+        if let Some(delay) = &delay {
+            if !delay.send((Arc::clone(&writer), buf[..n].to_vec())) {
+                break;
+            }
+            continue;
+        }
+        if writer.lock().await.write_all(&buf[..n]).await.is_err() {
             break;
         }
         carried.fetch_add(n as u64, Ordering::Relaxed);
@@ -267,11 +345,13 @@ async fn main() -> Result<(), String> {
     }
 
     let target = u16::try_from(target).map_err(|e| e.to_string())?;
+    let up_delay = DelayLine::from_env(Arc::clone(&up_bytes));
     loop {
         let Ok((client, _)) = listener.accept().await else {
             continue;
         };
         let (down, up, up_bytes) = (Arc::clone(&down), up.clone(), Arc::clone(&up_bytes));
+        let up_delay = up_delay.clone();
         tokio::spawn(async move {
             let Ok(socket) = TcpSocket::new_v4() else {
                 return;
@@ -299,7 +379,7 @@ async fn main() -> Result<(), String> {
             let upward = async {
                 match &up {
                     Some(link) => link.carry(client_r, server_w).await,
-                    None => pass(client_r, server_w, up_bytes).await,
+                    None => pass(client_r, server_w, up_bytes, up_delay).await,
                 }
             };
             tokio::join!(upward, down.carry(server_r, client_w));
