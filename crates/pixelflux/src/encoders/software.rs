@@ -476,6 +476,25 @@ thread_local! {
 #[cfg(feature = "gpl")]
 static X264_OPEN_CLOSE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// The UMH motion search range of every x264 session, in pixels: wide enough to find a fast
+/// scroll, where 16 spends half again the bytes on one of 96 rows a frame.
+#[cfg(feature = "gpl")]
+const X264_ME_RANGE: i32 = 64;
+
+#[cfg(feature = "gpl")]
+thread_local! {
+    static ME_RANGE: std::cell::Cell<i32> = const { std::cell::Cell::new(X264_ME_RANGE) };
+}
+
+/// Open the x264 sessions this thread opens from now on with a motion search range of `range`
+/// pixels in place of `X264_ME_RANGE`, for a benchmark timing the range against it; a session
+/// already open keeps its own.
+#[cfg(feature = "gpl")]
+#[doc(hidden)]
+pub fn set_x264_me_range(range: i32) {
+    ME_RANGE.set(range);
+}
+
 /// What libx264 adds to a quantizer above 8 bits: its quantizer bounds, a frame's forced
 /// quantizer, and the one it reports are all on a scale that starts six below zero for every
 /// bit past eight, while the rate factor is not. Added going in and taken off coming out, so a
@@ -895,7 +914,7 @@ impl H264EncoderWrapper {
             }
             param.analyse.b_mb_info = 1;
             param.analyse.i_me_method = codec_sys::x264::X264_ME_UMH as i32;
-            param.analyse.i_me_range = 64;
+            param.analyse.i_me_range = ME_RANGE.get();
 
             param.i_threads = threads;
             param.b_repeat_headers = 1;
@@ -4543,6 +4562,29 @@ mod qp_bound_sweep {
                 assert_eq!(dec.color_tags(), Some(want));
             }
         }
+    }
+
+    /// A session opens with `X264_ME_RANGE` unless its thread set another, which the sessions
+    /// it opens afterwards take and those of other threads do not.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_opens_with_the_motion_range_its_thread_set() {
+        use super::{X264_ME_RANGE, set_x264_me_range};
+        let range = || {
+            let enc = H264EncoderWrapper::new(64, 64, 25, false, 30.0, 1, false, 0, 0, 0, 0)
+                .expect("x264 init");
+            unsafe {
+                let mut param: codec_sys::x264::x264_param_t = std::mem::zeroed();
+                codec_sys::x264::x264_encoder_parameters(enc.encoder, &mut param);
+                param.analyse.i_me_range
+            }
+        };
+        assert_eq!(range(), X264_ME_RANGE);
+        set_x264_me_range(16);
+        assert_eq!(range(), 16);
+        assert_eq!(std::thread::spawn(range).join().unwrap(), X264_ME_RANGE);
+        set_x264_me_range(X264_ME_RANGE);
+        assert_eq!(range(), X264_ME_RANGE);
     }
 
     /// x264 is opened at the capture's rate as the fraction it names, its SPS declares that

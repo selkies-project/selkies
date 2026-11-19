@@ -2855,6 +2855,7 @@ dependencies = [
  "bitflags 2.13.2",
  "cfg-if",
  "codec-sys",
+ "codspeed-criterion-compat",
  "gbm",
  "image",
  "libc",

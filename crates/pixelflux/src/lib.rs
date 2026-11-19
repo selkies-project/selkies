@@ -173,6 +173,9 @@ pub mod wm;
 
 #[cfg(test)]
 mod cleanup_bench;
+/// Screen content the benchmarks and the cleanup measurements draw.
+#[doc(hidden)]
+pub mod fixtures;
 /// Multi-GPU NVENC device filtering via kernel ioctl.
 pub mod nvgpufilter;
 /// Frame-processing policy shared by the X11 and Wayland backends.

@@ -87,6 +87,18 @@ reis = "0.7"
 path = "nvcodec-sys"
 features = ["cuda"]
 
+[dev-dependencies]
+# Criterion's API, timed by CodSpeed's instrument under `cargo codspeed` (the repository's
+# .github/workflows/codspeed.yaml, which installs the cargo-codspeed of the same version) and by
+# Criterion under `cargo bench`.
+criterion = { package = "codspeed-criterion-compat", version = "6.0.0" }
+
+[[bench]]
+name = "encode"
+harness = false
+# The encoders a release ships: libx264 is the software H.264 of a `gpl` build alone.
+required-features = ["gpl"]
+
 [features]
 default = ["gpl"]
 ## The Python bridge: `import pixelflux` over the Rust API. Off, the crate is a Rust library
