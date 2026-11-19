@@ -88,6 +88,13 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # The window manager's appearance test writes the desktop's configuration as the shell does and
 # asks the Settings portal the manager serves
 selkies-draw = { path = "../selkies-draw" }
+# Criterion's API, timed by CodSpeed's instrument under `cargo codspeed` (.github/workflows/codspeed.yaml,
+# which installs the cargo-codspeed of the same version) and by Criterion under `cargo bench`.
+criterion = { package = "codspeed-criterion-compat", version = "6.0.0" }
+
+[[bench]]
+name = "ws_send"
+harness = false
 
 [features]
 ## Writes one line per frame sent to `$BASELINE_FRAME_LOG`, what the comparison benchmark reads; a

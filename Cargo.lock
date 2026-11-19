@@ -4024,6 +4024,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "bytes",
+ "codspeed-criterion-compat",
  "flate2",
  "futures",
  "http",
