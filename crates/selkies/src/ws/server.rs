@@ -4860,7 +4860,7 @@ impl RelayHost for WsService {
         };
         let sent_bytes = {
             let mut state = link.lock();
-            if !state.backpressure_enabled {
+            if !state.backpressure_enabled || !state.sound_gate(size, now()) {
                 return None;
             }
             state.sent_bytes += size as u64;

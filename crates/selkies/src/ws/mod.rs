@@ -36,6 +36,7 @@ pub mod link;
 pub mod protocol;
 pub mod relay;
 pub mod server;
+pub mod sounding;
 pub mod state;
 pub mod steer;
 pub mod upgrade;

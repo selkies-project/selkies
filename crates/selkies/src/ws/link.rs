@@ -48,6 +48,7 @@ use std::collections::VecDeque;
 
 use log::{debug, info, warn};
 
+use crate::ws::sounding::{self, SoundPhase, Sounding};
 use crate::ws::steer::{
     CongestionSteer, LinkAllowance, LinkProbeTick, PathProbe, RateHold, SteerTick,
 };
@@ -194,6 +195,8 @@ pub struct DisplayLink {
     pub link_probe: Option<PathProbe>,
     /// The padding the probe last asked of the owner's relay, in bits per second.
     pub link_padding: f64,
+    /// The sounding of the path the probe's padding carries (`ws::sounding`).
+    pub sounding: Sounding,
     /// What the gate did, as its log lines say it.
     pub gate_counts: GateCounts,
 }
@@ -284,6 +287,8 @@ impl DisplayLink {
         self.acked_sent_at = Some(send_time);
         self.acked_at = now;
         let rtt_sample_ms = rtt_sample_ms.max(0.0);
+        self.sounding.ack_held_ms = held_ms.max(0.0);
+        self.sounding.ack_is_frame = true;
         if let Some(crossing) = self.key_crossing
             && let Some(sent) = crossing.sent
             && send_time >= sent
@@ -348,6 +353,7 @@ impl DisplayLink {
         }
         self.smoothed_rtt = self.rtt_samples.iter().sum::<f64>() / self.rtt_samples.len() as f64;
         self.rtt_floor_ms = Some(self.rtt_floors.observe(rtt_ms, now));
+        self.sound_note(rtt_ms, sent_bytes, now);
         self.link_acks.push_back((now, rtt_ms, sent_bytes));
         while self.link_acks.len() > LINK_ACK_HISTORY {
             self.link_acks.pop_front();
@@ -379,6 +385,7 @@ impl DisplayLink {
         self.link_allowance = None;
         self.link_path_stand = None;
         self.link_probe = None;
+        self.sounding = Sounding::default();
     }
 
     /// Reset the frame-id state with the numbering (`PIPELINE_RESETTING`): a stale stamp
@@ -644,6 +651,11 @@ impl DisplayLink {
         encoder: Option<&dyn SteerTarget>,
         pad: PadPermit,
     ) -> SteerOutcome {
+        if !matches!(self.sounding.phase, SoundPhase::Idle)
+            && let Some(outcome) = self.sound_land(display_id, now, target_kbps, lo_kbps, encoder)
+        {
+            return outcome;
+        }
         let last_tick = self.link_tick_at.unwrap_or(0.0);
         self.link_tick_at = Some(now);
         let sent = self.sent_bytes;
@@ -835,7 +847,22 @@ impl DisplayLink {
         {
             self.link_carried = Some(measured >= LINK_CARRIED_SHARE * offered);
         }
-        let probed = self.link_probe.as_ref().is_some_and(|p| p.padding);
+        // The padding fills the path to the probe's own rate (`sound_rate`): the steer reads
+        // the stream alone, as on a tick without padding.
+        let (mut steer_offered_bps, mut steer_acked_bps, mut steer_goodput_bps) =
+            (offered_bps, acked_offered_bps, delivered_bps);
+        if self.link_probe.as_ref().is_some_and(|p| p.padding) || self.sounding.rate_kbps.is_some()
+        {
+            let padded = self
+                .pad_bytes
+                .saturating_sub(self.link_tick_pad.unwrap_or(self.pad_bytes));
+            if let Some(offered) = offered_bps.filter(|o| *o > 0.0 && now > last_tick) {
+                let content = (offered - padded as f64 * 8.0 / (now - last_tick)).max(0.0);
+                steer_goodput_bps = delivered_bps * (content / offered).min(1.0);
+                steer_offered_bps = Some(content);
+                steer_acked_bps = None;
+            }
+        }
         let steer = self.link_steer.get_or_insert_with(CongestionSteer::default);
         // Delivery reads a narrowed link on the tick its queue stands; held to the drain of the
         // cut before, the target the faster path set would keep filling it until the hold ran
@@ -848,19 +875,22 @@ impl DisplayLink {
                 current,
                 ceiling: target,
                 floor: lo_kbps,
-                goodput_bps: delivered_bps,
+                goodput_bps: steer_goodput_bps,
                 loss: 0.0,
                 now,
                 queue_s: Some(queue_s),
-                offered_bps,
-                acked_offered_bps,
+                offered_bps: steer_offered_bps,
+                acked_offered_bps: steer_acked_bps,
                 capacity_bps,
-                probed,
+                probed: false,
                 pacer_dropped: false,
                 pace_bps: None,
             })
             .round();
         let restored = steer.restored;
+        if steer.cap_probing {
+            self.sounding.armed_until = now + sounding::ARMED_CAP_S;
+        }
         self.link_kbps = Some(rate);
         let cleanup_bps = path_now.filter(|bps| bps.is_infinite()).or(completed_bps);
         let settled = now >= steer.hold_until;
@@ -1001,12 +1031,10 @@ impl DisplayLink {
             return None;
         }
         let held = self.link_steer.as_ref().is_some_and(|s| now < s.hold_until);
-        let mut bps = self
-            .link_probe
-            .get_or_insert_with(PathProbe::default)
-            .rate_bps(rate, ceiling, content_bps, queue_s, held, now);
+        let mut bps = self.sound_rate(rate, ceiling, content_bps, queue_s, held, span, now);
         if !pad.streaming {
             bps = 0.0;
+            self.sounding.rate_kbps = None;
         }
         if (bps > 0.0) != (self.link_padding > 0.0) {
             if bps > 0.0 {
@@ -1019,6 +1047,9 @@ impl DisplayLink {
                 };
                 debug!(target: "ws", "Congestion control[{display_id}]: probe ended at {rate:.0} kbps{why}");
             }
+        }
+        if bps > 0.0 {
+            self.sounding.armed_until = now + sounding::ARMED_S;
         }
         self.link_padding = bps;
         Some(bps)

@@ -47,8 +47,10 @@
 //! (`set_padding`): `0x07` chunks of `PAD_STEP_S` of the probe's rate, written only while no
 //! frame waits, so a frame waits behind one chunk at most, each counted in what the display
 //! sent (`RelayHost::note_padding`), with a ping behind a chunk every `PAD_PING_S` while no frame
-//! awaits its ack, whose pong acks the bytes sent through it for the steer. A tenth of a second
-//! keeps the pings the uplink clock holds (`PENDING_MAX`) over two and a half seconds of queue.
+//! awaits its ack, whose pong acks the bytes sent through it for the steer and for the path's
+//! sounding (`ws::sounding`), which reads a queue building on a still screen from the pongs
+//! alone. Forty milliseconds keep the pings the uplink clock holds (`PENDING_MAX`) over a
+//! second of queue.
 //!
 //! Reference-chain safety is tracked per stripe row (the header's `stripe_y`): one capture
 //! frame can mix IDR and delta stripes, so after any drop a row's delta chunks stay gated
@@ -96,7 +98,7 @@ pub const VIDEO_RELAY_SETTLE_SECONDS: f64 = 3.0;
 /// Padding: the stretch of the probe's rate one chunk carries, how often a chunk has a ping
 /// behind it, and the chunk's bounds in bytes.
 pub const PAD_STEP_S: f64 = 0.02;
-pub const PAD_PING_S: f64 = 0.1;
+pub const PAD_PING_S: f64 = 0.04;
 pub const PAD_CHUNK_MIN: usize = 1200;
 pub const PAD_CHUNK_MAX: usize = 256 * 1024;
 
