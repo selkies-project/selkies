@@ -6,16 +6,20 @@
 
 import React from "react";
 import { t } from "@/i18n";
+import type { Corner } from "@/panels/gamepads";
+import { usePhysicalGamepad } from "@/state/physical-gamepad";
 import { isMobileClient } from "@/utils";
 
 /**
- * The floating, draggable touch-gamepad toggle for every client that is not
- * the primary controller: the `#player2` to `#player4` and `#shared` hashes,
- * which render no dashboard, and a token-authenticated viewer, whose menu
- * DashboardOverlay withdraws. Uncontrolled it drives the touch overlay with
- * the same `TOUCH_GAMEPAD_SETUP` and `TOUCH_GAMEPAD_VISIBILITY` messages
- * DashboardOverlay posts on the primary display; controlled, the overlay
- * keeps that state so the Ctrl+Shift+G hotkey and the button agree.
+ * The floating, draggable touch-gamepad toggle for a page that holds a
+ * gamepad slot but is not the primary controller: the `#player2` to
+ * `#player4` hashes, which render no dashboard, and a viewer handed a slot
+ * (`ViewerControls`). Uncontrolled it drives the touch overlay with the same
+ * `TOUCH_GAMEPAD_SETUP` and `TOUCH_GAMEPAD_VISIBILITY` messages the dashboard
+ * posts on the primary display; controlled, the dashboard keeps that state so
+ * the Ctrl+Shift+G hotkey and the button agree. While a physical pad is in
+ * use (`usePhysicalGamepad`) the toggle steps aside, unless the overlay is
+ * up, so it can still be put away.
  * @module
  */
 
@@ -26,6 +30,8 @@ interface PlayerGamepadButtonProps {
     isActive?: boolean;
     /** Host toggle, replacing the internal one. */
     onToggle?: () => void;
+    /** Where it starts; 20 pixels in from the bottom right corner by default. */
+    start?: Corner;
 }
 
 const TOUCH_GAMEPAD_HOST_DIV_ID = "touch-gamepad-host";
@@ -48,8 +54,9 @@ const GamepadIcon = () => (
  * @param touchOnly Render only on a mobile or touch-detected client.
  * @param isActive Overlay state when controlled by the host.
  * @param onToggle Host toggle, replacing the internal one.
+ * @param start Where it starts.
  */
-export default function PlayerGamepadButton({ touchOnly = false, isActive, onToggle }: PlayerGamepadButtonProps) {
+export default function PlayerGamepadButton({ touchOnly = false, isActive, onToggle, start = { right: 20, bottom: 20 } }: PlayerGamepadButtonProps) {
     const [ownActive, setOwnActive] = React.useState(false);
     const [isTouchGamepadSetup, setIsTouchGamepadSetup] = React.useState(false);
     const [hasDetectedTouch, setHasDetectedTouch] = React.useState(isMobileClient);
@@ -63,7 +70,8 @@ export default function PlayerGamepadButton({ touchOnly = false, isActive, onTog
         return () => window.removeEventListener("touchstart", detectTouch);
     }, [hasDetectedTouch]);
 
-    const [buttonPosition, setButtonPosition] = React.useState({ bottom: 20, right: 20 });
+    const physicalPad = usePhysicalGamepad();
+    const [buttonPosition, setButtonPosition] = React.useState(start);
     const dragInfo = React.useRef({
         isDragging: false,
         hasDragged: false,
@@ -146,7 +154,7 @@ export default function PlayerGamepadButton({ touchOnly = false, isActive, onTog
         handleToggleTouchGamepad();
     };
 
-    if (touchOnly && !hasDetectedTouch) return null;
+    if ((touchOnly && !hasDetectedTouch) || (physicalPad && !isTouchGamepadActive)) return null;
 
     const title = t(isTouchGamepadActive
         ? "sections.gamepads.touchDisableTitle"

@@ -106,8 +106,10 @@
 
 import {
   Input,
+  slotList,
   slotPlayerIndex
 } from './lib/input.ts';
+import { publishViewerGrants } from './lib/viewer-grants.ts';
 import {
   createClipboardSync,
   createClipboardGestures,
@@ -8459,6 +8461,7 @@ class WorkerWebSocket {
         clientRole = permissions.role;
         clientSlot = permissions.slot;
         console.log(`Authentication successful. Received Role: ${clientRole}, Slot: ${clientSlot}`);
+        publishViewerGrants({ pad: slotList(clientSlot) !== null });
         window.postMessage({ type: 'clientRoleUpdate', role: clientRole }, window.location.origin);
 
         if (window.webrtcInput && typeof window.webrtcInput.updateControllerSlot === 'function') {
@@ -8510,6 +8513,7 @@ class WorkerWebSocket {
         const accessLevel = parseInt(event.data.split(',')[1]);
         const hasAccess = (accessLevel === 1);
         console.log(`Received MK_ACCESS update: ${hasAccess}`);
+        publishViewerGrants({ input: hasAccess });
         
         if (window.webrtcInput) {
             if (hasAccess) {
@@ -8538,6 +8542,7 @@ class WorkerWebSocket {
         const oldSlot = clientSlot;
         clientRole = newPermissions.role;
         clientSlot = newPermissions.slot;
+        publishViewerGrants({ pad: slotList(clientSlot) !== null });
 
         if (window.webrtcInput && typeof window.webrtcInput.updateControllerSlot === 'function') {
             window.webrtcInput.updateControllerSlot(clientSlot);
@@ -8579,6 +8584,7 @@ class WorkerWebSocket {
                 playerInputTargetIndex = 0;
             }
             console.log(`Legacy mode detected. Role from hash: ${clientRole}, Slot: ${clientSlot}`);
+            publishViewerGrants({ pad: clientRole === 'viewer' && slotList(clientSlot) !== null, input: false });
             initializeInput();
         }
 

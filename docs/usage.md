@@ -115,7 +115,7 @@ Every page streams from the one encoder its display has, and a page that does no
 
 `--enable-sharing=false` (`SELKIES_ENABLE_SHARING`) turns the feature off, and one page then holds the session: a second one takes it over instead of joining. `--enable-shared` and `--enable-player2` through `--enable-player4` drop individual links, and `--ui-sidebar-show-sharing=false` hides the section while leaving the links working.
 
-These fragments apply when the server has no master token. Under [Secure Mode](secure-mode.md) a client presents a provisioned session token that carries its own role and gamepad slot, and the sharing fragments are ignored. A copied link carries no token, the sharer's own included, so each holder needs a token of their own, which follows the fragment after `&token=`.
+These fragments apply when the server has no master token. Under [Secure Mode](secure-mode.md) a client presents a provisioned session token that carries its own role and gamepad slot, and the sharing fragments are ignored. A copied link carries no token, the sharer's own included, so each holder needs a token of their own, which follows the fragment after `&token=`. A viewer's page has no menu; it shows the touch gamepad's button while its token holds a gamepad slot (on a touch screen, and not while a physical gamepad is in use) and the on-screen keyboard's button while it holds keyboard and mouse input (until a physical keyboard is used), each added and removed as a new token table changes what it holds.
 
 ## Operator API
 

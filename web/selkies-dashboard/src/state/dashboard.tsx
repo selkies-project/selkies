@@ -14,7 +14,8 @@
  * `pipelineStatusUpdate` / `sidebarButtonStatusUpdate` flip the state once
  * whichever core is active has applied the change. The provider also listens
  * for `clientRoleUpdate` (viewers get no control UI, only the floating
- * touch-gamepad toggle on a touch client), `serverSettings` (the payload
+ * buttons for what they hold), `viewerGrants` (the gamepad slot and the input
+ * a viewer holds, `lib/viewer-grants.ts`), `serverSettings` (the payload
  * every visibility flag derives from), `trackpadModeUpdate`,
  * `gamingModeUpdate`, and the core-owned hotkey message `toggleTouchGamepad`;
  * `toggleDashboard` (Ctrl+Shift+M) is each layout's own, since what folds
@@ -35,6 +36,7 @@ import { computeRenderableSettings, getLastServerSettings, getPrefixedKey, getPr
   isMobileClient, isSecondaryDisplay, isViewerUrlMode, onCoreMessage, serverSettingsOf, type Renderable, type ServerSettings } from "@/utils";
 import { LAYOUTS, layoutById, resolveLayout, storeLayout, type LayoutSpec } from "@/layouts";
 import { errorName, stringOr } from "../../../selkies-web-core/lib/narrow.ts";
+import { NO_GRANTS, isViewerGrants, type ViewerGrants } from "../../../selkies-web-core/lib/viewer-grants.ts";
 
 declare global {
   /** One screen of the Window Management API, with its place on the desktop. */
@@ -84,6 +86,8 @@ export interface DashboardState {
   uiShowLogo: boolean;
   /** The server demoted this page to a viewer, or its URL names one. */
   isViewer: boolean;
+  /** What this page holds as a viewer: a gamepad slot, the keyboard and pointer. */
+  viewerGrants: ViewerGrants;
   /** This page is the `#display2` window. */
   isSecondaryDisplay: boolean;
   /** A mobile user agent, or a touch seen this session. */
@@ -113,7 +117,10 @@ export interface DashboardState {
   toggleTrackpad: () => void;
   trackpadSpeed: number;
   setTrackpadSpeed: (value: number) => void;
-  /** The floating on-screen keyboard button is shown. */
+  /**
+   * The floating on-screen keyboard button is wanted: on unless turned off,
+   * and while a hardware keyboard is in use only where the user turned it on.
+   */
   keyboardButton: boolean;
   toggleKeyboardButton: () => void;
   /** Pops the system's on-screen keyboard through the core's assist input; called from the tap's own handler. */
@@ -209,7 +216,14 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
     return TRACKPAD_SPEEDS.includes(stored) ? stored : 1;
   });
   const [keyboardButton, setKeyboardButton] = React.useState(true);
+  // Turned on by the user, which outranks a hardware keyboard's verdict.
+  const [keyboardButtonPinned, setKeyboardButtonPinned] = React.useState(false);
   const keyboardAttached = useKeyboardAttached();
+  const keyboardButtonShown = keyboardButton && (keyboardButtonPinned || !keyboardAttached);
+  const [viewerGrants, setViewerGrants] = React.useState<ViewerGrants>(() => {
+    const mirrored = window.selkiesViewerGrants;
+    return isViewerGrants(mirrored) ? mirrored : NO_GRANTS;
+  });
   const [statsOpen, setStatsOpenState] = React.useState(() => localStorage.getItem(getPrefixedKey("stats_strip")) === "true");
   const [printJobCount, setPrintJobCount] = React.useState(() => getPrintJobs().length);
   const [heldKeys, setHeldKeys] = React.useState<HeldKeys>({ Control: false, Alt: false, Meta: false });
@@ -250,6 +264,11 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
+  // A viewer whose slot is taken away loses the overlay with it: its presses would go nowhere.
+  React.useEffect(() => {
+    if (isViewer && !viewerGrants.pad) hideTouchGamepad();
+  }, [isViewer, viewerGrants.pad, hideTouchGamepad]);
+
   const toggleTouchGamepad = React.useCallback(() => {
     setTouchGamepad((active) => {
       const next = !active;
@@ -271,6 +290,9 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
           break;
         case "clientRoleUpdate":
           setIsViewer(message.role === "viewer");
+          break;
+        case "viewerGrants":
+          if (isViewerGrants(message)) setViewerGrants({ pad: message.pad, input: message.input });
           break;
         case "pipelineStatusUpdate":
         case "sidebarButtonStatusUpdate":
@@ -341,32 +363,29 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
     post({ type: "setTrackpadSpeed", value });
   }, []);
 
+  /** Turns the button off where it shows, else on and pinned against a hardware keyboard's verdict. */
   const toggleKeyboardButton = React.useCallback(() => {
-    // Asked for back while a keyboard was assumed: the user knows better.
-    if (keyboardAttached) {
-      keyboardWatch.reset();
-      setKeyboardButton(true);
-      return;
-    }
-    setKeyboardButton((visible) => !visible);
-  }, [keyboardAttached]);
+    const next = !keyboardButtonShown;
+    setKeyboardButton(next);
+    setKeyboardButtonPinned(next);
+  }, [keyboardButtonShown]);
 
   /**
    * Pops the on-screen keyboard by focusing the core's keyboard-assist input
    * (lib/virtual-keyboard.ts), which the next touch of the stream releases.
    * The focus is made here, within the button's own click: iOS WebKit raises
    * the keyboard only for a focus made while the page handles the user's tap,
-   * which the task of a message to the core is not. A viewer types nothing,
-   * as the core has it. Asking clears the attached-keyboard verdict, so the
+   * which the task of a message to the core is not. A viewer types only while
+   * it holds input. Asking clears the attached-keyboard verdict, so the
    * floating button comes back.
    */
   const showVirtualKeyboard = React.useCallback(() => {
-    if (isViewer) return;
+    if (isViewer && !viewerGrants.input) return;
     keyboardWatch.reset();
     if (!raiseVirtualKeyboard(document.getElementById("overlayInput"))) {
       console.error("Could not find #keyboard-input-assist element to focus.");
     }
-  }, [isViewer]);
+  }, [isViewer, viewerGrants.input]);
 
   /** Toggles a held modifier soft key; the core's synthetic-key mode is raised while any is held. */
   const holdKey = React.useCallback((key: keyof HeldKeys, code: string) => {
@@ -498,6 +517,7 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
     uiTitle: String(serverSettings?.ui_title?.value ?? "Selkies"),
     uiShowLogo: serverSettings?.ui_show_logo?.value !== false,
     isViewer,
+    viewerGrants,
     isSecondaryDisplay,
     isTouch: isMobileClient || hasDetectedTouch,
     isGamingMode,
@@ -516,7 +536,7 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
     toggleTrackpad,
     trackpadSpeed,
     setTrackpadSpeed,
-    keyboardButton: keyboardButton && !keyboardAttached,
+    keyboardButton: keyboardButtonShown,
     toggleKeyboardButton,
     showVirtualKeyboard,
     statsOpen,

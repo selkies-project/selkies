@@ -130,10 +130,13 @@ interface TouchGamepad {
     vibrationActuator: TouchRumbleActuator | null;
 }
 
+/** The id the synthetic pad reports, which tells it apart from a physical one. */
+export const TOUCH_GAMEPAD_ID = "Universal Touch Gamepad";
+
 (function() {
     'use strict';
 
-    const GAMEPAD_ID = "Universal Touch Gamepad";
+    const GAMEPAD_ID = TOUCH_GAMEPAD_ID;
     const MAX_BUTTONS = 18;
     const MAX_AXES = 4;
     const PREVIEW_SCALE = 0.15;

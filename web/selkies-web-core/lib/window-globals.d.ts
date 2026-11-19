@@ -13,6 +13,7 @@
  */
 import type { Input } from './input.ts';
 import type { StreamClient, StreamInfo, StreamStatsWindow } from './stream-stats.ts';
+import type { ViewerGrants } from './viewer-grants.ts';
 
 declare global {
   /** A timer handle the page cleared to null: the platform takes it as no timer. */
@@ -67,6 +68,8 @@ declare global {
     [key: string]: unknown;
     /** The input handler of the page's stream. */
     webrtcInput?: Input | null;
+    /** What this page holds as a viewer, as the core last heard it (`lib/viewer-grants.ts`). */
+    selkiesViewerGrants?: ViewerGrants;
     /** The WebSockets core's session socket, for the suites. */
     selkiesTransport?: object | null;
     /** The frame rate the page presents, as the cores measure it. */
