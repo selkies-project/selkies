@@ -79,8 +79,6 @@ pub struct PortalSession {
     pub devices: u32,
     pub cursor_mode: u32,
     pub restore_token: Option<String>,
-    /// The portal's `AvailableSourceTypes` (`SOURCE_*` bits), read when the session started.
-    source_types: u32,
     /// RemoteDesktop interface version, 0 when the session drives no input. `ConnectToEIS`
     /// exists from version 2.
     pub rd_version: u32,
@@ -131,18 +129,30 @@ fn sound_path(path: &std::path::Path) -> bool {
 }
 
 /// Where the portal's restore token lives between runs: `$XDG_STATE_HOME/pixelflux`, or
-/// `~/.local/state/pixelflux` where that is unset or not absolute.
-fn token_path() -> Option<std::path::PathBuf> {
+/// `~/.local/state/pixelflux` where that is unset or not absolute. A session on a virtual
+/// monitor keeps its own (`virtual_only`): a token restores the selection it was handed out
+/// for, so the two kinds of session would otherwise replace each other's on every start.
+fn token_path(virtual_only: bool) -> Option<std::path::PathBuf> {
     let base = match std::env::var_os("XDG_STATE_HOME").map(std::path::PathBuf::from) {
         Some(dir) if sound_path(&dir) => dir,
         _ => std::path::PathBuf::from(std::env::var_os("HOME")?).join(".local/state"),
     };
-    Some(base.join("pixelflux/portal-restore-token"))
+    Some(base.join(token_file(virtual_only)))
 }
 
-/// The restore token saved by an earlier session, if any.
-pub fn saved_restore_token() -> Option<String> {
-    let path = token_path()?;
+/// The restore token's file under the state directory, for a session on the host's monitors
+/// or on a virtual monitor (`token_path`).
+fn token_file(virtual_only: bool) -> &'static str {
+    if virtual_only {
+        "pixelflux/portal-virtual-restore-token"
+    } else {
+        "pixelflux/portal-restore-token"
+    }
+}
+
+/// The restore token an earlier session of the same kind saved (`token_path`), if any.
+pub fn saved_restore_token(virtual_only: bool) -> Option<String> {
+    let path = token_path(virtual_only)?;
     if !sound_path(&path) {
         return None;
     }
@@ -153,8 +163,10 @@ pub fn saved_restore_token() -> Option<String> {
 
 /// Keep a restore token for the next session (a token is single-use, so the newest replaces
 /// the one that opened this session).
-pub fn save_restore_token(token: &str) {
-    let Some(path) = token_path() else { return };
+pub fn save_restore_token(virtual_only: bool, token: &str) {
+    let Some(path) = token_path(virtual_only) else {
+        return;
+    };
     if !sound_path(&path) {
         return;
     }
@@ -285,11 +297,6 @@ impl PortalSession {
         })
     }
 
-    /// The `SOURCE_*` bits the portal offered when this session started.
-    pub fn available_source_types(&self) -> u32 {
-        self.source_types
-    }
-
     /// The session bus and the portal interfaces a session with `devices` speaks to, before
     /// any session exists.
     async fn connect(devices: u32, cursor_mode: u32) -> Result<Self, String> {
@@ -317,7 +324,6 @@ impl PortalSession {
             devices: 0,
             cursor_mode,
             restore_token: None,
-            source_types: SOURCE_MONITOR,
             rd_version: 0,
             kde: false,
             mutter: false,
@@ -384,11 +390,6 @@ impl PortalSession {
                     .find(|m| available & m != 0)
                     .unwrap_or(CURSOR_EMBEDDED);
             }
-            self.source_types = self
-                .screencast
-                .get_property("AvailableSourceTypes")
-                .await
-                .unwrap_or(SOURCE_MONITOR);
             let mut options = Options::new();
             opt_u32(&mut options, "types", source_types_options(virtual_only));
             options.insert("multiple", Variant::Bool(!virtual_only));
@@ -440,7 +441,7 @@ impl PortalSession {
         }
         if let Some(Variant::Str(t)) = results.get("restore_token").map(|v| &**v) {
             self.restore_token = Some(t.to_string());
-            save_restore_token(t);
+            save_restore_token(virtual_only, t);
         }
         if capture && self.streams.is_empty() {
             return Err("the portal started no monitor stream".into());
@@ -739,6 +740,13 @@ mod tests {
     #[test]
     fn source_types_virtual() {
         assert_eq!(source_types_options(true), SOURCE_VIRTUAL);
+    }
+
+    /// A virtual-monitor session keeps its restore token apart from the monitors' session, so
+    /// neither start replaces the token the other restores with.
+    #[test]
+    fn a_virtual_session_keeps_its_own_restore_token() {
+        assert_ne!(token_file(true), token_file(false));
     }
 
     #[test]

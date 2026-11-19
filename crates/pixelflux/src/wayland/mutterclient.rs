@@ -22,20 +22,32 @@ use std::time::Duration;
 
 use zbus::{Connection, OwnedVariant, Proxy, Variant};
 
+/// Mutter's display configuration service on the session bus, and its object path.
 const DISPLAY_CONFIG: &str = "org.gnome.Mutter.DisplayConfig";
 const DISPLAY_CONFIG_PATH: &str = "/org/gnome/Mutter/DisplayConfig";
+/// Bound on each DisplayConfig call, so a hung compositor cannot hold the control thread.
 const CALL_DEADLINE: Duration = Duration::from_secs(2);
+/// `ApplyMonitorsConfig`'s method 1: applied until the next configuration, never saved to
+/// `monitors.xml`.
 const METHOD_TEMPORARY: u32 = 1;
 
+/// A DisplayConfig property map (`a{sv}`).
 type Props = HashMap<String, OwnedVariant>;
+/// A monitor's identity: connector, vendor, product, and serial.
 type MonitorSpec = (String, String, String, String);
+/// One mode of a monitor: id, width, height, refresh rate, preferred scale, supported scales,
+/// and properties (`is-current`, `is-preferred`).
 type Mode = (String, i32, i32, f64, f64, Vec<f64>, Props);
+/// `GetCurrentState`'s reply: the configuration serial, every monitor with its modes, the
+/// logical monitors (x, y, scale, transform, primary, the monitors they show), and properties.
 type CurrentState = (
     u32,
     Vec<(MonitorSpec, Vec<Mode>, Props)>,
     Vec<(i32, i32, f64, u32, bool, Vec<MonitorSpec>, Props)>,
     Props,
 );
+/// One logical monitor as `ApplyMonitorsConfig` takes it: x, y, scale, transform, primary, and
+/// each monitor it shows as (connector, mode id, properties).
 type LogicalConfig<'a> = (
     i32,
     i32,
@@ -49,10 +61,13 @@ type LogicalConfig<'a> = (
 #[derive(Clone, Debug, PartialEq)]
 pub struct MonitorState {
     pub connector: String,
+    /// The id of the mode the monitor runs, which a configuration must name again.
     pub mode_id: String,
+    /// Position in logical pixels.
     pub x: i32,
     pub y: i32,
     pub scale: f64,
+    /// Rotation and flip, as Mutter numbers them (0 is none).
     pub transform: u32,
     pub primary: bool,
 }
@@ -80,8 +95,10 @@ pub fn layout_config(current: &[MonitorState], want: &[(String, i32, i32)]) -> V
     let min_x = out.iter().map(|m| m.x).min().unwrap_or(0);
     let min_y = out.iter().map(|m| m.y).min().unwrap_or(0);
     for m in &mut out {
-        m.x -= min_x;
-        m.y -= min_y;
+        // Positions come from the client's layout: a span past `i32` saturates, and Mutter
+        // refuses the configuration rather than the subtraction overflowing.
+        m.x = m.x.saturating_sub(min_x);
+        m.y = m.y.saturating_sub(min_y);
     }
     out
 }
@@ -183,10 +200,11 @@ fn monitors_now(state: &CurrentState) -> Vec<MonitorState> {
 }
 
 /// Arrange the host's monitors at `want` (`(connector, x, y)` in union-layout pixels, the
-/// primary first).
-pub fn apply(want: &[(String, i32, i32)]) -> Result<(), String> {
+/// primary first). `Ok(true)` once Mutter took a new configuration, `Ok(false)` where there
+/// was nothing to arrange: one display, or a layout the monitors already have.
+pub fn apply(want: &[(String, i32, i32)]) -> Result<bool, String> {
     if !worth_arranging(want) {
-        return Ok(());
+        return Ok(false);
     }
     zbus::block_on(async {
         let conn = connect().await?;
@@ -200,7 +218,7 @@ pub fn apply(want: &[(String, i32, i32)]) -> Result<(), String> {
         let now = monitors_now(&state);
         let config = layout_config(&now, want);
         if !needs_apply(&now, &config) {
-            return Ok(());
+            return Ok(false);
         }
         let logical: Vec<LogicalConfig<'_>> = config
             .iter()
@@ -222,6 +240,7 @@ pub fn apply(want: &[(String, i32, i32)]) -> Result<(), String> {
                 &(state.0, METHOD_TEMPORARY, logical, props),
             )
             .await
+            .map(|()| true)
             .map_err(|e| format!("ApplyMonitorsConfig: {e}"))
     })
 }
@@ -257,6 +276,21 @@ mod tests {
         let cur = [mon("Meta-0", 0, 0, 1.0), mon("Meta-1", 2556, 0, 1.0)];
         let cfg = layout_config(&cur, &want(&[("Meta-0", 0, 1318), ("Meta-1", 0, 0)]));
         assert_eq!(places(&cfg), want(&[("Meta-0", 0, 1318), ("Meta-1", 0, 0)]));
+    }
+
+    /// A client layout spanning more than `i32` saturates rather than overflowing the shift to
+    /// the origin.
+    #[test]
+    fn a_layout_wider_than_i32_saturates() {
+        let cur = [mon("Meta-0", 0, 0, 1.0), mon("Meta-1", 2556, 0, 1.0)];
+        let cfg = layout_config(
+            &cur,
+            &want(&[("Meta-0", i32::MIN, 0), ("Meta-1", i32::MAX, 0)]),
+        );
+        assert_eq!(
+            places(&cfg),
+            want(&[("Meta-0", 0, 0), ("Meta-1", i32::MAX, 0)])
+        );
     }
 
     #[test]

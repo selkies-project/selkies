@@ -187,13 +187,16 @@ backend shows one (GNOME; KDE shows none to an unsandboxed process), blocks only
 start: the restore token the backend hands back is kept in
 `$XDG_STATE_HOME/pixelflux/portal-restore-token` (`~/.local/state` by default) and restores the
 session without a dialog when it is reopened to change the cursor mode and on every later
-start. `libpipewire-0.3` is loaded at run time as for the virtual camera; the bus client is pure
+start; a display grown on a virtual monitor keeps its session's token in
+`portal-virtual-restore-token` beside it. `libpipewire-0.3` is loaded at run time as for the virtual camera; the bus client is pure
 Rust.
 
 Displays map onto host outputs by rank, so multi-display capture needs the host to expose that
 many outputs: `ScreenCapture.output_capacity()` reports the host's output count (`-1` when
 self-compositing, where outputs are created on demand), and `create_output` refuses ids the
-host cannot back rather than minting an output that would never receive a frame.
+host cannot back rather than minting an output that would never receive a frame. An unscaled
+Mutter host whose portal serves virtual sources backs one display more, on a virtual monitor
+that exists while that display captures and that DisplayConfig places where the layout puts it.
 
 A capture's size is asked of the host through `wlr-output-management`, but what it captures is
 the mode the host ends up running. A host that refuses the request, offers no layout management

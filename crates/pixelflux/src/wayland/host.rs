@@ -30,6 +30,13 @@
 //! A host without those protocols (GNOME, KDE before ext-image-copy-capture) is captured
 //! through xdg-desktop-portal instead: one RemoteDesktop session hands out a PipeWire stream per
 //! monitor and takes the input the seat lacks a virtual device for (`portal`, `pwcapture`).
+//! Where that portal also serves virtual sources, Mutter's DisplayConfig can place a new
+//! monitor (`mutterclient`), and the host is unscaled, one display more than the host has
+//! outputs grows on a virtual monitor: its own ScreenCast session opens on the display's first
+//! Start, its stream is consumed at exactly the display's size (which sizes the monitor), and
+//! the session closes when the display goes idle or the host session ends, removing the
+//! monitor. While that display captures, the host's monitors are arranged as selkies laid the
+//! displays out; otherwise they stay where the host's owner put them.
 //! Each rung is chosen per capability, ordered by measured delivery cost: a socket write to the
 //! compositor (libei, then the virtual-input protocols) runs about 4 us, a uinput write reaching
 //! evdev about 12 us, and a portal `Notify*` D-Bus call about 2 ms, so the kernel serves as the
@@ -407,6 +414,10 @@ struct CtrlState {
     /// announcement order is not guaranteed to match output creation order).
     order: Vec<usize>,
     output_mgr: Option<ZwlrOutputManagerV1>,
+    /// The session grows a display on a virtual monitor, which only Mutter's DisplayConfig
+    /// places: the host's monitors are arranged there while that display captures, and
+    /// otherwise left where the host's owner put them.
+    arrange_grown: bool,
     heads: Vec<(ZwlrOutputHeadV1, Option<String>)>,
     om_serial: Option<u32>,
     cfg_result: Option<bool>,
@@ -1046,6 +1057,8 @@ pub struct HostSession {
     uinput: Option<crate::uinput::Pair>,
     /// The portal session when frames or an input device come through xdg-desktop-portal.
     portal: Option<Arc<PortalCtl>>,
+    /// The grown display's own portal session, on the virtual monitor it exists by.
+    grown: Option<Arc<PortalCtl>>,
     /// Output geometry by rank, pairing portal streams with outputs.
     geoms: Vec<OutputGeom>,
     ctrl_tx: Sender<CtrlMsg>,
@@ -1068,8 +1081,9 @@ pub struct HostSession {
 
 impl HostSession {
     /// Connect to `display`, bring up input devices, enumerate the host's
-    /// outputs, and spawn one capture thread per output (idle until
-    /// [`start_capture`]) plus the layout-control thread. `gbm_path` (this
+    /// outputs, and spawn one capture thread per output, and one more for a
+    /// display grown on a portal virtual monitor where the host allows it (each
+    /// idle until [`start_capture`]), plus the layout-control thread. `gbm_path` (this
     /// process's render node) enables the zero-copy path; `frame_wake` is told the
     /// output index every time a capture thread queues a frame.
     pub fn connect(
@@ -1211,7 +1225,9 @@ impl HostSession {
         if grow {
             println!("[HostCapture] one more display can grow on a portal virtual monitor.");
         }
+        state.arrange_grown = grow;
         let mut outputs = Vec::new();
+        let mut grown_ctl = None;
         for i in 0..names.len() + usize::from(grow) {
             let name = names.get(i).cloned().flatten();
             let grown = i >= names.len();
@@ -1230,7 +1246,9 @@ impl HostSession {
             let gbm_path = gbm_path.clone();
             let alive = alive.clone();
             let portal_ctl = if grown {
-                Some(PortalCtl::spawn_virtual())
+                let ctl = PortalCtl::spawn_virtual();
+                grown_ctl = Some(ctl.clone());
+                Some(ctl)
             } else {
                 portal.clone().filter(|_| !native_capture)
             };
@@ -1324,6 +1342,7 @@ impl HostSession {
             vptr,
             uinput,
             portal,
+            grown: grown_ctl,
             geoms,
             ctrl_tx,
             ctrl_wake,
@@ -2163,8 +2182,11 @@ impl HostSession {
 }
 
 impl Drop for HostSession {
+    /// Close the portal sessions: their threads wait on the controllers, which the capture
+    /// threads keep alive, so only closing them here ends the sessions (and the grown
+    /// display's virtual monitor) with the host session.
     fn drop(&mut self) {
-        if let Some(ctl) = &self.portal {
+        for ctl in self.portal.iter().chain(&self.grown) {
             ctl.close();
         }
     }
@@ -2471,7 +2493,7 @@ fn portal_thread(ctl: Arc<PortalCtl>) {
                         inner
                             .restore_token
                             .clone()
-                            .or_else(portal::saved_restore_token),
+                            .or_else(|| portal::saved_restore_token(ctl.virtual_src)),
                     );
                 }
                 inner = ctl.changed.wait(inner).unwrap();
@@ -2514,6 +2536,13 @@ fn portal_thread(ctl: Arc<PortalCtl>) {
             other => other,
         };
         let mut inner = ctl.inner.lock().unwrap();
+        if !inner.wanted || inner.closed {
+            // The display went idle, or the host session ended, while the portal answered:
+            // the session closes outside the lock, taking a virtual monitor nothing reads.
+            drop(inner);
+            drop(opened);
+            continue;
+        }
         match opened {
             Ok((session, core)) => {
                 inner.epoch += 1;
@@ -2703,12 +2732,9 @@ fn portal_capture_loop(
                 size: w.size,
                 // The logical size the portal announces for the stream, as injection reads it
                 // (`HostSession::scale_at`), else the output's.
-                logical: assign_streams(&live.session.streams, &geoms)
-                    .get(index)
-                    .copied()
-                    .flatten()
+                logical: assigned
                     .and_then(|si| live.session.streams[si].size)
-                    .or_else(|| geoms.get(index).map(|g| g.logical))
+                    .or_else(|| geoms.get(rank).map(|g| g.logical))
                     .unwrap_or((0, 0)),
             },
             exact_size,
@@ -2750,9 +2776,9 @@ fn portal_capture_loop(
     }
 }
 
-// Dropping the session drops every channel sender and wake-pipe write end; the
-// capture and control threads observe the disconnect (poll sees POLLHUP) and
-// exit on their own.
+// Dropping the session closes its portal sessions (`HostSession`'s `Drop`) and drops
+// every channel sender and wake-pipe write end; the capture and control threads
+// observe the disconnect (poll sees POLLHUP) and exit on their own.
 
 // ---------------------------------------------------------------------------
 // Control thread: pumps the primary connection and applies layout requests.
@@ -2825,7 +2851,10 @@ fn control_loop(
 /// `LAYOUT_DEADLINE`, or no manager at all (KWin offers only its own kde_output_management
 /// protocol). Either answer settles the request, and the session owner then re-sizes its
 /// capture to the mode the host announces, so capture follows the host instead of gating
-/// forever on a size it will never produce.
+/// forever on a size it will never produce. A Mutter host growing a display has its monitors
+/// placed through DisplayConfig while that display captures (`mutterclient`), and still
+/// answers `false`: the arranger moves monitors and sets no mode, and the grown monitor takes
+/// its size from its stream.
 fn apply_layout(
     conn: &Connection,
     queue: &mut EventQueue<CtrlState>,
@@ -2834,10 +2863,13 @@ fn apply_layout(
     slots: &[LayoutSlot],
 ) -> bool {
     let Some(mgr) = state.output_mgr.clone() else {
-        if crate::wayland::mutterclient::available() {
+        if state.arrange_grown && slots.len() > state.order.len() {
             let want = layout_request(state, slots);
             match crate::wayland::mutterclient::apply(&want) {
-                Ok(()) => eprintln!("[HostCapture] arranged the Mutter host's monitors: {want:?}."),
+                Ok(true) => {
+                    eprintln!("[HostCapture] arranged the Mutter host's monitors: {want:?}.")
+                }
+                Ok(false) => {}
                 Err(e) => eprintln!("[HostCapture] Mutter refused the layout: {e}."),
             }
         }
