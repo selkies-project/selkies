@@ -1406,30 +1406,147 @@ mod pacing_tests {
         );
     }
 
-    /// What a source drawing at `src_hz` and keystrokes every `key_every` seconds (each drawn
-    /// 2 ms later) get from a capture paced in windows at `cap_fps`, driven in 0.1 ms steps as
-    /// the X11 capture loop drives the pacer, a held change (`FramePace::merge_until`) going
-    /// out with the next change or at its deadline: the frames sent a second, and the median
-    /// wait of the source's frames and of the keystrokes, in milliseconds.
-    fn drive(src_hz: f64, cap_fps: f64, key_every: f64, phase: f64, secs: f64) -> (f64, f64, f64) {
+    /// One run of the virtual-time harness (`simulate`): a source drawing at `src_hz` (none at
+    /// 0) from `phase` seconds, each frame up to `src_jitter` seconds either side of its slot,
+    /// as a framebuffer server's millisecond vblank timer puts it, and keystrokes every
+    /// `key_every` seconds (none at 0) from 0.2 s, each drawn 2 ms after the key and each
+    /// interval up to `key_jitter` of itself longer or shorter, under a capture paced in windows
+    /// at `cap_fps`, for `secs` seconds, each change's frame recorded as `trigger`.
+    #[derive(Clone, Copy)]
+    struct Sim {
+        trigger: TickTrigger,
+        src_hz: f64,
+        cap_fps: f64,
+        key_every: f64,
+        phase: f64,
+        src_jitter: f64,
+        key_jitter: f64,
+        secs: f64,
+    }
+
+    impl Sim {
+        fn new(src_hz: f64, cap_fps: f64, key_every: f64) -> Self {
+            Self {
+                trigger: TickTrigger::Damage,
+                src_hz,
+                cap_fps,
+                key_every,
+                phase: 0.0031,
+                src_jitter: 0.0,
+                key_jitter: 0.0,
+                secs: 10.0,
+            }
+        }
+    }
+
+    /// What a run of the harness sent: the frames, how long each of the source's frames and
+    /// each keystroke waited to go out (ms), the source frames a 60 Hz display showed, and the
+    /// frames sent in each 5 s of the run.
+    #[derive(Default)]
+    struct SimRun {
+        frames: u32,
+        painted: u32,
+        src_wait: Vec<f64>,
+        key_wait: Vec<f64>,
+        src_frames: u32,
+        src_shown: u32,
+        buckets: Vec<u32>,
+        secs: f64,
+    }
+
+    impl SimRun {
+        fn add(&mut self, other: SimRun) {
+            self.frames += other.frames;
+            self.painted += other.painted;
+            self.src_wait.extend(other.src_wait);
+            self.key_wait.extend(other.key_wait);
+            self.src_frames += other.src_frames;
+            self.src_shown += other.src_shown;
+            self.buckets.extend(other.buckets);
+            self.secs += other.secs;
+        }
+
+        fn fps(&self) -> f64 {
+            f64::from(self.frames) / self.secs
+        }
+
+        fn quantile(v: &[f64], q: f64) -> f64 {
+            let mut v = v.to_vec();
+            v.sort_by(f64::total_cmp);
+            v.get(((v.len().max(1) - 1) as f64 * q).round() as usize)
+                .copied()
+                .unwrap_or(0.0)
+        }
+
+        fn src(&self, q: f64) -> f64 {
+            Self::quantile(&self.src_wait, q)
+        }
+
+        fn key(&self, q: f64) -> f64 {
+            Self::quantile(&self.key_wait, q)
+        }
+
+        /// The highest rate any 5 s of the run sent at.
+        fn peak_fps(&self) -> f64 {
+            self.buckets
+                .iter()
+                .copied()
+                .max()
+                .map_or(0.0, |n| f64::from(n) / 5.0)
+        }
+    }
+
+    /// A deterministic uniform draw in [-1, 1).
+    fn wobble(seed: &mut u64) -> f64 {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 7;
+        *seed ^= *seed << 17;
+        (*seed >> 11) as f64 / (1u64 << 52) as f64 - 1.0
+    }
+
+    /// Drive a capture paced in windows through `sim` in 0.1 ms steps of virtual time, as the
+    /// X11 capture loop drives it (`x11::wait_for_frame`): a change pending once its pull comes
+    /// goes out at once, unless the pacing holds it for a source's next frame
+    /// (`FramePace::merge_until`), in which case it goes out with the next change or at the
+    /// hold's end, whichever comes first; with nothing pending the timer ticks at its due time,
+    /// and every tick is published (XShm). A 60 Hz display shows the last frame to arrive
+    /// before each vblank, 5 ms after the frame is sent.
+    fn simulate(sim: Sim) -> SimRun {
         let base = Instant::now();
-        let period = Duration::from_secs_f64(1.0 / cap_fps);
+        let period = Duration::from_secs_f64(1.0 / sim.cap_fps);
         let mut pace = FramePace::windowed();
         pace.record_tick(TickTrigger::Timer, period, base, true);
-        let (mut next_src, mut next_key) = (phase, if key_every > 0.0 { 0.2 } else { f64::MAX });
-        let (mut src, mut keys, mut drawn): (Vec<f64>, Vec<f64>, Vec<f64>) = Default::default();
-        let (mut src_wait, mut key_wait, mut frames) = (Vec::new(), Vec::new(), 0u32);
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64 ^ sim.phase.to_bits();
+        let src_at =
+            |k: f64, seed: &mut u64| sim.phase + k / sim.src_hz + sim.src_jitter * wobble(seed);
+        let mut src_k = 0.0;
+        let mut next_src = if sim.src_hz > 0.0 {
+            src_at(0.0, &mut seed).max(0.0)
+        } else {
+            f64::MAX
+        };
+        let mut next_key = if sim.key_every > 0.0 { 0.2 } else { f64::MAX };
+        let (mut src, mut keys, mut drawn): (Vec<(f64, u32)>, Vec<f64>, Vec<f64>) =
+            Default::default();
+        let mut run = SimRun {
+            secs: sim.secs,
+            ..SimRun::default()
+        };
+        // Each sent frame's time, and the newest source frame it carries.
+        let mut sent_frames: Vec<(f64, Option<u32>)> = Vec::new();
         let mut hold: Option<(f64, Instant)> = None;
-        for i in 1..=(secs / 1e-4) as u32 {
+        for i in 1..=(sim.secs / 1e-4) as u32 {
             let t = f64::from(i) * 1e-4;
             let now = base + Duration::from_micros(100) * i;
             while t >= next_src {
-                src.push(next_src);
-                next_src += 1.0 / src_hz;
+                src.push((next_src, run.src_frames));
+                run.src_frames += 1;
+                src_k += 1.0;
+                next_src = src_at(src_k, &mut seed).max(next_src);
             }
             while t >= next_key {
                 drawn.push(next_key + 0.002);
-                next_key += key_every;
+                next_key += sim.key_every * (1.0 + sim.key_jitter * wobble(&mut seed));
             }
             drawn.retain(|&d| {
                 (t < d) || {
@@ -1438,34 +1555,184 @@ mod pacing_tests {
                 }
             });
             let pending = !src.is_empty() || !keys.is_empty();
-            let pulled = pending && now >= pace.pull_at(TickTrigger::Damage, period, now);
+            let pulled = pending && now >= pace.pull_at(sim.trigger, period, now);
             if pulled && hold.is_none() {
-                hold = pace.merge_until(period, now).map(|until| (t, until));
+                let due = pace.next_due(period, now);
+                hold = pace
+                    .merge_until(period, now)
+                    .map(|until| (t, until.min(due)));
             }
             let held = hold.is_some_and(|(since, until)| {
-                now < until && !src.iter().chain(&keys).any(|&a| a > since)
+                now < until
+                    && !src
+                        .iter()
+                        .map(|s| s.0)
+                        .chain(keys.iter().copied())
+                        .any(|a| a > since)
             });
             let sent = if pulled && !held {
-                pace.record_tick(TickTrigger::Damage, period, now, true);
+                pace.record_tick(sim.trigger, period, now, true);
                 true
-            } else if now >= pace.next_due(period, now) {
+            } else if !pending && now >= pace.next_due(period, now) {
                 pace.record_tick(TickTrigger::Timer, period, now, true);
-                pending
+                false
             } else {
                 false
             };
             if sent {
                 hold = None;
-                frames += 1;
-                src_wait.extend(src.drain(..).map(|a| (t - a) * 1e3));
-                key_wait.extend(keys.drain(..).map(|k| (t - k) * 1e3));
+                run.frames += 1;
+                let bucket = (t / 5.0) as usize;
+                if run.buckets.len() <= bucket {
+                    run.buckets.resize(bucket + 1, 0);
+                }
+                run.buckets[bucket] += 1;
+                sent_frames.push((t, src.last().map(|s| s.1)));
+                run.src_wait.extend(src.drain(..).map(|s| (t - s.0) * 1e3));
+                run.key_wait.extend(keys.drain(..).map(|k| (t - k) * 1e3));
             }
         }
-        let median = |mut v: Vec<f64>| {
-            v.sort_by(f64::total_cmp);
-            v.get(v.len() / 2).copied().unwrap_or(0.0)
+        // Whole 5 s buckets only.
+        run.buckets.truncate((sim.secs / 5.0) as usize);
+        let display = 1.0 / 60.0;
+        let slot = |t: f64| ((t + 0.005 - 0.0037) / display).floor() as i64;
+        for (i, &(t, newest)) in sent_frames.iter().enumerate() {
+            if sent_frames
+                .get(i + 1)
+                .is_none_or(|next| slot(next.0) != slot(t))
+            {
+                run.painted += 1;
+                run.src_shown += u32::from(newest.is_some());
+            }
+        }
+        run
+    }
+
+    /// `simulate` at each of three phases of the source against the windows, pooled.
+    fn simulate_phases(sim: Sim) -> SimRun {
+        let mut run = SimRun::default();
+        for phase in [0.0031, 0.008, 0.014] {
+            run.add(simulate(Sim { phase, ..sim }));
+        }
+        run
+    }
+
+    /// What a source drawing at `src_hz` and keystrokes every `key_every` seconds get from a
+    /// capture paced in windows at `cap_fps` (`simulate`): the frames sent a second, and the
+    /// median wait of the source's frames and of the keystrokes, in milliseconds.
+    fn drive(src_hz: f64, cap_fps: f64, key_every: f64, phase: f64, secs: f64) -> (f64, f64, f64) {
+        let run = simulate(Sim {
+            phase,
+            secs,
+            ..Sim::new(src_hz, cap_fps, key_every)
+        });
+        (run.fps(), run.src(0.5), run.key(0.5))
+    }
+
+    /// The table the windowed pacer's extra-frame reserve is weighed by: run with
+    /// `cargo test -p pixelflux --lib pace_report -- --ignored --nocapture`. Each row pools the
+    /// source at three phases against the windows, 60 s each; "keys ±25 %" stretches or shrinks
+    /// each interval between keystrokes by up to a quarter, so they land at every phase of the
+    /// source.
+    #[test]
+    #[ignore = "a report, not a check"]
+    fn pace_report() {
+        let host = |sim: Sim| Sim {
+            trigger: TickTrigger::HostFrame,
+            ..sim
         };
-        (f64::from(frames) / secs, median(src_wait), median(key_wait))
+        let rows: [(&str, Sim); 13] = [
+            ("60 Hz at 60, keys 0.7 s", Sim::new(60.0, 60.0, 0.7)),
+            (
+                "60 Hz at 60, keys 0.7 s ±25 %",
+                Sim {
+                    key_jitter: 0.25,
+                    ..Sim::new(60.0, 60.0, 0.7)
+                },
+            ),
+            ("60 Hz at 60, keys 0.15 s", Sim::new(60.0, 60.0, 0.15)),
+            (
+                "60 Hz at 60, keys 0.15 s ±25 %",
+                Sim {
+                    key_jitter: 0.25,
+                    ..Sim::new(60.0, 60.0, 0.15)
+                },
+            ),
+            (
+                "60 Hz ±1 ms at 60, keys 0.7 s ±25 %",
+                Sim {
+                    src_jitter: 0.001,
+                    key_jitter: 0.25,
+                    ..Sim::new(60.0, 60.0, 0.7)
+                },
+            ),
+            ("60 Hz over 57", Sim::new(60.0, 57.0, 0.0)),
+            (
+                "60 Hz ±1 ms over 57",
+                Sim {
+                    src_jitter: 0.001,
+                    ..Sim::new(60.0, 57.0, 0.0)
+                },
+            ),
+            (
+                "60 Hz over 57, keys 0.7 s ±25 %",
+                Sim {
+                    key_jitter: 0.25,
+                    ..Sim::new(60.0, 57.0, 0.7)
+                },
+            ),
+            (
+                "host frames, 60 Hz over 57",
+                host(Sim::new(60.0, 57.0, 0.0)),
+            ),
+            ("60 Hz over 30", Sim::new(60.0, 30.0, 0.0)),
+            ("60.06 Hz at 60 (drift)", Sim::new(60.06, 60.0, 0.0)),
+            (
+                "60 Hz ±1 ms at 60",
+                Sim {
+                    src_jitter: 0.001,
+                    ..Sim::new(60.0, 60.0, 0.0)
+                },
+            ),
+            (
+                "still, keys 0.3 s ±25 %",
+                Sim {
+                    key_jitter: 0.25,
+                    ..Sim::new(0.0, 60.0, 0.3)
+                },
+            ),
+        ];
+        println!(
+            "| scenario | sent fps | peak 5 s fps | painted fps | source shown | source wait p50 / p90 ms | key wait p50 / p90 ms |"
+        );
+        println!("|---|---|---|---|---|---|---|");
+        for (name, sim) in rows {
+            let run = simulate_phases(Sim { secs: 60.0, ..sim });
+            let shown = if run.src_frames > 0 {
+                format!(
+                    "{:.1} %",
+                    100.0 * f64::from(run.src_shown) / f64::from(run.src_frames)
+                )
+            } else {
+                "–".into()
+            };
+            let src = if run.src_wait.is_empty() {
+                "–".into()
+            } else {
+                format!("{:.2} / {:.2}", run.src(0.5), run.src(0.9))
+            };
+            let key = if run.key_wait.is_empty() {
+                "–".into()
+            } else {
+                format!("{:.2} / {:.2}", run.key(0.5), run.key(0.9))
+            };
+            println!(
+                "| {name} | {:.2} | {:.2} | {:.2} | {shown} | {src} | {key} |",
+                run.fps(),
+                run.peak_fps(),
+                f64::from(run.painted) / run.secs,
+            );
+        }
     }
 
     /// Typing faster than the reserve refills over a 60 Hz animation at the cadence leaves the
