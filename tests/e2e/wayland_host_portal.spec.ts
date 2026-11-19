@@ -30,7 +30,11 @@
 // `gnome-scaled` at scale 2 over libei, and `gnome-notify` at scale 2 with the
 // backend refusing EIS, where the client's logical point reaches Mutter as the
 // stream's pixels. Mutter offers the cursor metadata at a fixed size, which
-// the stream must accept for any sprite to arrive.
+// the stream must accept for any sprite to arrive. `gnome-grow` has the
+// backend offer virtual sources too, opens a second display, which grows on a
+// virtual monitor of its own portal session, and toggles the cursor between
+// painted and page-drawn: the session, and its monitor, must stay the one it
+// opened, its cursor painted into the frames from the metadata meanwhile.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { accessSync, constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -43,7 +47,7 @@ import { Checks } from '../lib/checks.ts';
 import { onPath } from '../lib/desktop.ts';
 import { sleep, suiteOf, WORKDIR } from '../lib/env.ts';
 import { Host, suitesBin, type Observer } from '../lib/host.ts';
-import { launchClient } from '../lib/page.ts';
+import { launchClient, newPage, type Client } from '../lib/page.ts';
 import { realConsole, waitWrVideo, waitWsVideo, within } from '../lib/stream.ts';
 
 const SIZE = [1280, 720] as const;
@@ -319,11 +323,13 @@ class GnomeRig extends PortalRig {
     readonly logs = ['mutter', 'pipewire', 'wireplumber', 'portal-gnome', 'portal'];
     version: [number, number] = [0, 0];
     private readonly eis: boolean;
+    private readonly grow: boolean;
     private readonly mutter: string;
 
-    constructor(scale = 1, eis = true) {
+    constructor(scale = 1, eis = true, grow = false) {
         super('wayland-gnome', scale, { XDG_CURRENT_DESKTOP: 'GNOME', GSETTINGS_BACKEND: 'keyfile' });
         this.eis = eis;
+        this.grow = grow;
         const mutter = resolve(process.env.E2E_MUTTER || onPath('mutter') || '/nonexistent');
         let runnable: boolean;
         try {
@@ -357,7 +363,7 @@ class GnomeRig extends PortalRig {
         this.spawnLogged([this.mutter, '--wayland', '--no-x11', '--headless', '--wayland-display', this.socketName, '--virtual-monitor', `${this.mode[0]}x${this.mode[1]}`], 'mutter');
         why = await this.waitSocket();
         if (why) return why;
-        this.spawnLogged([suitesBin('mutter-portal'), ...(this.eis ? [] : ['--no-eis']), ...(this.scale !== 1 ? ['--scale', String(this.scale)] : [])], 'portal-gnome');
+        this.spawnLogged([suitesBin('mutter-portal'), ...(this.eis ? [] : ['--no-eis']), ...(this.scale !== 1 ? ['--scale', String(this.scale)] : []), ...(this.grow ? ['--virtual'] : [])], 'portal-gnome');
         // Up to the backend's own wait for Mutter's bus names, and some.
         for (const until = Date.now() + 40_000; !readFileSync(this.log('portal-gnome'), 'utf8').includes('ready');) {
             if (Date.now() > until) return `the Mutter portal backend never came up: ${tail(this.log('portal-gnome'), 3)}`;
@@ -413,11 +419,47 @@ async function landing(page: Page, obs: Observer, x: number, y: number, logical:
     return [got, want, at];
 }
 
+// A grown display's portal session: capture alone, no devices.
+const GROWN_OPEN = /portal session open: 1 stream\(s\), devices , cursor (\w+)/g;
+const nativeCursorJs = (on: boolean): string =>
+    `(() => { const input = window.webrtcInput; if (!input) return false; input.send('SET_NATIVE_CURSOR_RENDERING,${on ? 1 : 0}'); return true; })()`;
+
+/**
+ * Open a second display, which grows on a portal virtual monitor (host output
+ * 1), and toggle the cursor between painted and page-drawn: the grown
+ * display's session asks for the cursor metadata whatever the page wants, so
+ * the toggle paints the cursor into its frames and back without reopening the
+ * session, which would remove its virtual monitor and make another.
+ */
+async function growAndToggle(host: Host, res: Checks, rig: PortalRig, client: Client, url: string, mode: string): Promise<void> {
+    const log = (): Promise<string> => host.log();
+    const opens = async (): Promise<string[]> => [...(await log()).matchAll(GROWN_OPEN)].map((m) => m[1]);
+    const records = (): number => (readFileSync(rig.log('portal-gnome'), 'utf8').match(/: virtual monitor cursor mode/g) ?? []).length;
+    res.check('one more display can grow on a portal virtual monitor', await host.saw('one more display can grow on a portal virtual monitor', 10), textTail(await log(), 8));
+    const second = await newPage(client.context, url, { mode, hash: '#display2-right' });
+    try {
+        for (const until = Date.now() + 60_000; (await opens()).length === 0 && Date.now() < until;) await sleep(500);
+        const before = await opens();
+        res.check("the second display's session opens on a virtual monitor with the cursor metadata", r(before) === r(['metadata']) && records() === 1, `${r(before)}, ${records()} virtual record(s)`);
+        res.check('the grown display streams', await host.saw('output 1: first portal frame', 30), textTail(await log(), 8));
+        res.check('the page asks for the cursor painted', (await within(client.page.evaluate(nativeCursorJs(true)))) === true, '');
+        res.check("the grown display's cursor is painted into its frames", await host.saw("output 1: the host's cursor is painted into the frames", 20), textTail(await log(), 8));
+        await sleep(2000);
+        res.check('the page asks to draw the cursor again', (await within(client.page.evaluate(nativeCursorJs(false)))) === true, '');
+        res.check('the page draws the grown display\'s cursor again', await host.saw("output 1: the host's cursor is drawn by the page", 20), textTail(await log(), 8));
+        await sleep(2000);
+        const after = await opens();
+        res.check('the cursor toggle keeps the grown session and its virtual monitor', r(after) === r(before) && records() === 1 && !(await log()).includes('virtual monitor session failed'), `${r(after)}, ${records()} virtual record(s)`);
+    } finally {
+        await second.close();
+    }
+}
+
 const close2 = (a: Pt | null, b: Pt | null): boolean => a !== null && b !== null && Math.abs(a[0] - b[0]) <= 2 && Math.abs(a[1] - b[1]) <= 2;
 
-async function run(host: Host, res: Checks, mode: string, scale: number, desktop: string, eis: boolean): Promise<void> {
+async function run(host: Host, res: Checks, mode: string, scale: number, desktop: string, eis: boolean, grow: boolean): Promise<void> {
     const gnome = desktop === 'gnome';
-    const rig: PortalRig = gnome ? new GnomeRig(scale, eis) : new KdeRig(scale);
+    const rig: PortalRig = gnome ? new GnomeRig(scale, eis, grow) : new KdeRig(scale);
     const why = await rig.start();
     if (why) {
         await rig.stop();
@@ -553,6 +595,7 @@ async function run(host: Host, res: Checks, mode: string, scale: number, desktop
             // Either 24-pixel cursor comes from a buffer scale times as large.
             const sprite = /portal cursor sprites arrive \((\d+)x(\d+)/.exec(await log());
             res.check("the sprite is the cursor's size at the output's scale", sprite !== null && Number(sprite[1]) === Number(sprite[2]) && Number(sprite[1]) === 24 * scale, sprite ? sprite[0] : 'no sprite');
+            if (grow) await growAndToggle(host, res, rig, client, url, mode);
             const real = realConsole(client.consoleErrors, client.notFound);
             res.check('no browser console errors', real.errors.length === 0 && real.notFound.length === 0, [...real.errors, ...real.notFound].slice(0, 3));
         } finally {
@@ -565,24 +608,25 @@ async function run(host: Host, res: Checks, mode: string, scale: number, desktop
     }
 }
 
-const RUNS: Record<string, { mode: string; scale: number; desktop: string; eis: boolean }> = {
+const RUNS: Record<string, { mode: string; scale: number; desktop: string; eis: boolean; grow?: boolean }> = {
     websockets: { mode: 'websockets', scale: 1, desktop: 'kde', eis: true },
     webrtc: { mode: 'webrtc', scale: 1, desktop: 'kde', eis: true },
     scaled: { mode: 'websockets', scale: 2, desktop: 'kde', eis: true },
     gnome: { mode: 'websockets', scale: 1, desktop: 'gnome', eis: true },
     'gnome-scaled': { mode: 'websockets', scale: 2, desktop: 'gnome', eis: true },
     'gnome-notify': { mode: 'websockets', scale: 2, desktop: 'gnome', eis: false },
+    'gnome-grow': { mode: 'websockets', scale: 1, desktop: 'gnome', eis: true, grow: true },
     // The registry's `wayland` case runs the default block, as the suite runs with no selector.
     wayland: { mode: 'websockets', scale: 1, desktop: 'kde', eis: true },
 };
 
 for (const [which, run_] of Object.entries(RUNS)) {
     test(which, async () => {
-        const { mode, scale, desktop, eis } = run_;
-        const res = new Checks(`wl-host-portal-${mode}${desktop === 'gnome' ? '-gnome' : ''}${scale !== 1 ? `-scale${scale}` : ''}${eis ? '' : '-noeis'}`);
+        const { mode, scale, desktop, eis, grow = false } = run_;
+        const res = new Checks(`wl-host-portal-${mode}${desktop === 'gnome' ? '-gnome' : ''}${scale !== 1 ? `-scale${scale}` : ''}${eis ? '' : '-noeis'}${grow ? '-grow' : ''}`);
         const host = new Host(suiteOf(import.meta.filename));
         try {
-            await run(host, res, mode, scale, desktop, eis);
+            await run(host, res, mode, scale, desktop, eis, grow);
         } finally {
             await host.close();
         }

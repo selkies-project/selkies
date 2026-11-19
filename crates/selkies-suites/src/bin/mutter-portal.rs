@@ -16,12 +16,14 @@
 //!
 //! `--no-eis` refuses `ConnectToEIS`, as a backend without EIS does, so a client falls back to
 //! the Notify methods. `--scale N` first sets the primary monitor's scale through Mutter's
-//! DisplayConfig (Mutter 46 has no `gdctl`). Each Notify call it forwards goes to stdout with the
+//! DisplayConfig (Mutter 46 has no `gdctl`). `--virtual` offers virtual sources too: a session
+//! that selects one records a virtual monitor through Mutter's `RecordVirtual`, which Mutter
+//! creates for the session and removes when it stops. Each Notify call it forwards goes to stdout with the
 //! time, as Mutter stamps its own log; `mutter_portal: ready` once it owns its bus name. The
 //! portal frontend finds it through a `.portal` file naming [`BUS_NAME`].
 //!
 //! ```text
-//! mutter-portal [--no-eis] [--scale N]
+//! mutter-portal [--no-eis] [--scale N] [--virtual]
 //! ```
 
 use std::collections::HashMap;
@@ -93,6 +95,8 @@ struct Session {
     devices: u32,
     cursor_mode: u32,
     scale: f64,
+    /// The session selected a virtual source rather than a monitor.
+    virtual_src: bool,
 }
 
 #[derive(Default)]
@@ -267,12 +271,14 @@ impl SessionObject {
     }
 }
 
-/// What both interfaces share: the connection, the sessions, and whether EIS is offered.
+/// What both interfaces share: the connection, the sessions, whether EIS is offered, and
+/// whether virtual sources are.
 #[derive(Clone)]
 struct Backend {
     conn: Connection,
     state: Shared,
     eis: bool,
+    virtual_sources: bool,
 }
 
 impl Backend {
@@ -323,20 +329,33 @@ impl Backend {
         Ok((0, Dict::new()))
     }
 
-    /// Record the primary monitor, start, and answer once Mutter names the stream's node.
+    /// Record the primary monitor, or a virtual one where the session selected that, start,
+    /// and answer once Mutter names the stream's node.
     async fn start(&self, handle: &str) -> Result<Reply, PortalError> {
         let s = session(&self.state, handle)?;
         let mut options = Dict::new();
         options.insert("cursor-mode".into(), variant(s.cursor_mode));
-        let (stream,): (OwnedObjectPath,) = call(
-            &self.conn,
-            SC_NAME,
-            &s.sc_path,
-            SC_SESSION,
-            "RecordMonitor",
-            &("", options),
-        )
-        .await?;
+        let (stream,): (OwnedObjectPath,) = if s.virtual_src {
+            call(
+                &self.conn,
+                SC_NAME,
+                &s.sc_path,
+                SC_SESSION,
+                "RecordVirtual",
+                &(options,),
+            )
+            .await?
+        } else {
+            call(
+                &self.conn,
+                SC_NAME,
+                &s.sc_path,
+                SC_SESSION,
+                "RecordMonitor",
+                &("", options),
+            )
+            .await?
+        };
         let stream_path = stream.to_string();
         update(&self.state, handle, |x| {
             x.stream_path.clone_from(&stream_path)
@@ -368,7 +387,10 @@ impl Backend {
         };
         let mut props = Dict::new();
         props.insert("id".into(), variant("0"));
-        props.insert("source_type".into(), variant(1u32));
+        props.insert(
+            "source_type".into(),
+            variant(if s.virtual_src { 4u32 } else { 1u32 }),
+        );
         let position = pair("position");
         if let Some(at) = position {
             props.insert("position".into(), variant(at));
@@ -385,7 +407,15 @@ impl Backend {
         }
         let scale = monitor_scale(&self.conn, position.unwrap_or((0, 0))).await;
         update(&self.state, handle, |x| x.scale = scale);
-        println!("mutter_portal: stream {node_id}: Mutter's parameters {p:?}, scale {scale}");
+        println!(
+            "mutter_portal: stream {node_id}: {} cursor mode {}, Mutter's parameters {p:?}, scale {scale}",
+            if s.virtual_src {
+                "virtual monitor"
+            } else {
+                "monitor"
+            },
+            s.cursor_mode
+        );
         let mut results = Dict::new();
         results.insert("streams".into(), variant(vec![(node_id, props)]));
         if s.remote {
@@ -456,6 +486,11 @@ impl ScreenCast {
         _app_id: String,
         options: Dict,
     ) -> Result<Reply, PortalError> {
+        if self.0.virtual_sources && dict_u32(&options, "types").is_some_and(|t| t & 4 != 0) {
+            update(&self.0.state, session_handle.as_str(), |s| {
+                s.virtual_src = true
+            });
+        }
         // The portal's cursor mode bits (hidden, embedded, metadata) as Mutter's cursor-mode values.
         if let Some(mode) = dict_u32(&options, "cursor_mode").and_then(|m| match m {
             1 => Some(0),
@@ -481,10 +516,10 @@ impl ScreenCast {
         self.0.start(session_handle.as_str()).await
     }
 
-    /// Monitors.
+    /// Monitors, and virtual monitors under `--virtual`.
     #[zbus(property, name = "AvailableSourceTypes")]
     fn available_source_types(&self) -> u32 {
-        1
+        if self.0.virtual_sources { 5 } else { 1 }
     }
 
     /// Hidden, embedded, and metadata cursors.
@@ -796,6 +831,7 @@ async fn wait_for_names(
 async fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let eis = !args.iter().any(|a| a == "--no-eis");
+    let virtual_sources = args.iter().any(|a| a == "--virtual");
     let scale = args
         .iter()
         .position(|a| a == "--scale")
@@ -817,6 +853,7 @@ async fn run() -> Result<(), String> {
         conn: conn.clone(),
         state: Shared::default(),
         eis,
+        virtual_sources,
     };
     conn.object_server()
         .at(PORTAL_PATH, ScreenCast(backend.clone()))

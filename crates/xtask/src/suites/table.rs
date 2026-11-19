@@ -578,6 +578,7 @@ pub static SUITES: &[Suite] = &[
             "gnome",
             "gnome-scaled",
             "gnome-notify",
+            "gnome-grow",
             "wayland",
         ],
         name: None,
