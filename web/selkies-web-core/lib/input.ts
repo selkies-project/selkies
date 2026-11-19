@@ -303,9 +303,9 @@ const LONG_PRESS_MS = 750;
 const LONG_PRESS_MAX_MOVEMENT_SQ = 15 * 15;
 
 /**
- * How late a long press's timer may run and still right-click, in milliseconds,
- * and how long one that ran later waits for a lift still on its way
- * (`Input._armLongPress`).
+ * The last stretch of a long press, in milliseconds, that its timer waits out
+ * once more whenever it ran late, and how late that wait may run and still
+ * right-click (`Input._armLongPress`).
  */
 const LONG_PRESS_SETTLE_MS = 50;
 
@@ -4793,9 +4793,11 @@ export class Input {
      *
      * The timer only knows the page's clock. A main thread busy past it runs the timer late, and
      * the browser hands the page a lift made meanwhile only once the thread is free again, after
-     * the timer: a quick tap would right-click. So a timer that ran late waits
-     * `LONG_PRESS_SETTLE_MS` more, as often as that wait runs late too, and clicks only if the
-     * finger is still down; a lift handled first decides from its own timestamp
+     * the timer, so a quick tap would right-click. So the timer runs to `LONG_PRESS_SETTLE_MS`
+     * short of the long press, then waits out that last stretch, again as often as the wait runs
+     * more than `LONG_PRESS_SETTLE_MS` late: the thread is free for a while before the right
+     * click, and handles a lift still on its way first. A wait that runs on time right-clicks if
+     * the finger is still down; a lift handled first decides from its own timestamp
      * (`_handleTouchEvent`).
      */
     _armLongPress(identifier: number, since: number): void {
@@ -4803,12 +4805,12 @@ export class Input {
         const y = this.y;
         this._longPressTouchIdentifier = identifier;
         this._longPressSince = since;
-        const wait = (ms: number): void => {
+        const wait = (ms: number, settling: boolean): void => {
             const due = performance.now() + ms;
             this._longPressTimer = setTimeout((): void => {
                 this._longPressTimer = null;
-                if (performance.now() - due > LONG_PRESS_SETTLE_MS) {
-                    wait(LONG_PRESS_SETTLE_MS);
+                if (!settling || performance.now() - due > LONG_PRESS_SETTLE_MS) {
+                    wait(LONG_PRESS_SETTLE_MS, true);
                     return;
                 }
                 const touchData = this._activeTouches.get(identifier);
@@ -4824,7 +4826,7 @@ export class Input {
             }, ms);
         };
         if (this._longPressTimer) clearTimeout(this._longPressTimer);
-        wait(LONG_PRESS_MS);
+        wait(LONG_PRESS_MS - LONG_PRESS_SETTLE_MS, false);
     }
 
     /** Clicks the right button at the pointer, the long press of a touch. */

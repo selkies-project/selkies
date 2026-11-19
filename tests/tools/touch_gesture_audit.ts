@@ -700,6 +700,86 @@ function pencilTap(input: Input, x: number, y: number): void {
     check('direct touch: a long press lifted while the page is busy is a right click, and no left one',
         right === 'down,up' && left === '', `right ${right}, left ${left}`);
 }
+/** The left and the right clicks a direct touch sent, as 'down,up' each, and when the right one went down. */
+function clicks(sent: Sent): { left: string; right: string; rightAt: number | undefined } {
+    const right = leftTransitions(sent, 4);
+    return {
+        left: leftTransitions(sent).map(([, s]) => s).join(','),
+        right: right.map(([, s]) => s).join(','),
+        rightAt: right[0]?.[0],
+    };
+}
+for (const busy of [760, 790, 800, 2500]) {
+    // A quick tap, the main thread busy from the touch until just past the long press or long
+    // after it: its timer runs before the lift's handler, a little late or very late
+    const { input, sent } = makeInput(false);
+    const t = touch(1, 400, 300);
+    fire(input, 'touchstart', [t], [t]);
+    const lifted = now + 90;
+    stall(busy);
+    fire(input, 'touchend', [t], [], lifted);
+    advance(1000);
+    const { left, right } = clicks(sent);
+    check(`direct touch: a tap lifted at 90 ms, the page busy to ${busy} ms, clicks, and no right one`,
+        left === 'down,up' && right === '', `left ${left}, right ${right}`);
+}
+{
+    // The thread frees just short of the long press and is busy again through it: the wait for
+    // a lift still on its way runs late too
+    const { input, sent } = makeInput(false);
+    const t = touch(1, 400, 300);
+    fire(input, 'touchstart', [t], [t]);
+    const lifted = now + 90;
+    stall(720);
+    stall(130);
+    fire(input, 'touchend', [t], [], lifted);
+    advance(1000);
+    const { left, right } = clicks(sent);
+    check('direct touch: a tap whose lift waits out two busy spells clicks, and no right one',
+        left === 'down,up' && right === '', `left ${left}, right ${right}`);
+}
+{
+    // The touch's own handler ran a second after the finger came down, and the lift's soon
+    // after it, before the long press's timer: the finger rested past the long press
+    const { input, sent } = makeInput(false);
+    const t = touch(1, 400, 300);
+    fire(input, 'touchstart', [t], [t], now - 1000);
+    advance(100);
+    fire(input, 'touchend', [t], []);
+    advance(1000);
+    const { left, right } = clicks(sent);
+    check('direct touch: a press whose touch is handled late, lifted past the long press, right-clicks once, and no left one',
+        right === 'down,up' && left === '', `right ${right}, left ${left}`);
+}
+{
+    // The finger stays down through a busy spell past the long press, and lifts once the page is
+    // free again
+    const { input, sent } = makeInput(false);
+    const t = touch(1, 400, 300);
+    const touched = now;
+    fire(input, 'touchstart', [t], [t]);
+    stall(800);
+    advance(400);
+    fire(input, 'touchend', [t], []);
+    advance(1000);
+    const { left, right, rightAt } = clicks(sent);
+    check('direct touch: a press held through a busy spell right-clicks once as the page frees, and no left one',
+        right === 'down,up' && left === '' && rightAt !== undefined && rightAt - touched <= 900,
+        `right ${right} at ${rightAt === undefined ? '-' : rightAt - touched} ms, left ${left}`);
+}
+{
+    const { input, sent } = makeInput(false);
+    const t = touch(1, 400, 300);
+    const touched = now;
+    fire(input, 'touchstart', [t], [t]);
+    advance(1000);
+    fire(input, 'touchend', [t], []);
+    advance(1000);
+    const { left, right, rightAt } = clicks(sent);
+    check('direct touch: a long press on a free page right-clicks once at the long press, and no left one',
+        right === 'down,up' && left === '' && rightAt === touched + 750,
+        `right ${right} at ${rightAt === undefined ? '-' : rightAt - touched} ms, left ${left}`);
+}
 {
     // A pinch anchored on a still finger, the moving one lifting first: the finger left behind
     // lifts where it touched, short of a long press
