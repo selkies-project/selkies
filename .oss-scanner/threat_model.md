@@ -98,6 +98,19 @@
   a `desktop-entry` hint naming a path is ignored, every image is shrunk to 128 pixels, and the shell keeps at
   most 64 notifications, closing the oldest. A caller can show text and an image on the user's screen and learn
   when the user invoked one of its actions; nothing it sends is run, opened, or written.
+- Under `--desktop` with its tray on, the shell is also the session's system tray watcher and host
+  (`crates/selkies-desktop/src/sni.rs`): `org.kde.StatusNotifierWatcher` on the session bus, taken only while no
+  other process owns that name. Any process of the session user's bus may call `RegisterStatusNotifierItem` and
+  `RegisterStatusNotifierHost`, read the registered items, and hear the registration signals. The shell then calls
+  the registering connection back: `GetAll` on its item, `AboutToShow`, `GetLayout`, and `Event` on its
+  `com.canonical.dbusmenu` menu, and `Activate`, `SecondaryActivate`, `ContextMenu`, and `Scroll` on the user's
+  clicks, each on a worker thread under a five-second method timeout, so an item that never answers holds up no
+  other part of the shell. What an item sends is bounded before the shell draws it: at most 64 items, titles,
+  tooltips, and labels cut to 128 characters, properties and menu entries read as typed values with any of another
+  type dropped, an `IconPixmap` taken only with sides of 1 to 512 and bytes that cover them, an icon in the item's
+  own `IconThemePath` read only as a regular PNG or SVG file of at most 16 MiB and decoded on the worker, an icon
+  name with a path ignored, and a menu cut to 512 entries and eight levels. An item can show an icon, a tooltip,
+  and a menu on the user's bar and learn which entry the user chose; nothing it sends is run or written.
 - Under `--pelorus` (`crates/selkies/src/pelorus.rs` and `pelorus/`, the `pelorus` crate's accessibility-bus reader,
   the dashboard's `src/pelorus`): routes under `/pelorus` that every credential short of the controller's is refused
   (the desktop as text, the agent's tools, `api/run`, `api/models`, `api/models/names`, `api/session`). A run hands

@@ -61,6 +61,7 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Vec<Rect> {
         Popup::TaskMenu(index) => rects.extend(draw_task_menu(d, canvas, index)),
         Popup::PanelMenu(x, _) => rects.push(settings::draw_panel_menu(d, canvas, x)),
         Popup::DesktopMenu(x, y) => rects.push(ui::desktop_menu::draw(d, canvas, (x, y))),
+        Popup::TrayMenu => rects.extend(ui::tray_menu::draw(d, canvas)),
     }
     if let Some(text) = d.tooltip.clone()
         && let Some(rect) = draw_tooltip(d, canvas, &text)

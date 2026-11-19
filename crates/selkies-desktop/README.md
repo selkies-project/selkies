@@ -42,8 +42,11 @@ people reach for in a multi-application container:
   double click as the file manager opens them and stay where they are
   dragged on the icon grid.
 * **Quick launch** buttons beside the start button and a **system tray**
-  beside the clock that hosts the XEmbed icons applications such as Steam
-  dock, under openbox and under labwc through XWayland.
+  beside the clock: the shell is the session's StatusNotifierItem watcher and
+  host, so the icons Qt, Electron, and libappindicator applications register
+  over D-Bus show there with their menus on either display server, and it
+  hosts the XEmbed icons X11 applications such as Steam dock, under openbox
+  and under labwc through XWayland.
 * **Settings** in a window of their own, opened from the bar's right-click
   menu or by `selkies-desktop --settings [PAGE]`, with a sidebar of pages
   under four captions.  Appearance: Theme, the Dark (the default), Light,
@@ -227,7 +230,7 @@ applies within a moment.
 | `favorites` | the installed browsers, a terminal, and Files | Comma separated desktop file IDs (`foot`, `firefox-esr.desktop`) pinned at the top of the menu; unset, the first installed of Firefox, Chrome, Chromium, and a terminal are pinned ahead of the file manager |
 | `background_style_2`, `background_2`, `wallpaper_2`, `wallpaper_mode_2` | | The same four keys with a `_N` suffix override them for monitor N, numbered from 1 with the primary first |
 | `launchers` | | Comma separated desktop file IDs shown as quick launch buttons beside the start button |
-| `show_tray` | `true` | Host the system tray beside the clock for the applications that dock an icon |
+| `show_tray` | `true` | Host the system tray beside the clock for the applications that register or dock an icon |
 | `desktops` | `2` | Number of virtual desktops, 1 to 9; the window manager reads this key from the same file |
 | `show_pager` | `true` | Show the pager, one numbered pill per desktop, between the quick launch buttons and the taskbar when there is more than one desktop |
 | `tasks_all_desktops` | `false` | List the windows of every desktop on the taskbar rather than the current one's |

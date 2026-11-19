@@ -21,7 +21,7 @@ use crate::notify::Notification;
 use crate::render::{Canvas, Fonts};
 use crate::ui::notifications::{self, CardPart, CenterPart, NotificationState};
 use crate::ui::settings::Page;
-use crate::ui::{self, background, desktop_menu, launcher, menu, panel, popups, settings};
+use crate::ui::{self, background, desktop_menu, launcher, menu, panel, popups, settings, tray_menu};
 use crate::xkb::Key;
 
 /// Height of the strip that brings an auto-hidden bar back.
@@ -335,6 +335,8 @@ pub enum Popup {
     PanelMenu(i32, PanelTarget),
     /// The desktop icons' right-click menu, by the point of the panel surface it opened at.
     DesktopMenu(i32, i32),
+    /// The menu of a D-Bus tray item, which [`Desktop::tray_menu`] holds.
+    TrayMenu,
 }
 
 /// What the pointer rests on, for hover highlights and tooltips.
@@ -390,6 +392,10 @@ pub enum Hover {
     Card(u32, CardPart),
     /// A part of the notification center.
     Center(CenterPart),
+    /// A D-Bus tray item's button, by its position among the items.
+    StatusItem(usize),
+    /// An entry of a tray item's menu, by its level and row.
+    TrayMenuItem(usize, usize),
 }
 
 /// Current volume as the audio module reports it.
@@ -540,6 +546,10 @@ pub struct Desktop {
     pub preview_wallpaper: HashMap<(std::path::PathBuf, u32), Arc<Pixmap>>,
     /// Icons docked in the system tray.
     pub tray_icons: usize,
+    /// The D-Bus tray items, in the order they registered.
+    pub status_items: Vec<crate::sni::Item>,
+    /// The menu of a tray item, asked for or open.
+    pub tray_menu: Option<tray_menu::TrayMenu>,
     /// The strip of the bar the tray icons occupy, in panel coordinates.
     pub tray_slot: Option<Rect>,
     /// Whether the tray strip moved since the tray was last placed.
@@ -717,6 +727,8 @@ impl Desktop {
             panel_offset: (0, 0),
             preview_wallpaper: HashMap::new(),
             tray_icons: 0,
+            status_items: Vec::new(),
+            tray_menu: None,
             tray_slot: None,
             tray_moved: false,
             portal,
@@ -2658,6 +2670,7 @@ impl Desktop {
             Hover::Clock => Some(crate::clock::format_now("%A, %B %-d, %Y")),
             Hover::ShowDesktop => Some(tr("Show desktop").to_string()),
             Hover::Bell => Some(notifications::bell_tooltip(self)),
+            Hover::StatusItem(i) => self.status_items.get(i).and_then(tray_menu::tooltip),
             Hover::Pager(i) => Some(trf("Desktop {n}", &[("n", &(i + 1).to_string())])),
             Hover::Start => Some(tr("Applications (Super: quick launcher)").to_string()),
             Hover::Launcher(i) => self
@@ -2749,6 +2762,9 @@ impl Desktop {
         if self.popup == Popup::Notifications {
             self.notifications.close_center();
         }
+        if popup != Popup::TrayMenu {
+            self.tray_menu = None;
+        }
         self.popup = popup;
         self.tooltip = None;
         if popup == Popup::Notifications {
@@ -2777,6 +2793,7 @@ impl Desktop {
 
     /// Closes the open popup.
     pub fn close_popup(&mut self) {
+        self.tray_menu = None;
         if self.popup == Popup::None {
             return;
         }
@@ -2960,6 +2977,7 @@ impl Desktop {
                     Popup::TaskMenu(_) => popups::task_menu_hit(self, x, y).unwrap_or(Hover::None),
                     Popup::PanelMenu(..) => settings::panel_menu_hit(self, x, y).unwrap_or(Hover::None),
                     Popup::DesktopMenu(..) => desktop_menu::hit(self, x, y).unwrap_or(Hover::None),
+                    Popup::TrayMenu => tray_menu::hit(self, x, y).unwrap_or(Hover::None),
                     Popup::Notifications => notifications::center_hit(self, x, y).unwrap_or(Hover::None),
                     _ => Hover::None,
                 };
@@ -3082,6 +3100,7 @@ impl Desktop {
                         Popup::TaskMenu(_) => popups::task_menu_click(self, x, y, button),
                         Popup::PanelMenu(..) => settings::panel_menu_click(self, x, y, button),
                         Popup::DesktopMenu(..) => desktop_menu::click(self, x, y, button),
+                        Popup::TrayMenu => tray_menu::click(self, x, y, button),
                         Popup::Notifications => notifications::center_click(self, x, y, button),
                         Popup::None => false,
                     };
@@ -3089,6 +3108,7 @@ impl Desktop {
                         return;
                     }
                     let was = self.popup;
+                    let tray_key = self.tray_menu.as_ref().map(|m| m.key.clone());
                     self.close_popup();
                     if !self.bar_rect().contains(x, y) {
                         return;
@@ -3113,6 +3133,12 @@ impl Desktop {
                     if let Hover::Bell = panel::hit(self, x, y)
                         && was == Popup::Notifications
                         && button == Button::Left
+                    {
+                        return;
+                    }
+                    if let Hover::StatusItem(index) = panel::hit(self, x, y)
+                        && was == Popup::TrayMenu
+                        && self.status_items.get(index).map(|i| &i.key) == tray_key.as_ref()
                     {
                         return;
                     }

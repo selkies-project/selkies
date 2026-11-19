@@ -1719,7 +1719,8 @@ impl Backend for WaylandBackend {
             Request::SetVolume(_)
             | Request::ToggleMute
             | Request::NotificationClosed { .. }
-            | Request::ActionInvoked { .. } => {}
+            | Request::ActionInvoked { .. }
+            | Request::Tray(_) => {}
         }
     }
 }

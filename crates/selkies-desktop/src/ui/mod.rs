@@ -12,6 +12,7 @@ pub mod panel;
 pub mod popups;
 pub mod preview;
 pub mod settings;
+pub mod tray_menu;
 
 use tiny_skia::{Color, Path, PathBuilder};
 

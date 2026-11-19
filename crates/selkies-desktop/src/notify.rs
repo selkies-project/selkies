@@ -26,8 +26,7 @@
 //!
 //! zbus serves calls on its own executor thread, so a call is validated and
 //! converted there, and the result handed to the shell's loop through a
-//! channel, with a byte on a pipe whose read end is one of the descriptors
-//! the loop polls ([`Server::fd`]).  The ids `Notify` answers come from a
+//! [`mailbox`](crate::mailbox) whose pipe the loop polls ([`Server::fd`]).  The ids `Notify` answers come from a
 //! counter that thread owns, since the call must answer before the loop sees
 //! the notification.  The signals are emitted from the loop, each call run to
 //! completion with [`zbus::block_on`] as the Settings portal's are.  The name
@@ -36,20 +35,20 @@
 //! where another one already runs the shell serves nothing.
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::RawFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
 use tiny_skia::Pixmap;
 use zbus::connection::Builder;
-use zbus::export::serde::de::{self, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use zbus::export::serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
 use zbus::fdo::RequestNameFlags;
 use zbus::object_server::{InterfaceRef, SignalEmitter};
 use zbus::{OwnedVariant, Signature, Type, Variant};
+
+use crate::mailbox::{self, Mailbox, Post};
+use crate::variant::Lenient;
 
 /// The well-known name of the notification server.
 pub const NAME: &str = "org.freedesktop.Notifications";
@@ -375,44 +374,6 @@ fn load_image(path: &str) -> Option<Pixmap> {
 /// alpha, bits per sample, channels, and the rows.
 type RawImage = (i32, i32, i32, bool, i32, i32, Vec<u8>);
 
-/// The `image-data` hint read as its typed fields when the variant carries
-/// them, and as nothing when it carries anything else.
-#[derive(Debug, Default)]
-struct ImageHint(Option<RawImage>);
-
-impl Type for ImageHint {
-    const SIGNATURE: &'static Signature = &Signature::Variant;
-}
-
-impl<'de> zbus::export::serde::Deserialize<'de> for ImageHint {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<ImageHint, D::Error> {
-        deserializer.deserialize_struct("Variant", &["signature", "value"], ImageVisitor)
-    }
-}
-
-/// Reads a variant's signature, then its value as [`RawImage`] when the
-/// signature is that one's and skips it otherwise.
-struct ImageVisitor;
-
-impl<'de> Visitor<'de> for ImageVisitor {
-    type Value = ImageHint;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a variant")
-    }
-
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<ImageHint, A::Error> {
-        let signature: Signature = seq
-            .next_element()?
-            .ok_or_else(|| de::Error::invalid_length(0, &self))?;
-        if &signature == <RawImage as Type>::SIGNATURE {
-            return Ok(ImageHint(seq.next_element()?));
-        }
-        seq.next_element::<IgnoredAny>()?;
-        Ok(ImageHint(None))
-    }
-}
-
 /// The hints the server reads.  The scalar ones are taken as variants and
 /// read leniently, an integer of any width or a boolean where one is meant;
 /// every other key is skipped unread.
@@ -455,11 +416,11 @@ impl<'de> Visitor<'de> for HintsVisitor {
         while let Some(key) = map.next_key::<String>()? {
             let slot = match key.as_str() {
                 "image-data" => {
-                    hints.image_data = map.next_value::<ImageHint>()?.0;
+                    hints.image_data = map.next_value::<Lenient<RawImage>>()?.0;
                     continue;
                 }
                 "image_data" => {
-                    legacy_image = map.next_value::<ImageHint>()?.0;
+                    legacy_image = map.next_value::<Lenient<RawImage>>()?.0;
                     continue;
                 }
                 "urgency" => &mut hints.urgency,
@@ -603,23 +564,13 @@ struct NotifyCall {
 /// The `org.freedesktop.Notifications` interface, handing what it is sent
 /// to the shell's loop.
 struct Notifications {
-    /// The channel to the loop.
-    sender: Sender<Incoming>,
-    /// The write end of the pipe that wakes the loop.
-    wake: File,
+    /// The way to the loop.
+    post: Post<Incoming>,
     /// The last id answered.
     last_id: AtomicU32,
 }
 
 impl Notifications {
-    /// Hands something to the loop and wakes it.  A full pipe already wakes
-    /// the loop, so a write that would block is dropped.
-    fn send(&self, incoming: Incoming) {
-        if self.sender.send(incoming).is_ok() {
-            let _ = (&self.wake).write(&[1]);
-        }
-    }
-
     /// The id for a call: the one it replaces, else the next unused one,
     /// never zero.
     fn assign(&self, replaces_id: u32) -> u32 {
@@ -668,14 +619,14 @@ impl Notifications {
             hints,
             expire_timeout,
         };
-        self.send(Incoming::Notify(Box::new(build(id, call))));
+        self.post.send(Incoming::Notify(Box::new(build(id, call))));
         id
     }
 
     /// Withdraws a notification; the shell signals its closing when it was
     /// still open.
     fn close_notification(&self, id: u32) {
-        self.send(Incoming::Close(id));
+        self.post.send(Incoming::Close(id));
     }
 
     /// The server's name, vendor, version, and the specification's version.
@@ -705,9 +656,7 @@ pub struct Server {
     /// holds the connection, and with it the name.
     interface: InterfaceRef<Notifications>,
     /// What the interface handed over.
-    receiver: Receiver<Incoming>,
-    /// The read end of the pipe that wakes the loop.
-    wake: File,
+    mailbox: Mailbox<Incoming>,
 }
 
 impl Server {
@@ -732,18 +681,9 @@ impl Server {
     /// The pipe's or the connection's failure, or
     /// [`zbus::Error::NameTaken`] when the name has an owner.
     fn serve(builder: Builder<'_>) -> zbus::Result<Server> {
-        let mut fds = [0 as RawFd; 2];
-        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) } != 0 {
-            return Err(zbus::Error::InputOutput(
-                Arc::new(std::io::Error::last_os_error()),
-            ));
-        }
-        // SAFETY: pipe2 succeeded, so both descriptors are open and owned by nothing else.
-        let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-        let (sender, receiver) = channel();
+        let (post, mailbox) = mailbox::channel().map_err(|e| zbus::Error::InputOutput(Arc::new(e)))?;
         let notifications = Notifications {
-            sender,
-            wake: File::from(write),
+            post,
             last_id: AtomicU32::new(0),
         };
         zbus::block_on(async {
@@ -755,24 +695,18 @@ impl Server {
                 .object_server()
                 .interface::<_, Notifications>(PATH)
                 .await?;
-            Ok(Server {
-                interface,
-                receiver,
-                wake: File::from(read),
-            })
+            Ok(Server { interface, mailbox })
         })
     }
 
     /// The descriptor that becomes readable when something arrived.
     pub fn fd(&self) -> RawFd {
-        self.wake.as_raw_fd()
+        self.mailbox.fd()
     }
 
     /// Takes everything that arrived, clearing the wake pipe.
     pub fn drain(&self) -> Vec<Incoming> {
-        let mut buf = [0u8; 64];
-        while (&self.wake).read(&mut buf).is_ok_and(|n| n > 0) {}
-        self.receiver.try_iter().collect()
+        self.mailbox.drain()
     }
 
     /// Signals that a notification closed.
@@ -809,8 +743,7 @@ fn report(result: zbus::Result<()>) {
 mod tests {
     use super::*;
 
-    use std::io::BufRead;
-    use std::process::{Child, Command, Stdio};
+    use crate::test_bus::Bus;
 
     use zbus::{Connection, Message};
 
@@ -892,41 +825,6 @@ mod tests {
         );
         assert!(reference("../etc/passwd").is_none());
         assert!(reference("  ").is_none());
-    }
-
-    /// A private session bus, ended with the test.
-    struct Bus {
-        daemon: Child,
-        address: String,
-    }
-
-    impl Bus {
-        fn start() -> Option<Bus> {
-            let mut daemon = Command::new("dbus-daemon")
-                .args(["--session", "--nofork", "--print-address=1"])
-                .stdout(Stdio::piped())
-                .spawn()
-                .ok()?;
-            let mut address = String::new();
-            std::io::BufReader::new(daemon.stdout.take()?)
-                .read_line(&mut address)
-                .ok()?;
-            Some(Bus {
-                daemon,
-                address: address.trim().to_string(),
-            })
-        }
-
-        fn builder(&self) -> Builder<'static> {
-            Builder::address(self.address.as_str())
-        }
-    }
-
-    impl Drop for Bus {
-        fn drop(&mut self) {
-            let _ = self.daemon.kill();
-            let _ = self.daemon.wait();
-        }
     }
 
     fn call<B>(client: &Connection, method: &str, body: &B) -> zbus::Result<Message>
