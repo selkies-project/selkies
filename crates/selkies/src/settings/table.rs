@@ -2120,6 +2120,20 @@ pub static DEFINITIONS: &[SettingDef] = &[
         client_excluded: false,
     },
     SettingDef {
+        name: "webrtc_ignore_interfaces",
+        kind: Kind::Str,
+        default: "docker0, br-*",
+        help: "Network interfaces whose addresses WebRTC leaves out of its host ICE candidates and binds no mux port on, comma- or space-separated; an entry ending in an asterisk names every interface whose name begins with the rest. The default leaves out Docker's bridges, docker0 and the br- bridge of each network created beside it: the host reaches its other networks from such a bridge only through the NAT Docker installs, which rewrites the source address and port of every check the server sends from the bridge address, so a client paired with it meets the server at an address and port it was never offered, outside webrtc_port_range or the mux port. Another runtime's NAT bridge, such as libvirt's virbr0, is added the same way. A container's own interface is not among them. A client that reaches the server only through such a bridge, as on a Docker internal network, and a host whose own network rides a bridge of one of these names need a list without it; \"none\" gathers on every interface.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: false,
+    },
+    SettingDef {
         name: "webrtc_port_range",
         kind: Kind::Str,
         default: "",
@@ -3311,6 +3325,10 @@ impl Settings {
 
     pub fn webrtc_public_ip(&self) -> &str {
         self.str_value("webrtc_public_ip")
+    }
+
+    pub fn webrtc_ignore_interfaces(&self) -> &str {
+        self.str_value("webrtc_ignore_interfaces")
     }
 
     pub fn webrtc_port_range(&self) -> &str {

@@ -25,6 +25,7 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use parking_lot::Mutex;
+use selkies_rtc::ice::gather::host_addresses;
 use selkies_rtc::ice::rtc_config::{HttpFetch, HttpRequest, HttpResponse, RtcConfigSettings};
 use selkies_rtc::signaling::ClientType;
 use serde_json::{Value as Json, json};
@@ -454,12 +455,33 @@ pub fn public_ips(listed: &str) -> Vec<std::net::IpAddr> {
         .collect()
 }
 
-/// The ICE topology the settings decide, once.
+/// The interfaces a `webrtc_ignore_interfaces` value names, separated by commas, whitespace, or
+/// both; `none` names none.
+pub fn ignored_interfaces(listed: &str) -> Vec<String> {
+    if listed.trim().eq_ignore_ascii_case("none") {
+        return Vec::new();
+    }
+    listed
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The ICE topology the settings decide, once; an interface list that leaves out every host
+/// address is warned about, since the server then connects through a TURN relay alone.
 pub fn ice_topology(
     servers: Vec<selkies_rtc::ice::IceServer>,
 ) -> Result<selkies_rtc::ice::IceTopology, String> {
     let s = settings();
     let public_ips = public_ips(s.webrtc_public_ip());
+    let ignored_interfaces = ignored_interfaces(s.webrtc_ignore_interfaces());
+    if !ignored_interfaces.is_empty()
+        && host_addresses(true, true, &ignored_interfaces).is_empty()
+        && !host_addresses(true, true, &[]).is_empty()
+    {
+        log::warn!(target: "webrtc", "webrtc_ignore_interfaces leaves out every host address: WebRTC offers no host candidate and connects only through a TURN relay.");
+    }
     Ok(selkies_rtc::ice::IceTopology {
         udp_mux_port: s.webrtc_udp_mux_port().clamp(0, 65535) as u16,
         tcp_mux_port: s.webrtc_tcp_mux_port().clamp(0, 65535) as u16,
@@ -467,6 +489,7 @@ pub fn ice_topology(
         port_range: selkies_rtc::ice::parse_port_range(s.webrtc_port_range())
             .map_err(|e| e.to_string())?,
         public_ips,
+        ignored_interfaces,
         servers,
     })
 }
@@ -775,7 +798,7 @@ impl crate::files::SessionDirectory for RtcSessions {
 
 #[cfg(test)]
 mod tests {
-    use super::public_ips;
+    use super::{ignored_interfaces, public_ips};
 
     #[test]
     fn public_addresses_are_separated_by_commas_whitespace_or_both() {
@@ -795,5 +818,24 @@ mod tests {
             "an entry that is not an address is left out"
         );
         assert!(listed("").is_empty());
+    }
+
+    #[test]
+    fn ignored_interfaces_are_separated_like_addresses_and_none_names_none() {
+        assert_eq!(
+            ignored_interfaces(" docker0, br-*\tvirbr* "),
+            ["docker0", "br-*", "virbr*"]
+        );
+        assert!(ignored_interfaces("none").is_empty());
+        assert!(ignored_interfaces(" None ").is_empty());
+    }
+
+    /// The default leaves Docker's bridges out: `docker0`, and the `br-` bridge of every network
+    /// created beside it.
+    #[test]
+    fn the_default_ignores_the_docker_bridges() {
+        let default = crate::settings::Settings::parse(&[], &|_| None);
+        let ignored = ignored_interfaces(default.webrtc_ignore_interfaces());
+        assert!(ignored.iter().any(|p| p == "docker0") && ignored.iter().any(|p| p == "br-*"));
     }
 }

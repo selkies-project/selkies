@@ -8,12 +8,19 @@
 //!
 //! `host_addresses` filters the interfaces: loopback is left out, and an IPv6 address carries a
 //! zone exactly when its scope id is non-zero, so the scope is what marks the link-local addresses
-//! to leave out. `bind_udp` is the port-window rule: with a configured range the bind is the
-//! reservation, the ports are tried in random order and the kernel rejects occupied ones, so
-//! concurrent sessions sharing one range spread without coordination; only an occupied port is
-//! cured by trying another, since anything else (address gone, permissions) would fail across the
-//! whole window identically. Every ICE socket gets the receive and send buffers libwebrtc gives its
-//! own (`UDP_SOCKET_BUFFER_SIZE`), clamped by the kernel where its per-socket ceiling is lower.
+//! to leave out. So is every address of an interface the integrator names, by name or by a prefix
+//! of names: a container or VM bridge (`docker0`) is reached from the host's other networks only
+//! through the NAT its runtime installs, which rewrites the source address and port of a check
+//! sent from the bridge address anywhere but onto the bridge, so a peer paired with that address
+//! meets the server at an address and port it was never offered. A name is what marks such a
+//! bridge: its address is private like any LAN's, and the NAT rule lives in the kernel's tables,
+//! out of an unprivileged server's sight. `bind_udp` is the port-window rule: with a configured
+//! range the bind is the reservation, the ports are tried in random order and the kernel rejects
+//! occupied ones, so concurrent sessions sharing one range spread without coordination; only an
+//! occupied port is cured by trying another, since anything else (address gone, permissions)
+//! would fail across the whole window identically. Every ICE socket gets the receive and send
+//! buffers libwebrtc gives its own (`UDP_SOCKET_BUFFER_SIZE`), clamped by the kernel where its
+//! per-socket ceiling is lower.
 
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -24,14 +31,35 @@ use socket2::{Domain, Socket, Type};
 /// Asked for both directions, the size libwebrtc gives its own UDP sockets.
 pub const UDP_SOCKET_BUFFER_SIZE: usize = 262_144;
 
-/// The local addresses host candidates are gathered on.
-pub fn host_addresses(use_ipv4: bool, use_ipv6: bool) -> Vec<IpAddr> {
+/// The local addresses host candidates are gathered on, but those of the interfaces `ignored`
+/// names: each entry an interface name, or a prefix of names ending in `*`.
+pub fn host_addresses(use_ipv4: bool, use_ipv6: bool, ignored: &[String]) -> Vec<IpAddr> {
     let Ok(interfaces) = rtc_shared::ifaces::ifaces() else {
         return Vec::new();
     };
+    gatherable(
+        interfaces
+            .iter()
+            .filter_map(|interface| Some((interface.name.as_str(), interface.addr?))),
+        use_ipv4,
+        use_ipv6,
+        ignored,
+    )
+}
+
+/// The addresses among `interfaces`, each an interface name and one of its addresses, that
+/// [`host_addresses`] gathers on.
+fn gatherable<'a>(
+    interfaces: impl IntoIterator<Item = (&'a str, SocketAddr)>,
+    use_ipv4: bool,
+    use_ipv6: bool,
+    ignored: &[String],
+) -> Vec<IpAddr> {
     let mut addresses = Vec::new();
-    for interface in interfaces {
-        let Some(addr) = interface.addr else { continue };
+    for (name, addr) in interfaces {
+        if ignored.iter().any(|pattern| names_interface(pattern, name)) {
+            continue;
+        }
         match addr {
             SocketAddr::V4(v4) if use_ipv4 => {
                 if !v4.ip().is_loopback() {
@@ -46,6 +74,15 @@ pub fn host_addresses(use_ipv4: bool, use_ipv6: bool) -> Vec<IpAddr> {
     }
     addresses.dedup();
     addresses
+}
+
+/// Whether `pattern` names the interface `name`: the name itself, or, ending in `*`, every name
+/// that begins with what precedes it.
+fn names_interface(pattern: &str, name: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => name == pattern,
+    }
 }
 
 /// Give an ICE or relay socket its receive and send buffers.
@@ -110,13 +147,51 @@ mod tests {
 
     #[test]
     fn loopback_is_left_out_and_zones_mark_link_local() {
-        let all = host_addresses(true, true);
+        let all = host_addresses(true, true, &[]);
         assert!(all.iter().all(|a| !a.is_loopback()));
         assert!(all.iter().all(|a| match a {
             IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) != 0xfe80,
             IpAddr::V4(_) => true,
         }));
-        assert!(host_addresses(false, false).is_empty());
+        assert!(host_addresses(false, false, &[]).is_empty());
+    }
+
+    #[test]
+    fn an_ignored_interface_offers_none_of_its_addresses() {
+        let interfaces: Vec<(&str, SocketAddr)> = [
+            ("lo", "127.0.0.1:0"),
+            ("eth0", "10.1.0.81:0"),
+            ("eth0", "[2001:db8::81]:0"),
+            ("docker0", "172.17.0.1:0"),
+            ("docker0", "[fd00:dead:beef::1]:0"),
+            ("br-0123456789ab", "172.18.0.1:0"),
+            ("br0", "192.168.1.2:0"),
+        ]
+        .map(|(name, addr)| (name, addr.parse().unwrap()))
+        .into();
+        let ignored = ["docker0".to_string(), "br-*".to_string()];
+        let expect: Vec<IpAddr> = ["10.1.0.81", "2001:db8::81", "192.168.1.2"]
+            .map(|ip| ip.parse().unwrap())
+            .into();
+        assert_eq!(
+            gatherable(interfaces.iter().copied(), true, true, &ignored),
+            expect
+        );
+        assert_eq!(
+            gatherable(interfaces.iter().copied(), true, true, &[]).len(),
+            6,
+            "with nothing ignored, every address but loopback's is gathered"
+        );
+    }
+
+    #[test]
+    fn a_pattern_names_an_interface_whole_or_by_a_trailing_asterisk() {
+        assert!(names_interface("docker0", "docker0"));
+        assert!(!names_interface("docker0", "docker01"));
+        assert!(names_interface("br-*", "br-0123456789ab"));
+        assert!(!names_interface("br-*", "br0"));
+        assert!(names_interface("*", "eth0"));
+        assert!(!names_interface("", "eth0"));
     }
 
     /// Which bind failures are worth another port, by the ports they cost: only an occupied

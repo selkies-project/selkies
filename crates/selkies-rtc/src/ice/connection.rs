@@ -354,7 +354,11 @@ impl IceConnection {
         self.gathered = true;
         let addresses = match &self.config.addresses {
             Some(a) => a.clone(),
-            None => host_addresses(self.config.use_ipv4, self.config.use_ipv6),
+            None => host_addresses(
+                self.config.use_ipv4,
+                self.config.use_ipv6,
+                &self.config.ignored_interfaces,
+            ),
         };
         let component = 1;
         let ports = bind_ports(if self.config.udp_mux.is_some() {

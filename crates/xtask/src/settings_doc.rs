@@ -314,6 +314,7 @@ const SECTIONS: &[Section] = &[
             "cloudflare_turn_token_id",
             "cloudflare_turn_api_token",
             "webrtc_public_ip",
+            "webrtc_ignore_interfaces",
             "webrtc_port_range",
             "webrtc_udp_mux_port",
             "webrtc_tcp_mux_port",

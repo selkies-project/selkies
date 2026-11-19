@@ -7,14 +7,15 @@
 //! The ICE topology, decided once at startup, and the per-peer configuration it hands out.
 //!
 //! `IceTopology` is what the integrator fills from the settings (`webrtc_udp_mux_port`,
-//! `webrtc_tcp_mux_port`, `webrtc_ice_lite`, `webrtc_port_range`, `webrtc_public_ip`, and the
-//! STUN and TURN servers resolved for the deployment); `open_muxes` binds the shared ports
-//! ahead of the first peer, so a port in use fails the service rather than a session; and
-//! `IceTopology::peer_config` is the `RTCConfiguration` of a new peer: the muxes, the lite
-//! choice, the port range, the public addresses, and the servers. An ICE-lite agent gathers
-//! host candidates only, so the servers are left out of its configuration and serve the
-//! client side alone. ICE server URLs are parsed as RFC 7064 and RFC 7065 spell them; one STUN
-//! server and one TURN server are taken, `turn` over `udp` or `tcp`, `turns` over `tcp`.
+//! `webrtc_tcp_mux_port`, `webrtc_ice_lite`, `webrtc_port_range`, `webrtc_public_ip`,
+//! `webrtc_ignore_interfaces`, and the STUN and TURN servers resolved for the deployment);
+//! `open_muxes` binds the shared ports ahead of the first peer, so a port in use fails the
+//! service rather than a session; and `IceTopology::peer_config` is the `RTCConfiguration` of a
+//! new peer: the muxes, the lite choice, the port range, the public addresses, the interfaces
+//! left out of gathering, and the servers. An ICE-lite agent gathers host candidates only, so
+//! the servers are left out of its configuration and serve the client side alone. ICE server
+//! URLs are parsed as RFC 7064 and RFC 7065 spell them; one STUN server and one TURN server are
+//! taken, `turn` over `udp` or `tcp`, `turns` over `tcp`.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -256,6 +257,9 @@ pub struct IceTopology {
     pub port_range: Option<(u16, u16)>,
     /// `webrtc_public_ip`: addresses advertised in host candidates of their family (1:1 NAT).
     pub public_ips: Vec<IpAddr>,
+    /// `webrtc_ignore_interfaces`: the interfaces no host candidate is gathered or mux bound on,
+    /// each a name or a prefix of names ending in `*`.
+    pub ignored_interfaces: Vec<String>,
     /// The STUN and TURN servers of the deployment, as the client receives them.
     pub servers: Vec<IceServer>,
 }
@@ -282,15 +286,16 @@ impl IceMuxes {
 /// Bind the shared ICE ports the topology names, ahead of the first peer.
 ///
 /// `udp_mux_port` binds one UDP socket per host address and `tcp_mux_port` one TCP listener,
-/// once for the service; every peer's gatherer then shares them. A port in use fails here, at
-/// startup, rather than on a session; nothing stays bound on failure. An address that appears
-/// later is bound on first use by a gatherer.
+/// on every interface `ignored_interfaces` leaves in, once for the service; every peer's
+/// gatherer then shares them. A port in use fails here, at startup, rather than on a session;
+/// nothing stays bound on failure. An address that appears later is bound on first use by a
+/// gatherer.
 pub async fn open_muxes(topology: &IceTopology) -> Result<IceMuxes, IceError> {
     let mut muxes = IceMuxes::default();
     if topology.udp_mux_port == 0 && topology.tcp_mux_port == 0 {
         return Ok(muxes);
     }
-    let addresses = host_addresses(true, true);
+    let addresses = host_addresses(true, true, &topology.ignored_interfaces);
     let listed = if addresses.is_empty() {
         "no host address yet".to_string()
     } else {
@@ -342,6 +347,7 @@ impl IceTopology {
                 self.servers.clone()
             },
             public_ips: self.public_ips.clone(),
+            ignored_interfaces: self.ignored_interfaces.clone(),
             port_range: self.port_range,
             udp_mux: muxes.udp.clone(),
             tcp_mux: muxes.tcp.clone(),
@@ -372,6 +378,9 @@ pub struct IceConfig {
     pub use_ipv6: bool,
     /// The host addresses to gather on; `None` scans the interfaces.
     pub addresses: Option<Vec<IpAddr>>,
+    /// The interfaces a scan leaves out, each a name or a prefix of names ending in `*`; unused
+    /// where `addresses` is set.
+    pub ignored_interfaces: Vec<String>,
     /// Credentials to use in place of random ones.
     pub local_username: Option<String>,
     pub local_password: Option<String>,
@@ -395,6 +404,7 @@ impl Default for IceConfig {
             use_ipv4: true,
             use_ipv6: true,
             addresses: None,
+            ignored_interfaces: Vec::new(),
             local_username: None,
             local_password: None,
             mdns_lookup: default_lookup(),

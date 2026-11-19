@@ -1563,7 +1563,7 @@ async fn an_exhausted_window_skips_the_address() {
 #[tokio::test]
 async fn the_topology_binds_every_host_address_once_and_hands_it_to_every_peer() {
     let _no_fork = FORK.read().await;
-    let addresses = host_addresses(true, true);
+    let addresses = host_addresses(true, true, &[]);
     assert!(
         !addresses.is_empty(),
         "the sandbox has a non-loopback interface"
@@ -1689,6 +1689,59 @@ async fn the_topology_binds_every_host_address_once_and_hands_it_to_every_peer()
         .await
         .expect("and releases the UDP mux");
     released.close().await;
+}
+
+/// An interface the topology ignores offers nothing: the mux binds none of its addresses, and a
+/// peer gathers no host candidate on them, on the mux or on sockets of its own.
+#[tokio::test]
+async fn an_ignored_interface_gets_no_mux_socket_and_no_host_candidate() {
+    let _no_fork = FORK.read().await;
+    let every = host_addresses(true, true, &[]);
+    let interfaces = rtc_shared::ifaces::ifaces().unwrap();
+    let name = interfaces
+        .iter()
+        .find(|i| i.addr.is_some_and(|a| every.first() == Some(&a.ip())))
+        .expect("the sandbox has a non-loopback interface")
+        .name
+        .clone();
+    let left_out: Vec<IpAddr> = interfaces
+        .iter()
+        .filter(|i| i.name == name)
+        .filter_map(|i| i.addr.map(|a| a.ip()))
+        .collect();
+    let topology = IceTopology {
+        udp_mux_port: free_udp_port(),
+        lite: true,
+        ignored_interfaces: vec![name.clone()],
+        ..IceTopology::default()
+    };
+    let mut muxes = open_muxes(&topology).await.unwrap();
+    assert!(
+        muxes
+            .udp
+            .as_ref()
+            .unwrap()
+            .listen_addresses()
+            .iter()
+            .all(|a| !left_out.contains(&a.ip())),
+        "the UDP mux binds nothing on {name}"
+    );
+    for shared in [muxes.clone(), IceMuxes::default()] {
+        let (tx, mut rx) = inbound_channel();
+        let mut peer =
+            IceConnection::new(topology.peer_config(&shared), tx, LiteTimings::default()).unwrap();
+        let candidates = peer.gather(&mut rx).await.unwrap();
+        assert!(
+            candidates
+                .iter()
+                .filter(|c| c.kind == CandidateType::Host)
+                .all(|c| !left_out.contains(&c.host.parse().unwrap())),
+            "no host candidate sits on {name}, mux shared: {}",
+            shared.udp.is_some()
+        );
+        peer.close();
+    }
+    muxes.close().await;
 }
 
 /// A TURN server that answers nothing does not hold the gathering: the host candidates come
