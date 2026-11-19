@@ -3402,9 +3402,8 @@ impl WsService {
                 self.track_capture(display_id, |cs| cs.video_bitrate_kbps = kbps);
             }
         }
-        // A capped CRF display is never padded (`PathProbe`).
         let pad = PadPermit {
-            announced: !capped && client.as_ref().is_some_and(|c| c.pad()),
+            announced: client.as_ref().is_some_and(|c| c.pad()),
             streaming: video_active && !paused,
         };
         let padded = relay.clone();
@@ -3425,9 +3424,15 @@ impl WsService {
         let outcome = {
             let mut link = link.lock();
             link.loop_late_ms = late_ms;
+            link.capped = capped;
             link.backpressure_tick(display_id, input, at, &mut effects);
             if steered && capturing && link.acknowledged_frame_id != -1 && link.has_sent_any_frame {
                 let target_view = capture.as_ref().map(|c| EncoderTarget(c.clone()));
+                let target = if capped {
+                    link.peak_ceiling(target, configured_fps)
+                } else {
+                    target
+                };
                 link.steer_bitrate_to_link(
                     display_id,
                     at,
@@ -4872,7 +4877,14 @@ impl RelayHost for WsService {
             rtp_packets: 1,
             keyframe: item.data.get(1).is_some_and(|kind| kind & 0x01 != 0),
         });
-        link.is_some_and(|link| link.lock().note_send(item.frame_id, item.data.len(), now()))
+        link.is_some_and(|link| {
+            let mut link = link.lock();
+            if item.data.first() == Some(&0x04) {
+                let key = item.data.get(1).is_some_and(|kind| kind & 0x01 != 0);
+                link.note_frame(item.frame_id, item.data.len(), key, now());
+            }
+            link.note_send(item.frame_id, item.data.len(), now())
+        })
     }
 
     fn connection_verdict(&self, client: ClientId, poor: bool) {

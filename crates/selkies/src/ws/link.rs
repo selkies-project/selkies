@@ -51,6 +51,7 @@ use log::{debug, info, warn};
 use crate::ws::sounding::{self, SoundPhase, Sounding};
 use crate::ws::steer::{
     CongestionSteer, LinkAllowance, LinkProbeTick, PathProbe, RateHold, SteerTick,
+    peak_ceiling_kbps,
 };
 use crate::ws::uplink::FloorHistory;
 
@@ -79,6 +80,9 @@ pub const PATH_HOLD_MAX_S: f64 = 1.5;
 pub const LINK_QUEUE_MS: f64 = 40.0;
 /// Bytes a frame carries for its crossing time to tell what the path carries.
 pub const LINK_MEASURE_BYTES: u64 = 4096;
+/// How long the largest frame a link has sent is kept for a peak's ceiling, at least
+/// (`DisplayLink::largest_frame`).
+pub const FRAME_WINDOW_S: f64 = 60.0;
 /// The share of what the stream sent that a window delivered at or above which a gated window
 /// with nothing acked is taken for the path holding the stream, not for a queue.
 pub const LINK_CARRIED_SHARE: f64 = 0.8;
@@ -185,6 +189,16 @@ pub struct DisplayLink {
     pub link_jitter_ms: Option<f64>,
     pub link_allowance: Option<LinkAllowance>,
     pub link_path_stand: Option<PathStand>,
+    /// The bytes of the delta frame being sent, by its id, and of the largest sent over this
+    /// `FRAME_WINDOW_S` and the one before, with when this one began (`note_frame`).
+    frame_bytes: (u16, u64),
+    largest_frames: [u64; 2],
+    largest_since: f64,
+    /// Whether the display's rate is a capped CRF display's peak, as the server last said, and
+    /// whether a queue has shown this peak its path since content last filled it
+    /// (`probe_path`).
+    pub capped: bool,
+    pub(super) peak_settled: bool,
     /// The rate congestion control holds the display at, under its target.
     pub link_kbps: Option<f64>,
     pub link_hold: RateHold,
@@ -638,6 +652,43 @@ pub struct PadPermit {
 }
 
 impl DisplayLink {
+    /// Count `size` bytes of video frame `frame_id` sent at `now` toward the largest frame the
+    /// link has sent of late (`largest_frame`). A frame's messages (its stripes) count
+    /// together, and a key frame's not at all: a capped encoder fits one to a share of its
+    /// bucket whatever the screen does, and a ceiling read off it would rise with every key
+    /// frame coded under the ceiling before.
+    pub fn note_frame(&mut self, frame_id: u16, size: usize, key: bool, now: f64) {
+        if key {
+            return;
+        }
+        if now - self.largest_since >= FRAME_WINDOW_S {
+            self.largest_frames = [0, self.largest_frames[0]];
+            self.largest_since = now;
+        }
+        let before = if self.frame_bytes.0 == frame_id {
+            self.frame_bytes.1
+        } else {
+            0
+        };
+        self.frame_bytes = (frame_id, before + size as u64);
+        self.largest_frames[0] = self.largest_frames[0].max(self.frame_bytes.1);
+    }
+
+    /// The bytes of the largest delta frame sent within the last `FRAME_WINDOW_S` to twice
+    /// that.
+    pub fn largest_frame(&self) -> u64 {
+        self.largest_frames[0].max(self.largest_frames[1])
+    }
+
+    /// The ceiling of the display's rate where it is a capped CRF display's peak
+    /// ([`peak_ceiling_kbps`], from the largest frame the link has sent at `fps`), within
+    /// `ceiling_kbps`, and never under the rate the link holds, which a smaller frame or a
+    /// lower frame rate leaves standing.
+    pub fn peak_ceiling(&self, ceiling_kbps: f64, fps: f64) -> f64 {
+        peak_ceiling_kbps(self.largest_frame(), fps, ceiling_kbps)
+            .max(self.link_kbps.unwrap_or(0.0).min(ceiling_kbps))
+    }
+
     /// Hold a display's encoder to the rate its path carries, once per backpressure check:
     /// `target_kbps` is the display's ceiling (`DisplayState::rate_ceiling`), `(lo_kbps,
     /// hi_kbps)` the configured range, `encoder` the capture's controls, `pad` whether its owner
@@ -888,6 +939,15 @@ impl DisplayLink {
             })
             .round();
         let restored = steer.restored;
+        // A queue that cut the peak showed it its path; content that fills it since asks for
+        // more of the path than the peak allows.
+        if queue_s > 0.0 && rate < current {
+            self.peak_settled = true;
+        } else if steer_offered_bps
+            .is_some_and(|o| o >= current * 1_000.0 * CongestionSteer::APP_LIMITED)
+        {
+            self.peak_settled = false;
+        }
         if steer.cap_probing {
             self.sounding.armed_until = now + sounding::ARMED_CAP_S;
         }
@@ -949,7 +1009,7 @@ impl DisplayLink {
             offered_bps,
         };
         let pad_bps = self.probe_path(display_id, now, last_tick, tick, pad);
-        let cc_rate = self.link_hold.note(rate, now);
+        let cc_rate = self.keep_rate(rate, now);
         let mut outcome = SteerOutcome {
             cc_rate,
             applied_kbps: None,
@@ -997,8 +1057,24 @@ struct ProbeTick {
 }
 
 impl DisplayLink {
+    /// The rate the display's page is told to keep for its next stream (`RateHold`), where
+    /// `rate` has held long enough. A capped CRF display's page keeps only a peak a queue
+    /// showed its path: one the padding carried to its ceiling says what its content asked of
+    /// this path, not what a path carries, and a stream opened at it elsewhere would queue
+    /// before a tick could read it.
+    pub(super) fn keep_rate(&mut self, rate: f64, now: f64) -> Option<i64> {
+        if self.capped && !self.peak_settled {
+            return None;
+        }
+        self.link_hold.note(rate, now)
+    }
+
     /// The padding a display's owner is to be written through the next tick, where its
-    /// `PathProbe` asks for it; `None` where the page never sent `_pad,1`.
+    /// `PathProbe` asks for it; `None` where the page never sent `_pad,1`. A capped CRF
+    /// display whose peak a queue has shown its path (a landing, a cut) is padded again only
+    /// once content has filled that peak: over most paths its ceiling stands past what they
+    /// carry, and a probe on a timer, as a constant rate's target under its ceiling takes,
+    /// would fill the path under a still screen for nothing the screen has asked for.
     ///
     /// What the display sent over the tick is taken without the padding the relay wrote
     /// through it, so the probe weighs the stream's own.
@@ -1031,7 +1107,15 @@ impl DisplayLink {
             return None;
         }
         let held = self.link_steer.as_ref().is_some_and(|s| now < s.hold_until);
-        let mut bps = self.sound_rate(rate, ceiling, content_bps, queue_s, held, span, now);
+        let mut bps = if self.capped && self.peak_settled {
+            if let Some(probe) = self.link_probe.as_mut() {
+                probe.padding = false;
+            }
+            self.sounding.rate_kbps = None;
+            0.0
+        } else {
+            self.sound_rate(rate, ceiling, content_bps, queue_s, held, span, now)
+        };
         if !pad.streaming {
             bps = 0.0;
             self.sounding.rate_kbps = None;
@@ -1285,6 +1369,7 @@ impl DisplayLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ws::steer::START_KBPS;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -3007,6 +3092,93 @@ mod tests {
         );
         assert_eq!(state.link_kbps, Some(1803.0));
         assert!(module.rates.borrow().is_empty());
+    }
+
+    /// A delta frame sent in several messages counts whole toward the largest the link has
+    /// sent, for its window and the next, and a capped CRF display's ceiling is that frame on
+    /// every frame of its rate, from the start rate up, within the configured one and never
+    /// under the rate the link holds.
+    #[test]
+    fn a_peaks_ceiling_is_its_largest_frame_every_frame() {
+        let mut link = DisplayLink::new();
+        assert_eq!(link.peak_ceiling(1_000_000.0, 60.0), START_KBPS);
+        link.note_frame(1, 30_000, false, 0.0);
+        link.note_frame(1, 37_000, false, 0.001);
+        link.note_frame(2, 5_000, false, 0.017);
+        link.note_frame(3, 900_000, true, 0.033);
+        assert_eq!(
+            link.largest_frame(),
+            67_000,
+            "a key frame counts for nothing"
+        );
+        assert_eq!(link.peak_ceiling(1_000_000.0, 60.0), 32_160.0);
+        assert_eq!(link.peak_ceiling(1_000_000.0, 30.0), 16_080.0);
+        assert_eq!(link.peak_ceiling(20_000.0, 60.0), 20_000.0);
+        link.link_kbps = Some(50_000.0);
+        assert_eq!(link.peak_ceiling(1_000_000.0, 60.0), 50_000.0);
+        link.link_kbps = None;
+        link.note_frame(4, 1_000, false, FRAME_WINDOW_S);
+        assert_eq!(
+            link.largest_frame(),
+            67_000,
+            "kept through the window after its own"
+        );
+        link.note_frame(5, 1_000, false, 2.0 * FRAME_WINDOW_S);
+        assert_eq!(link.largest_frame(), 1_000);
+    }
+
+    /// A capped CRF display on a still screen is sounded as far as its ceiling and no further:
+    /// over a path that queues nothing its peak lands on the ceiling its largest frame sets,
+    /// 32 Mbit/s for 67 kB at 60 frames a second, with the padding never past `TOP` of it, and
+    /// once a larger frame has raised the ceiling the next probe starts with no quiet to wait
+    /// out and lands the peak there.
+    #[test]
+    fn a_still_crf_screen_is_sounded_as_far_as_its_peaks_ceiling() {
+        let module = Module::default();
+        let mut link = DisplayLink::new();
+        link.link_kbps = Some(START_KBPS);
+        link.capped = true;
+        link.note_frame(1, 67_000, false, 0.0);
+        let pad = PadPermit {
+            announced: true,
+            streaming: true,
+        };
+        let (mut acked, mut pad_bps) = (0.0, 0.0);
+        let most = std::cell::Cell::new(0.0f64);
+        let mut run = |link: &mut DisplayLink, start: f64, seconds: f64| {
+            let (mut t, step) = (start, 0.05);
+            while t < start + seconds - 1e-9 {
+                t = ((t + step) * 1000.0).round() / 1000.0;
+                let sent = (100_000.0 + pad_bps) / 8.0 * step;
+                link.sent_bytes += sent as u64;
+                link.pad_bytes += (pad_bps / 8.0 * step) as u64;
+                acked += sent;
+                link.note_round_trip(20.0, acked as u64, t);
+                if ((t * 2.0) - (t * 2.0).round()).abs() < 1e-6 {
+                    let ceiling = link.peak_ceiling(1_000_000.0, 60.0);
+                    let outcome = link.steer_bitrate_to_link(
+                        "display",
+                        t,
+                        ceiling,
+                        (LO, 1_000_000.0),
+                        Some(&module),
+                        pad,
+                    );
+                    if let Some(bps) = outcome.pad_bps {
+                        pad_bps = bps;
+                        most.set(most.get().max(bps));
+                    }
+                }
+            }
+            t
+        };
+        let t = run(&mut link, 0.0, 14.0);
+        assert_eq!(link.link_kbps, Some(32_160.0), "{:?}", module.rates);
+        assert!(most.get() <= sounding::TOP * 32_160_000.0, "{most:?}");
+        link.note_frame(2, 255_000, false, t);
+        run(&mut link, t, 10.0);
+        assert_eq!(link.link_kbps, Some(122_400.0), "{:?}", module.rates);
+        assert!(most.get() <= sounding::TOP * 122_400_000.0, "{most:?}");
     }
 
     #[test]
