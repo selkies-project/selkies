@@ -19,8 +19,8 @@
 //! Also held here are the places that rely on it: the base image installs it, and the desktop
 //! image and the AppImage build go through it.
 //!
-//! The helper is a Python script, so these need `python3`; they run with `cargo test
-//! --workspace`.
+//! The helper is a POSIX shell script on curl, jq and the coreutils, run here under `sh`; these
+//! run with `cargo test --workspace`.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -220,9 +220,8 @@ fn run(
     args: &[&str],
 ) -> (Option<String>, String) {
     network.serve(responses);
-    let mut command = Command::new("python3");
+    let mut command = Command::new("sh");
     command
-        .arg("-I")
         .arg(repo().join("addons/base/fetch-verified"))
         .args(args)
         .env("https_proxy", format!("http://127.0.0.1:{}", network.port))

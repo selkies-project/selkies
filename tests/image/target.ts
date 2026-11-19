@@ -26,6 +26,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { accessSync, constants, statSync } from 'node:fs';
 import { createServer, connect } from 'node:net';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
+import { X509Certificate } from 'node:crypto';
 import { Agent, request } from 'node:https';
 
 import { fields, isRecord, parseJson, stringOr } from '../../web/selkies-web-core/lib/narrow.ts';
@@ -44,8 +45,19 @@ const SESSION_ENV = 'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-$(i
     + 'done < /proc/$p/environ; break; done 2>/dev/null; '
     + 'export DISPLAY="${DISPLAY:-:20}"; ';
 
-// The images serve HTTPS on a certificate of their own making.
-const NO_VERIFY = new Agent({ rejectUnauthorized: false });
+/**
+ * An agent that trusts the one certificate `pem` and nothing else. The images
+ * serve HTTPS on a certificate of their own making, which names no address the
+ * tier reaches them at (a pod's, a forwarded port's), so the certificate itself
+ * is checked, by its fingerprint, in place of the name.
+ */
+function pinnedAgent(pem: string): Agent {
+    const fingerprint = new X509Certificate(pem).fingerprint256;
+    return new Agent({
+        ca: pem,
+        checkServerIdentity: (_host, cert) => (cert.fingerprint256 === fingerprint ? undefined : new Error('not the certificate the target serves')),
+    });
+}
 
 /** A finished command: its exit status (124 on a timeout) and output. */
 export interface Ran {
@@ -128,8 +140,26 @@ export abstract class Target {
     digest = '';
     node = '';
     protected execPrefix: string[] = [];
+    private agent: Agent | null = null;
 
     abstract up(timeoutS?: number): Promise<void>;
+
+    /**
+     * The agent `api` reaches the target with: one trusting the certificate the
+     * target serves, read from inside it over the exec channel the tier already
+     * trusts; null where none can be read.
+     */
+    private async trusted(): Promise<Agent | null> {
+        if (this.agent) return this.agent;
+        const pem = await this.out('openssl s_client -connect 127.0.0.1:8080 </dev/null 2>/dev/null | openssl x509', 30);
+        if (!pem.includes('BEGIN CERTIFICATE')) return null;
+        try {
+            this.agent = pinnedAgent(pem);
+        } catch {
+            return null;
+        }
+        return this.agent;
+    }
 
     /** Run `script` with bash inside the session, as its user. */
     sh(script: string, timeoutS = 60, data?: Buffer): Promise<Ran> {
@@ -148,7 +178,9 @@ export abstract class Target {
     }
 
     /** GET (or POST `body` as JSON to) one of the server's routes; null on failure. */
-    api(path: string, body?: unknown, timeoutS = 10): Promise<unknown> {
+    async api(path: string, body?: unknown, timeoutS = 10): Promise<unknown> {
+        const agent = await this.trusted();
+        if (agent === null) return null;
         return new Promise((resolve) => {
             let url: URL;
             try {
@@ -158,7 +190,7 @@ export abstract class Target {
                 return;
             }
             const req = request(url, {
-                method: body === undefined ? 'GET' : 'POST', agent: NO_VERIFY,
+                method: body === undefined ? 'GET' : 'POST', agent,
                 headers: { 'Content-Type': 'application/json' }, timeout: timeoutS * 1000,
             }, (res) => {
                 const chunks: Buffer[] = [];

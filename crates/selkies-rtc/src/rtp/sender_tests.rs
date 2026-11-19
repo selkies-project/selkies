@@ -19,7 +19,7 @@ use super::super::packet::{
     TRANSMISSION_OFFSET_URI, TRANSPORT_CC_URI, VIDEO_TIMING_URI,
 };
 use super::super::params::HeaderExtensionParameters;
-use super::super::rtcp::{PsfbPacket, RtpfbPacket};
+use super::super::rtcp::{PsfbPacket, ReceiverInfo, RtpfbPacket};
 use super::*;
 
 /// A transport recording what it was handed; its refusals and backlog are the test's.
@@ -2338,6 +2338,25 @@ fn a_frame_is_interleaved_into_groups_and_its_repairs_reach_the_history() {
 }
 
 #[test]
+fn a_full_paths_loss_adds_no_repairs() {
+    let mut s = RtpSender::new(Kind::Video, Box::new(NoHooks));
+    for _ in 0..6 {
+        s.steer_fec(0.3, true);
+    }
+    assert_eq!(
+        s.fec_repair_packets, 1,
+        "a queue's overflow raised the density"
+    );
+    for _ in 0..6 {
+        s.steer_fec(0.3, false);
+    }
+    assert_eq!(
+        s.fec_repair_packets, 3,
+        "the same loss with no queue standing"
+    );
+}
+
+#[test]
 fn the_repair_density_follows_the_loss_and_the_queue() {
     let mut s = RtpSender::new(Kind::Video, Box::new(NoHooks));
     let mut steps = Vec::new();
@@ -3240,4 +3259,42 @@ fn repairs_and_key_frame_requests_wait_on_a_full_path() {
         h.s.repair_room(10_000_000, false, now),
         "a budget lifted lets any repair through again"
     );
+}
+
+#[test]
+fn a_report_on_an_older_sender_report_measures_the_round_trip() {
+    // A round trip longer than the gap between two sender reports: the receiver's report
+    // echoes the one before the newest.
+    let mut h = Harness::selective();
+    let lsr_of = |compound: &[u8]| {
+        RtcpPacket::parse(compound)
+            .unwrap()
+            .into_iter()
+            .find_map(|p| match p {
+                RtcpPacket::Sr { sender_info, .. } => {
+                    Some(((sender_info.ntp_timestamp >> 16) & 0xFFFF_FFFF) as u32)
+                }
+                _ => None,
+            })
+            .unwrap()
+    };
+    let first = lsr_of(&h.s.rtcp_report(h.clock));
+    let _newer = h.s.rtcp_report(h.clock + 0.7);
+    let rr = RtcpPacket::Rr {
+        ssrc: 99,
+        reports: vec![ReceiverInfo {
+            ssrc: h.s.ssrc,
+            fraction_lost: 0,
+            packets_lost: 0,
+            highest_sequence: 0,
+            jitter: 0,
+            lsr: first,
+            dlsr: 6554, // 0.1 s
+        }],
+    };
+    h.s.handle_rtcp(&rr, &mut h.tr, h.clock + 1.5);
+    let rtt =
+        h.s.rtt()
+            .expect("the report on the older sender report measured nothing");
+    assert!((rtt - 1.4).abs() < 0.01, "round trip {rtt}");
 }

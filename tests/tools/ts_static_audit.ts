@@ -13,13 +13,15 @@
  * the suites hand a page. What is held here: a module's types are gone and its
  * code is untouched, it arrives as a JavaScript module type, a declaration
  * file and a plain file are served as they are, a module Node cannot strip is
- * an error and not a half-served page, and every module the client's input
- * handler imports, to the end of the chain, comes back as JavaScript.
+ * an error and not a half-served page, nothing outside the served directory
+ * is reached (an encoded way out or a symbolic link leading out of it), and
+ * every module the client's input handler imports, to the end of the chain,
+ * comes back as JavaScript.
  *
  * Prints one PASS/FAIL line per check and exits non-zero if any failed.
  * @module
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, normalize } from 'node:path';
 
@@ -61,6 +63,10 @@ for (const [name, text] of [['mod.ts', source], ['decl.d.ts', 'export declare co
   ['plain.txt', 'hello\n'], ['bad.ts', 'enum E { A }\nexport const e = E.A;\n']]) {
   writeFileSync(join(tmp, name), text);
 }
+// A file beside the served directory, and a link inside it that leads there.
+const outside = mkdtempSync(join(tmpdir(), 'ts-static-out-'));
+writeFileSync(join(outside, 'secret.txt'), 'secret\n');
+symlinkSync(join(outside, 'secret.txt'), join(tmp, 'link.txt'));
 let served = await serveTypeScript(tmp);
 try {
   let got = await get(served, '/mod.ts');
@@ -74,9 +80,15 @@ try {
   check('a module needing a real transform is an error', got.status === 500, got.status);
   got = await get(served, '/missing.ts');
   check('a missing module is a 404', got.status === 404, got.status);
+  const way = `/..%2F${outside.slice(outside.lastIndexOf('/') + 1)}%2Fsecret.txt`;
+  got = await get(served, way);
+  check('an encoded way out of the directory is not found', got.status === 404 && !got.body.includes('secret'), got.status);
+  got = await get(served, '/link.txt');
+  check('a link leading out of the directory is refused', got.status === 403 && !got.body.includes('secret'), got.status);
 } finally {
   await served.close();
   rmSync(tmp, { recursive: true, force: true });
+  rmSync(outside, { recursive: true, force: true });
 }
 
 served = await serveTypeScript(CORE);

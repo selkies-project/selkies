@@ -166,6 +166,11 @@ pub fn start(is_wayland: bool) {
                 buttons: Buttons::parse(s.wm_buttons()),
                 menus: s.wm_menus().on,
                 keybinds: s.wm_keybinds().on,
+                frame_rate: s
+                    .range_default("framerate")
+                    .map(|rate| rate.as_f64())
+                    .filter(|rate| rate.is_finite() && *rate >= 1.0)
+                    .map_or(60, |rate| rate.round().min(1000.0) as u32),
             },
         };
         (s.wm().on, desktop.on, policy)

@@ -13,19 +13,22 @@
             }
         },
         {
-            "label": "[build] build python package",
+            "label": "[build] build the web client",
             "type": "shell",
-            "command": "python3 -m build",
+            "command": "./scripts/ci/build-web.sh",
             "problemMatcher": [],
             "options": {
                 "cwd": "${workspaceFolder}"
             }
         },
         {
-            "label": "[install] re-install python package",
+            "label": "[build] build the server",
             "type": "shell",
-            "command": "sudo PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --no-cache-dir --force-reinstall --upgrade ${workspaceFolder}/dist/selkies-0.0.1-py3-none-any.whl",
-            "problemMatcher": []
+            "command": "cargo build --release --locked -p selkies",
+            "problemMatcher": [],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            }
         },
         {
             "label": "[run] Start Selkies",
@@ -34,37 +37,25 @@
             "problemMatcher": [],
             "options": {
                 "env": {
-                    "SELKIES_WEB_ROOT": "${workspaceFolder}/addons/gst-web/src"
+                    "PATH": "${workspaceFolder}/target/release:${env:PATH}"
                 }
             }
         },
         {
-            "label": "[run] re-build, re-install, and run Selkies",
+            "label": "[run] re-build and run Selkies",
             "problemMatcher": [],
             "dependsOrder": "sequence",
             "dependsOn": [
                 "[build] build joystick interposer library",
-                "[build] build python package",
-                "[install] re-install python package",
+                "[build] build the web client",
+                "[build] build the server",
                 "[run] Start Selkies"
             ]
         },
         {
-            "label": "[workflow] local run devcontainer_feature_validate",
+            "label": "[workflow] local run devcontainer-feature validate",
             "type": "shell",
-            "command": "act -W .github/workflows/devcontainer_feature_validate.yaml workflow_dispatch",
-            "problemMatcher": []
-        },
-        {
-            "label": "[workflow] local run devcontainer_feature_test",
-            "type": "shell",
-            "command": "act -W .github/workflows/devcontainer_feature_test.yaml workflow_dispatch",
-            "problemMatcher": []
-        },
-        {
-            "label": "[workflow] local run devcontainer_feature_release",
-            "type": "shell",
-            "command": "act -W .github/workflows/devcontainer_feature_release.yaml workflow_dispatch",
+            "command": "act -W .github/workflows/devcontainer-feature.yaml -j validate pull_request",
             "problemMatcher": []
         }
     ]

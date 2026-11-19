@@ -16,6 +16,10 @@
 //! default models a shallow hop, and a fat one (a modem holding seconds of data) is what turns an
 //! upload into input lag. Every second it prints what each direction carried.
 //!
+//! A line on stdin changes a shaped direction's rate from then on (`down KBIT_S`, `up KBIT_S`),
+//! the step a congested stretch and its recovery are: what is queued stays queued and drains at
+//! the new rate.
+//!
 //! ```text
 //! bwrelay LISTEN_PORT TARGET_PORT RATE_KBIT_S [UPLINK_RATE_KBIT_S]
 //! ```
@@ -24,7 +28,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::{Mutex, mpsc};
@@ -38,30 +42,36 @@ const GRAIN: usize = 8192;
 /// sender-side congestion gauge sees it.
 const RCVBUF: usize = 128 * 1024;
 
-/// A token bucket in bytes with a quarter-second burst allowance. Takes are FIFO (the one
-/// drainer of a link takes them in queue order), so concurrent connections interleave in
-/// arrival order instead of racing for the balance.
+/// A token bucket in bytes with a quarter-second burst allowance, at the rate its link holds
+/// now. Takes are FIFO (the one drainer of a link takes them in queue order), so concurrent
+/// connections interleave in arrival order instead of racing for the balance.
 struct Bucket {
-    rate: f64,
-    cap: f64,
+    /// Bytes a second, which stdin may change while the link runs.
+    rate: Arc<AtomicU64>,
     tokens: f64,
     at: Instant,
 }
 
 impl Bucket {
-    fn new(rate: f64) -> Bucket {
+    fn new(rate: Arc<AtomicU64>) -> Bucket {
+        let tokens = rate.load(Ordering::Relaxed) as f64 * 0.25;
         Bucket {
             rate,
-            cap: rate * 0.25,
-            tokens: rate * 0.25,
+            tokens,
             at: Instant::now(),
         }
     }
 
+    /// The rate now, in bytes a second; never zero, so a deficit is always repaid.
+    fn rate(&self) -> f64 {
+        (self.rate.load(Ordering::Relaxed) as f64).max(1.0)
+    }
+
     fn top_up(&mut self) {
         let now = Instant::now();
+        let rate = self.rate();
         self.tokens =
-            (self.tokens + now.duration_since(self.at).as_secs_f64() * self.rate).min(self.cap);
+            (self.tokens + now.duration_since(self.at).as_secs_f64() * rate).min(rate * 0.25);
         self.at = now;
     }
 
@@ -71,15 +81,16 @@ impl Bucket {
         let n = n as f64;
         loop {
             self.top_up();
-            if self.tokens >= n || (self.tokens > 0.0 && n <= self.cap) {
+            let rate = self.rate();
+            if self.tokens >= n || (self.tokens > 0.0 && n <= rate * 0.25) {
                 self.tokens -= n;
                 if self.tokens < 0.0 {
-                    tokio::time::sleep(Duration::from_secs_f64(-self.tokens / self.rate)).await;
+                    tokio::time::sleep(Duration::from_secs_f64(-self.tokens / rate)).await;
                 }
                 return;
             }
             tokio::time::sleep(Duration::from_secs_f64(
-                ((n - self.tokens) / self.rate).min(0.01),
+                ((n - self.tokens) / rate).min(0.01),
             ))
             .await;
         }
@@ -96,9 +107,9 @@ struct Link {
 }
 
 impl Link {
-    fn start(rate_kbit: u64, depth: usize, carried: Arc<AtomicU64>) -> Link {
+    fn start(rate: Arc<AtomicU64>, depth: usize, carried: Arc<AtomicU64>) -> Link {
         let (queue, mut pieces) = mpsc::channel::<Piece>((depth / GRAIN).max(1));
-        let mut bucket = Bucket::new(rate_kbit as f64 * 1000.0 / 8.0);
+        let mut bucket = Bucket::new(rate);
         tokio::spawn(async move {
             while let Some((writer, piece)) = pieces.recv().await {
                 bucket.take(piece.len()).await;
@@ -150,6 +161,29 @@ async fn pass(
     let _ = writer.lock().await.shutdown().await;
 }
 
+/// Take `down KBIT_S` and `up KBIT_S` lines from stdin until it ends, each setting that
+/// direction's rate; an unshaped uplink stays unshaped.
+async fn rates_from_stdin(down: Arc<AtomicU64>, up: Option<Arc<AtomicU64>>) {
+    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let mut words = line.split_whitespace();
+        let (Some(which), Some(Ok(kbit))) = (words.next(), words.next().map(str::parse::<u64>))
+        else {
+            continue;
+        };
+        let rate = match which {
+            "down" => &down,
+            "up" => match &up {
+                Some(up) => up,
+                None => continue,
+            },
+            _ => continue,
+        };
+        rate.store(kbit * 1000 / 8, Ordering::Relaxed);
+        println!("[relay] {which}link cap {kbit} kbit/s");
+    }
+}
+
 fn number(arg: Option<&String>, what: &str) -> Result<u64, String> {
     arg.ok_or_else(|| format!("no {what}"))?
         .parse()
@@ -174,8 +208,24 @@ async fn main() -> Result<(), String> {
         .unwrap_or(RCVBUF);
 
     let (down_bytes, up_bytes) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-    let down = Arc::new(Link::start(down_kbit, depth, Arc::clone(&down_bytes)));
-    let up = (up_kbit > 0).then(|| Arc::new(Link::start(up_kbit, depth, Arc::clone(&up_bytes))));
+    let bytes_per_s = |kbit: u64| Arc::new(AtomicU64::new(kbit * 1000 / 8));
+    let (down_rate, up_rate) = (bytes_per_s(down_kbit), bytes_per_s(up_kbit));
+    let down = Arc::new(Link::start(
+        Arc::clone(&down_rate),
+        depth,
+        Arc::clone(&down_bytes),
+    ));
+    let up = (up_kbit > 0).then(|| {
+        Arc::new(Link::start(
+            Arc::clone(&up_rate),
+            depth,
+            Arc::clone(&up_bytes),
+        ))
+    });
+    tokio::spawn(rates_from_stdin(
+        down_rate,
+        (up_kbit > 0).then_some(up_rate),
+    ));
     let listener = TcpListener::bind((
         "127.0.0.1",
         u16::try_from(listen).map_err(|e| e.to_string())?,

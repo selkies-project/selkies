@@ -450,8 +450,13 @@ pub enum Event {
     Changed(WindowInfo),
     /// The client drew its first buffer: the window is on screen at this size.
     Mapped { id: WindowId, size: Size },
-    /// A mapped window committed a new size.
-    Resized { id: WindowId, size: Size },
+    /// A mapped toplevel committed a new size or answered a configure with another one;
+    /// `answered` says whether it answers the newest configure.
+    Resized {
+        id: WindowId,
+        size: Size,
+        answered: bool,
+    },
     /// The client withdrew its window (a null buffer, an unmap); it may map again.
     Unmapped { id: WindowId },
     /// The window is gone.
@@ -520,6 +525,9 @@ pub struct FramePart {
     /// Where the part sits, relative to the client area, in logical pixels.
     pub rect: Rect,
     pub image: Image,
+    /// The part of `image` stretched over `rect`, in its logical pixels; the whole image where
+    /// `None`. A band is read from inside identical pixels, so filtering stays exact.
+    pub source: Option<Rect>,
 }
 
 /// A window's server-side frame: the border it adds around the client area and the parts
@@ -528,6 +536,7 @@ pub struct FramePart {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Frame {
     pub extents: Extents,
+    /// The parts, front to back; they overlap only for a backend that blends them.
     pub parts: Vec<FramePart>,
 }
 

@@ -289,7 +289,8 @@ impl Pacer {
         pacer
     }
 
-    /// Enable the stale-video deadline (`SELKIES_WEBRTC_PACER_STALE_MS`).
+    /// Enable the stale-video deadline: video queued longer than `seconds` is purged. Off (0)
+    /// unless set; the server does not set it.
     pub fn set_stale_deadline(&mut self, seconds: f64) {
         self.stale_deadline_s = seconds.max(0.0);
     }

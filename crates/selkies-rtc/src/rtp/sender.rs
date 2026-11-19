@@ -49,7 +49,8 @@
 //!
 //! FlexFEC repairs are built beside the frame's media packets and sent in the same burst: a
 //! group closes at every frame end or at `FEC_GROUP_PACKETS`, takes the repairs `fec_repairs`
-//! grants it at the density `steer_fec` sets from the smoothed loss, and the repairs are
+//! grants it at the density `steer_fec` sets from the smoothed loss of the windows no queue
+//! stood in, and the repairs are
 //! interleaved so `n` repairs recover `n` losses one XOR at a time. The history
 //! (`RtpHistory`) is told the instant a repair reaches the wire, the pacer's queue included.
 //!
@@ -106,6 +107,10 @@ use super::rtcp::{
 use super::twcc::TwccSender;
 
 pub const RTT_ALPHA: f64 = 0.85;
+/// The sender reports a receiver report's LSR is matched against. One goes out every 0.5 to
+/// 1.5 s (`send_report`), and a receiver echoes the last it received: a round trip longer than
+/// the gap to the next one, as a standing queue makes it, echoes one before the newest.
+pub const SR_KEPT: usize = 8;
 /// Receive-only reporters answered per sender report (libwebrtc answers at most 50 per XR).
 pub const RRTR_REPORTERS_MAX: usize = 50;
 /// How long a peer may send nothing at all before this sender stops: a browser sends
@@ -146,8 +151,10 @@ pub const FEC_CLEAR_WINDOWS: u32 = 3;
 /// Where congestion control bounds them (a target a queue cut), repairs (retransmissions and
 /// FlexFEC) take at most `REPAIR_SHARE` of the rate it steered the display to, over
 /// `REPAIR_WINDOW_S` (libwebrtc's retransmission rate limiter): a path that loses packets because
-/// it is full is sent no more than it was asked to carry (`set_repair_budget`).
-pub const REPAIR_SHARE: f64 = 1.0;
+/// it is full is sent half again what it was asked to carry at most (`set_repair_budget`). A
+/// peer's NACKs repeat for a round trip before a frame counts as lost, and behind a queue that
+/// round trip is long: at the whole rate their repairs alone could fill the path again.
+pub const REPAIR_SHARE: f64 = 0.5;
 pub const REPAIR_WINDOW_S: f64 = 0.5;
 /// The share of the repair budget FlexFEC leaves to retransmissions (`repair_room`).
 pub const FEC_RESERVE: f64 = 0.5;
@@ -586,8 +593,9 @@ pub struct RtpSender {
     fec_group: Vec<(Vec<u8>, Payload)>,
     fec_first_seq: u16,
     frame_ends: VecDeque<(u16, FrameEnd)>,
-    lsr: Option<u32>,
-    lsr_time: f64,
+    /// The sender reports sent last (`SR_KEPT`): the middle 32 bits of each one's NTP
+    /// timestamp, which a receiver report echoes as its LSR, and when it was sent.
+    sr_sent: VecDeque<(u32, f64)>,
     rtp_timestamp: u32,
     rtp_instant_ns: i64,
     rtp_clock_rate: u32,
@@ -672,8 +680,7 @@ impl RtpSender {
             fec_group: Vec::with_capacity(FEC_GROUP_PACKETS),
             fec_first_seq: 0,
             frame_ends: VecDeque::with_capacity(FRAME_ENDS_MAX),
-            lsr: None,
-            lsr_time: 0.0,
+            sr_sent: VecDeque::with_capacity(SR_KEPT),
             rtp_timestamp: 0,
             rtp_instant_ns: 0,
             rtp_clock_rate: 0,
@@ -753,6 +760,13 @@ impl RtpSender {
 
     pub fn fec_ssrc(&self) -> u32 {
         self.fec_ssrc
+    }
+
+    /// Move the stream to a new SSRC and return it; for a stream the SDP left unsignaled, which
+    /// the receiver then takes as a new stream of the same track.
+    pub fn reseat(&mut self) -> u32 {
+        self.ssrc = random32();
+        self.ssrc
     }
 
     /// Give the sender fixed SSRCs, as the SDP that announced them requires.
@@ -876,14 +890,21 @@ impl RtpSender {
 
     /// Set the FlexFEC repair density from a measured loss fraction: one repair per group
     /// under 2% loss, two under 8%, three above, read on a smoothed loss so a single small
-    /// window neither adds nor drops a repair on its own. Every group takes them while the
+    /// window neither adds nor drops a repair on its own. The loss of a window a queue stood
+    /// in (`queued`) is left out: a full path dropped it, and repairs would only add to what it
+    /// cannot carry (a 4 Mbit/s path narrowed under an 8 Mbit/s stream ran its queue full
+    /// almost twice as long with them). Every group takes them while the
     /// path loses packets with no queue standing (`queued`), a loss a repair recovers without
     /// a retransmission's round trip: the loss read on windows `FEC_CLEAR_WINDOWS` past the
     /// last queue, since a queue's overflow shows in the windows it stood in and the ones
     /// just after. With nothing lost that way, or while a queue stands, the repairs follow the
     /// media packets (`fec_repairs`).
     pub fn steer_fec(&mut self, loss_fraction: f64, queued: bool) {
-        self.fec_loss += (loss_fraction - self.fec_loss) * 0.3;
+        // A window a queue stood in lost what the full path dropped: repairs would only add to
+        // what it cannot carry, so that loss leaves the density where it was.
+        if !queued {
+            self.fec_loss += (loss_fraction - self.fec_loss) * 0.3;
+        }
         self.fec_clear = if queued { 0 } else { self.fec_clear + 1 };
         if self.fec_clear > FEC_CLEAR_WINDOWS {
             self.fec_clear_loss += (loss_fraction - self.fec_clear_loss) * 0.3;
@@ -2017,8 +2038,15 @@ impl RtpSender {
         match packet {
             RtcpPacket::Rr { reports, .. } | RtcpPacket::Sr { reports, .. } => {
                 for report in reports.iter().filter(|r| r.ssrc == self.ssrc) {
-                    if self.lsr == Some(report.lsr) && report.dlsr != 0 {
-                        let rtt = now - self.lsr_time - f64::from(report.dlsr) / 65536.0;
+                    let sent_at = self
+                        .sr_sent
+                        .iter()
+                        .find(|(lsr, _)| *lsr == report.lsr)
+                        .map(|(_, at)| *at);
+                    if let Some(sent_at) = sent_at
+                        && report.dlsr != 0
+                    {
+                        let rtt = now - sent_at - f64::from(report.dlsr) / 65536.0;
                         self.rtt = Some(match self.rtt {
                             None => rtt,
                             Some(old) => RTT_ALPHA * old + (1.0 - RTT_ALPHA) * rtt,
@@ -2178,8 +2206,11 @@ impl RtpSender {
             reports: vec![],
         }
         .serialize();
-        self.lsr = Some(((ntp_timestamp >> 16) & 0xFFFF_FFFF) as u32);
-        self.lsr_time = now;
+        if self.sr_sent.len() == SR_KEPT {
+            self.sr_sent.pop_front();
+        }
+        self.sr_sent
+            .push_back((((ntp_timestamp >> 16) & 0xFFFF_FFFF) as u32, now));
         if let Some(cname) = &self.cname {
             compound.extend(
                 RtcpPacket::Sdes {

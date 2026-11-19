@@ -85,6 +85,26 @@ impl Drop for ShmBuffer {
     }
 }
 
+impl ShmBuffer {
+    /// Gives the buffer another size inside its pool, which must hold it, so a resize maps no
+    /// new memory; its first present at the new size copies everything.
+    fn reshape(&mut self, qh: &QueueHandle<State>, width: i32, height: i32, whole: Rect) {
+        self.buffer.destroy();
+        self.buffer = self.pool.create_buffer(
+            0,
+            width,
+            height,
+            width * 4,
+            wl_shm::Format::Argb8888,
+            qh,
+            self.busy.clone(),
+        );
+        self.width = width;
+        self.height = height;
+        self.missed = vec![whole];
+    }
+}
+
 /// An output with the wallpaper surface placed on it.
 struct Output {
     name: u32,
@@ -1256,7 +1276,9 @@ impl WaylandBackend {
         })
     }
 
-    /// Finds or creates a free buffer of the surface's size.
+    /// Finds or makes a free buffer of the surface's size, reshaping a free one of another size
+    /// whose pool holds it. A buffer made mid-resize gets a quarter more room, and one the
+    /// compositor still holds is kept to be reshaped once released.
     fn acquire_buffer(state: &mut State, qh: &QueueHandle<State>, target: Target) -> Option<usize> {
         let shm = state.shm.clone()?;
         let surface = state.target_mut(target)?;
@@ -1265,22 +1287,43 @@ impl WaylandBackend {
         if width < 1 || height < 1 || width > MAX_SURFACE_SIDE || height > MAX_SURFACE_SIDE {
             return None;
         }
-        surface.buffers.retain(|b| b.width == width && b.height == height);
+        let whole = Rect::new(0, 0, surface.width, surface.height);
+        let size = width as usize * height as usize * 4;
+        let resizing = surface
+            .buffers
+            .iter()
+            .any(|b| b.width != width || b.height != height);
+        for buffer in &mut surface.buffers {
+            if (buffer.width != width || buffer.height != height)
+                && !buffer.busy.load(Ordering::Acquire)
+                && buffer.map.len() >= size
+            {
+                buffer.reshape(qh, width, height, whole);
+            }
+        }
+        let sized = |b: &ShmBuffer| b.width == width && b.height == height;
+        surface
+            .buffers
+            .retain(|b| sized(b) || b.busy.load(Ordering::Acquire));
         if let Some(index) = surface
             .buffers
             .iter()
-            .position(|b| !b.busy.load(Ordering::Acquire))
+            .position(|b| sized(b) && !b.busy.load(Ordering::Acquire))
         {
             return Some(index);
         }
         if surface.buffers.len() >= 3 {
-            return Some(0);
+            match surface.buffers.iter().position(|b| !sized(b)) {
+                Some(held) => {
+                    surface.buffers.remove(held);
+                }
+                None => return Some(0),
+            }
         }
-        let whole = Rect::new(0, 0, surface.width, surface.height);
-        let size = width as usize * height as usize * 4;
-        let fd = create_memfd(size)?;
+        let room = if resizing { size + size / 4 } else { size };
+        let fd = create_memfd(room)?;
         let map = unsafe { memmap2::MmapMut::map_mut(&fd) }.ok()?;
-        let pool = shm.create_pool(fd.as_fd(), size as i32, qh, ());
+        let pool = shm.create_pool(fd.as_fd(), i32::try_from(room).ok()?, qh, ());
         let busy = Arc::new(AtomicBool::new(false));
         let buffer = pool.create_buffer(
             0,

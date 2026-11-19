@@ -59,7 +59,8 @@ use crate::input::authority::{
 use crate::settings::{WS_MAX_MESSAGE_BYTES, settings};
 use crate::stats::stats_request;
 use crate::ws::client::{
-    BOUNDED_SEND_SECONDS, Client, ClientId, Frame, NoLink, Perms, SocketLink, TcpLink, run_writer,
+    BOUNDED_SEND_SECONDS, Client, ClientId, Frame, NoLink, Perms, SocketLink, TcpLink,
+    bound_unsent, run_writer,
 };
 use crate::ws::host::MicUplink;
 use crate::ws::link::MAX_UINT16_FRAME_ID;
@@ -194,7 +195,10 @@ async fn run_socket(
     query_slot: Option<String>,
 ) {
     let link: Box<dyn SocketLink> = match peer.fd {
-        Some(fd) => Box::new(TcpLink::new(fd)),
+        Some(fd) => {
+            bound_unsent(fd);
+            Box::new(TcpLink::new(fd))
+        }
         None => Box::new(NoLink),
     };
     let remote = peer

@@ -108,11 +108,10 @@ jobs:
       - name: Run the unit tier
         run: cargo xtask suites --tier unit --junit unit-report.xml
 
-  # The Python the tree ships outside the wheel (addons/base/fetch-verified, the
-  # devcontainer's wheel selector, the services' helpers) holds to the oldest
-  # interpreter ruff.toml targets and runs on the newest as well. Their suites
-  # start the python3 first on PATH, which the server's unit tier leaves as the
-  # runner's own.
+  # The Python the tree ships outside the wheel, the devcontainer's wheel
+  # selector, holds to the oldest interpreter ruff.toml targets and runs on the
+  # newest as well. Its suite starts the python3 first on PATH, which the
+  # server's unit tier leaves as the runner's own.
   scripts-python:
     name: Shipped scripts (Python ${{ matrix.python-version }})
     if: ${{ !inputs.suites && (github.event_name != 'schedule' || github.repository == 'selkies-project/selkies') }}
@@ -172,8 +171,6 @@ jobs:
       # The selector reads wheel tags with packaging
       - name: Install packaging for the wheel selector
         run: scripts/ci/retry.sh 5 60 python3 -m pip install packaging
-      - name: Install shellcheck
-        run: scripts/ci/install-shellcheck.sh
       # What the suites' crate links
       - name: Install the Wayland client library
         run: sudo apt-get install --no-install-recommends -y libwayland-dev
@@ -182,10 +179,10 @@ jobs:
           pin="$(sed -n 's/^PIN="\(.*\)"$/\1/p' infra/packaging/rust.sh)"
           scripts/ci/retry.sh 5 60 rustup toolchain install "${pin}" --profile minimal
           rustup default "${pin}"
-      - name: Run the scripts' suites
+      - name: Run the wheel selector's suite
         run: |
           python3 --version | grep -F "Python ${{ matrix.python-version }}"
-          cargo test --locked -p selkies-suites --test fetch_verified --test wheel_selection --test session_scripts
+          cargo test --locked -p selkies-suites --test wheel_selection
 
   # The server's own unit tier, which runs wherever the suites' does
   server-unit:
@@ -315,6 +312,13 @@ jobs:
       fail-fast: false
       matrix:
         shard: ${{ fromJSON(inputs.shards || '[1, 2, 3]') }}
+    # The Rust suites' build, which every shard restores: with no incremental
+    # state and line tables for its debug information (a panic still names
+    # its line), it is about a fifth of the full debug build's size. The driver's
+    # own cargo runs take the same profile, so they find the build current.
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Free disk space
@@ -561,18 +565,19 @@ jobs:
             echo "toolchain=$(sed -n 's/^PIN="\(.*\)"$/\1/p' infra/packaging/rust.sh)"
             echo "image=$(. /etc/os-release && echo "${ID}${VERSION_ID}")"
           } >> "$GITHUB_OUTPUT"
-      - name: Cache the Rust suites' build
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore the Rust suites' build
+        id: suites-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             target
-          key: suites-${{ steps.rust.outputs.image }}-${{ runner.arch }}-${{ steps.rust.outputs.toolchain }}-${{ hashFiles('Cargo.lock', 'crates/selkies-suites/**') }}
+          key: suites-lines-${{ steps.rust.outputs.image }}-${{ runner.arch }}-${{ steps.rust.outputs.toolchain }}-${{ hashFiles('Cargo.lock', 'crates/selkies-suites/**') }}
           # A changed suite rebuilds the suites' crate alone, on the crates the
           # last build of this image and toolchain left.
           restore-keys: |
-            suites-${{ steps.rust.outputs.image }}-${{ runner.arch }}-${{ steps.rust.outputs.toolchain }}-
+            suites-lines-${{ steps.rust.outputs.image }}-${{ runner.arch }}-${{ steps.rust.outputs.toolchain }}-
       - name: Build the Rust suites
         run: |
           scripts/ci/retry.sh 5 60 rustup toolchain install "${{ steps.rust.outputs.toolchain }}" --profile minimal
@@ -582,6 +587,17 @@ jobs:
           scripts/ci/retry.sh 5 60 cargo build --locked --package xtask
           # Built now, so no Playwright suite pays for cargo's look at it either
           echo "SELKIES_SUITES_HOST=${PWD}/target/debug/suites-host" >> "$GITHUB_ENV"
+      # Kept by the first shard alone, as soon as it is built: every shard
+      # builds the same thing, and one upload of it is enough.
+      - name: Keep the Rust suites' build
+        if: steps.suites-cache.outputs.cache-hit != 'true' && matrix.shard == 1
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            target
+          key: ${{ steps.suites-cache.outputs.cache-primary-key }}
       # The same stack a development sandbox starts, on the display the
       # workflow names. VirtualCamera publishes a PipeWire node as well as
       # listening on its socket, so the webcam suite needs a reachable daemon.

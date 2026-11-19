@@ -1524,10 +1524,7 @@ impl Desktop {
             (geometry.width * geometry.scale) as u32,
             (geometry.height * geometry.scale) as u32,
         );
-        let mut pix = match self.notify_pix.take() {
-            Some(pix) if pix.width() == w && pix.height() == h => pix,
-            _ => Pixmap::new(w, h)?,
-        };
+        let (mut pix, _) = sized_pixmap(self.notify_pix.take(), w, h)?;
         let opaque = self.opaque_output;
         let drawn = notifications::render(self, &mut pix, geometry.scale, Instant::now(), opaque);
         self.notify_pix = Some(pix);
@@ -3345,10 +3342,7 @@ impl Desktop {
             (geometry.width * geometry.scale) as u32,
             (geometry.height * geometry.scale) as u32,
         );
-        let (mut pix, fresh) = match self.panel_pix.take() {
-            Some(pix) if pix.width() == w && pix.height() == h => (pix, false),
-            _ => (Pixmap::new(w, h)?, true),
-        };
+        let (mut pix, fresh) = sized_pixmap(self.panel_pix.take(), w, h)?;
         let previous = std::mem::take(&mut self.panel_visible);
         let hidden = self.panel_hidden();
         let whole = Rect::new(0, 0, geometry.width, geometry.height);
@@ -3467,10 +3461,7 @@ impl Desktop {
             (geometry.height * geometry.scale) as u32,
         );
         let whole = Rect::new(0, 0, geometry.width, geometry.height);
-        let (mut pix, fresh) = match self.backgrounds[index].pix.take() {
-            Some(pix) if pix.width() == w && pix.height() == h => (pix, false),
-            _ => (Pixmap::new(w, h)?, true),
-        };
+        let (mut pix, fresh) = sized_pixmap(self.backgrounds[index].pix.take(), w, h)?;
         let scene = background::scene(self, id);
         let damage = match self.backgrounds[index].scene.as_ref() {
             Some(before) if !fresh => background::damage(before, &scene).map(|r| r.intersect(&whole)),
@@ -3521,14 +3512,9 @@ impl Desktop {
             (geometry.height * geometry.scale) as u32,
         );
         let whole = Rect::new(0, 0, geometry.width, geometry.height);
-        let (mut pix, pix_fresh) = match self.backgrounds[index].pix.take() {
-            Some(pix) if pix.width() == w && pix.height() == h => (pix, false),
-            _ => (Pixmap::new(w, h)?, true),
-        };
-        let (mut launchers, launchers_fresh) = match self.backgrounds[index].launchers_pix.take() {
-            Some(pix) if pix.width() == w && pix.height() == h => (pix, false),
-            _ => (Pixmap::new(w, h)?, true),
-        };
+        let (mut pix, pix_fresh) = sized_pixmap(self.backgrounds[index].pix.take(), w, h)?;
+        let (mut launchers, launchers_fresh) =
+            sized_pixmap(self.backgrounds[index].launchers_pix.take(), w, h)?;
         let full = pix_fresh || launchers_fresh || self.backgrounds[index].scene.is_none();
         let scene = background::scene(self, id);
         let damage = match self.backgrounds[index].scene.as_ref() {
@@ -3614,10 +3600,7 @@ impl Desktop {
             (geometry.width * geometry.scale) as u32,
             (geometry.height * geometry.scale) as u32,
         );
-        let mut pix = match self.files.windows[index].pix.take() {
-            Some(pix) if pix.width() == w && pix.height() == h => pix,
-            _ => Pixmap::new(w, h)?,
-        };
+        let (mut pix, _) = sized_pixmap(self.files.windows[index].pix.take(), w, h)?;
         {
             let mut canvas = Canvas::new(pix.as_mut(), geometry.scale);
             ui::files::draw(self, id, &mut canvas);
@@ -3651,10 +3634,7 @@ impl Desktop {
             (geometry.width * geometry.scale) as u32,
             (geometry.height * geometry.scale) as u32,
         );
-        let mut pix = match self.dialog.pix.take() {
-            Some(pix) if pix.width() == w && pix.height() == h => pix,
-            _ => Pixmap::new(w, h)?,
-        };
+        let (mut pix, _) = sized_pixmap(self.dialog.pix.take(), w, h)?;
         {
             let mut canvas = Canvas::new(pix.as_mut(), geometry.scale);
             ui::dialog::draw(self, &mut canvas);
@@ -3686,10 +3666,7 @@ impl Desktop {
             (geometry.width * geometry.scale) as u32,
             (geometry.height * geometry.scale) as u32,
         );
-        let mut pix = match self.settings.pix.take() {
-            Some(pix) if pix.width() == w && pix.height() == h => pix,
-            _ => Pixmap::new(w, h)?,
-        };
+        let (mut pix, _) = sized_pixmap(self.settings.pix.take(), w, h)?;
         {
             let mut canvas = Canvas::new(pix.as_mut(), geometry.scale);
             settings::draw(self, &mut canvas);
@@ -3753,6 +3730,24 @@ fn seed_favorites(config: &mut Config, apps: &Apps) {
     seeded.retain(|id| !config.favorites.contains(id));
     seeded.append(&mut config.favorites);
     config.favorites = seeded;
+}
+
+/// A `w` by `h` pixmap from the one a surface kept, and whether it is fresh: the kept one at
+/// that size, else its memory zeroed and resized with room to spare, so a resize maps no pages.
+fn sized_pixmap(kept: Option<Pixmap>, w: u32, h: u32) -> Option<(Pixmap, bool)> {
+    match kept {
+        Some(pix) if pix.width() == w && pix.height() == h => Some((pix, false)),
+        kept => {
+            let mut data = kept.map(Pixmap::take).unwrap_or_default();
+            data.clear();
+            let len = usize::try_from(w).ok()? * usize::try_from(h).ok()? * 4;
+            if len > data.capacity() {
+                data.reserve_exact(len + len / 4);
+            }
+            data.resize(len, 0);
+            Pixmap::from_vec(data, tiny_skia::IntSize::from_wh(w, h)?).map(|pix| (pix, true))
+        }
+    }
 }
 
 #[cfg(test)]

@@ -49,7 +49,10 @@
 	"customizations": {
 		"vscode": {
 			"extensions": [
-				"ms-python.python"
+				"rust-lang.rust-analyzer",
+				"vadimcn.vscode-lldb",
+				"dbaeumer.vscode-eslint",
+				"charliermarsh.ruff"
 			]
 		}
 	}

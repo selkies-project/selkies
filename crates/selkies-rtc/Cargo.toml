@@ -49,8 +49,15 @@ libc = "0.2"
 memchr = "2"
 
 [dev-dependencies]
+# Criterion's API, timed by CodSpeed's instrument under `cargo codspeed` (.github/workflows/codspeed.yaml,
+# which installs the cargo-codspeed of the same version) and by Criterion under `cargo bench`.
+criterion = { package = "codspeed-criterion-compat", version = "6.0.0" }
 rtc-crypto = { version = "=0.21.1", default-features = false, features = ["test-support"] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 crc32c = "0.6"
 rtc-rtp = "=0.21.1"
 rtc-rtcp = "=0.21.1"
+
+[[bench]]
+name = "hot_paths"
+harness = false

@@ -450,6 +450,8 @@ pub struct Policy {
     pub menus: bool,
     /// The key binds that close or kill a window, open a menu, or start a program.
     pub keybinds: bool,
+    /// The stream's frame rate, which paces a resize of a window the engine sizes itself.
+    pub frame_rate: u32,
 }
 
 impl Default for Policy {
@@ -459,6 +461,7 @@ impl Default for Policy {
             buttons: Buttons::ALL,
             menus: true,
             keybinds: true,
+            frame_rate: 60,
         }
     }
 }

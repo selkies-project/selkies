@@ -3137,10 +3137,28 @@ impl WaylandFocus for FocusTarget {
     }
 }
 
-/// Forward every keyboard event (enter / leave / key / modifiers) to the wrapped target's
-/// underlying `wl_surface`, which carries Smithay's real keyboard-target implementation; a
-/// subsurface's events go to the surface it belongs to, since keyboard focus is a whole
-/// window's.
+impl FocusTarget {
+    /// The X11 window this target is, or a subsurface belongs to, which takes the keyboard
+    /// through Smithay's window manager rather than through its `wl_surface` alone.
+    fn keyboard_x11(&self) -> Option<&smithay::xwayland::X11Surface> {
+        match self.owner() {
+            FocusTarget::Window(window) => window.x11_surface(),
+            _ => None,
+        }
+    }
+}
+
+/// Forward every keyboard event (enter / leave / key / modifiers) to the target that carries
+/// Smithay's real keyboard-target implementation; a subsurface's events go to the surface it
+/// belongs to, since keyboard focus is a whole window's.
+///
+/// An X11 window's events go to its [`smithay::xwayland::X11Surface`], never straight to its
+/// `wl_surface`: Xwayland routes a key to the X server's input focus, not to the surface the
+/// seat entered, so the X focus has to follow the seat (`SetInputFocus` or `WM_TAKE_FOCUS` on
+/// enter, by the window's ICCCM input model, and a release on leave), or every key goes to
+/// whichever window an X client last focused itself. A window the policy focuses as it maps has
+/// no `wl_surface` until Xwayland associates one, and the X11 surface holds that enter until it
+/// does, where the bare surface would drop it and leave Xwayland hearing no keys at all.
 impl KeyboardTarget<AppState> for FocusTarget {
     fn enter(
         &self,
@@ -3149,19 +3167,17 @@ impl KeyboardTarget<AppState> for FocusTarget {
         keys: Vec<KeysymHandle<'_>>,
         serial: Serial,
     ) {
-        if let Some(surface) = self.owner().wl_surface() {
-            smithay::input::keyboard::KeyboardTarget::enter(
-                surface.as_ref(),
-                seat,
-                data,
-                keys,
-                serial,
-            );
+        if let Some(x11) = self.keyboard_x11() {
+            KeyboardTarget::enter(x11, seat, data, keys, serial);
+        } else if let Some(surface) = self.owner().wl_surface() {
+            KeyboardTarget::enter(surface.as_ref(), seat, data, keys, serial);
         }
     }
     fn leave(&self, seat: &Seat<AppState>, data: &mut AppState, serial: Serial) {
-        if let Some(surface) = self.owner().wl_surface() {
-            smithay::input::keyboard::KeyboardTarget::leave(surface.as_ref(), seat, data, serial);
+        if let Some(x11) = self.keyboard_x11() {
+            KeyboardTarget::leave(x11, seat, data, serial);
+        } else if let Some(surface) = self.owner().wl_surface() {
+            KeyboardTarget::leave(surface.as_ref(), seat, data, serial);
         }
     }
     fn key(
@@ -3173,16 +3189,10 @@ impl KeyboardTarget<AppState> for FocusTarget {
         serial: Serial,
         time: InputTime,
     ) {
-        if let Some(surface) = self.owner().wl_surface() {
-            smithay::input::keyboard::KeyboardTarget::key(
-                surface.as_ref(),
-                seat,
-                data,
-                key,
-                state,
-                serial,
-                time,
-            );
+        if let Some(x11) = self.keyboard_x11() {
+            KeyboardTarget::key(x11, seat, data, key, state, serial, time);
+        } else if let Some(surface) = self.owner().wl_surface() {
+            KeyboardTarget::key(surface.as_ref(), seat, data, key, state, serial, time);
         }
     }
     fn modifiers(
@@ -3192,14 +3202,10 @@ impl KeyboardTarget<AppState> for FocusTarget {
         modifiers: ModifiersState,
         serial: Serial,
     ) {
-        if let Some(surface) = self.owner().wl_surface() {
-            smithay::input::keyboard::KeyboardTarget::modifiers(
-                surface.as_ref(),
-                seat,
-                data,
-                modifiers,
-                serial,
-            );
+        if let Some(x11) = self.keyboard_x11() {
+            KeyboardTarget::modifiers(x11, seat, data, modifiers, serial);
+        } else if let Some(surface) = self.owner().wl_surface() {
+            KeyboardTarget::modifiers(surface.as_ref(), seat, data, modifiers, serial);
         }
     }
 }
@@ -3558,10 +3564,13 @@ impl SeatHandler for AppState {
     /// A client requested a cursor change (named, hidden, or surface-backed): retain it as
     /// the current icon and forward it to the Python cursor callback. A surface-backed one
     /// is delivered by the surface's commit or by `flush_pending_cursor`, whichever is first.
+    /// Records the cursor a client asked for and shows it unless the policy shows its own: the
+    /// seat resets to the default as the pointer leaves a client for a frame.
     fn cursor_image(&mut self, _seat: &Seat<AppState>, image: CursorImageStatus) {
         self.current_cursor_icon = Some(image.clone());
         self.cursor_surface_pending = matches!(image, CursorImageStatus::Surface(_));
-        if !self.cursor_surface_pending {
+        let policy_cursor = self.wm.as_ref().is_some_and(|wm| wm.cursor.is_some());
+        if !self.cursor_surface_pending && !policy_cursor {
             self.send_cursor_image(&image);
         }
     }

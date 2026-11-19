@@ -207,7 +207,13 @@ abstract class PortalRig {
                 // never written
             }
         }
-        rmSync(this.root, { recursive: true, force: true });
+        // Best effort, as the stack's teardown is: a portal's FUSE mount under the
+        // root can refuse its files while its daemon is still going away.
+        try {
+            rmSync(this.root, { recursive: true, force: true });
+        } catch (e) {
+            process.stdout.write(`note: the portal rig's ${this.root} is left behind: ${String(e)}\n`);
+        }
     }
 }
 

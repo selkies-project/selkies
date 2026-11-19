@@ -27,6 +27,7 @@
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use smithay::backend::allocator::Fourcc;
@@ -43,7 +44,9 @@ use smithay::input::keyboard::ModifiersState;
 use smithay::input::pointer::{CursorIcon, CursorImageStatus};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgState;
 use smithay::reexports::wayland_server::Resource;
-use smithay::utils::{Logical, Physical, Point, Rectangle, Scale, Transform as OutputTransform};
+use smithay::utils::{
+    Logical, Physical, Point, Rectangle, Scale, Serial, Transform as OutputTransform,
+};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat;
 use smithay::wayland::seat::WaylandFocus;
@@ -60,11 +63,23 @@ use crate::wm::{
     WindowId, WindowInfo, WindowKind, WindowPolicy, WindowType,
 };
 
-/// A frame's parts as render buffers, placed relative to the client area.
+/// A frame's parts as render buffers, placed relative to the client area, front to back.
 #[derive(Clone)]
 pub struct FrameBuffers {
     pub extents: Extents,
-    pub parts: Vec<(Rect, MemoryRenderBuffer)>,
+    pub parts: Vec<PartBuffer>,
+}
+
+/// One frame part as a render buffer.
+#[derive(Clone)]
+pub struct PartBuffer {
+    /// Where the part sits, relative to the client area.
+    pub rect: Rect,
+    /// The part of the buffer stretched over `rect`, the whole buffer where `None`.
+    pub source: Option<Rectangle<f64, Logical>>,
+    pub buffer: MemoryRenderBuffer,
+    /// The pixels the buffer was made from: a frame handing the same ones keeps the buffer.
+    pixels: Arc<[u8]>,
 }
 
 /// An overlay as render buffers at a layout rectangle: the whole picture, or the pieces its
@@ -216,18 +231,22 @@ const GHOST_UNCLAIMED: Duration = Duration::from_millis(250);
 /// How long a ghost may live however the policy drives it.
 const GHOST_LIFETIME: Duration = Duration::from_secs(2);
 
-/// A move held until the toplevel commits a size, see [`WmState::pending_moves`].
+/// How long a resizing configure waits on the client's answer to the one before it.
+const ANSWER_PATIENCE: Duration = Duration::from_millis(100);
+
+/// A move held until the toplevel answers the configure that carried it, see
+/// [`WmState::pending_moves`].
 ///
-/// A configure holding an edge places every commit against that edge until the client reaches
-/// the size asked for: a client answering a drag commits sizes it was asked for a few
-/// configures back, and each lands with the held edge where the pointer put it rather than
-/// where the newest size would.
+/// The answer is told by serial, since a client snapping to its cells never commits the size
+/// asked for. Until it comes, a configure holding an edge places every commit against it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PendingMove {
     /// The rectangle configured.
     pub rect: Rect,
     pub holds_right: bool,
     pub holds_bottom: bool,
+    /// The configure the move waits for the client to answer.
+    pub serial: Serial,
 }
 
 impl PendingMove {
@@ -247,7 +266,7 @@ impl PendingMove {
         )
     }
 
-    /// Whether the move waits for the size asked for, rather than for the first commit.
+    /// Whether the commits that come before the answer are placed against a held edge.
     fn holds_edge(&self) -> bool {
         self.holds_right || self.holds_bottom
     }
@@ -276,9 +295,16 @@ pub struct WmState {
     /// move: a resize from a window's top or left edge, or a maximize, changes both, and moving
     /// the old buffer first would show its far edge jump and come back.
     pub pending_moves: HashMap<WindowId, PendingMove>,
-    /// The size of the configure each toplevel last acknowledged, as of its last commit, so a
-    /// commit that answers a configure is told from one that was already on its way.
-    pub acked: HashMap<WindowId, Option<Size>>,
+    /// The configure each toplevel last acknowledged, as of its last commit.
+    pub acked: HashMap<WindowId, Serial>,
+    /// The newest configure sent each toplevel and when, until a commit answers it.
+    pub outstanding: HashMap<WindowId, (Serial, Instant)>,
+    /// A resizing configure held until the client answers the last one and a stream frame has
+    /// passed ([`flush_deferred`]): one size a frame, not one a pointer motion. After
+    /// [`ANSWER_PATIENCE`] it goes out unanswered.
+    pub deferred: HashMap<WindowId, (Rect, States)>,
+    /// When each toplevel was last configured.
+    pub configured_at: HashMap<WindowId, Instant>,
     /// When the policy asked to be ticked.
     pub wake_at: Option<Instant>,
     /// The cursor the policy shows while it holds the pointer; `None` leaves the client's.
@@ -310,6 +336,9 @@ impl WmState {
             known: HashMap::new(),
             pending_moves: HashMap::new(),
             acked: HashMap::new(),
+            outstanding: HashMap::new(),
+            deferred: HashMap::new(),
+            configured_at: HashMap::new(),
             wake_at: None,
             cursor: None,
             pointer_taken: false,
@@ -704,20 +733,16 @@ pub fn window_mapped(state: &mut AppState, window: &Window, size: Size) {
     mark_dirty(state);
 }
 
-/// A mapped window committed a size. The policy is told when it differs from the last, and
-/// also when the commit answers a configure with a size other than the one asked for, which
-/// a client snapping to its cell size does without changing size at all; a move held for the
-/// configure is carried out on that answer, with whatever size the client chose.
+/// A mapped window committed a size. The policy is told when the size changed, when the commit
+/// answers a configure with another size, and when it answers the newest configure; a held move
+/// and a held resizing configure follow the answer.
 pub fn window_resized(state: &mut AppState, window: &Window, size: Size) {
     let Some(id) = window_id(window) else {
         return;
     };
-    let acked = window
-        .toplevel()
-        .and_then(|toplevel| {
-            toplevel.with_committed_state(|committed| committed.and_then(|c| c.size))
-        })
-        .map(|s| Size { w: s.w, h: s.h });
+    let acked = window.toplevel().and_then(|toplevel| {
+        toplevel.with_cached_state(|cached| cached.last_acked.as_ref().map(|c| c.serial))
+    });
     let Some(wm) = state.wm.as_mut() else {
         return;
     };
@@ -726,13 +751,24 @@ pub fn window_resized(state: &mut AppState, window: &Window, size: Size) {
     };
     let changed = *last != size;
     *last = size;
-    let acked_now = acked.is_some() && wm.acked.insert(id, acked) != Some(acked);
+    let acked_now = acked.is_some_and(|serial| wm.acked.insert(id, serial) != Some(serial));
+    let answers = |serial: Serial| acked.is_some_and(|a| a >= serial);
+    let caught_up = acked_now
+        && wm
+            .outstanding
+            .get(&id)
+            .is_some_and(|(serial, _)| answers(*serial));
+    if caught_up {
+        wm.outstanding.remove(&id);
+    }
+    let answered = caught_up && !wm.deferred.contains_key(&id);
     let requested = wm.rects.get(&id).map(|r| Size { w: r.w, h: r.h });
-    let answered = acked_now && requested.is_some_and(|r| r != size);
+    let other_size = acked_now && requested.is_some_and(|r| r != size);
     let pending = if changed || acked_now {
         match wm.pending_moves.get(&id).copied() {
-            Some(held) if held.holds_edge() && requested != Some(size) => Some(held),
-            _ => wm.pending_moves.remove(&id),
+            Some(held) if answers(held.serial) => wm.pending_moves.remove(&id),
+            Some(held) if held.holds_edge() => Some(held),
+            _ => None,
         }
     } else {
         None
@@ -745,8 +781,48 @@ pub fn window_resized(state: &mut AppState, window: &Window, size: Size) {
         state.refocus_pointer();
         mark_dirty(state);
     }
-    if (changed || answered) && active(state) {
-        dispatch(state, Event::Resized { id, size });
+    if (changed || other_size || answered) && active(state) {
+        dispatch(state, Event::Resized { id, size, answered });
+    }
+    if caught_up {
+        flush_deferred(state, Instant::now());
+    }
+}
+
+/// When a resizing configure for `id` may go out: a stream frame after the last one, once that
+/// one is answered or [`ANSWER_PATIENCE`] runs out.
+fn resize_due(state: &AppState, id: WindowId, now: Instant) -> Instant {
+    let Some(wm) = state.wm.as_ref() else {
+        return now;
+    };
+    let period = crate::frame_period(state.settings.target_fps);
+    let framed = wm.configured_at.get(&id).map_or(now, |at| *at + period);
+    match wm.outstanding.get(&id) {
+        Some((_, at)) => framed.max(*at + ANSWER_PATIENCE),
+        None => framed,
+    }
+}
+
+/// Sends the held resizing configures that are due and wakes for the next.
+pub fn flush_deferred(state: &mut AppState, now: Instant) {
+    let ids: Vec<WindowId> = state
+        .wm
+        .as_ref()
+        .map(|wm| wm.deferred.keys().copied().collect())
+        .unwrap_or_default();
+    let mut wake: Option<Instant> = None;
+    for id in ids {
+        let due = resize_due(state, id, now);
+        if due <= now {
+            if let Some((rect, states)) = state.wm.as_mut().and_then(|wm| wm.deferred.remove(&id)) {
+                configure(state, id, rect, states);
+            }
+        } else {
+            wake = Some(wake.map_or(due, |w| w.min(due)));
+        }
+    }
+    if let (Some(due), Some(wm)) = (wake, state.wm.as_mut()) {
+        wm.wake_at = Some(wm.wake_at.map_or(due, |w| w.min(due)));
     }
 }
 
@@ -759,6 +835,8 @@ pub fn window_unmapped(state: &mut AppState, window: &Window) {
         wm.frames.remove(&id);
         wm.effects.remove(&id);
         wm.hidden.remove(&id);
+        wm.outstanding.remove(&id);
+        wm.deferred.remove(&id);
     }
     if active(state)
         && state
@@ -790,6 +868,9 @@ pub fn window_removed(state: &mut AppState, id: WindowId) {
         wm.known.remove(&id);
         wm.pending_moves.remove(&id);
         wm.acked.remove(&id);
+        wm.outstanding.remove(&id);
+        wm.deferred.remove(&id);
+        wm.configured_at.remove(&id);
         if wm.focus == Some(id) {
             wm.focus = None;
         }
@@ -1116,6 +1197,7 @@ pub fn tick(state: &mut AppState, now: Instant) -> bool {
         wm.wake_at = None;
     }
     dispatch(state, Event::Tick(now));
+    flush_deferred(state, now);
     sweep_ghosts(state, now);
     take_dirty(state)
 }
@@ -1330,7 +1412,8 @@ where
         }
     }
     if let Some(frame) = ghost.frame.as_ref() {
-        for (rect, buffer) in &frame.parts {
+        for part in &frame.parts {
+            let rect = part.rect;
             let (location, size) = place(Rect::new(
                 ghost.geometry.x + rect.x,
                 ghost.geometry.y + rect.y,
@@ -1340,9 +1423,9 @@ where
             if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
                 renderer,
                 location,
-                buffer,
+                &part.buffer,
                 Some(effect.alpha),
-                None,
+                part.source,
                 Some(size),
                 Kind::Unspecified,
             ) {
@@ -1374,7 +1457,8 @@ where
     };
     let sx = f64::from(effect.rect.w) / f64::from(client.w.max(1));
     let sy = f64::from(effect.rect.h) / f64::from(client.h.max(1));
-    for (rect, buffer) in &frame.parts {
+    for part in &frame.parts {
+        let rect = part.rect;
         let x = f64::from(effect.rect.x) + f64::from(rect.x) * sx - f64::from(origin.x);
         let y = f64::from(effect.rect.y) + f64::from(rect.y) * sy - f64::from(origin.y);
         let location = Point::<f64, Logical>::from((x, y)).to_physical(Scale::from(scale));
@@ -1386,9 +1470,9 @@ where
         if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             location,
-            buffer,
+            &part.buffer,
             Some(effect.alpha),
-            None,
+            part.source,
             Some(size),
             Kind::Unspecified,
         ) {
@@ -1607,10 +1691,27 @@ fn set_frame(state: &mut AppState, id: WindowId, frame: Option<Frame>) {
     };
     match frame {
         Some(frame) => {
+            let mut previous = wm.frames.remove(&id).map(|f| f.parts).unwrap_or_default();
             let parts = frame
                 .parts
                 .iter()
-                .map(|part| (part.rect, buffer_of(&part.image)))
+                .map(|part| {
+                    let kept = previous
+                        .iter()
+                        .position(|p| Arc::ptr_eq(&p.pixels, &part.image.rgba))
+                        .map(|i| previous.swap_remove(i).buffer);
+                    PartBuffer {
+                        rect: part.rect,
+                        source: part.source.map(|r| {
+                            Rectangle::new(
+                                (f64::from(r.x), f64::from(r.y)).into(),
+                                (f64::from(r.w), f64::from(r.h)).into(),
+                            )
+                        }),
+                        buffer: kept.unwrap_or_else(|| buffer_of(&part.image)),
+                        pixels: part.image.rgba.clone(),
+                    }
+                })
                 .collect();
             wm.frames.insert(
                 id,
@@ -1662,21 +1763,40 @@ fn sync_decoration_mode(state: &mut AppState, id: WindowId) {
 
 /// Place and size a window as the policy asked: an xdg configure for the size and states, a
 /// Space mapping for the position, a Space unmapping for a minimized one or one on another
-/// desktop, and the output's enter and leave as the window moves between outputs.
+/// desktop, and the output's enter and leave as the window moves between outputs. A resizing
+/// configure may be held ([`WmState::deferred`]); a move waits only on a configure that went out.
 fn configure(state: &mut AppState, id: WindowId, rect: Rect, states: States) {
-    if let Some(wm) = state.wm.as_mut() {
-        wm.rects.insert(id, rect);
-        wm.states.insert(id, states);
-    }
     let Some(window) = find_window(state, id) else {
+        if let Some(wm) = state.wm.as_mut() {
+            wm.rects.insert(id, rect);
+            wm.states.insert(id, states);
+        }
         return;
     };
+    let toplevel = window.toplevel().cloned();
+    if states.resizing && toplevel.is_some() {
+        let now = Instant::now();
+        if resize_due(state, id, now) > now {
+            if let Some(wm) = state.wm.as_mut() {
+                wm.deferred.insert(id, (rect, states));
+            }
+            flush_deferred(state, now);
+            return;
+        }
+    }
+    let Some(wm) = state.wm.as_mut() else {
+        return;
+    };
+    wm.deferred.remove(&id);
+    wm.rects.insert(id, rect);
+    wm.states.insert(id, states);
     let in_space = state.space.elements().any(|w| *w == window);
     let hidden = state
         .wm
         .as_ref()
         .is_some_and(|wm| wm.hidden.contains_key(&id));
-    if let Some(toplevel) = window.toplevel() {
+    let mut sent = None;
+    if let Some(toplevel) = toplevel {
         toplevel.with_pending_state(|s| {
             s.size = (rect.w > 0 && rect.h > 0).then(|| (rect.w, rect.h).into());
             set_state(&mut s.states, XdgState::Maximized, states.maximized);
@@ -1695,11 +1815,21 @@ fn configure(state: &mut AppState, id: WindowId, rect: Rect, states: States) {
                 set_state(&mut s.states, XdgState::TiledRight, false);
             }
         });
-        toplevel.send_pending_configure();
+        sent = toplevel.send_pending_configure();
     }
     if let Some(surface) = window.x11_surface() {
         crate::wayland::xwm::configure(surface, rect, states);
     }
+    let awaited = match (sent, state.wm.as_mut()) {
+        (Some(serial), Some(wm)) => {
+            let now = Instant::now();
+            wm.outstanding.insert(id, (serial, now));
+            wm.configured_at.insert(id, now);
+            Some(serial)
+        }
+        (None, Some(wm)) => wm.outstanding.get(&id).map(|(serial, _)| *serial),
+        (_, None) => None,
+    };
     if states.minimized || states.hidden {
         if in_space {
             state.space.unmap_elem(&window);
@@ -1712,7 +1842,7 @@ fn configure(state: &mut AppState, id: WindowId, rect: Rect, states: States) {
         let location = (rect.x, rect.y);
         let holds_edge = states.holds_right || states.holds_bottom;
         let awaits_size = in_space
-            && window.toplevel().is_some()
+            && awaited.is_some()
             && (holds_edge || state.space.element_location(&window) != Some(location.into()))
             && state
                 .wm
@@ -1723,13 +1853,14 @@ fn configure(state: &mut AppState, id: WindowId, rect: Rect, states: States) {
                 });
         if let Some(wm) = state.wm.as_mut() {
             wm.hidden.remove(&id);
-            if awaits_size {
+            if let Some(serial) = awaited.filter(|_| awaits_size) {
                 wm.pending_moves.insert(
                     id,
                     PendingMove {
                         rect,
                         holds_right: states.holds_right,
                         holds_bottom: states.holds_bottom,
+                        serial,
                     },
                 );
             } else {
@@ -1850,7 +1981,8 @@ where
     let Some(frame) = wm.and_then(|wm| wm.frames.get(&id)) else {
         return elements;
     };
-    for (rect, buffer) in &frame.parts {
+    for part in &frame.parts {
+        let rect = part.rect;
         let loc = Point::<i32, Logical>::from((
             client_loc.x + rect.x - origin.x,
             client_loc.y + rect.y - origin.y,
@@ -1859,9 +1991,9 @@ where
         if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             location,
-            buffer,
+            &part.buffer,
             Some(alpha),
-            None,
+            part.source,
             Some((rect.w, rect.h).into()),
             Kind::Unspecified,
         ) {
