@@ -173,3 +173,62 @@ export async function checkPicture(page: Page, script: string = PICTURE_JS): Pro
     const n = (k: string): number => Number(Reflect.get(got, k));
     return { index: n('index'), ambiguous: n('ambiguous'), mismatch: n('mismatch'), w: n('w'), h: n('h') };
 }
+
+/**
+ * An init script that reads the frame index off whichever sink shows the
+ * picture every 100 ms, from the code strip alone, into `window.__shown` as
+ * [performance.now(), Date.now(), index or -1 where unreadable]. With the
+ * scene's `t0` and `interval` (motion-scene prints them), the gap between the
+ * wall clock and frame index's drawing time is the age of the picture on
+ * screen ({@link pictureAge}).
+ */
+export const SHOWN_JS = `(() => {
+  const g = ${JSON.stringify(GEOMETRY)};
+  const rows = [];
+  window.__shown = rows;
+  const W = g.codeX + g.codeBits * (g.codeSize + g.codeGap), H = g.codeY + g.codeSize;
+  let c = null;
+  setInterval(() => {
+    let src = document.querySelector('video');
+    if (!(src && src.videoWidth > 0 && src.readyState >= 2 && src.style.display !== 'none')) {
+      src = [...document.querySelectorAll('canvas')].find((k) => k.width >= 640 && k.style.display !== 'none') || null;
+    }
+    let index = -1;
+    if (src) {
+      if (!c) { c = document.createElement('canvas'); c.width = W; c.height = H; }
+      const ctx = c.getContext('2d', {willReadFrequently: true});
+      ctx.drawImage(src, 0, 0, W, H, 0, 0, W, H);
+      const px = ctx.getImageData(0, 0, W, H).data;
+      index = 0;
+      for (let b = 0; b < g.codeBits && index >= 0; b++) {
+        const cx = g.codeX + b * (g.codeSize + g.codeGap) + g.codeSize / 2, cy = g.codeY + g.codeSize / 2;
+        let sum = 0, n = 0;
+        for (let dy = -8; dy < 8; dy += 2) for (let dx = -8; dx < 8; dx += 2) {
+          const i = ((cy + dy) * W + cx + dx) * 4; sum += px[i] + px[i + 1] + px[i + 2]; n += 3;
+        }
+        const lum = sum / n;
+        if (lum > 160) index |= (1 << b); else if (lum > 96) index = -1;
+      }
+    }
+    rows.push([performance.now(), Date.now(), index]);
+  }, 100);
+})();`;
+
+/**
+ * How old the picture shown at wall-clock `now` was, in milliseconds: the
+ * time since the scene drew frame `index`, the newest drawing of that index
+ * at or before `now` (the index wraps every 2^codeBits frames).
+ * @param now The page's `Date.now()` when it read the picture.
+ * @param index The frame index read off it.
+ * @param t0 The scene's first frame, in wall-clock milliseconds.
+ * @param interval The scene's frame interval in milliseconds.
+ * @returns The age, or null before the scene's first frame.
+ */
+export function pictureAge(now: number, index: number, t0: number, interval: number): number | null {
+    const elapsed = now - t0;
+    if (elapsed < 0 || index < 0) return null;
+    const wrap = 2 ** GEOMETRY.codeBits;
+    const due = Math.floor(elapsed / interval);
+    const behind = (((due - index) % wrap) + wrap) % wrap;
+    return behind * interval + (elapsed - due * interval);
+}

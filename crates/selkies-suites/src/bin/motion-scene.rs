@@ -21,10 +21,19 @@
 //! ```
 //!
 //! Each frame is drawn off screen and copied to the window in one request, so a grab of the
-//! screen always holds a whole frame. The noise is the noise the suites' checkers know: four
+//! screen always holds a whole frame. Frames keep a fixed cadence from the first, whose wall-clock
+//! time the scene prints once, as `t0 MILLISECONDS interval MILLISECONDS`: frame N is drawn at
+//! `t0 + N * interval`, so a viewer that reads N off what it shows knows how old its picture is.
+//! A line `noise off` on its input leaves the noise band out from the next frame, and `noise on`
+//! puts it back, so one scene can turn light and heavy without losing its clock; `still on`
+//! stops the painting altogether, the clock counting on, and `still off` resumes it. The noise
+//! is the noise the suites' checkers know: four
 //! images of Python's `random.Random(1).getrandbits(24)` colors, row by row.
 
-use std::time::{Duration, Instant};
+use std::io::{BufRead as _, Write as _};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::xproto::{
@@ -167,6 +176,24 @@ fn run() -> Result<(), String> {
         put(&connection, noise, gc, noise_w, &pixels)?;
         noises.push(noise);
     }
+    let noisy = Arc::new(AtomicBool::new(true));
+    let still = Arc::new(AtomicBool::new(false));
+    {
+        let noisy = Arc::clone(&noisy);
+        let still = Arc::clone(&still);
+        std::thread::spawn(move || {
+            for line in std::io::stdin().lock().lines() {
+                match line.as_deref().map(str::trim) {
+                    Ok("noise off") => noisy.store(false, Ordering::Relaxed),
+                    Ok("noise on") => noisy.store(true, Ordering::Relaxed),
+                    Ok("still on") => still.store(true, Ordering::Relaxed),
+                    Ok("still off") => still.store(false, Ordering::Relaxed),
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        });
+    }
     let frame = id()?;
     connection
         .create_pixmap(depth, frame, window, width, height)
@@ -220,7 +247,7 @@ fn run() -> Result<(), String> {
                 },
             )?;
         }
-        if !noises.is_empty() {
+        if !noises.is_empty() && noisy.load(Ordering::Relaxed) {
             let source = noises[usize::try_from(index).unwrap_or(0) % NOISE_IMAGES];
             let shift = (index * 97) % u32::from(width);
             connection
@@ -263,13 +290,27 @@ fn run() -> Result<(), String> {
 
     let interval = Duration::from_millis(u64::from((1000 + fps / 2) / fps).max(1));
     let mut index = 0u32;
-    draw(index)?;
     let mut next = Instant::now() + interval;
+    let t0 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?;
+    draw(index)?;
+    let mut out = std::io::stdout();
+    // A viewer that does not read it has the scene's output closed or discarded.
+    let _ = writeln!(
+        out,
+        "t0 {:.3} interval {}",
+        t0.as_secs_f64() * 1000.0,
+        interval.as_millis()
+    )
+    .and_then(|()| out.flush());
     loop {
         std::thread::sleep(next.saturating_duration_since(Instant::now()));
         next += interval;
         index = (index + 1) % (1 << CODE_BITS);
-        draw(index)?;
+        if !still.load(Ordering::Relaxed) {
+            draw(index)?;
+        }
         // A connection the server dropped ends the scene rather than spinning.
         if let Err(e) = connection.poll_for_event() {
             return Err(e.to_string());
