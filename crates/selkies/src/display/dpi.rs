@@ -666,19 +666,23 @@ pub async fn desktop_dpi() -> Option<i32> {
 /// writes nothing, while the session then applies what xfconfd persisted. That density is
 /// recorded as the one applied all the same: a page at unity would otherwise be compared
 /// against the configured default and leave the desktop where it was. An operator-set value
-/// that could not be written is not the desktop's, and is not recorded. On XFCE it is
-/// written once the session has a bus (`apply_once_xfce_has_bus`): nothing else would write
-/// it, since an operator-set density is applied only here and a page's density is not
-/// applied while it is operator-set.
+/// that could not be written is not the desktop's, and is not recorded. On XFCE with
+/// `xfconf-query` installed it is written once the session has a bus
+/// ([`apply_once_xfce_has_bus`]): nothing else would write it, since an operator-set density
+/// is applied only here and a page's density is not applied while it is operator-set.
+///
+/// MATE is not waited for. Its density also goes to `xrdb`, which needs no session, so
+/// `set_dpi` succeeds ahead of `mate-session` and the gsettings half of the write, which
+/// needs the session's bus, is not made again once the session runs.
 pub async fn restore_dpi(configured: i32, locked: bool) -> i32 {
     let (target, apply) = restore_plan(desktop_dpi().await, configured, locked);
     if apply && !set_dpi(target).await {
         if !locked {
             set_applied_dpi(target);
-        } else if running_desktop("xfce", "xfce4-session") {
+        } else if running_desktop("xfce", "xfce4-session") && which("xfconf-query") {
             debug!(
                 target: "display",
-                "No XFCE session with a session bus yet; the operator-set density {target} is written once one runs (waiting up to {} s).",
+                "The operator-set density {target} is written once the XFCE session on this display takes it (waiting up to {} s).",
                 XFCE_BUS_WAIT.as_secs()
             );
             tokio::spawn(apply_once_xfce_has_bus(target, XFCE_BUS_WAIT));
@@ -691,37 +695,55 @@ pub async fn restore_dpi(configured: i32, locked: bool) -> i32 {
 /// density through.
 const XFCE_BUS_WAIT: Duration = Duration::from_secs(60);
 
-/// How often that wait looks for the session.
+/// How often that wait looks for the session, and how long it pauses after the first write
+/// that failed through the session's bus; each further failure doubles the pause.
 const XFCE_BUS_POLL: Duration = Duration::from_millis(250);
 
 /// Write the operator-set `dpi` once an XFCE session with a session bus runs on this display,
-/// looking for one every `XFCE_BUS_POLL` for at most `wait`, and then the cursor size a
-/// configured cursor takes at that density, as startup does after `restore_dpi`.
+/// and then the cursor size a configured cursor takes at that density, as startup does after
+/// [`restore_dpi`].
 ///
 /// A server started ahead of the session, as `selkies session` starts the two, finds no bus
-/// to write through at startup. Gives up with a warning when no session appears in time.
+/// to write through at startup. The session is looked for every [`XFCE_BUS_POLL`], and a write
+/// that fails through its bus is made again after a pause that doubles with each further
+/// failure, so a session that never takes it logs the warnings of some eight attempts over the
+/// minute rather than a pair every poll. Both end at `wait`, with a warning saying whether no
+/// session ran or the one that ran took no write.
 async fn apply_once_xfce_has_bus(dpi: i32, wait: Duration) {
     let deadline = tokio::time::Instant::now() + wait;
+    let mut pause = XFCE_BUS_POLL;
+    let mut refused = false;
     loop {
         let found = tokio::task::spawn_blocking(|| session_env("xfce4-session").is_some())
             .await
             .unwrap_or(false);
         if found {
-            break;
+            if set_dpi(dpi).await {
+                break;
+            }
+            if refused {
+                pause = pause.saturating_mul(2);
+            }
+            refused = true;
         }
-        if tokio::time::Instant::now() >= deadline {
-            warn!(
-                target: "display",
-                "No XFCE session with a session bus ran within {} s; the operator-set density {dpi} is not applied.",
-                wait.as_secs()
-            );
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            if refused {
+                warn!(
+                    target: "display",
+                    "The XFCE session on this display took no write of the operator-set density {dpi} within {} s; it is not applied.",
+                    wait.as_secs()
+                );
+            } else {
+                warn!(
+                    target: "display",
+                    "No XFCE session with a session bus ran within {} s; the operator-set density {dpi} is not applied.",
+                    wait.as_secs()
+                );
+            }
             return;
         }
-        tokio::time::sleep(XFCE_BUS_POLL).await;
-    }
-    if !set_dpi(dpi).await {
-        warn!(target: "display", "The XFCE session has a bus now, but the operator-set density {dpi} could not be applied.");
-        return;
+        tokio::time::sleep(pause.min(deadline - now)).await;
     }
     info!(target: "display", "The XFCE session has a bus now; applied the operator-set density {dpi}.");
     let base = i32::try_from(crate::settings::settings().cursor_size()).unwrap_or(0);

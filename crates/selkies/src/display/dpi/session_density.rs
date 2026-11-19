@@ -307,6 +307,71 @@ fn an_operator_density_reaches_a_session_that_starts_later() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "run by a_write_the_session_refuses_is_made_again, in a process of its own"]
+async fn a_write_the_session_refuses_is_made_again_in_its_process() {
+    if !isolated() {
+        return;
+    }
+    crate::settings::install(crate::settings::Settings::parse(&[], &|_| None));
+    let display = std::env::var("DISPLAY").expect("a display name");
+    let written = PathBuf::from(std::env::var("DENSITY_WRITTEN").expect("the record"));
+    let refused = PathBuf::from(std::env::var("DENSITY_REFUSED").expect("the refusal"));
+    let stand_ins = home().join("stand-ins");
+    std::fs::create_dir_all(&stand_ins).expect("stand-ins");
+    std::fs::write(&refused, "").expect("refusal");
+
+    let xfce = session(&stand_ins, "xfce4-session", &display);
+    let task = tokio::spawn(apply_once_xfce_has_bus(
+        144,
+        std::time::Duration::from_secs(10),
+    ));
+    let bus = format!("unix:path={display}");
+    let refusal = format!("refused {bus} -c xsettings -p /Xft/DPI -s 144 --create -t int");
+    let mut seen = Vec::new();
+    for _ in 0..50 {
+        seen.extend(runs(&written));
+        if seen.contains(&refusal) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        seen.contains(&refusal),
+        "the density is written through the session's bus once it runs: {seen:?}"
+    );
+    std::fs::remove_file(&refused).expect("the refusal ends");
+    tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .expect("a write the session takes ends the wait")
+        .expect("the wait runs to its end");
+    end(vec![xfce]);
+    let taken: Vec<String> = runs(&written)
+        .into_iter()
+        .filter(|run| !run.starts_with("refused "))
+        .collect();
+    assert_eq!(
+        taken,
+        vec![
+            format!("xfconf-query {bus} -c xsettings -p /Xft/DPI -s 144 --create -t int"),
+            format!(
+                "xfconf-query {bus} -c xsettings -p /Gtk/CursorThemeSize -s 48 --create -t int"
+            ),
+        ],
+        "a write the session refused is made again until the session takes it"
+    );
+}
+
+/// A write of an operator-set density that the XFCE session refuses is made again, and goes
+/// through once the session takes it.
+#[test]
+fn a_write_the_session_refuses_is_made_again() {
+    run_with_recorded_xfconf(
+        "display::dpi::session_density::a_write_the_session_refuses_is_made_again_in_its_process",
+        ":7396",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "run by the_wait_for_a_session_bus_ends_at_its_limit, in a process of its own"]
 async fn the_wait_for_a_session_bus_ends_at_its_limit_in_its_process() {
     if !isolated() {
@@ -344,17 +409,21 @@ fn the_wait_for_a_session_bus_ends_at_its_limit() {
 
 /// Run `test` in a process of its own on an XFCE desktop whose `display` no X server serves
 /// (empty: no display at all), with an `xfconf-query` that records each call to
-/// `DENSITY_WRITTEN`.
+/// `DENSITY_WRITTEN` and, while the file `DENSITY_REFUSED` exists, records it as refused and
+/// fails it.
 fn run_with_recorded_xfconf(test: &str, display: &str) {
     let home = Scratch::new("density-home");
     let stub_bin = home.path("stub-bin");
     std::fs::create_dir_all(&stub_bin).expect("stub-bin");
     let written = home.path("written");
+    let refused = home.path("refused");
     script(
         &stub_bin.join("xfconf-query"),
         &format!(
-            "echo \"xfconf-query $DBUS_SESSION_BUS_ADDRESS $*\" >> \"{}\"",
-            written.display()
+            "if [ -e \"{refused}\" ]; then echo \"refused $DBUS_SESSION_BUS_ADDRESS $*\" >> \"{written}\"; exit 1; fi\n\
+             echo \"xfconf-query $DBUS_SESSION_BUS_ADDRESS $*\" >> \"{written}\"",
+            refused = refused.display(),
+            written = written.display()
         ),
     );
     let path = format!(
@@ -375,6 +444,7 @@ fn run_with_recorded_xfconf(test: &str, display: &str) {
             ("DISPLAY", display),
             ("PATH", &path),
             ("DENSITY_WRITTEN", &written.display().to_string()),
+            ("DENSITY_REFUSED", &refused.display().to_string()),
         ],
     );
 }
