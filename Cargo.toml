@@ -81,6 +81,14 @@ rtc-sctp = { path = "crates/selkies-rtc/vendor/rtc-sctp" }
 rtc-srtp = { path = "crates/selkies-rtc/vendor/rtc-srtp" }
 rtc-turn = { path = "crates/selkies-rtc/vendor/rtc-turn" }
 
+# What CodSpeed builds the benchmarks with (.github/workflows/codspeed.yaml): release's
+# optimization with thin LTO in place of fat. With the debug info `cargo codspeed` adds, fat LTO's
+# link of the server's executable, which cargo builds beside a benchmark of its package, peaks
+# at 14 GB, near all a hosted runner has; thin LTO builds the three crates' benchmarks in 7 GB.
+[profile.codspeed]
+inherits = "release"
+lto = "thin"
+
 # Optimized enough to time and to drive a browser with, and rebuilt in seconds rather than the
 # minutes fat LTO takes; numbers quoted anywhere come from `release`.
 [profile.iterate]

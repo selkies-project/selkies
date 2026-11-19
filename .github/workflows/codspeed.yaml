@@ -4,10 +4,12 @@
 
 name: CodSpeed
 
-# CPU benchmarks of the WebRTC transport's per-frame and per-packet work
-# (crates/selkies-rtc/benches), measured with CodSpeed's simulation
-# instrument, which counts instructions rather than time, so a pull request's
-# report against main does not move with the runner's load.
+# CPU benchmarks of the per-frame and per-packet work of a stream: the WebRTC
+# transport's (crates/selkies-rtc/benches), the software encoders' through the
+# capture pipeline (crates/pixelflux/benches), and the WebSockets send path's
+# (crates/selkies/benches), measured with CodSpeed's simulation instrument,
+# which counts instructions rather than time, so a pull request's report
+# against main does not move with the runner's load.
 
 on:
   push:
@@ -33,6 +35,13 @@ jobs:
       contents: read
       # CodSpeed authenticates the upload through OIDC
       id-token: write
+    env:
+      # pkg-config-rs links each codec library the patched build below installs
+      # from its archive, with the libraries that archive needs
+      X264_STATIC: "1"
+      X265_STATIC: "1"
+      VPX_STATIC: "1"
+      SVTAV1ENC_STATIC: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install the pinned Rust toolchain
@@ -40,15 +49,50 @@ jobs:
           pin="$(sed -n 's/^PIN="\(.*\)"$/\1/p' infra/packaging/rust.sh)"
           scripts/ci/retry.sh 5 60 rustup toolchain install "${pin}" --profile minimal
           rustup default "${pin}"
+      # The libraries pixelflux and the server link, as
+      # scripts/ci/server-build-deps.sh installs them: the distribution's, but
+      # libx264, x265, libvpx, and SVT-AV1, built with the patches pixelflux
+      # carries at the commits its wheel recipe (pyproject.toml) pins, and kept
+      # between runs until the recipe, a patch, or a build script changes
+      - name: Install the server's build libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential pkg-config cmake nasm clang libclang-dev \
+            libdav1d-dev libde265-dev libopus-dev \
+            libva-dev libdrm-dev libgbm-dev libegl-dev libgles-dev libwayland-dev libinput-dev \
+            libudev-dev libxkbcommon-dev libpixman-1-dev libxcb1-dev libxcb-shm0-dev \
+            libxcb-xfixes0-dev libpulse-dev
+      - name: Name the runner's image
+        id: codecs
+        run: echo "image=$(. /etc/os-release && echo "${ID}${VERSION_ID}")" >> "$GITHUB_OUTPUT"
+      - name: Cache the patched codecs
+        id: codecs-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/codecs
+          key: patched-codecs-${{ steps.codecs.outputs.image }}-${{ runner.arch }}-${{ hashFiles('crates/pixelflux/pyproject.toml', 'crates/pixelflux/patches/x264/*.patch', 'crates/pixelflux/patches/x265/*.patch', 'crates/pixelflux/patches/libvpx/*.patch', 'crates/pixelflux/patches/svtav1/*.patch', 'crates/pixelflux/scripts/build-x264.sh', 'crates/pixelflux/scripts/build-x265.sh', 'crates/pixelflux/scripts/build-libvpx.sh', 'crates/pixelflux/scripts/build-svtav1.sh', 'infra/packaging/patched-codecs.sh') }}
+      - name: Build the patched codecs
+        if: steps.codecs-cache.outputs.cache-hit != 'true'
+        run: sh infra/packaging/patched-codecs.sh "${HOME}/codecs"
+      - name: Put the patched codecs on the pkg-config path
+        run: echo "PKG_CONFIG_PATH=${HOME}/codecs/lib/pkgconfig" >> "${GITHUB_ENV}"
       # The same version as the codspeed-criterion-compat the benchmarks build
-      # against (crates/selkies-rtc/Cargo.toml): the two are released together,
-      # and Dependabot moves only the crate.
+      # against (crates/selkies-rtc/Cargo.toml, crates/pixelflux/Cargo.toml,
+      # crates/selkies/Cargo.toml): the two are released together, and
+      # Dependabot moves only the crate.
       - name: Install cargo-codspeed
         run: scripts/ci/retry.sh 5 60 cargo install --locked cargo-codspeed --version 6.0.0
+      # The benchmark targets by name: `--benches` alone also builds each
+      # library's and executable's tests as benchmarks, which nothing runs. The
+      # codspeed profile is release with thin LTO (Cargo.toml).
       - name: Build the benchmarks
-        run: cargo codspeed build --locked --measurement-mode simulation -p selkies-rtc
+        run: >-
+          cargo codspeed build --locked --measurement-mode simulation --profile codspeed
+          -p selkies-rtc -p pixelflux -p selkies
+          --bench hot_paths --bench encode --bench ws_send
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@af75f77f17a054769abefaa42fe8dc2975469b5f # v5.6.3
         with:
           mode: simulation
-          run: cargo codspeed run -p selkies-rtc
+          run: cargo codspeed run -p selkies-rtc -p pixelflux -p selkies
