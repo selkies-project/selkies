@@ -94,7 +94,7 @@ This section is a knowledge base for code contributions and development.
 
 - **Our [Documentation](README.md) and [Issues](https://github.com/selkies-project/selkies/issues)/[Pull Requests](https://github.com/selkies-project/selkies/pulls)** (including closed Issues/Pull Requests) and <https://github.com/m1k1o/neko/issues/371>
 
-- Projects behind the current media stack, including the native crates in this workspace: the `rtc-*` crates of [webrtc-rs](https://github.com/webrtc-rs/rtc) (the sans-IO crates the WebRTC stack is built over, `rtc-sctp` vendored with the Selkies fixes), [`pixelflux`](https://github.com/selkies-project/selkies/tree/main/crates/pixelflux) (screen capture with H.264/JPEG encoding), and [`pcmflux`](https://github.com/selkies-project/selkies/tree/main/crates/pcmflux) (PulseAudio capture with Opus encoding)
+- Projects behind the current media stack, including the native crates in this workspace: the `rtc-*` crates of [webrtc-rs](https://github.com/webrtc-rs/rtc) (the sans-IO crates the WebRTC stack is built over, `rtc-dtls`, `rtc-ice`, `rtc-sctp`, `rtc-srtp`, and `rtc-turn` vendored under `crates/selkies-rtc/vendor`), [`pixelflux`](https://github.com/selkies-project/selkies/tree/main/crates/pixelflux) (screen capture with H.264/JPEG encoding), and [`pcmflux`](https://github.com/selkies-project/selkies/tree/main/crates/pcmflux) (PulseAudio capture with Opus encoding)
 
 - The Rust references those two generate: [pixelflux](/rustdoc/pixelflux/index.html) and [pcmflux](/rustdoc/pcmflux/index.html)
 

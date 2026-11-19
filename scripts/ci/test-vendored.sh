@@ -21,7 +21,7 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target/vendored}"
 
 vendor=crates/selkies-rtc/vendor
 cargo test --locked --manifest-path "${vendor}/rtc-sctp/Cargo.toml" "$@"
-for crate in rtc-dtls rtc-srtp; do
+for crate in rtc-dtls rtc-ice rtc-srtp rtc-turn; do
     cargo test --locked --manifest-path "${vendor}/${crate}/Cargo.toml" \
         --no-default-features --features crypto-aws-lc-rs "$@"
 done

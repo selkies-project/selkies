@@ -1,0 +1,46 @@
+# rtc-ice 0.21.1 (https://github.com/webrtc-rs/rtc, MIT/Apache-2.0), vendored so that Selkies
+# can change it in tree; the workspace's `[patch.crates-io]` points the `rtc-ice` dependency
+# here. The example, and the dev-dependencies only it and the tests upstream leaves commented out
+# use, are left out.
+
+[package]
+name = "rtc-ice"
+version = "0.21.1"
+authors = ["Rain Liu <yliu@webrtc.rs>"]
+edition = "2024"
+description = "RTC ICE in Rust"
+homepage = "https://webrtc.rs"
+documentation = "https://docs.rs/rtc-ice"
+readme = "README.md"
+keywords = ["sansio", "networking", "protocols"]
+categories = ["network-programming"]
+license = "MIT/Apache-2.0"
+repository = "https://github.com/webrtc-rs/rtc"
+publish = false
+
+[features]
+crypto-aws-lc-rs = ["crypto/crypto-aws-lc-rs", "stun/crypto-aws-lc-rs"]
+crypto-ring = ["crypto/crypto-ring", "stun/crypto-ring"]
+default = ["crypto-ring"]
+
+[lib]
+name = "rtc_ice"
+path = "src/lib.rs"
+
+[dependencies]
+bytes = "1.12.0"
+crc = "3.0.1"
+crypto = { package = "rtc-crypto", version = "0.21.1", default-features = false }
+log = "0.4.33"
+mdns = { package = "rtc-mdns", version = "0.21.1" }
+sansio = "1"
+serde = { version = "1.0.228", features = ["derive"] }
+shared = { package = "rtc-shared", version = "0.21.1", default-features = false }
+stun = { package = "rtc-stun", version = "0.21.1", default-features = false }
+url = "2.5.0"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+serde_json = "1.0.114"
+
+[workspace]

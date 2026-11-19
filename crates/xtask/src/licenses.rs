@@ -206,7 +206,7 @@ const ROLES: &[Role] = &[
         ],
         how: "the [webrtc-rs](https://github.com/webrtc-rs/rtc) protocol crates `selkies-rtc` is \
               built over",
-        notes: "`rtc-dtls`, `rtc-sctp`, and `rtc-srtp` vendored (below)",
+        notes: "`rtc-dtls`, `rtc-ice`, `rtc-sctp`, `rtc-srtp`, and `rtc-turn` vendored (below)",
     },
     Role {
         crates: &["tokio", "tokio-util", "futures", "async-trait", "bytes"],
@@ -333,6 +333,10 @@ const VENDORED: &[(&str, &str)] = &[
          Selkies code-scanning fixes, which are MPL-2.0",
     ),
     (
+        "rtc-ice",
+        "the workspace patches the published crate with it, unchanged",
+    ),
+    (
         "rtc-sctp",
         "the workspace patches the published crate with it; `rtc-sctp-selkies.patch` beside it is \
          the diff, whose changes are MPL-2.0",
@@ -340,6 +344,11 @@ const VENDORED: &[(&str, &str)] = &[
     (
         "rtc-srtp",
         "the workspace patches the published crate with it; `rtc-srtp-selkies.patch` beside it is \
+         the diff, whose changes are MPL-2.0",
+    ),
+    (
+        "rtc-turn",
+        "the workspace patches the published crate with it; `rtc-turn-selkies.patch` beside it is \
          the diff, whose changes are MPL-2.0",
     ),
 ];

@@ -1,0 +1,43 @@
+# rtc-turn 0.21.1 (https://github.com/webrtc-rs/rtc, MIT/Apache-2.0), vendored with the
+# Selkies changes applied on top; the workspace's `[patch.crates-io]` points the `rtc-turn`
+# dependency here. `rtc-turn-selkies.patch` beside it is the diff against the published
+# crate, the shape the changes take upstream. The example and the benchmark, and the
+# dev-dependencies only they use, are left out.
+
+[package]
+name = "rtc-turn"
+version = "0.21.1"
+authors = ["Rain Liu <yliu@webrtc.rs>"]
+edition = "2024"
+description = "RTC TURN in Rust"
+homepage = "https://webrtc.rs"
+documentation = "https://docs.rs/rtc-turn"
+readme = "README.md"
+keywords = ["sansio", "networking", "protocols"]
+categories = ["network-programming"]
+license = "MIT/Apache-2.0"
+repository = "https://github.com/webrtc-rs/rtc"
+publish = false
+
+[features]
+crypto-aws-lc-rs = ["crypto/crypto-aws-lc-rs", "stun/crypto-aws-lc-rs"]
+crypto-ring = ["crypto/crypto-ring", "stun/crypto-ring"]
+default = ["crypto-ring"]
+metrics = []
+
+[lib]
+name = "rtc_turn"
+path = "src/lib.rs"
+
+[dependencies]
+bytes = "1.12.0"
+crypto = { package = "rtc-crypto", version = "0.21.1", default-features = false }
+log = "0.4.33"
+sansio = "1"
+shared = { package = "rtc-shared", version = "0.21.1", default-features = false }
+stun = { package = "rtc-stun", version = "0.21.1", default-features = false }
+
+[dev-dependencies]
+hex = "0.4.3"
+
+[workspace]

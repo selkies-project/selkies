@@ -57,11 +57,14 @@ bench = false
 members = ["."]
 
 # The workspace's patch, which a crate outside the workspace does not inherit: the association
-# fuzzed, and the DTLS and SRTP selkies-rtc builds on, are the vendored ones the server runs.
+# fuzzed, and the ICE, TURN, DTLS, and SRTP selkies-rtc builds on, are the vendored ones the
+# server runs.
 [patch.crates-io]
 rtc-dtls = { path = "../vendor/rtc-dtls" }
+rtc-ice = { path = "../vendor/rtc-ice" }
 rtc-sctp = { path = "../vendor/rtc-sctp" }
 rtc-srtp = { path = "../vendor/rtc-srtp" }
+rtc-turn = { path = "../vendor/rtc-turn" }
 
 # The workspace's lint table, which a crate outside the workspace does not inherit.
 [lints.clippy]

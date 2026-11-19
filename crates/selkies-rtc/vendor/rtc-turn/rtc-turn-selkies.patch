@@ -1,0 +1,97 @@
+diff --git a/src/client/client_test.rs b/src/client/client_test.rs
+index 70e8326..bae72e2 100644
+--- a/src/client/client_test.rs
++++ b/src/client/client_test.rs
+@@ -30,12 +30,14 @@ fn create_listening_test_client(rto_in_ms: u64) -> Result<(UdpSocket, Client)> {
+     Ok((udp_socket, client))
+ }
+ 
+-fn create_listening_test_client_with_stun_serv() -> Result<(UdpSocket, Client)> {
++fn create_listening_test_client_with_stun_serv(
++    stun_serv_addr: SocketAddr,
++) -> Result<(UdpSocket, Client)> {
+     let udp_socket = UdpSocket::bind("0.0.0.0:0")?;
+ 
+     let client = Client::new(
+         ClientConfig {
+-            stun_serv_addr: "stun1.l.google.com:19302".to_owned(),
++            stun_serv_addr: stun_serv_addr.to_string(),
+             turn_serv_addr: String::new(),
+             local_addr: udp_socket.local_addr()?,
+             transport_protocol: TransportProtocol::UDP,
+@@ -52,6 +54,35 @@ fn create_listening_test_client_with_stun_serv() -> Result<(UdpSocket, Client)>
+     Ok((udp_socket, client))
+ }
+ 
++/// A STUN server on the loopback interface, so the binding tests reach no server on the Internet.
++fn local_stun_server() -> Result<UdpSocket> {
++    let server = UdpSocket::bind("127.0.0.1:0")?;
++    server.set_read_timeout(Some(Duration::from_secs(5)))?;
++    Ok(server)
++}
++
++/// Answers `count` Binding requests on `server` as a STUN server does: a success response with the
++/// request's transaction id and the sender's address as XOR-MAPPED-ADDRESS.
++fn answer_binding_requests(server: &UdpSocket, count: usize) -> Result<()> {
++    let mut buffer = vec![0u8; 2048];
++    for _ in 0..count {
++        let (n, from) = server.recv_from(&mut buffer)?;
++        let mut request = Message::new();
++        request.unmarshal_binary(&buffer[..n])?;
++        let mut response = Message::new();
++        response.build(&[
++            Box::new(request.transaction_id),
++            Box::new(BINDING_SUCCESS),
++            Box::new(XorMappedAddress {
++                ip: from.ip(),
++                port: from.port(),
++            }),
++        ])?;
++        server.send_to(&response.raw, from)?;
++    }
++    Ok(())
++}
++
+ /// A host demultiplexing STUN on a socket it shares — a STUN gatherer and this client pointed at
+ /// one server address — routes a response by transaction id, because nothing else identifies its
+ /// owner. See webrtc-rs/webrtc#890.
+@@ -83,7 +114,9 @@ fn test_has_transaction_reports_outstanding_requests() -> Result<()> {
+ fn test_client_with_stun_send_binding_request() -> Result<()> {
+     //env_logger::init();
+ 
+-    let (conn, mut client) = create_listening_test_client_with_stun_serv()?;
++    let server = local_stun_server()?;
++    let (conn, mut client) = create_listening_test_client_with_stun_serv(server.local_addr()?)?;
++    conn.set_read_timeout(Some(Duration::from_secs(5)))?;
+     let local_addr = conn.local_addr()?;
+ 
+     let tid = client.send_binding_request(Instant::now())?;
+@@ -91,6 +124,7 @@ fn test_client_with_stun_send_binding_request() -> Result<()> {
+     while let Some(transmit) = client.poll_write() {
+         conn.send_to(&transmit.message, transmit.transport.peer_addr)?;
+     }
++    answer_binding_requests(&server, 1)?;
+ 
+     let mut buffer = vec![0u8; 2048];
+     let (n, peer_addr) = conn.recv_from(&mut buffer)?;
+@@ -126,16 +160,19 @@ fn test_client_with_stun_send_binding_request() -> Result<()> {
+ fn test_client_with_stun_send_binding_request_to_parallel() -> Result<()> {
+     //env_logger::init();
+ 
++    let server = local_stun_server()?;
+     let (conn, mut client) = create_listening_test_client(0)?;
++    conn.set_read_timeout(Some(Duration::from_secs(5)))?;
+     let local_addr = conn.local_addr()?;
+ 
+-    let to = lookup_host(true, "stun1.l.google.com:19302")?;
++    let to = server.local_addr()?;
+ 
+     let tid1 = client.send_binding_request_to(Instant::now(), to)?;
+     let tid2 = client.send_binding_request_to(Instant::now(), to)?;
+     while let Some(transmit) = client.poll_write() {
+         conn.send_to(&transmit.message, transmit.transport.peer_addr)?;
+     }
++    answer_binding_requests(&server, 2)?;
+ 
+     let mut buffer = vec![0u8; 2048];
+     for _ in 0..2 {
