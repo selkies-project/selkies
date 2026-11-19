@@ -71,9 +71,9 @@ opt-level = 3
 opt-level = 3
 
 # rtc-dtls carries the handshake's retransmission fix and rtc-srtp the in-place RTP encryption,
-# both with code-scanning fixes, and rtc-sctp the Selkies SCTP fixes, until they land upstream
-# (crates/selkies-rtc/vendor/*/*-selkies.patch); rtc-ice and rtc-turn are vendored to be changed
-# in tree the same way.
+# both with code-scanning fixes, rtc-sctp the Selkies SCTP fixes, and rtc-ice and rtc-turn STUN
+# transaction ids drawn from the crypto provider, until they land upstream
+# (crates/selkies-rtc/vendor/*/*-selkies.patch).
 [patch.crates-io]
 rtc-dtls = { path = "crates/selkies-rtc/vendor/rtc-dtls" }
 rtc-ice = { path = "crates/selkies-rtc/vendor/rtc-ice" }

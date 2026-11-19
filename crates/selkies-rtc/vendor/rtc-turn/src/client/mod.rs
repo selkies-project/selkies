@@ -453,12 +453,15 @@ impl Client {
         let msg = {
             let attrs: Vec<Box<dyn Setter + '_>> = if !self.software.text.is_empty() {
                 vec![
-                    Box::new(TransactionId::new()),
+                    Box::new(RandomTransactionId(self.crypto_provider.random())),
                     Box::new(BINDING_REQUEST),
                     Box::new(self.software.clone()),
                 ]
             } else {
-                vec![Box::new(TransactionId::new()), Box::new(BINDING_REQUEST)]
+                vec![
+                    Box::new(RandomTransactionId(self.crypto_provider.random())),
+                    Box::new(BINDING_REQUEST),
+                ]
             };
 
             let mut msg = Message::new();
@@ -593,7 +596,7 @@ impl Client {
     pub fn allocate(&mut self, now: Instant) -> Result<TransactionId> {
         let mut msg = Message::new();
         msg.build(&[
-            Box::new(TransactionId::new()),
+            Box::new(RandomTransactionId(self.crypto_provider.random())),
             Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
             Box::new(RequestedTransport {
                 // Always a UDP relay, however the server is reached: REQUESTED-TRANSPORT

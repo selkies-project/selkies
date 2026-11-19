@@ -334,7 +334,8 @@ const VENDORED: &[(&str, &str)] = &[
     ),
     (
         "rtc-ice",
-        "the workspace patches the published crate with it, unchanged",
+        "the workspace patches the published crate with it; `rtc-ice-selkies.patch` beside it is \
+         the diff, whose changes are MPL-2.0",
     ),
     (
         "rtc-sctp",

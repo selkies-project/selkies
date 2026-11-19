@@ -849,3 +849,237 @@ fn test_a_request_over_udp_is_still_retransmitted() -> Result<()> {
     assert!(client.poll_write().is_some(), "UDP retransmits");
     Ok(())
 }
+
+/// A random source that counts up and records every fill it serves, and fails once told to, over
+/// the built-in provider's primitives: which bytes on the wire the client drew from its provider.
+#[derive(Default)]
+struct RecordingRandom {
+    counter: std::sync::Mutex<u8>,
+    fills: std::sync::Mutex<Vec<Vec<u8>>>,
+    failing: std::sync::atomic::AtomicBool,
+}
+
+impl crypto::RTCRandom for RecordingRandom {
+    fn fill(&self, output: &mut [u8]) -> std::result::Result<(), crypto::CryptoError> {
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(crypto::CryptoError::RandomnessFailed);
+        }
+        let mut counter = self.counter.lock().unwrap();
+        for byte in output.iter_mut() {
+            *byte = *counter;
+            *counter = counter.wrapping_add(1);
+        }
+        self.fills.lock().unwrap().push(output.to_vec());
+        Ok(())
+    }
+}
+
+struct RecordingProvider {
+    inner: Arc<dyn RTCCryptoProvider>,
+    random: RecordingRandom,
+}
+
+impl RecordingProvider {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: test_crypto_provider(),
+            random: RecordingRandom::default(),
+        })
+    }
+
+    fn fills(&self) -> Vec<Vec<u8>> {
+        self.random.fills.lock().unwrap().clone()
+    }
+
+    fn fail(&self) {
+        self.random
+            .failing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl RTCCryptoProvider for RecordingProvider {
+    fn name(&self) -> &'static str {
+        "recording"
+    }
+
+    fn crypto(&self) -> &dyn crypto::RTCCrypto {
+        self.inner.crypto()
+    }
+
+    fn random(&self) -> &dyn crypto::RTCRandom {
+        &self.random
+    }
+}
+
+fn recording_client(provider: &Arc<RecordingProvider>, software: &str) -> Result<Client> {
+    Client::new(
+        ClientConfig {
+            stun_serv_addr: String::new(),
+            turn_serv_addr: "127.0.0.1:3478".to_owned(),
+            local_addr: "127.0.0.1:40000".parse().unwrap(),
+            transport_protocol: TransportProtocol::UDP,
+            username: "user".to_owned(),
+            password: "pass".to_owned(),
+            realm: "realm".to_owned(),
+            software: software.to_owned(),
+            rto_in_ms: 0,
+            allocation_refresh_interval_cap: None,
+        },
+        provider.clone(),
+    )
+}
+
+/// The next datagram the client sends, decoded.
+fn next_sent(client: &mut Client) -> Message {
+    let transmit = client.poll_write().expect("the client sends a message");
+    let mut msg = Message::new();
+    msg.raw = transmit.message.to_vec();
+    msg.decode().expect("the client sends a STUN message");
+    msg
+}
+
+/// Asserts that `msg` is a `method` message whose transaction id is the provider's fill number
+/// `draw`, and that the provider has served no fill after it.
+fn assert_drawn_from_provider(
+    provider: &RecordingProvider,
+    draw: usize,
+    msg: &Message,
+    method: Method,
+) {
+    let fills = provider.fills();
+    assert_eq!(msg.typ.method, method);
+    assert!(
+        fills.len() > draw,
+        "{method} drew its transaction id from the provider"
+    );
+    assert_eq!(
+        fills[draw][..],
+        msg.transaction_id.0[..],
+        "the {method} transaction id is the provider's draw"
+    );
+}
+
+fn seed_relay(client: &mut Client, relayed_addr: RelayedAddr) {
+    client.relays.insert(
+        relayed_addr,
+        RelayState::new(
+            Instant::now(),
+            relayed_addr,
+            vec![0u8; 16],
+            Nonce::new(ATTR_NONCE, "nonce".to_owned()),
+            Duration::from_secs(600),
+            None,
+        ),
+    );
+}
+
+/// Every request and indication the client originates takes its transaction id from the crypto
+/// provider it was given, never from `rand`: binding requests with and without SOFTWARE, the
+/// allocation, and a relay's permission, refresh, channel binding and send indication.
+#[test]
+fn test_transaction_ids_are_drawn_from_the_provider() -> Result<()> {
+    let provider = RecordingProvider::new();
+    let server: SocketAddr = "127.0.0.1:3478".parse().unwrap();
+    let now = Instant::now();
+
+    for software in ["TEST SOFTWARE", ""] {
+        let mut client = recording_client(&provider, software)?;
+        let drawn = provider.fills().len();
+        let tid = client.send_binding_request_to(now, server)?;
+        let msg = next_sent(&mut client);
+        assert_drawn_from_provider(&provider, drawn, &msg, METHOD_BINDING);
+        assert_eq!(provider.fills().len(), drawn + 1, "one draw");
+        assert_eq!(tid, msg.transaction_id);
+        client.close()?;
+    }
+
+    let mut client = recording_client(&provider, "TEST SOFTWARE")?;
+    let drawn = provider.fills().len();
+    let tid = client.allocate(now)?;
+    let msg = next_sent(&mut client);
+    assert_drawn_from_provider(&provider, drawn, &msg, METHOD_ALLOCATE);
+    assert_eq!(provider.fills().len(), drawn + 1, "one draw");
+    let mut expected = msg.transaction_id;
+    expected.0[TRANSACTION_ID_SIZE - 1] = expected.0[TRANSACTION_ID_SIZE - 1].wrapping_add(1);
+    assert_eq!(tid, expected, "allocate names its authenticated retry");
+
+    let relayed_addr: RelayedAddr = "127.0.0.1:50000".parse().unwrap();
+    let peer: SocketAddr = "127.0.0.1:60000".parse().unwrap();
+    seed_relay(&mut client, relayed_addr);
+
+    let drawn = provider.fills().len();
+    let tid = client
+        .relay(relayed_addr)?
+        .create_permission(now, peer)?
+        .expect("a new peer needs a permission");
+    let msg = next_sent(&mut client);
+    assert_drawn_from_provider(&provider, drawn, &msg, METHOD_CREATE_PERMISSION);
+    assert_eq!(provider.fills().len(), drawn + 1, "one draw");
+    assert_eq!(tid, msg.transaction_id);
+
+    let mut response = Message::new();
+    response.build(&[
+        Box::new(tid),
+        Box::new(MessageType::new(
+            METHOD_CREATE_PERMISSION,
+            CLASS_SUCCESS_RESPONSE,
+        )),
+    ])?;
+    client.handle_read(TransportMessage {
+        now,
+        transport: TransportContext {
+            local_addr: "127.0.0.1:40000".parse().unwrap(),
+            peer_addr: server,
+            transport_protocol: TransportProtocol::UDP,
+            ecn: None,
+        },
+        message: BytesMut::from(&response.raw[..]),
+    })?;
+
+    let drawn = provider.fills().len();
+    client
+        .relay(relayed_addr)?
+        .refresh_allocation(now, Duration::from_secs(600))?;
+    let msg = next_sent(&mut client);
+    assert_drawn_from_provider(&provider, drawn, &msg, METHOD_REFRESH);
+    assert_eq!(provider.fills().len(), drawn + 1, "one draw");
+
+    // The first datagram to a permitted peer binds a channel and goes out as a send indication.
+    let drawn = provider.fills().len();
+    client.relay(relayed_addr)?.send_to(now, b"payload", peer)?;
+    let channel_bind = next_sent(&mut client);
+    assert_drawn_from_provider(&provider, drawn, &channel_bind, METHOD_CHANNEL_BIND);
+    let indication = next_sent(&mut client);
+    assert_drawn_from_provider(&provider, drawn + 1, &indication, METHOD_SEND);
+    assert_eq!(provider.fills().len(), drawn + 2, "one draw for each");
+
+    client.close()
+}
+
+/// A provider that cannot produce random bytes fails the request with a crypto error, and
+/// nothing goes on the wire.
+#[test]
+fn test_a_failing_provider_sends_nothing() -> Result<()> {
+    let provider = RecordingProvider::new();
+    let mut client = recording_client(&provider, "TEST SOFTWARE")?;
+    let relayed_addr: RelayedAddr = "127.0.0.1:50000".parse().unwrap();
+    seed_relay(&mut client, relayed_addr);
+    provider.fail();
+    let now = Instant::now();
+
+    assert!(matches!(
+        client.send_binding_request_to(now, "127.0.0.1:3478".parse().unwrap()),
+        Err(Error::Crypto(_))
+    ));
+    assert!(matches!(client.allocate(now), Err(Error::Crypto(_))));
+    assert!(matches!(
+        client
+            .relay(relayed_addr)?
+            .create_permission(now, "127.0.0.1:60000".parse().unwrap()),
+        Err(Error::Crypto(_))
+    ));
+    assert!(client.poll_write().is_none(), "nothing was sent");
+
+    Ok(())
+}

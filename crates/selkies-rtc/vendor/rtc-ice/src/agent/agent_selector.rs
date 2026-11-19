@@ -1,4 +1,5 @@
 use crate::agent::Agent;
+use crate::rand::RandomTransactionId;
 use log::{debug, error, trace, warn};
 use std::net::SocketAddr;
 use std::time::Instant;
@@ -100,7 +101,7 @@ impl Agent {
                     let mut msg = Message::new();
                     let result = msg.build(&[
                         Box::new(BINDING_REQUEST),
-                        Box::new(TransactionId::new()),
+                        Box::new(RandomTransactionId(self.crypto_provider.random())),
                         Box::new(Username::new(ATTR_USERNAME, username)),
                         Box::<UseCandidateAttr>::default(),
                         Box::new(AttrControlling(self.tie_breaker)),
@@ -270,7 +271,7 @@ impl ControllingSelector for Agent {
             let mut msg = Message::new();
             let result = msg.build(&[
                 Box::new(BINDING_REQUEST),
-                Box::new(TransactionId::new()),
+                Box::new(RandomTransactionId(self.crypto_provider.random())),
                 Box::new(Username::new(ATTR_USERNAME, username)),
                 Box::new(AttrControlling(self.tie_breaker)),
                 Box::new(PriorityAttr(self.local_candidates[local_index].priority())),
@@ -438,7 +439,7 @@ impl ControlledSelector for Agent {
             let mut msg = Message::new();
             let result = msg.build(&[
                 Box::new(BINDING_REQUEST),
-                Box::new(TransactionId::new()),
+                Box::new(RandomTransactionId(self.crypto_provider.random())),
                 Box::new(Username::new(ATTR_USERNAME, username)),
                 Box::new(AttrControlled(self.tie_breaker)),
                 Box::new(PriorityAttr(self.local_candidates[local_index].priority())),

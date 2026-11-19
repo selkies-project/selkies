@@ -1,7 +1,8 @@
-# rtc-ice 0.21.1 (https://github.com/webrtc-rs/rtc, MIT/Apache-2.0), vendored so that Selkies
-# can change it in tree; the workspace's `[patch.crates-io]` points the `rtc-ice` dependency
-# here. The example, and the dev-dependencies only it and the tests upstream leaves commented out
-# use, are left out.
+# rtc-ice 0.21.1 (https://github.com/webrtc-rs/rtc, MIT/Apache-2.0), vendored with the
+# Selkies changes applied on top; the workspace's `[patch.crates-io]` points the `rtc-ice`
+# dependency here. `rtc-ice-selkies.patch` beside it is the diff against the published
+# crate, the shape the changes take upstream. The example, and the dev-dependencies only it
+# and the tests upstream leaves commented out use, are left out.
 
 [package]
 name = "rtc-ice"

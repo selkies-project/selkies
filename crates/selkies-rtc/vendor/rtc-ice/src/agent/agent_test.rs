@@ -3386,3 +3386,172 @@ fn test_stats_snapshot_reports_the_callers_instant_throughout() -> Result<()> {
 
     Ok(())
 }
+
+/// A random source that counts up and records every fill it serves, and fails once told to, over
+/// the built-in provider's primitives: which bytes on the wire the agent drew from its provider.
+#[derive(Default)]
+struct RecordingRandom {
+    counter: std::sync::Mutex<u8>,
+    fills: std::sync::Mutex<Vec<Vec<u8>>>,
+    failing: std::sync::atomic::AtomicBool,
+}
+
+impl crypto::RTCRandom for RecordingRandom {
+    fn fill(&self, output: &mut [u8]) -> std::result::Result<(), crypto::CryptoError> {
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(crypto::CryptoError::RandomnessFailed);
+        }
+        let mut counter = self.counter.lock().unwrap();
+        for byte in output.iter_mut() {
+            *byte = *counter;
+            *counter = counter.wrapping_add(1);
+        }
+        self.fills.lock().unwrap().push(output.to_vec());
+        Ok(())
+    }
+}
+
+struct RecordingProvider {
+    inner: Arc<dyn RTCCryptoProvider>,
+    random: RecordingRandom,
+}
+
+impl RecordingProvider {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: test_crypto_provider(),
+            random: RecordingRandom::default(),
+        })
+    }
+
+    fn fills(&self) -> Vec<Vec<u8>> {
+        self.random.fills.lock().unwrap().clone()
+    }
+
+    fn fail(&self) {
+        self.random
+            .failing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl RTCCryptoProvider for RecordingProvider {
+    fn name(&self) -> &'static str {
+        "recording"
+    }
+
+    fn crypto(&self) -> &dyn RTCCrypto {
+        self.inner.crypto()
+    }
+
+    fn random(&self) -> &dyn crypto::RTCRandom {
+        &self.random
+    }
+}
+
+/// An agent on `provider` with one host candidate pair and the remote credentials, so that a
+/// connectivity check can be sent.
+fn recording_agent(provider: &Arc<RecordingProvider>) -> Result<Agent> {
+    let mut a = Agent::new(
+        Instant::now(),
+        Arc::new(AgentConfig::default()),
+        provider.clone(),
+    )?;
+    let local = CandidateHostConfig {
+        base_config: CandidateConfig {
+            network: "udp".to_owned(),
+            address: "192.168.0.2".to_owned(),
+            port: 5000,
+            component: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+    .new_candidate_host()?;
+    a.add_local_candidate(local)?;
+    let remote = CandidateHostConfig {
+        base_config: CandidateConfig {
+            network: "udp".to_owned(),
+            address: "10.79.11.1".to_owned(),
+            port: 37983,
+            component: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+    .new_candidate_host()?;
+    a.add_remote_candidate(remote)?;
+    a.set_remote_credentials(
+        "remoteufrag".to_owned(),
+        "remotepasswordremotepassword".to_owned(),
+    )?;
+    a.write_outs.clear();
+    Ok(a)
+}
+
+/// The transaction id of the one connectivity check the agent sent.
+fn sent_check_transaction_id(a: &mut Agent) -> Result<TransactionId> {
+    let transmit = a
+        .write_outs
+        .pop_front()
+        .expect("a connectivity check is sent");
+    assert!(a.write_outs.is_empty(), "one connectivity check is sent");
+    let mut msg = Message::new();
+    msg.unmarshal_binary(&transmit.message)?;
+    assert_eq!(msg.typ, BINDING_REQUEST);
+    Ok(msg.transaction_id)
+}
+
+/// Every connectivity check takes its transaction id from the agent's crypto provider, never from
+/// `rand`: a controlling agent's check and nomination, and a controlled agent's check.
+#[test]
+fn test_connectivity_check_transaction_ids_are_drawn_from_the_provider() -> Result<()> {
+    let provider = RecordingProvider::new();
+    let mut a = recording_agent(&provider)?;
+    let now = Instant::now();
+
+    for controlling in [true, false] {
+        a.set_role(controlling);
+        let drawn = provider.fills().len();
+        a.ping_candidate(now, 0, 0);
+        let tid = sent_check_transaction_id(&mut a)?;
+        let fills = provider.fills();
+        assert_eq!(fills.len(), drawn + 1, "one draw for the check");
+        assert_eq!(fills[drawn][..], tid.0[..], "the check's id is the draw");
+    }
+
+    a.set_role(true);
+    a.nominated_pair = Some(0);
+    let drawn = provider.fills().len();
+    a.contact_candidates(now);
+    let tid = sent_check_transaction_id(&mut a)?;
+    let fills = provider.fills();
+    assert_eq!(fills.len(), drawn + 1, "one draw for the nomination");
+    assert_eq!(
+        fills[drawn][..],
+        tid.0[..],
+        "the nomination's id is the draw"
+    );
+
+    a.close()
+}
+
+/// A provider that cannot produce random bytes sends no connectivity check.
+#[test]
+fn test_a_failing_provider_sends_no_connectivity_check() -> Result<()> {
+    let provider = RecordingProvider::new();
+    let mut a = recording_agent(&provider)?;
+    provider.fail();
+    let now = Instant::now();
+
+    for controlling in [true, false] {
+        a.set_role(controlling);
+        a.ping_candidate(now, 0, 0);
+    }
+    a.set_role(true);
+    a.nominated_pair = Some(0);
+    a.contact_candidates(now);
+    assert!(a.write_outs.is_empty(), "nothing was sent");
+
+    a.close()
+}

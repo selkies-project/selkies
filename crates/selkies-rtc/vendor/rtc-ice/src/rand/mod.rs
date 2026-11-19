@@ -1,6 +1,7 @@
 use crypto::RTCRandom;
 use shared::error::{Error, Result};
 use shared::util::generate_crypto_random_string;
+use stun::message::{Message, Setter, TransactionId};
 
 #[cfg(test)]
 mod rand_test;
@@ -88,4 +89,21 @@ pub fn generate_ufrag() -> String {
 /// source.
 pub(crate) fn generate_ufrag_with_random(random: &dyn RTCRandom) -> Result<String> {
     generate_string_with_random(LEN_UFRAG, RUNES_ALPHA, random)
+}
+
+/// Sets a fresh STUN transaction ID drawn from the agent's random provider.
+///
+/// [`TransactionId::new`] draws from `rand`. The agent owns a [`crypto::RTCCryptoProvider`], so
+/// its connectivity checks take their IDs from the same source as its credentials and tie
+/// breaker. A failing source fails the `Message::build` this setter is applied in.
+pub(crate) struct RandomTransactionId<'a>(pub(crate) &'a dyn RTCRandom);
+
+impl Setter for RandomTransactionId<'_> {
+    fn add_to(&self, m: &mut Message) -> Result<()> {
+        let mut id = TransactionId::default();
+        self.0
+            .fill(&mut id.0)
+            .map_err(|error| Error::Crypto(error.to_string()))?;
+        id.add_to(m)
+    }
 }

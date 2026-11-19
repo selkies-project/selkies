@@ -257,7 +257,7 @@ impl Relay<'_> {
                 // send data using SendIndication
                 let mut msg = Message::new();
                 msg.build(&[
-                    Box::new(TransactionId::new()),
+                    Box::new(RandomTransactionId(self.client.crypto_provider.random())),
                     Box::new(MessageType::new(METHOD_SEND, CLASS_INDICATION)),
                     Box::new(proto::data::Data(p.to_vec())),
                     Box::new(proto::peeraddr::PeerAddress {
@@ -319,7 +319,7 @@ impl Relay<'_> {
         if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
             let msg = {
                 let mut setters: Vec<Box<dyn Setter + '_>> = vec![
-                    Box::new(TransactionId::new()),
+                    Box::new(RandomTransactionId(self.client.crypto_provider.random())),
                     Box::new(MessageType::new(METHOD_CREATE_PERMISSION, CLASS_REQUEST)),
                 ];
 
@@ -401,7 +401,7 @@ impl Relay<'_> {
         if let Some(relay) = self.client.relays.get_mut(&self.relayed_addr) {
             let mut msg = Message::new();
             msg.build(&[
-                Box::new(TransactionId::new()),
+                Box::new(RandomTransactionId(self.client.crypto_provider.random())),
                 Box::new(MessageType::new(METHOD_REFRESH, CLASS_REQUEST)),
                 Box::new(proto::lifetime::Lifetime(lifetime)),
                 Box::new(username),
@@ -504,7 +504,7 @@ impl Relay<'_> {
     ) -> Result<()> {
         let (msg, turn_server_addr) = {
             let setters: Vec<Box<dyn Setter + '_>> = vec![
-                Box::new(TransactionId::new()),
+                Box::new(RandomTransactionId(self.client.crypto_provider.random())),
                 Box::new(MessageType::new(METHOD_CHANNEL_BIND, CLASS_REQUEST)),
                 Box::new(proto::peeraddr::PeerAddress {
                     ip: bind_addr.ip(),

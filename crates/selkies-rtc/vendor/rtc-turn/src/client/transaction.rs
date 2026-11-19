@@ -8,8 +8,27 @@ use std::time::{Duration, Instant};
 use stun::message::*;
 
 use crate::client::{Event, RelayedAddr};
+use crypto::RTCRandom;
+use shared::error::{Error, Result};
 use shared::{TransportContext, TransportMessage, TransportProtocol};
 use stun::textattrs::TextAttribute;
+
+/// Sets a fresh STUN transaction ID drawn from the client's random provider.
+///
+/// [`TransactionId::new`] draws from `rand`. The client owns a [`crypto::RTCCryptoProvider`],
+/// so its requests and indications take their IDs from the same source as its other
+/// unpredictable values. A failing source fails the `Message::build` this setter is applied in.
+pub(crate) struct RandomTransactionId<'a>(pub(crate) &'a dyn RTCRandom);
+
+impl Setter for RandomTransactionId<'_> {
+    fn add_to(&self, m: &mut Message) -> Result<()> {
+        let mut id = TransactionId::default();
+        self.0
+            .fill(&mut id.0)
+            .map_err(|error| Error::Crypto(error.to_string()))?;
+        id.add_to(m)
+    }
+}
 
 const MAX_RTX_INTERVAL_IN_MS: u64 = 1600;
 const MAX_RTX_COUNT: u16 = 7; // total 7 requests (Rc)

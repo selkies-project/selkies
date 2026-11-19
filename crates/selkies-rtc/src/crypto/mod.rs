@@ -52,7 +52,10 @@
 //! [`fill_random`] is also the source of the security-relevant values this crate draws itself
 //! (ICE credentials and tie-breakers, STUN transaction ids, initial RTP sequence numbers and
 //! timestamps, SSRCs) and of the ones `rtc-sctp` draws (verification tags, initial TSNs, state
-//! cookies). AWS-LC serves it from a per-thread DRBG, at about 0.3 microseconds a draw on an
+//! cookies). The full ICE agent's tie-breaker and the STUN transaction ids of its connectivity
+//! checks and of the TURN client's requests come from the provider's [`AwsLcRandom`] instead,
+//! drawn in the vendored `rtc-ice` and `rtc-turn` from the provider they are handed rather than
+//! from `rand`. AWS-LC serves both from a per-thread DRBG, at about 0.3 microseconds a draw on an
 //! x86-64 server core. DTLS draws once per record (the explicit nonce or the CBC IV), so a
 //! data channel message pays that; SRTP draws nothing per packet.
 

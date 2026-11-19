@@ -8,22 +8,28 @@
 //! and the reuse of one keyed object across messages that a session relies on.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use rtc_crypto::{
     AeadAlgorithm, BlockCipherAlgorithm, CbcAlgorithm, CryptoError, HashAlgorithm, RTCCrypto,
-    RTCCryptoProvider, StreamCipherAlgorithm,
+    RTCCryptoProvider, RTCRandom, StreamCipherAlgorithm,
 };
 use rtc_dtls::cipher_suite::CipherSuiteId;
 use rtc_dtls::config::{ConfigBuilder, HandshakeConfig};
 use rtc_dtls::crypto::Certificate;
 use rtc_dtls::endpoint::{Endpoint, EndpointEvent};
+use rtc_ice::agent::Agent;
+use rtc_ice::agent::agent_config::AgentConfig;
+use rtc_ice::candidate::{CandidateType, unmarshal_candidate};
+use rtc_ice::mdns::MulticastDnsMode;
 use rtc_shared::TransportProtocol;
 use rtc_stun::integrity::MessageIntegrity;
-use rtc_stun::message::Message;
+use rtc_stun::message::{BINDING_REQUEST, METHOD_ALLOCATE, METHOD_BINDING, Message};
+use rtc_turn::client::{Client, ClientConfig};
+use sansio::Protocol as _;
 
-use super::{AwsLcCrypto, AwsLcProvider, fill_random, random};
+use super::{AwsLcCrypto, AwsLcProvider, AwsLcRandom, fill_random, random};
 
 fn hex(text: &str) -> Vec<u8> {
     let digits: Vec<u8> = text
@@ -471,6 +477,131 @@ fn random_draws_are_fresh_and_fill_the_whole_buffer() {
     fill_random(&mut buffer);
     assert!(buffer.windows(16).all(|window| window != [0u8; 16]));
     fill_random(&mut []);
+}
+
+/// [`AwsLcProvider`], recording every random fill it serves, to tell which bytes on the wire
+/// an `rtc-*` crate drew from it.
+#[derive(Default)]
+struct RecordingProvider {
+    provider: AwsLcProvider,
+    random: RecordingRandom,
+}
+
+/// AWS-LC's random source, keeping a copy of each fill.
+#[derive(Default)]
+struct RecordingRandom {
+    fills: Mutex<Vec<Vec<u8>>>,
+}
+
+impl RTCRandom for RecordingRandom {
+    fn fill(&self, output: &mut [u8]) -> Result<(), CryptoError> {
+        AwsLcRandom.fill(output)?;
+        self.fills.lock().unwrap().push(output.to_vec());
+        Ok(())
+    }
+}
+
+impl RTCCryptoProvider for RecordingProvider {
+    fn name(&self) -> &'static str {
+        "aws-lc, recorded"
+    }
+
+    fn crypto(&self) -> &dyn RTCCrypto {
+        self.provider.crypto()
+    }
+
+    fn random(&self) -> &dyn RTCRandom {
+        &self.random
+    }
+}
+
+impl RecordingProvider {
+    /// Whether `bytes` is exactly one of the fills served.
+    fn served(&self, bytes: &[u8]) -> bool {
+        self.random
+            .fills
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|fill| fill[..] == *bytes)
+    }
+}
+
+#[test]
+fn the_full_ice_agent_draws_its_check_transaction_ids_from_the_provider() {
+    let provider = Arc::new(RecordingProvider::default());
+    let start = Instant::now();
+    let config = AgentConfig {
+        local_ufrag: "serverfr".to_owned(),
+        local_pwd: "serverpasswordserverpass".to_owned(),
+        candidate_types: vec![CandidateType::Host],
+        multicast_dns_mode: MulticastDnsMode::Disabled,
+        ..AgentConfig::default()
+    };
+    let mut agent = Agent::new(start, Arc::new(config), provider.clone()).unwrap();
+    let local = unmarshal_candidate("1 1 udp 2130706431 127.0.0.1 5000 typ host").unwrap();
+    let remote = unmarshal_candidate("1 1 udp 2130706431 127.0.0.1 6000 typ host").unwrap();
+    agent.add_local_candidate(local).unwrap();
+    agent.add_remote_candidate(remote).unwrap();
+    agent
+        .start_connectivity_checks(
+            start,
+            true,
+            "clientfr".to_owned(),
+            "clientpasswordclientpass".to_owned(),
+        )
+        .unwrap();
+
+    let mut checks = Vec::new();
+    for step in 0..20 {
+        agent
+            .handle_timeout(start + Duration::from_millis(50 * step))
+            .unwrap();
+        while let Some(transmit) = agent.poll_write() {
+            let mut message = Message::new();
+            message.unmarshal_binary(&transmit.message).unwrap();
+            assert_eq!(message.typ, BINDING_REQUEST);
+            checks.push(message.transaction_id);
+        }
+    }
+    assert!(!checks.is_empty(), "the agent checks its pair");
+    for id in checks {
+        assert!(provider.served(&id.0), "a check's id is an AWS-LC draw");
+    }
+}
+
+#[test]
+fn the_turn_client_draws_its_request_transaction_ids_from_the_provider() {
+    let provider = Arc::new(RecordingProvider::default());
+    let server: SocketAddr = "127.0.0.1:3478".parse().unwrap();
+    let config = ClientConfig {
+        stun_serv_addr: String::new(),
+        turn_serv_addr: server.to_string(),
+        local_addr: "127.0.0.1:40000".parse().unwrap(),
+        transport_protocol: TransportProtocol::UDP,
+        username: "user".to_owned(),
+        password: "pass".to_owned(),
+        realm: String::new(),
+        software: String::new(),
+        rto_in_ms: 0,
+        allocation_refresh_interval_cap: None,
+    };
+    let mut client = Client::new(config, provider.clone()).unwrap();
+    let now = Instant::now();
+    client.send_binding_request_to(now, server).unwrap();
+    client.allocate(now).unwrap();
+
+    let mut methods = Vec::new();
+    while let Some(transmit) = client.poll_write() {
+        let mut message = Message::new();
+        message.unmarshal_binary(&transmit.message).unwrap();
+        assert!(
+            provider.served(&message.transaction_id.0),
+            "a request's id is an AWS-LC draw"
+        );
+        methods.push(message.typ.method);
+    }
+    assert_eq!(methods, [METHOD_BINDING, METHOD_ALLOCATE]);
 }
 
 /// A handshake configuration offering `suite` alone, with the pre-shared key or the
