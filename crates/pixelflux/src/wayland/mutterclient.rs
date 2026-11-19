@@ -11,9 +11,10 @@
 //! logical monitor with its connector, current mode, position, scale, transform and primary
 //! flag, and Mutter refuses one whose monitors overlap or do not touch. Positions are
 //! logical pixels, so a union-layout point is divided by its monitor's scale, and the layout
-//! is shifted to start at 0,0. A monitor the request does not name keeps its place. A virtual
-//! monitor is left out of the layout until a configuration places it, which is why a grown
-//! display on Mutter is offered only where this arranger is available. Sizes are not set
+//! is shifted to start at 0,0. A monitor the request does not name keeps its place, and one
+//! outside the layout stays out. A virtual monitor is left out of the layout until a
+//! configuration places it, which is why a grown display on Mutter is offered only where this
+//! arranger is available, and why one is placed even where it would land where it is wanted. Sizes are not set
 //! here: a virtual monitor follows the format its stream is consumed at. Configurations are
 //! applied temporarily (method 1), so nothing reaches `monitors.xml`.
 
@@ -70,13 +71,19 @@ pub struct MonitorState {
     /// Rotation and flip, as Mutter numbers them (0 is none).
     pub transform: u32,
     pub primary: bool,
+    /// Whether the monitor is in Mutter's layout; one outside it (a virtual monitor not yet
+    /// placed, or a monitor its owner turned off) has a position made up here.
+    pub placed: bool,
 }
 
 /// `current` moved to the union-layout positions `want` names (`(connector, x, y)`, first
-/// entry the primary), in logical pixels, shifted to start at 0,0.
+/// entry the primary), in logical pixels, shifted to start at 0,0. A monitor outside the
+/// layout joins it only where `want` names it: a configuration enables every monitor it
+/// lists, and one its owner turned off stays off.
 pub fn layout_config(current: &[MonitorState], want: &[(String, i32, i32)]) -> Vec<MonitorState> {
     let mut out: Vec<MonitorState> = current
         .iter()
+        .filter(|m| m.placed || want.iter().any(|(c, _, _)| *c == m.connector))
         .map(|m| {
             let mut m = m.clone();
             if let Some((_, x, y)) = want.iter().find(|(c, _, _)| *c == m.connector) {
@@ -103,14 +110,16 @@ pub fn layout_config(current: &[MonitorState], want: &[(String, i32, i32)]) -> V
     out
 }
 
-/// Whether `config` places any monitor differently from `current`: re-applying an identical
-/// layout still makes Mutter reconfigure, which pauses every stream it carries.
+/// Whether `config` places any monitor differently from `current`, or brings one into the
+/// layout: re-applying an identical layout still makes Mutter reconfigure, which pauses every
+/// stream it carries, while a monitor outside it stays out until a configuration places it,
+/// even where the position made up for it is already the one wanted.
 pub fn needs_apply(current: &[MonitorState], config: &[MonitorState]) -> bool {
     config.iter().any(|c| {
         current
             .iter()
             .find(|m| m.connector == c.connector)
-            .is_none_or(|m| (m.x, m.y, m.primary) != (c.x, c.y, c.primary))
+            .is_none_or(|m| !m.placed || (m.x, m.y, m.primary) != (c.x, c.y, c.primary))
     })
 }
 
@@ -153,7 +162,8 @@ fn current_mode(modes: &[Mode]) -> Option<&Mode> {
 }
 
 /// Every monitor Mutter knows, as placed now; a monitor outside the layout (a virtual one
-/// not yet placed) goes right of the placed ones at scale 1.
+/// not yet placed, or one turned off) goes right of the placed ones at scale 1, marked
+/// unplaced.
 fn monitors_now(state: &CurrentState) -> Vec<MonitorState> {
     let (_, monitors, logical, _) = state;
     let mut out = Vec::new();
@@ -175,6 +185,7 @@ fn monitors_now(state: &CurrentState) -> Vec<MonitorState> {
                 scale: *scale,
                 transform: *transform,
                 primary: *primary,
+                placed: true,
             });
         }
     }
@@ -193,6 +204,7 @@ fn monitors_now(state: &CurrentState) -> Vec<MonitorState> {
             scale: 1.0,
             transform: 0,
             primary: false,
+            placed: false,
         });
         right += mode.1;
     }
@@ -258,6 +270,7 @@ mod tests {
             scale,
             transform: 0,
             primary: connector == "Meta-0",
+            placed: true,
         }
     }
 
@@ -321,6 +334,28 @@ mod tests {
         assert!(!needs_apply(&cur, &cfg));
         let moved = layout_config(&cur, &want(&[("Meta-0", 0, 0), ("Meta-1", 2556, 0)]));
         assert!(needs_apply(&cur, &moved));
+    }
+
+    /// A grown monitor outside the layout is placed even where the position made up for it
+    /// (right of the others) is the one wanted, and once placed there needs nothing more; a
+    /// monitor outside the layout that the request does not name stays out.
+    #[test]
+    fn an_unplaced_monitor_is_placed_once() {
+        let unplaced = |connector: &str, x: i32| MonitorState {
+            placed: false,
+            ..mon(connector, x, 0, 1.0)
+        };
+        let cur = [
+            mon("Meta-0", 0, 0, 1.0),
+            unplaced("Meta-1", 2556),
+            unplaced("DP-1", 5112),
+        ];
+        let side = want(&[("Meta-0", 0, 0), ("Meta-1", 2556, 0)]);
+        let cfg = layout_config(&cur, &side);
+        assert_eq!(places(&cfg), side);
+        assert!(needs_apply(&cur, &cfg));
+        let now = [mon("Meta-0", 0, 0, 1.0), mon("Meta-1", 2556, 0, 1.0)];
+        assert!(!needs_apply(&now, &layout_config(&now, &side)));
     }
 
     /// One display has nothing to arrange: a host's real monitors (and its primary) stay

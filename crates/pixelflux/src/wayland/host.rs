@@ -1883,9 +1883,10 @@ impl HostSession {
     }
 
     /// Absolute motion to a union-layout point, the physical space selkies injects in. libei
-    /// takes it in the compositor's logical space, where EIS regions lie: the stream's
-    /// position plus the point in its logical size. A union layout with no stream position
-    /// to place it by goes as it is, which is that space on an unscaled host.
+    /// takes it in the compositor's logical space, where EIS regions lie: the output's position,
+    /// as the host announces it now (`region_origin`), plus the point in its stream's logical
+    /// size. A union layout with no position to place it by goes as it is, which is that space
+    /// on an unscaled host.
     ///
     /// The portal announces a stream's size once, at Start, so after the host changes the
     /// output's mode that logical point is off by the ratio of the two sizes. Where the
@@ -2513,7 +2514,9 @@ impl PortalCtl {
 
 /// The portal thread: opens the session once the first Start has decided the cursor mode,
 /// reopens it (restoring with the token the backend gave) whenever that mode changes, and
-/// ends with the host session.
+/// ends with the host session. A grown display's session is open only while the display
+/// wants it (`PortalCtl::set_wanted`), so one the portal finishes opening after that ended
+/// is closed rather than kept.
 fn portal_thread(ctl: Arc<PortalCtl>) {
     loop {
         let (paint, token) = {
@@ -2769,11 +2772,17 @@ fn portal_capture_loop(
                 origin,
                 size: w.size,
                 // The logical size the portal announces for the stream, as injection reads it
-                // (`HostSession::scale_at`), else the output's.
-                logical: assigned
-                    .and_then(|si| live.session.streams[si].size)
-                    .or_else(|| geoms.get(rank).map(|g| g.logical))
-                    .unwrap_or((0, 0)),
+                // (`HostSession::scale_at`), else the output's. A grown monitor's is the
+                // display's: the host is unscaled, and the monitor takes its size from the
+                // stream after the portal announced one.
+                logical: if grown {
+                    w.size
+                } else {
+                    assigned
+                        .and_then(|si| live.session.streams[si].size)
+                        .or_else(|| geoms.get(rank).map(|g| g.logical))
+                        .unwrap_or((0, 0))
+                },
             },
             exact_size,
         };
