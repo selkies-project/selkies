@@ -66,6 +66,7 @@ dependency of the workspace's crates, by what it does:
 | `x11rb` | Apache-2.0 OR MIT | permissive | X11 input injection (XTEST), the clipboard (XFixes), and the display's outputs (RandR) | speaks the X protocol itself, no libxcb |
 | `xkbcommon` | MIT | permissive | keymaps |  |
 | `libpulse-binding` | Apache-2.0 OR MIT | permissive | the sound-server control plane |  |
+| `zbus` | MIT | permissive | D-Bus: asks an isolated session's own bus which settings daemons it can start | speaks the D-Bus protocol itself, no libdbus |
 | `nvml-wrapper` | Apache-2.0 OR MIT | permissive | GPU statistics |  |
 | `sysinfo` | MIT | permissive | system and process statistics |  |
 | `prometheus-client` | Apache-2.0 OR MIT | permissive | metrics endpoint |  |

@@ -267,6 +267,11 @@ const ROLES: &[Role] = &[
         notes: "",
     },
     Role {
+        crates: &["zbus"],
+        how: "D-Bus: asks an isolated session's own bus which settings daemons it can start",
+        notes: "speaks the D-Bus protocol itself, no libdbus",
+    },
+    Role {
         crates: &["nvml-wrapper"],
         how: "GPU statistics",
         notes: "",
