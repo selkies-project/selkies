@@ -210,6 +210,7 @@ const SECTIONS: &[Section] = &[
         names: &[
             "webcam_enabled",
             "webcam_encoder",
+            "webcam_max_bitrate",
             "webcam_width",
             "webcam_height",
             "webcam_pixel_format",

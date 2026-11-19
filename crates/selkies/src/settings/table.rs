@@ -2344,6 +2344,20 @@ pub static DEFINITIONS: &[SettingDef] = &[
         client_excluded: false,
     },
     SettingDef {
+        name: "webcam_max_bitrate",
+        kind: Kind::Int,
+        default: "2500",
+        help: "Ceiling, in kilobits per second (kbps), on the camera a browser sends over WebRTC: the b=AS and x-google-max-bitrate lines of the offer's webcam section, which bound the browser's send rate whatever its bandwidth estimate allows. The default is the rate the WebSockets uplink encodes the camera at. On a narrow client uplink a lower ceiling leaves room for the microphone and for the feedback the display's stream relies on.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: Some(50.0),
+        max: Some(300000.0),
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
         name: "webcam_device",
         kind: Kind::Str,
         default: "auto",
@@ -3361,6 +3375,10 @@ impl Settings {
 
     pub fn webcam_encoder(&self) -> &str {
         self.str_value("webcam_encoder")
+    }
+
+    pub fn webcam_max_bitrate(&self) -> i64 {
+        self.int_value("webcam_max_bitrate")
     }
 
     pub fn webcam_device(&self) -> &str {
