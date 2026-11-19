@@ -38,15 +38,18 @@ Selkies' own desktop shell, over HTTPS behind a login whose password you set
   `settings.ini`, the file manager's desktop entries and folder handler, an
   openbox or labwc theme and `rc.xml`, and an X11 density, which the session
   reads beneath the user's own configuration through `XDG_CONFIG_DIRS` and
-  `XDG_DATA_DIRS`; the applications keep the user's XDG homes, and what would
-  land in them (the `gtk.css` accent, GSettings, and the xfconf, MATE, and
-  LXQt density, which reaches those desktops through the X resources alone)
-  is not written. `full` moves `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
-  `XDG_STATE_HOME`, and `XDG_CACHE_HOME` there, the applications' own
-  configuration and GSettings included (under `--host` the GSettings writes
-  still go through the host's session bus, to the host's own settings).
-  `off` writes into the user's XDG homes, for a home that is the session's
-  own: the container images set it.
+  `XDG_DATA_DIRS`, while the applications keep the user's XDG homes. On the
+  session's own bus the settings daemons it activates, dconf and xfconfd,
+  keep GSettings and XFCE's settings in the quarantine as well, starting from
+  the user's, so a GNOME, MATE, or XFCE session takes the theme and the
+  density there; under `--host`, whose bus is the host's, they are left
+  alone, as are the `gtk.css` accent and `lxqt.conf` everywhere, an LXQt
+  session taking a density through the X resources. `full` moves
+  `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME`
+  there, the applications' own configuration and GSettings included (under
+  `--host` the GSettings writes still go through the host's session bus, to
+  the host's own settings). `off` writes into the user's XDG homes, for a
+  home that is the session's own: the container images set it.
 - **Buses**: a session bus at `$XDG_RUNTIME_DIR/bus`, where D-Bus clients look
   when no address is named, that Selkies, its window manager, and the desktop all
   join, and a system bus of the session's own (`DBUS_SYSTEM_BUS_ADDRESS`).

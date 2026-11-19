@@ -12,9 +12,10 @@
 //! every other session gets `Xft.dpi` merged into the resource database and written to
 //! `~/.Xresources` and `~/.xsettingsd` (under the quarantine's `home` in a quarantined session,
 //! `selkies_draw::dirs::dotfile_home`, so a density never reaches the user's own desktop's next
-//! login). Under a targeted quarantine, whose desktop keeps its settings in the user's own
-//! configuration, every desktop takes that last branch and neither xfconf, GSettings, nor
-//! `lxqt.conf` is written (`ladder`). The LXQt font repolish runs whichever branch was
+//! login). Under a targeted quarantine the desktop's applications keep the user's own
+//! configuration, so `lxqt.conf`, a file every LXQt application reads there, is never written,
+//! and xfconf and GSettings only where the session's own settings daemons keep them in the
+//! quarantine; where they are the user's, every desktop takes that last branch (`ladder`). The LXQt font repolish runs whichever branch was
 //! taken: the session that owns the windows decides whether anything already drawn follows,
 //! and it is the only one that can repolish them. On success the root pane's physical size
 //! is stamped with the same density, because xdpyinfo/RandR consumers (Qt's fallback
@@ -626,10 +627,12 @@ fn desktop_dpi_from(resource_db: Option<String>) -> Option<i32> {
         std::fs::read_to_string(path).unwrap_or_default()
     };
     if running_desktop("xfce", "xfce4-session") {
-        let config = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .and_then(usable_dir)
-            .unwrap_or_else(|| home().join(".config"));
+        let config = selkies_draw::dirs::settings_home().unwrap_or_else(|| {
+            std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .and_then(usable_dir)
+                .unwrap_or_else(|| home().join(".config"))
+        });
         if let Some(dpi) = last_dpi(&xfconf, &persisted(config.join(XFCONF_XSETTINGS))) {
             return Some(dpi);
         }
@@ -788,11 +791,11 @@ fn ladder(xfce: bool, mate: bool, settings: bool) -> Ladder {
     }
 }
 
-/// Whether the desktop's own settings stores (xfconf, GSettings, `lxqt.conf`) may take a
-/// density: not under a targeted quarantine, where they are the user's own and the density
-/// would reach the desktop they log into (`selkies_draw::dirs::keeps_user_homes`).
+/// Whether the desktop's settings daemons (xfconf, GSettings) may take a density: not under a
+/// targeted quarantine whose daemons are the user's own, where the density would reach the
+/// desktop the user logs into (`selkies_draw::dirs::settings_stores_writable`).
 fn desktop_settings_writable() -> bool {
-    !selkies_draw::dirs::keeps_user_homes()
+    selkies_draw::dirs::settings_stores_writable()
 }
 
 /// Set the X11 display DPI using DE-specific methods (see the module docblock). Returns
@@ -839,7 +842,7 @@ pub async fn set_dpi(dpi: i32) -> bool {
             any |= run_xrdb(dpi).await;
         }
     }
-    if settings {
+    if !selkies_draw::dirs::keeps_user_homes() {
         any |= run_lxqt_font(dpi).await;
     }
     if !any {

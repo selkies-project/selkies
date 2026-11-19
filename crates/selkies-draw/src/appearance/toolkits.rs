@@ -35,9 +35,10 @@
 //! (`crate::dirs::keeps_user_homes`), so what lands there reaches the desktop the user logs
 //! into. There `settings.ini` is written in the quarantine's `config`, which GTK reads beneath
 //! the user's own through `XDG_CONFIG_DIRS`, so the session's theme applies where the user named
-//! none; the style sheets and GSettings are left alone, since GTK reads `gtk.css` from the
-//! configuration home alone and dconf keeps its one database there; and an `xsettingsd` is
-//! given the names only where its configuration is in the quarantine. libadwaita, Qt 6,
+//! none; the style sheets are left alone, since GTK reads `gtk.css` from the configuration home
+//! alone; GSettings are written only where the session's own dconf keeps them in the quarantine
+//! (`crate::dirs::settings_stores_writable`), never into the user's database; and an
+//! `xsettingsd` is given the names only where its configuration is in the quarantine. libadwaita, Qt 6,
 //! Chromium, and Electron still take the scheme and the accent from the portal.
 //!
 //! Every file is written only when its content changes. What was updated and what failed comes
@@ -521,7 +522,10 @@ fn apply_gsettings(decision: &Decision, env: &[(String, String)]) -> std::io::Re
         .iter()
         .map(|(key, value)| format!("{key}={value}\n"))
         .collect();
-    let state_file = desktop_config_dir().join("toolkits.state");
+    // The record belongs with the database it describes: the quarantine's dconf keeps its own.
+    let state_file = dirs::settings_home()
+        .map_or_else(desktop_config_dir, |home| home.join("selkies-desktop"))
+        .join("toolkits.state");
     if std::fs::read_to_string(&state_file).is_ok_and(|recorded| recorded == state) {
         return Ok(false);
     }
@@ -620,7 +624,7 @@ pub fn apply(theme: Theme, icon_theme: Option<&str>, env: &[(String, String)]) -
         "xsettingsd",
         apply_xsettings(&decision, display.as_deref()).map(|()| false),
     );
-    if !users_own {
+    if dirs::settings_stores_writable() {
         report("GSettings", apply_gsettings(&decision, env));
     }
     (decision, notes)

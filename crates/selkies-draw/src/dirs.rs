@@ -14,7 +14,9 @@
 //! `config` and `data` lead the system directories the session searches: what Selkies writes
 //! for the desktop's toolkits and window managers goes there ([`session_config_home`],
 //! [`session_data_home`]), beneath anything the user configured, and a write that can only land
-//! in the user's own configuration is left out ([`keeps_user_homes`]). Either way
+//! in the user's own configuration is left out ([`keeps_user_homes`]), but for the settings
+//! daemons on a session bus of the session's own, which keep theirs in the quarantine
+//! ([`settings_home`]). Either way
 //! [`dotfile_home`] is where the few files a desktop reads from the home itself
 //! (`~/.Xresources`, `~/.xsettingsd`) are written instead.
 
@@ -54,9 +56,30 @@ pub fn dotfile_home() -> PathBuf {
     quarantine().map_or_else(home, |root| root.join("home"))
 }
 
+/// The variable a session whose settings daemons keep their settings in its quarantine carries:
+/// the configuration home those daemons (dconf, xfconfd) were started with.
+pub const SETTINGS_VAR: &str = "SELKIES_QUARANTINE_SETTINGS";
+
+/// The configuration home the session's settings daemons keep their settings in, where the
+/// quarantine gave them one of its own ([`SETTINGS_VAR`]), else `None`.
+pub fn settings_home() -> Option<PathBuf> {
+    std::env::var_os(SETTINGS_VAR)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .and_then(usable)
+}
+
+/// Whether the settings stores the session's desktop reads through a daemon (GSettings, xfconf)
+/// may be written: everywhere but under a targeted quarantine whose settings daemons are the
+/// user's own, where a write would reach the desktop the user logs into.
+pub fn settings_stores_writable() -> bool {
+    !keeps_user_homes() || settings_home().is_some()
+}
+
 /// Whether the session keeps the user's own XDG homes beside its quarantine (the targeted
-/// quarantine): a file written in the configuration home, or through a service that writes
-/// there (dconf, xfconfd), reaches the desktop the user logs into, so the session writes none.
+/// quarantine): a file written in the configuration home reaches the desktop the user logs
+/// into, so the session writes none, and the settings daemons write there unless the quarantine
+/// gave them a home of their own ([`settings_stores_writable`]).
 pub fn keeps_user_homes() -> bool {
     quarantine().is_some_and(|root| !config_home().starts_with(root))
 }

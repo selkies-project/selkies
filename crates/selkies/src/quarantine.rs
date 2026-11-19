@@ -27,12 +27,19 @@
 //!   user's own homes and above the system's: `settings.ini`, `mimeapps.list`, the window
 //!   managers' `rc.xml`, the desktop entries, and the window theme are written there
 //!   (`selkies_draw::dirs::session_config_home`), and what the user configured still wins.
-//!   What would land in the user's own configuration is not written: the `gtk.css`
-//!   import, which GTK reads from the configuration home alone, and everything that goes through
-//!   a service keeping one database there, GSettings (dconf), xfconf, and `lxqt.conf`
-//!   (`selkies_draw::dirs::keeps_user_homes`). The scheme and the accent still reach libadwaita,
-//!   Qt 6, Chromium, and Electron through the Settings portal, and a density through the X
-//!   resources.
+//!   On a session bus of the session's own (`selkies session` without `--host`), the settings
+//!   daemons it activates, dconf and xfconfd, are given a configuration home in the quarantine
+//!   ([`SETTINGS_DAEMONS`], [`write_daemon_services`], [`settings_env`]): they alone write the
+//!   stores the desktop's theme and density live in, so GSettings and XFCE's settings become
+//!   the session's, starting from the user's (dconf reads the user's database beneath its own,
+//!   xfconfd's channels are copied in the first time), and the theme and the density keep
+//!   going there. What would still land in the user's own configuration is not written: the
+//!   `gtk.css` import, which GTK reads from the configuration home alone, `lxqt.conf`, a file
+//!   every LXQt application reads there, and GSettings and xfconf where the daemons are the
+//!   user's, on the host's bus under `--host` or a server run alone
+//!   (`selkies_draw::dirs::settings_stores_writable`). The scheme and the accent still reach
+//!   libadwaita, Qt 6, Chromium, and Electron through the Settings portal, and a density the
+//!   other desktops through the X resources.
 //! * **Full**: the four homes, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, and
 //!   `XDG_CACHE_HOME`, move into the quarantine, so everything the session writes through them,
 //!   Selkies or not, lands there, the applications' profiles and GSettings included. The user's
@@ -251,6 +258,214 @@ pub fn prepare(
     Ok(())
 }
 
+/// The settings daemons a targeted quarantine gives a configuration home of its own on a
+/// session bus of the session's own, by the bus name each is activated under: dconf, which keeps
+/// GSettings, and xfconfd, which keeps XFCE's settings. Only these processes write their stores,
+/// and every other reads them through the bus or, for dconf, through the profile
+/// ([`dconf_profile`]), so moving their home moves the stores and nothing an application keeps.
+pub const SETTINGS_DAEMONS: &[&str] = &["ca.desrt.dconf", "org.xfce.Xfconf"];
+
+/// A bus name only a service file in the session's runtime directory activates, whose presence
+/// among the bus's activatable names shows the bus reads that directory.
+pub const PROBE_NAME: &str = "org.selkies.QuarantineProbe";
+
+/// The configuration home the session's settings daemons get: `settings` in the quarantine.
+pub fn settings_home(root: &Path) -> PathBuf {
+    root.join("settings")
+}
+
+/// `text` quoted as a word for the `Exec` line of a D-Bus service file, which the bus splits as
+/// a shell does.
+fn exec_word(text: &str) -> String {
+    format!("'{}'", text.replace('\'', r"'\''"))
+}
+
+/// The service file that activates `name` as the system's `text` does, with the configuration
+/// home `home` given to it through `env`; `None` where `text` names no command.
+fn wrapped_service(name: &str, text: &str, env: &Path, home: &Path) -> Option<String> {
+    let exec = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Exec="))
+        .map(str::trim)
+        .filter(|exec| !exec.is_empty())?;
+    Some(format!(
+        "[D-BUS Service]\nName={name}\nExec={} {} {exec}\n",
+        exec_word(&env.to_string_lossy()),
+        exec_word(&format!("XDG_CONFIG_HOME={}", home.display())),
+    ))
+}
+
+/// Write the service files that give the [`SETTINGS_DAEMONS`] found along `data_dirs` the
+/// quarantine's [`settings_home`] into `dbus-1/services` of the session's runtime directory,
+/// which a session bus reads ahead of every other service directory, with the [`PROBE_NAME`]
+/// beside them. Returns the names given a service file, the probe's not among them; none
+/// without `env`.
+///
+/// # Errors
+/// The directory or a file could not be written.
+pub fn write_daemon_services(
+    runtime_dir: &Path,
+    root: &Path,
+    data_dirs: &[PathBuf],
+    env: Option<&Path>,
+) -> std::io::Result<Vec<String>> {
+    let Some(env) = env else {
+        return Ok(Vec::new());
+    };
+    let dir = runtime_dir.join("dbus-1/services");
+    std::fs::create_dir_all(&dir)?;
+    let home = settings_home(root);
+    let mut written = Vec::new();
+    for name in SETTINGS_DAEMONS {
+        let file = format!("{name}.service");
+        let Some(text) = data_dirs
+            .iter()
+            .filter(|dir| !dir.starts_with(root))
+            .find_map(|dir| std::fs::read_to_string(dir.join("dbus-1/services").join(&file)).ok())
+        else {
+            continue;
+        };
+        if let Some(service) = wrapped_service(name, &text, env, &home) {
+            std::fs::write(dir.join(&file), service)?;
+            written.push(name.to_string());
+        }
+    }
+    std::fs::write(
+        dir.join(format!("{PROBE_NAME}.service")),
+        format!("[D-BUS Service]\nName={PROBE_NAME}\nExec=/bin/false\n"),
+    )?;
+    Ok(written)
+}
+
+/// Copy the user's own XFCE settings (`xfce4/xfconf/xfce-perchannel-xml` in `user_config`) into
+/// the quarantine's [`settings_home`] the first time, so the session's XFCE starts from them and
+/// then keeps its own. Returns whether they were copied.
+///
+/// # Errors
+/// A file could not be copied.
+pub fn seed_xfconf(user_config: &Path, root: &Path) -> std::io::Result<bool> {
+    const CHANNELS: &str = "xfce4/xfconf/xfce-perchannel-xml";
+    let target = settings_home(root).join(CHANNELS);
+    let Ok(entries) = std::fs::read_dir(user_config.join(CHANNELS)) else {
+        return Ok(false);
+    };
+    if target.exists() {
+        return Ok(false);
+    }
+    std::fs::create_dir_all(&target)?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "xml") && path.is_file() {
+            std::fs::copy(&path, target.join(entry.file_name()))?;
+        }
+    }
+    Ok(true)
+}
+
+/// The dconf profile of a session whose dconf keeps GSettings in the quarantine: writes go to a
+/// keyfile database the session's dconf service keeps under its configuration home, the
+/// quarantine's, and reads fall through to the user's own database, `user_db` where it exists,
+/// read-only, and to the system databases the profile that would otherwise apply names
+/// (`base`), so the session starts from the user's settings and the user's database is never
+/// written.
+fn dconf_profile(user_db: Option<&Path>, base: &str) -> String {
+    let mut lines = vec!["service-db:keyfile/user".to_string()];
+    if let Some(db) = user_db {
+        lines.push(format!("file-db:{}", db.display()));
+    }
+    lines.extend(
+        base.lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("system-db:") || line.starts_with("file-db:"))
+            .map(str::to_string),
+    );
+    lines.join("\n") + "\n"
+}
+
+/// The text of the dconf profile that applies to the environment `get` reads: the file
+/// `DCONF_PROFILE` names (a path, or a name under `/etc/dconf/profile`), else
+/// `/etc/dconf/profile/user`, else none, dconf's built-in `user-db:user`.
+fn base_dconf_profile(get: &impl Fn(&str) -> Option<String>) -> String {
+    let named = get("DCONF_PROFILE").filter(|v| !v.is_empty());
+    let path = match named {
+        Some(name) if name.starts_with('/') => PathBuf::from(name),
+        Some(name) => Path::new("/etc/dconf/profile").join(name),
+        None => PathBuf::from("/etc/dconf/profile/user"),
+    };
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
+/// The variables that hand the session to its settings daemons once the bus has shown it reads
+/// their service files (`activatable` holds [`PROBE_NAME`]): `DCONF_PROFILE` naming a profile
+/// written into the quarantine ([`dconf_profile`]) where dconf was given a service file, and
+/// [`selkies_draw::dirs::SETTINGS_VAR`] naming the daemons' configuration home, with the user's
+/// XFCE settings seeded into it the first time ([`seed_xfconf`]). Empty where the bus does not
+/// read them, so the daemons stay the user's and their stores are left alone.
+///
+/// # Errors
+/// The profile could not be written or the settings seeded.
+pub fn settings_env(
+    root: &Path,
+    daemons: &[String],
+    activatable: &[String],
+    get: impl Fn(&str) -> Option<String>,
+) -> std::io::Result<Vec<(String, String)>> {
+    if daemons.is_empty() || !activatable.iter().any(|name| name == PROBE_NAME) {
+        return Ok(Vec::new());
+    }
+    let home = settings_home(root);
+    std::fs::DirBuilder::new().recursive(true).create(&home)?;
+    let user_config = user_home_dir(&get, "XDG_CONFIG_HOME", ".config");
+    let mut vars = Vec::new();
+    if daemons.iter().any(|name| name == "ca.desrt.dconf") {
+        let user_db = user_config
+            .as_ref()
+            .map(|config| config.join("dconf/user"))
+            .filter(|db| db.is_file());
+        let profile = home.join("dconf-profile");
+        std::fs::write(
+            &profile,
+            dconf_profile(user_db.as_deref(), &base_dconf_profile(&get)),
+        )?;
+        vars.push((
+            "DCONF_PROFILE".to_string(),
+            profile.to_string_lossy().into_owned(),
+        ));
+    }
+    if daemons.iter().any(|name| name == "org.xfce.Xfconf")
+        && let Some(config) = &user_config
+    {
+        seed_xfconf(config, root)?;
+    }
+    vars.push((
+        selkies_draw::dirs::SETTINGS_VAR.to_string(),
+        home.to_string_lossy().into_owned(),
+    ));
+    Ok(vars)
+}
+
+/// The names the bus at `address` can activate, empty where it does not answer.
+pub fn activatable_names(address: &str) -> Vec<String> {
+    zbus::block_on(async {
+        let connection = zbus::connection::Builder::address(address)
+            .build()
+            .await
+            .ok()?;
+        let reply = connection
+            .call_method(
+                Some("org.freedesktop.DBus"),
+                "/org/freedesktop/DBus",
+                Some("org.freedesktop.DBus"),
+                "ListActivatableNames",
+                &(),
+            )
+            .await
+            .ok()?;
+        reply.body().deserialize::<Vec<String>>().ok()
+    })
+    .unwrap_or_default()
+}
+
 /// Quarantine this process's own environment in `mode`, for a server run alone: the variables
 /// [`env`] gives, set where the environment is not quarantined already, with the directories
 /// made. Returns the root where this call quarantined the environment.
@@ -408,7 +623,9 @@ mod tests {
         }
         let home = selkies_draw::dirs::home();
         let user = home.join(".config");
-        let mode = Mode::parse(&std::env::var("QUARANTINE_CHECK").unwrap_or_default());
+        let check = std::env::var("QUARANTINE_CHECK").unwrap_or_default();
+        let session_daemons = check == "targeted-daemons";
+        let mode = Mode::parse(check.trim_end_matches("-daemons"));
         let gsettings_log = PathBuf::from(std::env::var("GSETTINGS_LOG").expect("the log"));
         let root = (mode != Mode::Off).then(|| {
             let root = apply_to_process(mode).expect("the environment is quarantined");
@@ -419,6 +636,12 @@ mod tests {
             );
             root
         });
+        if let Some(root) = root.as_ref().filter(|_| session_daemons) {
+            // SAFETY: the test runs alone in its own process, before any thread it starts.
+            unsafe {
+                std::env::set_var(selkies_draw::dirs::SETTINGS_VAR, settings_home(root));
+            }
+        }
         let (decision, _) = selkies_draw::appearance::toolkits::apply(
             selkies_draw::style::Theme::default(),
             None,
@@ -464,7 +687,10 @@ mod tests {
             assert_eq!(selkies_draw::dirs::config_home(), user, "the apps keep it");
             assert_eq!(selkies_draw::dirs::config_dirs()[0], root.join("config"));
             assert_eq!(selkies_draw::dirs::data_dirs()[0], root.join("data"));
-            assert!(!set_gsettings, "the user's own GSettings are left alone");
+            assert_eq!(
+                set_gsettings, session_daemons,
+                "GSettings are written only where the session's own dconf keeps them"
+            );
             assert!(
                 !root.join("config/gtk-3.0/gtk.css").exists(),
                 "GTK reads no style sheet from beneath the user's"
@@ -496,7 +722,7 @@ mod tests {
 
     #[test]
     fn the_users_own_desktop_configuration_is_left_as_it_is() {
-        for check in ["off", "targeted", "full"] {
+        for check in ["off", "targeted", "targeted-daemons", "full"] {
             let home = crate::session_screens::testing::Scratch::new("quarantine-home");
             for gtk in ["gtk-3.0", "gtk-4.0"] {
                 let dir = home.path(".config").join(gtk);
@@ -570,6 +796,324 @@ mod tests {
                 .path(".local/state/selkies/quarantine/config/user-dirs.locale")
                 .exists()
         );
+    }
+
+    #[test]
+    fn a_settings_daemon_is_activated_as_the_system_does_in_a_home_of_the_quarantines() {
+        let system = "[D-BUS Service]\nName=org.xfce.Xfconf\nExec=/usr/lib/xfce4/xfconf/xfconfd\n";
+        assert_eq!(
+            wrapped_service(
+                "org.xfce.Xfconf",
+                system,
+                Path::new("/usr/bin/env"),
+                Path::new("/home/it's/q/settings"),
+            )
+            .as_deref(),
+            Some(
+                "[D-BUS Service]\nName=org.xfce.Xfconf\nExec='/usr/bin/env' \
+                 'XDG_CONFIG_HOME=/home/it'\\''s/q/settings' /usr/lib/xfce4/xfconf/xfconfd\n"
+            )
+        );
+        assert_eq!(
+            wrapped_service(
+                "x",
+                "[D-BUS Service]\nName=x\n",
+                Path::new("/e"),
+                Path::new("/h")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_settings_daemons_found_get_service_files_in_the_runtime_directory() {
+        let scratch = crate::session_screens::testing::Scratch::new("quarantine-services");
+        let root = scratch.path("q");
+        let system = scratch.path("share/dbus-1/services");
+        std::fs::create_dir_all(&system).unwrap();
+        std::fs::write(
+            system.join("ca.desrt.dconf.service"),
+            "[D-BUS Service]\nName=ca.desrt.dconf\nExec=/usr/libexec/dconf-service\n",
+        )
+        .unwrap();
+        let own = root.join("data/dbus-1/services");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(
+            own.join("org.xfce.Xfconf.service"),
+            "[D-BUS Service]\nName=org.xfce.Xfconf\nExec=/stale\n",
+        )
+        .unwrap();
+        let runtime = scratch.path("run");
+        let dirs = [root.join("data"), scratch.path("share")];
+        assert_eq!(
+            write_daemon_services(&runtime, &root, &dirs, None).unwrap(),
+            Vec::<String>::new(),
+            "no env, no service files"
+        );
+        let written =
+            write_daemon_services(&runtime, &root, &dirs, Some(Path::new("/usr/bin/env"))).unwrap();
+        assert_eq!(
+            written,
+            ["ca.desrt.dconf"],
+            "the quarantine's own are no system's"
+        );
+        let services = runtime.join("dbus-1/services");
+        let dconf = std::fs::read_to_string(services.join("ca.desrt.dconf.service")).unwrap();
+        assert!(dconf.contains(&format!(
+            "'XDG_CONFIG_HOME={}' /usr/libexec/dconf-service",
+            settings_home(&root).display()
+        )));
+        assert!(services.join(format!("{PROBE_NAME}.service")).is_file());
+        assert!(!services.join("org.xfce.Xfconf.service").exists());
+    }
+
+    #[test]
+    fn the_users_xfce_settings_are_seeded_once() {
+        let scratch = crate::session_screens::testing::Scratch::new("quarantine-xfconf");
+        let user = scratch.path("config");
+        let channels = user.join("xfce4/xfconf/xfce-perchannel-xml");
+        std::fs::create_dir_all(&channels).unwrap();
+        std::fs::write(channels.join("xsettings.xml"), "mine").unwrap();
+        std::fs::write(channels.join("notes.txt"), "not a channel").unwrap();
+        let root = scratch.path("q");
+        assert!(seed_xfconf(&user, &root).unwrap());
+        let seeded = settings_home(&root).join("xfce4/xfconf/xfce-perchannel-xml");
+        assert_eq!(
+            std::fs::read_to_string(seeded.join("xsettings.xml")).unwrap(),
+            "mine"
+        );
+        assert!(!seeded.join("notes.txt").exists());
+        std::fs::write(seeded.join("xsettings.xml"), "the session's").unwrap();
+        std::fs::write(channels.join("xsettings.xml"), "changed").unwrap();
+        assert!(!seed_xfconf(&user, &root).unwrap(), "seeded once");
+        assert_eq!(
+            std::fs::read_to_string(seeded.join("xsettings.xml")).unwrap(),
+            "the session's"
+        );
+        assert_eq!(
+            std::fs::read_to_string(channels.join("xsettings.xml")).unwrap(),
+            "changed"
+        );
+    }
+
+    #[test]
+    fn the_dconf_profile_writes_the_quarantine_and_reads_the_users_and_the_systems() {
+        assert_eq!(
+            dconf_profile(
+                Some(Path::new("/home/u/.config/dconf/user")),
+                "user-db:user\nsystem-db:local\n# comment\nsystem-db:site\n"
+            ),
+            "service-db:keyfile/user\nfile-db:/home/u/.config/dconf/user\nsystem-db:local\nsystem-db:site\n"
+        );
+        assert_eq!(dconf_profile(None, ""), "service-db:keyfile/user\n");
+    }
+
+    #[test]
+    fn the_session_takes_its_settings_daemons_only_once_the_bus_reads_their_service_files() {
+        let scratch = crate::session_screens::testing::Scratch::new("quarantine-settings-env");
+        let home = scratch.text();
+        let root = scratch.path("q");
+        let get = |k: &str| (k == "HOME").then(|| home.clone());
+        let daemons = ["ca.desrt.dconf".to_string(), "org.xfce.Xfconf".to_string()];
+        assert!(settings_env(&root, &daemons, &[], get).unwrap().is_empty());
+        assert!(
+            settings_env(&root, &[], &[PROBE_NAME.to_string()], get)
+                .unwrap()
+                .is_empty()
+        );
+        let channels = scratch.path(".config/xfce4/xfconf/xfce-perchannel-xml");
+        std::fs::create_dir_all(&channels).unwrap();
+        std::fs::write(channels.join("xsettings.xml"), "mine").unwrap();
+        let vars: HashMap<String, String> =
+            settings_env(&root, &daemons, &[PROBE_NAME.to_string()], get)
+                .unwrap()
+                .into_iter()
+                .collect();
+        let settings = settings_home(&root);
+        assert_eq!(
+            vars[selkies_draw::dirs::SETTINGS_VAR],
+            settings.to_string_lossy()
+        );
+        let profile = std::fs::read_to_string(&vars["DCONF_PROFILE"]).unwrap();
+        assert!(
+            profile.starts_with("service-db:keyfile/user\n"),
+            "{profile}"
+        );
+        assert!(
+            !profile.contains("file-db:"),
+            "the user has no database yet"
+        );
+        assert!(
+            settings
+                .join("xfce4/xfconf/xfce-perchannel-xml/xsettings.xml")
+                .is_file()
+        );
+    }
+
+    /// The user's own GSettings, written through a bus and a dconf that are the user's.
+    fn user_gsettings(home: &Path, runtime: &Path, args: &[&str]) {
+        let bus = Bus::start(home, runtime);
+        assert!(
+            gsettings(home, runtime, &bus.address, None, args)
+                .status
+                .success()
+        );
+    }
+
+    /// A session bus in `runtime`, ended with this value.
+    struct Bus {
+        _daemon: crate::session_screens::testing::Owned,
+        address: String,
+    }
+
+    impl Bus {
+        fn start(home: &Path, runtime: &Path) -> Bus {
+            std::fs::create_dir_all(runtime).unwrap();
+            let socket = runtime.join("bus");
+            let address = format!("unix:path={}", socket.display());
+            let daemon = crate::session_screens::testing::Owned::spawn(
+                std::process::Command::new("dbus-daemon")
+                    .args(["--session", "--nofork", "--nopidfile"])
+                    .arg(format!("--address={address}"))
+                    .env_clear()
+                    .envs(base_env(home, runtime)),
+            );
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !socket.exists() {
+                assert!(std::time::Instant::now() < deadline, "the bus comes up");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Bus {
+                _daemon: daemon,
+                address,
+            }
+        }
+    }
+
+    fn base_env(home: &Path, runtime: &Path) -> Vec<(String, String)> {
+        vec![
+            ("PATH".into(), std::env::var("PATH").unwrap_or_default()),
+            ("HOME".into(), home.display().to_string()),
+            (
+                "XDG_CONFIG_HOME".into(),
+                home.join(".config").display().to_string(),
+            ),
+            ("XDG_RUNTIME_DIR".into(), runtime.display().to_string()),
+            ("XDG_DATA_DIRS".into(), "/usr/local/share:/usr/share".into()),
+        ]
+    }
+
+    fn gsettings(
+        home: &Path,
+        runtime: &Path,
+        address: &str,
+        profile: Option<&str>,
+        args: &[&str],
+    ) -> std::process::Output {
+        let mut command = std::process::Command::new("gsettings");
+        command
+            .args(args)
+            .env_clear()
+            .envs(base_env(home, runtime))
+            .env("DBUS_SESSION_BUS_ADDRESS", address);
+        if let Some(profile) = profile {
+            command.env("DCONF_PROFILE", profile);
+        }
+        command.output().expect("gsettings runs")
+    }
+
+    #[test]
+    fn a_session_bus_hands_gsettings_to_a_dconf_of_the_quarantines_own() {
+        let schema = std::process::Command::new("gsettings")
+            .args(["list-keys", "org.gnome.desktop.interface"])
+            .output();
+        let env = crate::commands::sessions::which("env");
+        let dconf = PathBuf::from("/usr/share/dbus-1/services/ca.desrt.dconf.service");
+        if crate::commands::sessions::which("dbus-daemon").is_none()
+            || !schema.is_ok_and(|out| out.status.success())
+            || env.is_none()
+            || !dconf.is_file()
+        {
+            eprintln!("skipped: needs dbus-daemon, dconf, and gsettings with the GNOME schemas");
+            return;
+        }
+        let scratch = crate::session_screens::testing::Scratch::new("quarantine-dconf");
+        let home = scratch.0.clone();
+        user_gsettings(
+            &home,
+            &scratch.path("user-run"),
+            &["set", "org.gnome.desktop.interface", "font-name", "Mine 13"],
+        );
+        let user_db = home.join(".config/dconf/user");
+        let before = std::fs::read(&user_db).expect("the user's database");
+
+        let root = scratch.path(".local/state/selkies/quarantine");
+        let runtime = scratch.path("session-run");
+        let daemons = write_daemon_services(
+            &runtime,
+            &root,
+            &[PathBuf::from("/usr/share")],
+            env.as_deref(),
+        )
+        .unwrap();
+        let bus = Bus::start(&home, &runtime);
+        let home_text = home.display().to_string();
+        let vars: HashMap<String, String> =
+            settings_env(&root, &daemons, &activatable_names(&bus.address), |k| {
+                (k == "HOME").then(|| home_text.clone())
+            })
+            .unwrap()
+            .into_iter()
+            .collect();
+        let profile = vars
+            .get("DCONF_PROFILE")
+            .expect("the bus reads the runtime directory");
+        let get = |key: &str| {
+            let out = gsettings(
+                &home,
+                &runtime,
+                &bus.address,
+                Some(profile),
+                &["get", "org.gnome.desktop.interface", key],
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(
+            get("font-name"),
+            "'Mine 13'",
+            "the session starts from the user's"
+        );
+        let set = gsettings(
+            &home,
+            &runtime,
+            &bus.address,
+            Some(profile),
+            &[
+                "set",
+                "org.gnome.desktop.interface",
+                "color-scheme",
+                "prefer-dark",
+            ],
+        );
+        assert!(
+            set.status.success(),
+            "{}",
+            String::from_utf8_lossy(&set.stderr)
+        );
+        assert_eq!(get("color-scheme"), "'prefer-dark'");
+        let keyfile = settings_home(&root).join("dconf/user.txt");
+        assert!(
+            std::fs::read_to_string(&keyfile)
+                .unwrap_or_default()
+                .contains("color-scheme='prefer-dark'"),
+            "the write lands in the quarantine"
+        );
+        assert_eq!(
+            std::fs::read(&user_db).unwrap(),
+            before,
+            "the user's database is untouched"
+        );
+        assert!(!home.join(".config/dconf/user.txt").exists());
     }
 
     #[test]

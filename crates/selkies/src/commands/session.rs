@@ -363,6 +363,9 @@ pub struct Session {
     /// The desktop's output is discarded rather than written to the launcher's own streams
     /// (`app_logs` off).
     pub quiet_desktop: bool,
+    /// The quarantine's root and the settings daemons given service files of its own, until the
+    /// session bus is up to show whether it reads them ([`Session::settings_daemons`]).
+    settings: Option<(PathBuf, Vec<String>)>,
 }
 
 impl Session {
@@ -461,6 +464,9 @@ impl Session {
             ));
         }
         self.env.extend(vars);
+        if mode == Mode::Targeted && !self.host {
+            self.settings_services(&root);
+        }
         log(&format!(
             "the session's writes are quarantined ({}) under {}{}",
             mode.name(),
@@ -472,6 +478,87 @@ impl Session {
             }
         ));
         Some(root)
+    }
+
+    /// Give the settings daemons the session's own bus activates (dconf, xfconfd) a configuration
+    /// home in the quarantine, `root`, through service files in the session's runtime
+    /// directory, before the bus starts ([`crate::quarantine::write_daemon_services`]). The
+    /// applications keep the user's own homes: these daemons alone write the stores the desktop
+    /// reads its theme and density from, so those stores become the session's.
+    fn settings_services(&mut self, root: &Path) {
+        let mut data_dirs: Vec<PathBuf> = self
+            .env
+            .get("XDG_DATA_DIRS")
+            .map(|dirs| {
+                dirs.split(':')
+                    .filter(|d| !d.is_empty())
+                    .map(PathBuf::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for dir in ["/usr/local/share", "/usr/share"] {
+            if !data_dirs.iter().any(|d| d == Path::new(dir)) {
+                data_dirs.push(PathBuf::from(dir));
+            }
+        }
+        let env = which("env");
+        match crate::quarantine::write_daemon_services(
+            &self.runtime_dir,
+            root,
+            &data_dirs,
+            env.as_deref(),
+        ) {
+            Ok(daemons) if !daemons.is_empty() => {
+                self.settings = Some((root.to_path_buf(), daemons));
+            }
+            Ok(_) => {}
+            Err(err) => log(&format!(
+                "the settings daemons' service files were not written ({err}); GSettings and \
+                 XFCE's settings stay the user's and are left alone"
+            )),
+        }
+    }
+
+    /// Hand the session to the settings daemons [`Session::settings_services`] gave a home in
+    /// the quarantine, once the session bus is up: where the bus lists the probe among its
+    /// activatable names, so it reads the runtime directory's service files, the session's
+    /// environment takes the dconf profile and the daemons' home
+    /// ([`crate::quarantine::settings_env`]), and the theme and density are written there.
+    /// Elsewhere the daemons stay the user's and their stores are left alone.
+    pub fn settings_daemons(&mut self) {
+        let Some((root, daemons)) = self.settings.take() else {
+            return;
+        };
+        let activatable = self
+            .env
+            .get("DBUS_SESSION_BUS_ADDRESS")
+            .map(|address| crate::quarantine::activatable_names(address))
+            .unwrap_or_default();
+        let _ = fs::remove_file(
+            self.runtime_dir
+                .join("dbus-1/services")
+                .join(format!("{}.service", crate::quarantine::PROBE_NAME)),
+        );
+        match crate::quarantine::settings_env(&root, &daemons, &activatable, |name| {
+            self.env.get(name).cloned()
+        }) {
+            Ok(vars) if !vars.is_empty() => {
+                self.env.extend(vars);
+                log(&format!(
+                    "the session's settings daemons ({}) keep their settings under {}",
+                    daemons.join(", "),
+                    crate::quarantine::settings_home(&root).display()
+                ));
+            }
+            Ok(_) => log(
+                "the session bus reads no service files from the runtime directory; GSettings \
+                 and XFCE's settings stay the user's and are left alone",
+            ),
+            Err(err) => log(&format!(
+                "the settings daemons were not given the quarantine ({err}); GSettings and \
+                 XFCE's settings stay the user's and are left alone"
+            )),
+        }
     }
 
     /// A session sharing the host's runtime directory `dir`, buses, and sound server.
@@ -516,6 +603,7 @@ impl Session {
             requested_display,
             bundle,
             quiet_desktop: false,
+            settings: None,
         }
     }
 
@@ -1542,6 +1630,7 @@ pub fn main(argv: &[String], prog: &str) -> i32 {
             .map_err(|e| format!("cannot find the selkies executable: {e}"))?;
         let mut command = vec![exe.clone()];
         session.buses();
+        session.settings_daemons();
         if !session.sound() {
             command.push("--audio-enabled=false".to_string());
         }
@@ -2074,6 +2163,60 @@ mod tests {
         .unwrap();
         assert_eq!(session.quarantine(Mode::Off), None);
         assert!(!session.env.contains_key(crate::quarantine::QUARANTINE_VAR));
+    }
+
+    #[test]
+    fn a_targeted_session_gives_its_own_bus_settings_daemons_and_a_host_session_does_not() {
+        let home = tempfile::tempdir().unwrap();
+        let share = home.path().join("share");
+        fs::create_dir_all(share.join("dbus-1/services")).unwrap();
+        fs::write(
+            share.join("dbus-1/services/org.xfce.Xfconf.service"),
+            "[D-BUS Service]\nName=org.xfce.Xfconf\nExec=/usr/lib/xfconfd\n",
+        )
+        .unwrap();
+        let env = Env::from([
+            (
+                "HOME".to_string(),
+                home.path().to_string_lossy().into_owned(),
+            ),
+            (
+                "XDG_DATA_DIRS".to_string(),
+                share.to_string_lossy().into_owned(),
+            ),
+        ]);
+        let services = |dir: &Path| dir.join("dbus-1/services/org.xfce.Xfconf.service");
+
+        let runtime = tempfile::tempdir().unwrap();
+        let mut isolated = Session::new_in(Some(runtime.path()), env.clone()).unwrap();
+        isolated.quarantine(Mode::Targeted).expect("quarantined");
+        assert!(
+            services(&isolated.runtime_dir).is_file(),
+            "xfconfd gets a home of its own"
+        );
+        isolated.settings_daemons();
+        assert!(
+            !isolated.env.contains_key(selkies_draw::dirs::SETTINGS_VAR),
+            "no bus answered, so the daemons stay the user's and are left alone"
+        );
+
+        let runtime = tempfile::tempdir().unwrap();
+        let mut full = Session::new_in(Some(runtime.path()), env.clone()).unwrap();
+        full.quarantine(Mode::Full).expect("quarantined");
+        assert!(
+            !services(&full.runtime_dir).exists(),
+            "full moves their home already"
+        );
+
+        let host_dir = tempfile::tempdir().unwrap();
+        let mut host = Session::on_host(host_dir.path(), env);
+        host.quarantine(Mode::Targeted).expect("quarantined");
+        assert!(
+            !services(host_dir.path()).exists(),
+            "the host's bus is the host's"
+        );
+        host.settings_daemons();
+        assert!(!host.env.contains_key(selkies_draw::dirs::SETTINGS_VAR));
     }
 
     #[test]
