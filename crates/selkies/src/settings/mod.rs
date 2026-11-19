@@ -1925,4 +1925,21 @@ mod tests {
         assert_eq!(p["microphone_on_demand"]["value"], json!(false));
         assert!(p.get("encoder_backends").is_none());
     }
+
+    /// The webcam's ceiling reaches the page, whose WebSockets uplink encodes at it, in the
+    /// kbit/s the WebRTC offer carries, held to its bounds.
+    #[test]
+    fn the_webcam_ceiling_reaches_the_page() {
+        let s = parse(&["--webcam-max-bitrate=1500"], &[]);
+        assert_eq!(s.webcam_max_bitrate(), 1500);
+        assert_eq!(
+            s.client_payload()["webcam_max_bitrate"]["value"],
+            json!(1500)
+        );
+        assert_eq!(
+            parse(&["--webcam-max-bitrate=10"], &[]).webcam_max_bitrate(),
+            50,
+            "a ceiling below the floor is raised to it"
+        );
+    }
 }

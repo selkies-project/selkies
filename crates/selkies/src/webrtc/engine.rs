@@ -819,7 +819,7 @@ impl RtcEngine {
                 .trim()
                 .parse()
                 .unwrap_or(10.0),
-            webcam_max_kbps: settings().webcam_max_bitrate() as u32,
+            webcam_max_kbps: settings().webcam_max_bitrate(),
         };
         let mut ice = {
             let topology = self.topology.read();

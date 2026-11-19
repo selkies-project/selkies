@@ -164,7 +164,7 @@ import type { FramerateSpan } from './lib/display-refresh.ts';
 import type { StreamInfo, StreamSample } from './lib/stream-stats.ts';
 import type { PrintDocument } from './lib/webrtc.ts';
 import { isCursorData, isDisplayConfig } from './lib/webrtc.ts';
-import { asError, elementByTag, errorName, fields, isRecord, messageOf, stringOr } from './lib/narrow.ts';
+import { asError, elementByTag, errorName, fields, isRecord, messageOf, numberOr, stringOr } from './lib/narrow.ts';
 
 installAuthGuard();
 installSessionCookie();
@@ -520,6 +520,10 @@ Object.defineProperty(window, 'webcamCodec', {
 });
 // webcam_encoder: the server default, overridden by the stored choice unless locked.
 let webcamEncoderPreference = 'auto';
+// webcam_max_bitrate in bits per second, the rate the uplink's encoder targets:
+// the server's alone, as over WebRTC, where it is the offer's ceiling on the
+// camera; undefined until a server_settings payload names it.
+let webcamMaxBitrate: number | undefined;
 let preferredWebcamDeviceId: string | null = null;
 let displayId = 'primary';
 let displayPosition = 'right';
@@ -8768,6 +8772,9 @@ class WorkerWebSocket {
                 const stored = getStringParam('webcam_encoder', wceValue);
                 webcamEncoderPreference = wce.locked || !WEBCAM_ENCODER_PREFERENCES.includes(stored) ? wceValue : stored;
               }
+              const wmb = obj.settings && obj.settings.webcam_max_bitrate;
+              const wmbKbps = wmb ? numberOr(wmb.value) : undefined;
+              if (wmbKbps !== undefined && wmbKbps > 0) webcamMaxBitrate = wmbKbps * 1000;
               const cssScaling = resolvedCssScaling(obj.settings);
               if (cssScaling !== useCssScaling) {
                   window.postMessage({ type: 'setUseCssScaling', value: cssScaling },
@@ -10325,9 +10332,11 @@ let webcamLastFrameBytes = 0;
  * server's virtual camera decodes for the V4L2 device. Flags bit 0 marks a
  * keyframe; bits 1 to 2 carry the frame's clockwise rotation in quarter turns
  * and bit 3 a horizontal flip applied after it, the orientation metadata the
- * encoder never bakes into the bitstream. Frames are dropped rather than
- * queued while the socket is backed up (`WEBCAM_QUEUE_MS`). Blocked for
- * shared viewers.
+ * encoder never bakes into the bitstream. The encoder targets the server's
+ * `webcam_max_bitrate`, the ceiling the WebRTC offer puts on the same camera,
+ * and the send queue is bounded by it. Frames are dropped rather than queued
+ * while the socket is backed up (`WEBCAM_QUEUE_MS`). Blocked for shared
+ * viewers.
  *
  * @param [askedByServer] The session asked rather than the user, so a refusal
  *   latches instead of raising a dialog.
@@ -10338,6 +10347,7 @@ function startWebcamCapture(askedByServer: boolean = false): void {
   }
   webcamCapture = new WebcamCapture({
     encoderPreference: webcamEncoderPreference,
+    bitrate: webcamMaxBitrate,
     sendFrame: (codec: number, keyframe: boolean, payload: Uint8Array<ArrayBufferLike>, rotation: number | undefined, flip: boolean | undefined): void => {
       if (!(websocket && websocket.readyState === WebSocket.OPEN && isWebcamActive)) {
         return;
