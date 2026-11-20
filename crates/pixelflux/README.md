@@ -801,7 +801,15 @@ so no frame is converted on a CPU core.
     (Firefox's for WebRTC H.264 where no FFmpeg decodes it) reaches only the first long-term
     index of a CABAC stream, and decodes a frame naming a second against another picture without
     an error. In H.264 the frame at the `frame_num` wrap is an anchor too, reaching back however
-    far.
+    far. VA-API keeps and flags its anchors the same way where the driver is radeonsi (one in
+    H.264, two in H.265); libvpx's VP8 and VP9, SVT-AV1 at a constant rate (4.2 on), and VA-API's
+    VP8 pin the anchor buffer holding the newest frame every client holds, and the first two flag
+    an anchor on their schedule that predicts from a frame every client was sent; OpenH264 takes
+    the long-term reference it marked for a recovery once every client holds it, and flags a
+    frame marking one from a frame every client was sent and one predicting past a loss from a
+    confirmed one. Elsewhere (libx264, x265, kvazaar, VA-API's H.264 and H.265 on other drivers,
+    its VP9 and AV1, Tegra, a stateful V4L2 device) no anchor is kept, and a loss reaching past
+    the recent frames costs a keyframe.
 
 ### Color conversion
 
@@ -900,7 +908,8 @@ asked for.
     *   **Reference invalidation:** `invalidate_reference(frame_id)` has the encoder predict past a
         frame a client lost, so recovery costs no keyframe; `acknowledge_reference(frame_id)` pins
         the long-term references every client holds, so clients sharing a stream each recover
-        on their own (NVENC).
+        on their own (NVENC, VA-API's H.264 and H.265 on radeonsi and its VP8, libvpx, SVT-AV1
+        at a constant rate, and OpenH264).
 *   **Self-description:** `stream_info()` reports the capture path, the encoder, the GPU, and why a
     faster path was declined, and `stream_stats()` the encode's counters, so a caller shows its
     user what a session runs on instead of pointing them at a log.

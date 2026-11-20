@@ -134,9 +134,11 @@ H.265 no more than `video_reference_frames`, for a decoder that holds its whole 
 GStreamer's hardware decoders in WebKitGTK and WPE do), or for AV1
 a fixed eight whatever the level, four under NVENC, as many as a frame predicts from (eight work there too, at 112
 MiB more a session). NVENC keeps long-term
-frames of that buffer as anchors where the device offers them (H.264 and AV1 one, H.265 two), and VA-API one in
-H.264 where the driver codes from the long-term reference it is named (radeonsi's VCE, measured; the session writes the
-marking and the list modification into its own slice headers, `keeps_h264_anchors`), so a loss older than
+frames of that buffer as anchors where the device offers them (H.264 and AV1 one, H.265 two), and VA-API as many
+where the driver codes a picture from the reference it is named (radeonsi's VCE for H.264 and UVD for H.265,
+measured, `keeps_anchors`): one in H.264, long-term, the session writing the marking and the list modification into
+its own slice headers, and two in H.265, listed as short-term pictures in every reference picture set as NVENC's are,
+so a loss older than
 every recent frame, or than a buffer a resize left small (the driver lowers the buffer in place but never raises it),
 is still predicted past. H.264 keeps one in every case: NVENC's H.264 fallback takes the first alone, and OpenH264's
 decoder, Firefox's for WebRTC H.264 where no FFmpeg decodes it, finds a CABAC stream's long-term picture by a number
@@ -151,11 +153,14 @@ eight anchor periods); an anchor within an anchor period of the newest frame all
 frames after it, so it predicts from that one (`settle`), and carries `FRAME_ANCHOR` in its kind; a frame predicting from an anchor
 names it (NVENC's H.264 fallback takes the first otherwise); an AV1 anchor slot holding no frame, or a lost one,
 counts among the recent frames, as NVENC lends it to them (`lend_free_anchors`), so the window names the frame the
-device predicts from; and in H.264 the frame at the `frame_num` wrap is an anchor reaching back however far. libvpx and
-SVT-AV1 keep their anchor buffers alike once told (`ReferenceSlots::acknowledge`): the one holding the newest frame all
-of them hold is pinned, one they were all sent is kept until they hold it, a frame predicting past a loss from an
-anchor refreshes another, and an anchor on the schedule predicting from a frame all of them were sent carries
-`FRAME_ANCHOR`. A session that does not
+device predicts from; and in H.264 the frame at the `frame_num` wrap is an anchor reaching back however far. VA-API
+keeps its H.264 and H.265 anchors the same way. libvpx, SVT-AV1, and VA-API's VP8 keep their anchor buffers alike once
+told (`ReferenceSlots::acknowledge`): the one holding the newest frame all of them hold is pinned, one they were all
+sent is kept until they hold it, a frame predicting past a loss from an anchor refreshes another, and in libvpx and
+SVT-AV1 an anchor on the schedule predicting from a frame all of them were sent carries `FRAME_ANCHOR`. OpenH264 marks
+its long-term references on its own schedule and takes one for a recovery once all of them hold it
+(`encoders/oh264_refs.rs`), the frame marking one from a frame all of them were sent and one predicting past a loss
+from a confirmed one carrying `FRAME_ANCHOR`. A session that does not
 (x265, kvazaar, SVT-AV1 at a constant quantizer or before 4.2, Tegra's H.264 and AV1, a stateful V4L2 device)
 refuses, and the caller forces an IDR instead; an H.264 session answers a loss covering the frame at its `frame_num` wrap with a key frame itself,
 since FFmpeg's decoder, which Chromium, Firefox, and WebKit decode with on Linux, derives the picture order past that gap a wrap short and drops about a `frame_num` range of pictures after it; libx264's sixteen values and NVENC's 256 go out a byte wider (`encoders::sps::WideFrameNum`), so that frame comes once in 4096 or 65536. Every full-frame session is chosen by one ladder,
