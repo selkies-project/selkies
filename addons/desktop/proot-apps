@@ -10,14 +10,15 @@
 # warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 # https://www.gnu.org/licenses/gpl-3.0.html for the full license.
 #
-# Modified by the Selkies project, 2026-11-12: the default repository filled in
+# Modified by the Selkies project, 2026-11-20: the default repository filled in
 # as the release builds fill it; `##pa phase` lines and curl's --progress-bar
 # under PA_STATUS; an INT or TERM during a download removes the partial folder;
 # a folder still marked DOWNLOADING is started over by install and get and is
 # absent to run and update; a `list` command; the system socket's listener
 # started under umask 077; an update whose registry lookup fails keeps the
-# installed copy; and its expansions quoted, its proot binds held in
-# arrays, and its app folders globbed, as shellcheck asks.
+# installed copy; the panel's reload trigger looked for under XDG_CONFIG_HOME;
+# and its expansions quoted, its proot binds held in arrays, its app folders
+# globbed, and its non-empty tests written as -n, as shellcheck asks.
 
 TYPE=$1
 DEFAULT_GH_USER=linuxserver
@@ -25,7 +26,7 @@ DEFAULT_GH_REPO=proot-apps
 DEFAULT_REPO=${PA_DEFAULT_REPO:-ghcr.io/${DEFAULT_GH_USER}/${DEFAULT_GH_REPO}}
 DEFAULT_REPO=${DEFAULT_REPO%/}
 
-if [[ ! -z ${LOCALREPO+x} ]] && [[ ! -z ${PA_REPO_FOLDER+x} ]]; then
+if [[ -n ${LOCALREPO+x} ]] && [[ -n ${PA_REPO_FOLDER+x} ]]; then
   ROOT_DIR=$PA_REPO_FOLDER
 else
   ROOT_DIR=$HOME/proot-apps
@@ -41,7 +42,7 @@ fi
 
 # Print a machine-readable status line when PA_STATUS is set
 pa_status() {
-  if [[ ! -z ${PA_STATUS+x} ]]; then
+  if [[ -n ${PA_STATUS+x} ]]; then
     echo "##pa $*"
   fi
 }
@@ -155,7 +156,7 @@ function dl_layer() {
 
   # Fetch the layer from the registry, kept as a tarball for a local repo
   fetch_layer() {
-    if [[ ! -z ${LOCALREPO+x} ]] && [[ ! -z ${PA_REPO_FOLDER+x} ]]; then
+    if [[ -n ${LOCALREPO+x} ]] && [[ -n ${PA_REPO_FOLDER+x} ]]; then
       curl -f --retry 3 --retry-max-time 20 "${PROGRESS[@]}" \
         -o "${ROOT_DIR}/${IMAGE_FOLDER}/app.tar.gz" \
         --location \
@@ -173,7 +174,7 @@ function dl_layer() {
   }
   
   if [[ -z ${SHALAYER+x} ]]; then
-    if [[ ! -z ${PA_REPO_FOLDER+x} ]] && [[ -z ${LOCALREPO+x} ]]; then
+    if [[ -n ${PA_REPO_FOLDER+x} ]] && [[ -z ${LOCALREPO+x} ]]; then
       SHALAYER=$(cat "$PA_REPO_FOLDER/${IMAGE_FOLDER}/SHALAYER")
     else
       registry_setup "${IMAGE}"
@@ -191,10 +192,10 @@ function dl_layer() {
   # Download layer
   pa_status phase download
   PROGRESS=()
-  if [[ ! -z ${PA_STATUS+x} ]]; then
+  if [[ -n ${PA_STATUS+x} ]]; then
     PROGRESS=(--progress-bar)
   fi
-  if [[ ! -z ${PA_REPO_FOLDER+x} ]] && [[ -z ${LOCALREPO+x} ]]; then
+  if [[ -n ${PA_REPO_FOLDER+x} ]] && [[ -z ${LOCALREPO+x} ]]; then
     echo "Extracting from local repo"
     tar -xf \
       "$PA_REPO_FOLDER/${IMAGE_FOLDER}/app.tar.gz" -C \
@@ -247,7 +248,7 @@ function update() {
     exit 1
   fi
   LOCAL_SHA=$(cat "$ROOT_DIR/${IMAGE_FOLDER}/SHALAYER")
-  if [[ ! -z ${PA_REPO_FOLDER+x} ]] && [[ -z ${LOCALREPO+x} ]]; then
+  if [[ -n ${PA_REPO_FOLDER+x} ]] && [[ -z ${LOCALREPO+x} ]]; then
     if [ ! -f "$PA_REPO_FOLDER/${IMAGE_FOLDER}/SHALAYER" ]; then
       echo "${IMAGE} is not available in local repo"
       exit 1
@@ -273,7 +274,7 @@ function update() {
   else
     echo "Updating ${IMAGE_FOLDER}"
     # Run remove logic
-    if [[ ! -z ${LOCALREPO+x} ]] && [[ ! -z ${PA_REPO_FOLDER+x} ]]; then
+    if [[ -n ${LOCALREPO+x} ]] && [[ -n ${PA_REPO_FOLDER+x} ]]; then
       echo "Removing app root local"
       rm -Rf "${ROOT_DIR:?}/${IMAGE_FOLDER}/"
       dl_layer "${IMAGE}"
@@ -313,7 +314,7 @@ function remove() {
     exit 1
   fi
   pa_status phase remove
-  if [[ ! -z ${LOCALREPO+x} ]] && [[ ! -z ${PA_REPO_FOLDER+x} ]]; then
+  if [[ -n ${LOCALREPO+x} ]] && [[ -n ${PA_REPO_FOLDER+x} ]]; then
     echo "localremove ${IMAGE}"
   else
     # Run remove logic
@@ -407,7 +408,7 @@ function get_app() {
 
 # Print nvidia debug output if PA_DEBUG is set
 nvidia_debug() {
-  if [[ ! -z ${PA_DEBUG+x} ]]; then
+  if [[ -n ${PA_DEBUG+x} ]]; then
     echo "nvidia: ${1}" >&2
   fi
 }
@@ -432,7 +433,7 @@ nvidia_ldcache() {
 
 # Check for nvidia driver in the current environment
 nvidia_present() {
-  if [[ ! -z ${PA_NO_NVIDIA+x} ]]; then
+  if [[ -n ${PA_NO_NVIDIA+x} ]]; then
     nvidia_debug "disabled by PA_NO_NVIDIA"
     return 1
   fi
@@ -527,7 +528,7 @@ nvidia_binds() {
   # GBM backend fallback to the allocator
   ALLOCATOR=$(nvidia_ldcache | awk -v tag="${LDTAG}" \
     '$1 ~ /^libnvidia-allocator\.so\.1$/ && $2 ~ tag {print $NF; exit}')
-  if [ ! -z "${ALLOCATOR}" ]; then
+  if [ -n "${ALLOCATOR}" ]; then
     nvidia_add "${ALLOCATOR}" "${GUEST_LIB}/gbm/nvidia-drm_gbm.so"
   fi
   # ICD files
@@ -564,7 +565,7 @@ nvidia_binds() {
     nvidia_add "$(which nvidia-smi)" /usr/bin/nvidia-smi
   fi
   nvidia_debug "guest libdir ${GUEST_LIB}, $(( ${#NVIDIA_BIND[@]} / 2 )) binds"
-  if [[ ! -z ${PA_DEBUG+x} ]]; then
+  if [[ -n ${PA_DEBUG+x} ]]; then
     printf '%s\n' "${NVIDIA_BIND[@]}" | grep -v '^-b$' >&2
   fi
 }
@@ -572,7 +573,7 @@ nvidia_binds() {
 #### Runtime ####
 
 # If a non docker endpoint is passed assume the default repo
-if [[ ! -z ${2+x} ]]; then
+if [[ -n ${2+x} ]]; then
   if [[ ( "${2}" != *"/"* || "${2}" != *":"* ) && "${2}" != "all" ]]; then
     IMAGE=${DEFAULT_REPO}:${2}
   else
@@ -588,7 +589,7 @@ if [ "${TYPE}" == "run" ]; then
     exit 1
   fi
   IMAGE_FOLDER=$(echo "${IMAGE}"| sed 's|/|_|g'| sed 's|:|_|g')
-  if [ ! -d "$ROOT_DIR/${IMAGE_FOLDER}/" ] && [[ ! -z ${PA_DEFAULT_REPO+x} ]]; then
+  if [ ! -d "$ROOT_DIR/${IMAGE_FOLDER}/" ] && [[ -n ${PA_DEFAULT_REPO+x} ]]; then
     DEFAULT_FOLDER=$(echo "${DEFAULT_REPO}:${IMAGE##*:}"| sed 's|/|_|g'| sed 's|:|_|g')
     if [ -d "$ROOT_DIR/${DEFAULT_FOLDER}/" ]; then
       IMAGE_FOLDER=${DEFAULT_FOLDER}
@@ -607,7 +608,7 @@ if [ "${TYPE}" == "run" ]; then
   fi
   # Mount repo location for the gui app
   REPO_BIND=()
-  if [[ ! -z ${PA_REPO_FOLDER+x} ]] && [[ "${IMAGE_FOLDER}" == *gui ]]; then
+  if [[ -n ${PA_REPO_FOLDER+x} ]] && [[ "${IMAGE_FOLDER}" == *gui ]]; then
     REPO_BIND=(-b "${PA_REPO_FOLDER}:${PA_REPO_FOLDER}")
     mkdir -p "$ROOT_DIR/${IMAGE_FOLDER}${PA_REPO_FOLDER}"
   fi
@@ -642,7 +643,7 @@ if [ "${TYPE}" == "install" ]; then
     exit 1
   fi
   # Install multiple
-  if [[ ! -z ${3+x} ]]; then
+  if [[ -n ${3+x} ]]; then
     for APP in "${@:2}"; do
       if [[ "${APP}" != *"/"* ]] || [[ "${APP}" != *":"* ]]; then
         install_app "${DEFAULT_REPO}:${APP}"
@@ -678,7 +679,7 @@ if [ "${TYPE}" == "remove" ]; then
     exit 1
   fi
   # Remove multiple
-  if [[ ! -z ${3+x} ]]; then
+  if [[ -n ${3+x} ]]; then
     for APP in "${@:2}"; do
       if [[ "${APP}" != *"/"* ]] || [[ "${APP}" != *":"* ]]; then
         IMAGE=${DEFAULT_REPO}:${APP}
@@ -716,7 +717,7 @@ if [ "${TYPE}" == "uninstall" ]; then
     exit 1
   fi
   # Uninstall multiple
-  if [[ ! -z ${3+x} ]]; then
+  if [[ -n ${3+x} ]]; then
     for APP in "${@:2}"; do
       if [[ "${APP}" != *"/"* ]] || [[ "${APP}" != *":"* ]]; then 
         IMAGE=${DEFAULT_REPO}:${APP}
@@ -754,7 +755,7 @@ if [ "${TYPE}" == "update" ]; then
     exit 1
   fi
   # Update multiple
-  if [[ ! -z ${3+x} ]]; then
+  if [[ -n ${3+x} ]]; then
     for APP in "${@:2}"; do
       if [[ "${APP}" != *"/"* ]] || [[ "${APP}" != *":"* ]]; then
         IMAGE=${DEFAULT_REPO}:${APP}
@@ -792,7 +793,7 @@ if [ "${TYPE}" == "get" ]; then
     exit 1
   fi
   # Get multiple
-  if [[ ! -z ${3+x} ]]; then
+  if [[ -n ${3+x} ]]; then
     for APP in "${@:2}"; do
       if [[ "${APP}" != *"/"* ]] || [[ "${APP}" != *":"* ]]; then
         IMAGE=${DEFAULT_REPO}:${APP}
@@ -874,11 +875,11 @@ completion_folders() {
 # List apps available to install
 completion_apps() {
   # Local repo folder is the app list when set never reach out
-  if [[ ! -z ${PA_REPO_FOLDER+x} ]]; then
+  if [[ -n ${PA_REPO_FOLDER+x} ]]; then
     completion_folders "${PA_REPO_FOLDER}"
     return 0
   fi
-  if [[ ! -z ${PA_DEFAULT_REPO+x} ]]; then
+  if [[ -n ${PA_DEFAULT_REPO+x} ]]; then
     return 1
   fi
   CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/proot-apps"
