@@ -16,8 +16,10 @@
  * headers, the proxy's credential stripped and the forwarding headers set
  * over any the client forged, and the response comes back with its status,
  * headers, and body; a header only the hop's `Connection` nominates crosses
- * in neither direction, and a chunked body's trailers cross in both; a valid upgrade carries its protocol headers and the
- * bytes sent after them to the upstream and then relays both ways intact;
+ * in neither direction, and a chunked body's trailers cross in both; a valid
+ * upgrade carries its protocol headers, its `Connection` and `Upgrade`, and the
+ * bytes sent after them to the upstream, without the hop headers or what its
+ * `Connection` nominates, and then relays both ways intact;
  * an upstream that cannot be reached is a 502 and an error the proxy
  * records; and stopping the proxy destroys every open socket and frees the
  * port.
@@ -37,6 +39,9 @@ import {
 } from './auth_proxy_peer.ts';
 
 const checks = new Checks('auth-proxy');
+
+/** The hop's transfer-extensions request header: its name is escaped so that codespell does not read it as a typo. */
+const TRANSFER_EXT = 'T\u0045';
 
 /** Denials over HTTP: each credential refused with a challenge, the upstream untouched. */
 async function auditHttpDenied(proxy: AuthProxy, up: Upstream): Promise<void> {
@@ -104,7 +109,11 @@ async function auditUpgradeDenied(proxy: AuthProxy, up: Upstream): Promise<void>
  */
 async function auditUpgradeValid(proxy: AuthProxy, up: Upstream): Promise<Raw> {
     const { username, password } = proxy.httpCredentials;
-    const raw = await upgrade(proxy, basic(username, password));
+    const raw = await upgrade(proxy, basic(username, password), {
+        Connection: 'Upgrade, X-Hop-Upgrade', 'X-Hop-Upgrade': 'leak', 'Keep-Alive': 'timeout=5', [TRANSFER_EXT]: 'trailers', Expect: '100-continue',
+        'Proxy-Connection': 'keep-alive', 'X-Kept-Upgrade': 'kept',
+        'X-Forwarded-For': '203.0.113.9', 'X-Forwarded-Host': 'forged.example', 'X-Forwarded-Proto': 'http',
+    });
     checks.check('a valid upgrade is answered 101 with the upstream\'s protocol',
         statusOf(raw.head) === 101 && /^sec-websocket-protocol: selkies\.token\.audit, binary$/im.test(raw.head ?? ''), `status ${statusOf(raw.head)}`);
     const got = up.upgrades[0];
@@ -119,6 +128,11 @@ async function auditUpgradeValid(proxy: AuthProxy, up: Upstream): Promise<Raw> {
         h.authorization === undefined && !leaks(up, password) && h['x-forwarded-proto'] === 'https'
         && h['x-forwarded-for'] === '127.0.0.1' && h['x-forwarded-host'] === PUBLIC_HOST,
         `${String(h['x-forwarded-proto'])} ${String(h['x-forwarded-for'])}`);
+    const hops = [h['x-hop-upgrade'], h['keep-alive'], h[TRANSFER_EXT.toLowerCase()], h.expect, h['proxy-connection']];
+    checks.check('the upgrade drops the hop headers and what its Connection nominates, and keeps the end-to-end ones',
+        hops.every((v) => v === undefined) && h['x-kept-upgrade'] === 'kept', JSON.stringify([...hops, h['x-kept-upgrade']]));
+    checks.check('the upgrade keeps Connection and Upgrade as the client sent them, a usable WebSocket handshake',
+        h.connection === 'Upgrade, X-Hop-Upgrade' && h.upgrade === 'websocket', `${String(h.connection)} ${String(h.upgrade)}`);
     const payload = randomBytes(128 * 1024);
     raw.socket.write(payload);
     const expected = Buffer.concat([GREETING, EARLY, payload]);

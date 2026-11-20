@@ -279,30 +279,32 @@ export function statusOf(head: string | null): number {
 /**
  * The request head of a WebSocket upgrade.
  * @param auth The `Authorization` value to send, none for null.
+ * @param headers Headers added to the head, or replacing the default of the same name in its place.
  * @returns The head text, ending the headers.
  */
-function upgradeHead(auth: string | null): string {
-    return [
-        'GET /ws/stream?room=1 HTTP/1.1',
-        `Host: ${PUBLIC_HOST}`,
-        'Upgrade: websocket',
-        'Connection: Upgrade',
-        'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
-        'Sec-WebSocket-Version: 13',
-        'Sec-WebSocket-Protocol: selkies.token.audit, binary',
-        'Origin: https://selkies.example',
-        ...(auth === null ? [] : [`Authorization: ${auth}`]),
-        '', '',
-    ].join('\r\n');
+function upgradeHead(auth: string | null, headers: Readonly<Record<string, string>>): string {
+    const fields: Record<string, string> = {
+        Host: PUBLIC_HOST,
+        Upgrade: 'websocket',
+        Connection: 'Upgrade',
+        'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+        'Sec-WebSocket-Version': '13',
+        'Sec-WebSocket-Protocol': 'selkies.token.audit, binary',
+        Origin: 'https://selkies.example',
+        ...(auth === null ? {} : { Authorization: auth }),
+        ...headers,
+    };
+    return ['GET /ws/stream?room=1 HTTP/1.1', ...Object.entries(fields).map(([name, value]) => `${name}: ${value}`), '', ''].join('\r\n');
 }
 
 /**
  * Upgrade through the proxy with `auth`, the head and `EARLY` in one write.
+ * @param headers Headers the head carries beyond its defaults, or in place of the default of the same name.
  * @returns The connection after the proxy has answered or closed.
  */
-export async function upgrade(proxy: AuthProxy, auth: string | null): Promise<Raw> {
+export async function upgrade(proxy: AuthProxy, auth: string | null, headers: Readonly<Record<string, string>> = {}): Promise<Raw> {
     const raw = await Raw.open(proxy);
-    raw.socket.write(Buffer.concat([Buffer.from(upgradeHead(auth), 'latin1'), EARLY]));
+    raw.socket.write(Buffer.concat([Buffer.from(upgradeHead(auth, headers), 'latin1'), EARLY]));
     await until(() => raw.head !== null || raw.closed);
     return raw;
 }

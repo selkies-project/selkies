@@ -20,10 +20,12 @@
  * relayed as an HTTP request, in each direction without the headers that
  * describe only the hop (`Connection` and every header it nominates) and
  * with its chunked body's trailers, which a plain pipe would drop. An upgrade
- * keeps its `Connection` and `Upgrade`: it is written to the upstream as the
- * head the client sent, with the bytes that followed it, and then both sockets
- * are piped one into the other, so what the upstream answers (101 or not) and
- * every frame after it pass untouched. Every failure closes both ends of the
+ * is written to the upstream as the head the client sent, with the bytes that
+ * followed it. Its `Connection` and `Upgrade` stay; every other header that
+ * describes only the hop, and every header its `Connection` nominates, is
+ * dropped as in a request. Then both sockets are piped one into the other,
+ * so what the upstream answers (101 or not) and every frame after it pass
+ * untouched. Every failure closes both ends of the
  * connection it happened on and is kept in {@link AuthProxy.errors} for the
  * caller to read.
  * @module
@@ -212,13 +214,19 @@ export class AuthProxy {
     /**
      * The request's headers as the upstream gets them, as a flat name/value
      * list in the client's own spelling and order: without the credential,
-     * the hop's own headers and those its `Connection` nominates (unless
-     * `keep`, as an upgrade does, whose `Connection` and `Upgrade` are the
-     * point), or any forwarding header, and with the proxy's forwarding
-     * headers.
+     * any forwarding header, the hop's own headers, and those its
+     * `Connection` nominates, and with the proxy's forwarding headers. An
+     * upgrade (`keep`) is the one exception to the hop filtering: its
+     * `Connection` and `Upgrade` are the point, so they stay, as the client
+     * sent them, while every other hop header still goes.
      */
     private headersFor(req: IncomingMessage, keep: boolean): string[] {
-        const drop = keep ? OWN_HEADERS : new Set([...OWN_HEADERS, ...HOP_HEADERS, ...nominated(req.rawHeaders)]);
+        const hop = new Set([...HOP_HEADERS, ...nominated(req.rawHeaders)]);
+        if (keep) {
+            hop.delete('connection');
+            hop.delete('upgrade');
+        }
+        const drop = new Set([...OWN_HEADERS, ...hop]);
         const headers = without(req.rawHeaders, drop);
         headers.push('X-Forwarded-For', req.socket.remoteAddress ?? '', 'X-Forwarded-Proto', 'https');
         if (req.headers.host !== undefined) headers.push('X-Forwarded-Host', req.headers.host);
