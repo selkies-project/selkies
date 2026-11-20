@@ -76,6 +76,7 @@ fi
 # sound server is listening
 if [ ! -S "${PULSE_SERVER#unix:}" ]; then
     "${LIBEXEC}/pulseaudio" -n --daemonize=no --exit-idle-time=-1 --use-pid-file=no \
+        --enable-memfd=no \
         --dl-search-path="${HERE}/lib/selkies/pulse/modules" \
         --load="module-native-protocol-unix auth-anonymous=1 auth-cookie-enabled=0" \
         --load=module-always-sink --log-target="file:${XDG_RUNTIME_DIR}/pulseaudio_selkies.log" &

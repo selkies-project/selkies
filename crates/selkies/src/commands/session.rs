@@ -774,7 +774,12 @@ impl Session {
     /// microphone source it streams, when the server moves those streams onto them. The
     /// socket admits whoever reaches it, since it sits in the session's private runtime
     /// directory, which is the access control, rather than asking for the cookie a fresh home
-    /// has none of.
+    /// has none of. Its memory pools are POSIX shared memory rather than memfd
+    /// (`--enable-memfd=no`): a memfd pool is registered with one connection alone, so a block
+    /// an application plays passes from its connection to the recorder capturing the sink's
+    /// monitor only as a copy over the socket, which PulseAudio logs as an error on every
+    /// low-latency recording stream, while a segment in `/dev/shm` any client of the same user
+    /// opens by name hands it over without one.
     pub fn sound(&mut self) -> bool {
         if self.host && self.host_sound() {
             return true;
@@ -809,6 +814,7 @@ impl Session {
                     "--daemonize=no".into(),
                     "--exit-idle-time=-1".into(),
                     "--use-pid-file=no".into(),
+                    "--enable-memfd=no".into(),
                     "-n".into(),
                     "--load=module-native-protocol-unix auth-anonymous=1 auth-cookie-enabled=0"
                         .into(),
