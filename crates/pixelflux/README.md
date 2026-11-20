@@ -280,7 +280,7 @@ settings.video_paintover_burst_frames = 5          # Frames sent after a cleanup
 settings.video_fullcolor = False                   # Use 4:4:4 chroma instead of 4:2:0 where the codec carries it (H.264 and H.265): software x264/x265 and NVENC take it, VA-API negotiates it per device.
 settings.video_bit_depth = 8                       # Bits per sample, 8 or 10: 10 where the codec has a 10-bit profile an encoder here codes (H.264 on x264; H.265, VP9, and AV1 on VA-API, x265, libvpx, and SVT-AV1; H.265 and AV1 on NVENC). An engine without it hands the session to the software encoder, as it does a 4:4:4 it lacks; OpenH264, kvazaar, and VP8 stay 8-bit. A software encoder pays for it in CPU, and the source is 8-bit, so it is recommended only with 4:4:4 (`video_fullcolor`).
 settings.video_streaming_mode = False              # Bypass all VNC logic and work like a normal video encoder, higher constant CPU usage for fullscreen gaming/videos
-settings.keyframe_interval_s = 0.0                   # Periodic keyframe interval in seconds (0 = keyframes only on demand/paint-over)
+settings.keyframe_interval_s = 0.0                   # Periodic keyframe interval in seconds (0 = keyframes only on demand/paint-over; 10 s on Tegra and V4L2 M2M)
 settings.video_cbr_mode = False                    # Switches to CBR mode and ignores CRF value. Used in conjunction with video_bitrate_kbps.
 settings.video_bitrate_kbps = 4000                 # Target bitrate for CBR mode. Required when video_cbr_mode is enabled.
 settings.video_vbv_multiplier = 0.0                # Optional VBV size as a multiple of one frame's bit budget. CBR: 0 = auto (1.5, or 3 with periodic keyframes). CRF: a positive value caps software x264 at a peak of video_bitrate_kbps (capped CRF); 0 = uncapped.
@@ -336,7 +336,7 @@ settings.omit_stripe_headers = True
 Points to code against:
 
 - The frame kind is not in the bytes. A key frame is told by its IDR NAL unit (type 5). `reference_frame_id` is -1 on a key frame only where the session tracks references; a session that does not (a hardware encoder that cannot invalidate a reference) reports -2 on every frame. The sequence and picture parameter sets are repeated on every key frame, so a decoder configured from any key frame can start there.
-- The GOP is infinite unless `keyframe_interval_s` is positive, so a key frame comes only when asked: at the start, from `capture.request_idr_frame()`, or from the cleanup and recovery policies. A client that joins late, reconnects, or resets its decoder must call `request_idr_frame()`, and a decoder must not be fed delta frames before the key frame that follows.
+- The GOP is infinite unless `keyframe_interval_s` is positive, so a key frame comes only when asked: at the start, from `capture.request_idr_frame()`, or from the cleanup and recovery policies. Tegra's encoder and a stateful V4L2 device are the exception: they code a key frame every ten seconds where `keyframe_interval_s` is 0, and no further apart than 600 frames at any interval. A client that joins late, reconnects, or resets its decoder must call `request_idr_frame()`, and a decoder must not be fed delta frames before the key frame that follows.
 - A software encoder that does not honor the request still labels the frame by what it produced, so decide on the frame that arrives rather than on the request.
 - NVENC is configured without access unit delimiters, so a unit begins at its first parameter-set or slice NAL unit.
 
