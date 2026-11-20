@@ -810,15 +810,15 @@ impl VideoRelay {
             return false;
         }
         let at = now();
+        // Read before the relay's own lock is taken: a check takes the link's first.
+        let acked = link.lock().unacked_since.is_none();
         let due = {
             let mut inner = self.inner.lock();
-            let due = at - inner.pad_pinged >= PAD_PING_S;
-            if due && link.lock().unacked_since.is_none() {
+            let due = acked && at - inner.pad_pinged >= PAD_PING_S;
+            if due {
                 inner.pad_pinged = at;
-                true
-            } else {
-                false
             }
+            due
         };
         if due {
             let (host, client, display_id) =
