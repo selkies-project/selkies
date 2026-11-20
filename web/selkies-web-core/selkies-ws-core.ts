@@ -7687,8 +7687,15 @@ class WorkerWebSocket {
         type: 'application/javascript'
       });
       const audioDecoderWorkerURL = URL.createObjectURL(audioDecoderWorkerBlob);
-      audioDecoderWorker = new Worker(audioDecoderWorkerURL);
-      URL.revokeObjectURL(audioDecoderWorkerURL);
+      try {
+        audioDecoderWorker = new Worker(audioDecoderWorkerURL);
+      } catch (e) {
+        audioWorkerUnavailable = true;
+        throw e;
+      } finally {
+        URL.revokeObjectURL(audioDecoderWorkerURL);
+      }
+      let audioWorkerReady = false;
       wireDecoderToWorklet();
       wireSocketToDecoder();
       audioDecoderWorker.onmessage = (event: MessageEvent<{ type: string; reason?: string; message?: string; wasm?: boolean; pcmBuffer?: ArrayBuffer; quiet?: boolean }>): void => {
@@ -7702,6 +7709,7 @@ class WorkerWebSocket {
         } else if (type === 'decoderError') {
           console.error(`[Main] Audio Decoder Worker reported error: ${message}`);
         } else if (type === 'decoderInitialized') {
+          audioWorkerReady = true;
           audioWorkerUnavailable = false;
           console.log(event.data.wasm
             ? '[Main] Audio Decoder Worker decodes on libopus in WASM, the engine having no AudioDecoder.'
@@ -7721,7 +7729,7 @@ class WorkerWebSocket {
       };
       audioDecoderWorker.onerror = (error: ErrorEvent): void => {
         console.error('[Main] Uncaught error in Audio Decoder Worker:', error.message, error);
-        audioWorkerUnavailable = true;
+        if (!audioWorkerReady) audioWorkerUnavailable = true;
         if (audioDecoderWorker) {
           audioDecoderWorker.terminate();
           audioDecoderWorker = null;

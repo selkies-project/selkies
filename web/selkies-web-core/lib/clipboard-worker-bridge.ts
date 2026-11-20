@@ -132,6 +132,7 @@ export class ClipboardWorkerBridge {
         if (!this.worker && !this.inProcess) return;
         if (this.worker) this.worker.terminate();
         this.worker = null;
+        this.inProcess = null;
         this.pendingRequests.clear();
         this.pendingStreams.clear();
         this.workerReady = false;
