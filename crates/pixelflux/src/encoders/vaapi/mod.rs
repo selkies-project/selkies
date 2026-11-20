@@ -2336,7 +2336,8 @@ impl VaapiEncoder {
     }
 
     /// A VA surface over a dmabuf: through the PRIME 2 descriptor, which carries the format
-    /// modifier, else the older external-buffer one.
+    /// modifier, else the older external-buffer one where it reads the buffer as laid out
+    /// (`legacy_descriptor_reads`).
     fn import_dmabuf(&mut self, dmabuf: &Dmabuf) -> Result<VASurfaceID, String> {
         let api = self.device.api;
         let display = self.device.display;
@@ -2377,7 +2378,7 @@ impl VaapiEncoder {
         };
         let planes: Vec<(u32, u32)> = dmabuf.strides().zip(dmabuf.offsets()).collect();
         let modifier = u64::from(dmabuf.format().modifier);
-        if modifier == 0
+        if modifier == DRM_FORMAT_MOD_LINEAR
             && !self.negotiated.fullcolor
             && self.device.rounds_linear_pitch()
             && !planes[0].0.is_multiple_of(64)
@@ -2395,7 +2396,8 @@ impl VaapiEncoder {
         attribs[1].type_ = VASurfaceAttribExternalBufferDescriptor;
         attribs[1].flags = VA_SURFACE_ATTRIB_SETTABLE;
         attribs[1].value.type_ = VAGenericValueTypePointer;
-        if modifier != 0x00ff_ffff_ffff_ffff {
+        let mut prime2 = None;
+        if modifier != DRM_FORMAT_MOD_INVALID {
             let mut desc: VADRMPRIMESurfaceDescriptor = unsafe { std::mem::zeroed() };
             desc.fourcc = fourcc;
             desc.width = width;
@@ -2431,6 +2433,15 @@ impl VaapiEncoder {
             if status == VA_STATUS_SUCCESS as VAStatus {
                 return Ok(surface);
             }
+            prime2 = Some(status);
+        }
+        if let Some(status) = prime2
+            && !legacy_descriptor_reads(modifier, prime2)
+        {
+            return Err(format!(
+                "this VA-API driver does not import a dmabuf of modifier {modifier:#x}: {}",
+                error_text(&api, status)
+            ));
         }
         // The older descriptor carries one object.
         if objects.len() != 1 {
@@ -2975,6 +2986,26 @@ fn image_format(device: &Device, fourcc: u32) -> Option<VAImageFormat> {
         .copied()
 }
 
+/// The DRM format modifier of a buffer laid out as its allocator chose, unnamed.
+const DRM_FORMAT_MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
+
+/// The DRM format modifier of rows packed one after another.
+const DRM_FORMAT_MOD_LINEAR: u64 = 0;
+
+/// Whether the external-buffer descriptor reads a dmabuf of `modifier` as it is laid out, once
+/// the PRIME 2 descriptor answered `prime2` (None where it was not tried).
+///
+/// That descriptor carries no modifier: the driver takes the layout from what the kernel says of
+/// the object, which is nothing for a buffer in a discrete GPU's local memory and never a
+/// compression. A buffer whose modifier is unnamed or linear reads as laid out there, as does any
+/// on a driver that does not know the PRIME 2 memory type at all. A buffer of another modifier
+/// the driver refused through PRIME 2 does not: iHD refuses Arc's compressed Tile 4 layouts, and
+/// read as linear they encode as noise.
+fn legacy_descriptor_reads(modifier: u64, prime2: Option<VAStatus>) -> bool {
+    matches!(modifier, DRM_FORMAT_MOD_INVALID | DRM_FORMAT_MOD_LINEAR)
+        || prime2 == Some(VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE as VAStatus)
+}
+
 /// The dma-buf object `fd` names, as its device and inode: two fds of one buffer give the same.
 fn object_identity(fd: i32) -> Option<(u64, u64)> {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
@@ -2993,6 +3024,19 @@ mod tests {
         assert!(refines(700_000, 8.0, 1920, 1080));
         assert!(!refines(2_000_000, 60.0, 1920, 1080));
         assert!(!refines(500_000, 8.0, 1920, 1080));
+    }
+
+    /// A compressed Tile 4 buffer PRIME 2 refused is not read again without its layout; an
+    /// unnamed or linear one is, and any on a driver without the PRIME 2 memory type.
+    #[test]
+    fn a_refused_tiled_dmabuf_is_not_imported_without_its_modifier() {
+        let dg2_rc_ccs_cc = 0x0100_0000_0000_000c;
+        let refused = Some(VA_STATUS_ERROR_INVALID_SURFACE as VAStatus);
+        let unknown = Some(VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE as VAStatus);
+        assert!(!legacy_descriptor_reads(dg2_rc_ccs_cc, refused));
+        assert!(legacy_descriptor_reads(DRM_FORMAT_MOD_LINEAR, refused));
+        assert!(legacy_descriptor_reads(DRM_FORMAT_MOD_INVALID, None));
+        assert!(legacy_descriptor_reads(dg2_rc_ccs_cc, unknown));
     }
 
     /// Intel's low-power H.264 encoder is named no more regions than its three native zones at a
