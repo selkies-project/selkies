@@ -245,5 +245,6 @@ mod tests {
                 dir.join("libasound_module_ctl_pulse.so")
             ])
         );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
