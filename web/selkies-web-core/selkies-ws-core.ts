@@ -279,6 +279,8 @@ let isSecondaryDisplayConnected = false;
 /** Display rectangles (+ per-page scale) from the last DISPLAY_CONFIG_UPDATE. */
 let latestDisplayLayouts: DisplayLayouts | null = null;
 let audioDecoderWorker: Worker | null = null;
+/** Set when the audio decoder worker failed (a policy forbidding blob workers, say), so `initializeAudio` stops respawning it per packet. */
+let audioWorkerUnavailable = false;
 let canvas: HTMLCanvasElement | null = null;
 let canvasContext: CanvasRenderingContext2D | null = null;
 /** A message as the session socket delivers it: a browser event, or the plain record the worker socket and a replay hand over. */
@@ -2953,7 +2955,12 @@ function ensureVideoWorker(): boolean {
     if (streamStats.open) videoWorker.postMessage({ type: 'statsOpen', open: true });
     videoWorkerInFlight = 0;
     wireSocketToVideoWorker();
-    videoWorker.onerror = (e: ErrorEvent): void => { console.warn('video worker error:', e && e.message); deactivateVideoWorker(); };
+    videoWorker.onerror = (e: ErrorEvent): void => {
+      console.warn('video worker error:', e && e.message);
+      // A worker that never came up is a policy forbidding it; stop respawning.
+      if (!videoWorkerReady) videoWorkerSinkInert = true;
+      deactivateVideoWorker();
+    };
     videoWorker.onmessage = (e: MessageEvent<VideoWorkerMessage>): void => {
       const m = e.data;
       if (!m) return;
@@ -3084,6 +3091,7 @@ function ensureVideoWorker(): boolean {
     return false;
   } catch (e) {
     console.warn('video worker init failed, using main canvas:', e);
+    if (!videoWorkerReady) videoWorkerSinkInert = true;
     deactivateVideoWorker();
     return false;
   }
@@ -7059,8 +7067,12 @@ class WorkerWebSocket {
    *     that one takes the audio short-circuit.
    * @param [protocols] Subprotocols the handshake offers
    *     (`sessionTokenProtocols`).
+   * @param [onWorkerError] Called instead of the `error` and `close`
+   *     events when the worker fails before it ever reported, as a
+   *     Content-Security-Policy that blocks blob workers does
+   *     asynchronously; the owner then reads the socket on the page.
    */
-  constructor(url: string, primary: boolean, protocols: string[] = []) {
+  constructor(url: string, primary: boolean, protocols: string[] = [], onWorkerError?: (err: ErrorEvent) => void) {
     this.readyState = WebSocket.CONNECTING;
     this.binaryType = 'arraybuffer';
     this.onopen = this.onmessage = this.onerror = this.onclose = null;
@@ -7070,7 +7082,9 @@ class WorkerWebSocket {
     const workerURL = URL.createObjectURL(blob);
     this._worker = new Worker(workerURL);
     URL.revokeObjectURL(workerURL);
+    let workerAlive = false;
     this._worker.onmessage = (e: MessageEvent<SocketWorkerMessage>): void => {
+      workerAlive = true;
       const m = e.data;
       if (m.type === 'message') {
         const ev = { data: m.data, at: m.at };
@@ -7098,6 +7112,21 @@ class WorkerWebSocket {
         this._emit('close', m);
         this._retire();
         return;
+      }
+    };
+    this._worker.onerror = (err: ErrorEvent): void => {
+      this._retire();
+      if (!workerAlive && onWorkerError) {
+        onWorkerError(err);
+        return;
+      }
+      if (this.onerror) this.onerror(err);
+      this._emit('error', err);
+      if (this.readyState !== WebSocket.CLOSED) {
+        this.readyState = WebSocket.CLOSED;
+        const closeEv = { code: 1006, reason: '', wasClean: false };
+        if (this.onclose) this.onclose(closeEv);
+        this._emit('close', closeEv);
       }
     };
     this._worker.postMessage({ type: 'open', url, primary, protocols });
@@ -7278,6 +7307,7 @@ class WorkerWebSocket {
     }
 
     if (window.isAudioInitializing) return;
+    if (audioWorkerUnavailable) return;
     // Kept through a reconnect in place: only the new socket's line to the decoder is new.
     if (audioDecoderWorker && audioContext && audioContext.state !== 'closed' && audioWorkletNode) {
       wireSocketToDecoder();
@@ -7672,6 +7702,7 @@ class WorkerWebSocket {
         } else if (type === 'decoderError') {
           console.error(`[Main] Audio Decoder Worker reported error: ${message}`);
         } else if (type === 'decoderInitialized') {
+          audioWorkerUnavailable = false;
           console.log(event.data.wasm
             ? '[Main] Audio Decoder Worker decodes on libopus in WASM, the engine having no AudioDecoder.'
             : '[Main] Audio Decoder Worker confirmed its decoder is initialized.');
@@ -7690,6 +7721,7 @@ class WorkerWebSocket {
       };
       audioDecoderWorker.onerror = (error: ErrorEvent): void => {
         console.error('[Main] Uncaught error in Audio Decoder Worker:', error.message, error);
+        audioWorkerUnavailable = true;
         if (audioDecoderWorker) {
           audioDecoderWorker.terminate();
           audioDecoderWorker = null;
@@ -7768,31 +7800,62 @@ class WorkerWebSocket {
   const socketWorkerEnabled = (socketWorkerParam !== null)
     ? (socketWorkerParam.toLowerCase() === 'true')
     : getBoolParam('socket_worker', true);
+  let socketWorkerAvailable = socketWorkerEnabled;
+  /** Binds the page's socket handlers to the current socket; assigned once they exist. */
+  let bindSessionSocket: () => void = (): void => {};
+  /** Opens the session socket as a plain `WebSocket` on the page thread. */
+  const openPageSocket = (): void => {
+    websocket = asSessionSocket(new WebSocket(websocketEndpointURL.href, tokenProtocols));
+    websocket.binaryType = 'arraybuffer';
+    window.selkiesTransport = websocket;
+    wireSocketToDecoder();
+    videoDivertOn = false;
+    wireSocketToVideoWorker();
+  };
   /**
    * Opens the session socket and wires the decoders' lines into it; the page
    * binds its handlers to it next (`bindSessionSocket`). Runs again for each
    * in-place reconnect.
    */
   const openSessionSocket = (): void => {
+    if (!socketWorkerAvailable) {
+      openPageSocket();
+      return;
+    }
     try {
       if (!socketWorkerEnabled) throw new Error('socket_worker=false');
-      websocket = new WorkerWebSocket(websocketEndpointURL.href, displayId === 'primary', tokenProtocols);
+      let candidate: WorkerWebSocket | null = null;
+      candidate = new WorkerWebSocket(
+        websocketEndpointURL.href,
+        displayId === 'primary',
+        tokenProtocols,
+        (err: ErrorEvent): void => {
+          // A policy forbidding blob workers reports here, after the constructor
+          // returned; latch it so no later reconnect spawns a blocked worker.
+          socketWorkerAvailable = false;
+          console.warn('[websockets] socket worker unavailable, reading on the page:', err.message || err);
+          if (websocket !== candidate) return;
+          openPageSocket();
+          bindSessionSocket();
+        },
+      );
+      websocket = candidate;
       if (streamStats.open) websocket.setStats!(true);
+      // The socket itself is in a worker, so this handle is what page-side
+      // tooling has to observe or close the transport through.
+      window.selkiesTransport = websocket;
+      wireSocketToDecoder();
+      // A fresh socket worker holds the divert default; re-point it.
+      videoDivertOn = false;
+      wireSocketToVideoWorker();
     } catch (e) {
       // No worker to be had (a policy forbidding blob workers, say). The socket
       // then runs here, where a busy thread costs audio its cadence, which is
       // still better than no session.
+      socketWorkerAvailable = false;
       if (socketWorkerEnabled) console.warn('[websockets] socket worker unavailable, reading on the page:', e);
-      websocket = asSessionSocket(new WebSocket(websocketEndpointURL.href, tokenProtocols));
-      websocket!.binaryType = 'arraybuffer';
+      openPageSocket();
     }
-    // The socket itself is in a worker, so this handle is what page-side
-    // tooling has to observe or close the transport through.
-    window.selkiesTransport = websocket;
-    wireSocketToDecoder();
-    // A fresh socket worker holds the divert default; re-point it.
-    videoDivertOn = false;
-    wireSocketToVideoWorker();
   };
   openSessionSocket();
 
@@ -9318,7 +9381,7 @@ class WorkerWebSocket {
    * Binds the handlers above to the socket `openSessionSocket` made.
    * @returns
    */
-  const bindSessionSocket = (): void => {
+  bindSessionSocket = (): void => {
     gzipTextSends(websocket!);
     websocket!.onopen = onSocketOpen;
     websocket!.onmessage = onSocketMessage;
