@@ -423,7 +423,8 @@ pub fn window_info(
     });
     let hints = surface.size_hints();
     let geometry = surface.geometry();
-    let origin = surface.last_configure().loc;
+    let placed = surface.last_configure();
+    let origin = root_location(surface);
     let decoration = if surface.is_decorated() {
         Decoration::None
     } else {
@@ -445,13 +446,13 @@ pub fn window_info(
         parent,
         modal: surface.is_modal(),
         hints: SizeHints {
-            min: surface.min_size().map(|s| Size { w: s.w, h: s.h }),
-            max: surface.max_size().map(|s| Size { w: s.w, h: s.h }),
+            min: surface.min_size().map(|s| visible_size(surface, s)),
+            max: surface.max_size().map(|s| visible_size(surface, s)),
             increment: hints
                 .as_ref()
                 .and_then(|h| h.size_increment)
                 .map(|(w, h)| Size { w, h }),
-            base: surface.base_size().map(|s| Size { w: s.w, h: s.h }),
+            base: surface.base_size().map(|s| visible_size(surface, s)),
         },
         requested: Some(Rect::new(
             origin.x,
@@ -461,7 +462,7 @@ pub fn window_info(
         )),
         positioned: hints
             .as_ref()
-            .is_some_and(|h| h.position.is_some() && (origin.x != 0 || origin.y != 0))
+            .is_some_and(|h| h.position.is_some() && placed.loc != Point::default())
             || !matches!(
                 window_type_of(surface),
                 WindowType::Normal | WindowType::Dialog | WindowType::Utility | WindowType::Toolbar
@@ -541,13 +542,37 @@ fn root_location(surface: &X11Surface) -> Point<i32, Logical> {
     surface.last_configure().loc + surface.geometry().loc
 }
 
+/// The X window rectangle whose visible area is `rect`: `rect` grown by the shadow the
+/// window's toolkit draws inside it (`_GTK_FRAME_EXTENTS`).
+///
+/// The policy places and sizes what the user sees, as an xdg toplevel's window geometry
+/// carries it, so a client that draws its own shadow is configured that much larger, as mutter
+/// configures it; handed the rectangle itself, the client would draw its shadow inside it and
+/// show a window smaller than the one placed, offset from where the X server holds it.
+fn window_rect(surface: &X11Surface, rect: Rect) -> Rectangle<i32, Logical> {
+    Rectangle::new((rect.x, rect.y).into(), (rect.w, rect.h).into()) + surface.frame_extents()
+}
+
+/// The visible area of an X window rectangle, the inverse of [`window_rect`].
+fn visible_rect(surface: &X11Surface, geo: Rectangle<i32, Logical>) -> Rect {
+    let geo = geo - surface.frame_extents();
+    Rect::new(geo.loc.x, geo.loc.y, geo.size.w, geo.size.h)
+}
+
+/// The visible size of an X window size, as a size hint states it: the toolkit's shadow
+/// taken off, since the policy bounds the visible area.
+fn visible_size(surface: &X11Surface, size: smithay::utils::Size<i32, Logical>) -> Size {
+    let e = surface.frame_extents();
+    Size {
+        w: (size.w - e.left - e.right).max(1),
+        h: (size.h - e.top - e.bottom).max(1),
+    }
+}
+
 /// Carry a configure out on an X11 window: its geometry and its states.
 pub fn configure(surface: &X11Surface, rect: Rect, states: States) {
     if rect.w > 0 && rect.h > 0 {
-        let _ = surface.configure(Some(Rectangle::<i32, Logical>::new(
-            (rect.x, rect.y).into(),
-            (rect.w, rect.h).into(),
-        )));
+        let _ = surface.configure(Some(window_rect(surface, rect)));
     }
     let _ = surface.set_maximized(states.maximized);
     let _ = surface.set_fullscreen(states.fullscreen);
@@ -812,14 +837,11 @@ impl XwmHandler for AppState {
         let rect = wm::rect_of(self, id)
             .filter(|r| r.w > 0 && r.h > 0)
             .unwrap_or_else(|| {
-                let at = surface.last_configure().loc;
+                let at = root_location(&surface);
                 let size = surface.geometry().size;
                 Rect::new(at.x, at.y, size.w.max(1), size.h.max(1))
             });
-        let _ = surface.configure(Some(Rectangle::<i32, Logical>::new(
-            (rect.x, rect.y).into(),
-            (rect.w, rect.h).into(),
-        )));
+        let _ = surface.configure(Some(window_rect(&surface, rect)));
         self.space
             .map_element(window.clone(), (rect.x, rect.y), true);
         wm::window_mapped(
@@ -934,11 +956,7 @@ impl XwmHandler for AppState {
         }
         match window_of(self, &surface) {
             Some((id, _)) if wm::active(self) => {
-                wm::request(
-                    self,
-                    id,
-                    Request::Geometry(Rect::new(geo.loc.x, geo.loc.y, geo.size.w, geo.size.h)),
-                );
+                wm::request(self, id, Request::Geometry(visible_rect(&surface, geo)));
                 match reorder {
                     Some(Reorder::Top) => {
                         wm::request(self, id, Request::Raise);
@@ -981,10 +999,21 @@ impl XwmHandler for AppState {
         }
     }
 
+    /// A window's properties changed: the policy hears of what it reads, and a window whose
+    /// toolkit grew or dropped its shadow is configured again so its visible area keeps the
+    /// rectangle the policy placed.
     fn property_notify(&mut self, _xwm: XwmId, surface: X11Surface, property: WmWindowProperty) {
+        if property == WmWindowProperty::FrameExtents
+            && let Some((id, _)) = window_of(self, &surface)
+            && let Some(rect) = wm::rect_of(self, id).filter(|r| r.w > 0 && r.h > 0)
+            && window_rect(&surface, rect) != surface.last_configure()
+        {
+            let _ = surface.configure(Some(window_rect(&surface, rect)));
+        }
         if matches!(
             property,
-            WmWindowProperty::Title
+            WmWindowProperty::FrameExtents
+                | WmWindowProperty::Title
                 | WmWindowProperty::Class
                 | WmWindowProperty::TransientFor
                 | WmWindowProperty::WindowType
