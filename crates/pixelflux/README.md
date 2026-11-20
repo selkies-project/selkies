@@ -774,7 +774,9 @@ so no frame is converted on a CPU core.
     client that never received it and the stream costs no keyframe. Each frame says what it
     predicts from (`StripeFrame.reference_frame_id`), which is what a consumer holds the frames
     behind a loss back by. Every session whose encoder lets it name its references tracks them:
-    libx264 and libvpx always, NVENC on the devices whose driver offers reference invalidation,
+    libx264 and libvpx always, OpenH264 always as well, though it predicts past a loss only from a
+    confirmed long-term reference before it (its keyframe, or one every client holds) and answers
+    any other with a keyframe, NVENC on the devices whose driver offers reference invalidation,
     VA-API where the driver takes the session's slice headers (H.264, H.265) or addresses
     reference slots (VP8, VP9, AV1), Tegra for H.265 through the vendor's external reference set
     (L4T R32 and R36), and SVT-AV1 at a constant rate where the release takes reference commands

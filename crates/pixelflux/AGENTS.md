@@ -126,8 +126,10 @@ stripes (`encoders/software.rs`); every video codec streams whole frames. Every 
 does (`encoders/reference.rs`, `StripeFrame.reference_frame_id`), and `invalidate_reference`
 leaves a frame a consumer lost out of the predictions so recovery costs no keyframe: libx264 and libvpx
 always (VP9 in libvpx's flexible reference mode, VP8 across its three buffers on a schedule `reference.rs`
-keeps), NVENC where the device reports reference-picture invalidation, VA-API where the driver takes the
-session's own H.264 or HEVC slice headers or addresses the VP8 buffers and the VP9 and AV1 slots, Tegra for
+keeps), OpenH264 from a confirmed long-term reference before the loss, its key frame or one every consumer
+holds, where there is one (`encoders/oh264_refs.rs`), NVENC where the device reports reference-picture
+invalidation, VA-API where the driver takes the session's own H.264 or HEVC slice headers or addresses the VP8
+buffers and the VP9 and AV1 slots, Tegra for
 H.265 through the vendor's external reference set (L4T R32 and R36), SVT-AV1 at a constant rate where the release
 takes reference commands (4.2 on); and the stream declares the decoded picture buffer its level admits (H.264 and
 H.265 no more than `video_reference_frames`, for a decoder that holds its whole buffer before it shows a picture, as
