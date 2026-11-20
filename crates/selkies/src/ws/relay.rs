@@ -31,11 +31,12 @@
 //! key frame gate; elsewhere a drop skips ahead to the next key frame.
 //!
 //! Each frame a relay writes is one its page holds (`CommonFrames`, joined at a key frame and
-//! left at the gate), and the display's encoder is told of each frame every page holds. An
-//! encoder that keeps long-term references then pins the newest such anchor, so a run of any
-//! depth is predicted past on its report, and flags an anchor predicting from such a frame
-//! (`FRAME_ANCHOR`), which every page decodes: it goes to a page without room as a key frame
-//! does, unless the page is too far behind for one, and ends the page's run.
+//! left at the gate and at a `REQUEST_KEYFRAME` of the page's the server takes), and the
+//! display's encoder is told of each frame every page holds. An encoder that keeps long-term
+//! references then pins the newest such anchor, so a run of any depth is predicted past on its
+//! report, and flags an anchor predicting from such a frame (`FRAME_ANCHOR`), which every page
+//! decodes: it goes to a page without room as a key frame does, unless the page is too far
+//! behind for one, and ends the page's run.
 //!
 //! The read of the page's queue moves its floor onto a least round trip that stood
 //! `VIDEO_RELAY_LAG_SECONDS` or more past it through `VIDEO_RELAY_SETTLE_SECONDS` of pongs (a
@@ -431,6 +432,12 @@ impl VideoRelay {
 
     pub fn stopped(&self) -> bool {
         self.inner.lock().stopped
+    }
+
+    /// The page asked for a key frame: its decoder holds nothing it was sent, so the page holds
+    /// no frame in common until it holds a key frame again.
+    pub fn await_key_frame(&self) {
+        self.leave_common();
     }
 
     fn leave_common(&self) {

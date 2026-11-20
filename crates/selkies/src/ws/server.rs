@@ -475,6 +475,10 @@ impl WsService {
     }
 
     /// `REQUEST_KEYFRAME`: one request per display per 250 ms; the log line is throttled harder.
+    /// A request taken has the page hold no frame in common until it holds a key frame again: it
+    /// leaves before the key frame is asked for, so the key frame answering it rejoins the page.
+    /// A request the floors refuse brings no key frame and leaves the page counted, until the
+    /// page's next request is taken.
     pub(crate) fn request_keyframe(&self, client: &Client, display_id: Option<&str>) {
         let target = display_id.unwrap_or(PRIMARY_DISPLAY);
         if !self.repair_taken(client.id, target, "keyframe") {
@@ -522,6 +526,15 @@ impl WsService {
                     .entry(target.to_string())
                     .or_insert(0) += 1;
             }
+        }
+        let relay = self
+            .reg
+            .lock()
+            .relays
+            .get(target)
+            .and_then(|group| group.get(&client.id).cloned());
+        if let Some(relay) = relay {
+            relay.await_key_frame();
         }
         request_key_frame(
             &*capture,

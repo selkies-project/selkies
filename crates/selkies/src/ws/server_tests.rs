@@ -423,6 +423,81 @@ async fn lost_frames_and_key_frames_are_floored() {
     reset_clock();
 }
 
+/// A page asking for a key frame holds none of the frames sent before the one it asked for:
+/// its decoder waits for that one, so the encoder is told of no frame until the page holds it.
+#[tokio::test]
+async fn a_page_asking_for_a_key_frame_holds_nothing_until_it_takes_one() {
+    let rig = Rig::new();
+    let mut owner = rig.owner("a").await;
+    settle().await;
+    let capture = rig.primary_capture();
+    capture.deliver(1, 1, true);
+    settle().await;
+    capture.deliver(2, 1, false);
+    settle().await;
+    assert!(
+        capture.has("acknowledge 2 true"),
+        "the page holds what its relay wrote"
+    );
+    owner.say("REQUEST_KEYFRAME").await;
+    capture.deliver(3, 2, false);
+    settle().await;
+    assert!(
+        !capture.has("acknowledge 3 true"),
+        "nor what its relay writes while it waits for the key frame"
+    );
+    assert!(!capture.has("acknowledge 3 false"));
+    capture.deliver(4, 4, true);
+    settle().await;
+    capture.deliver(5, 4, false);
+    settle().await;
+    assert!(
+        capture.has("acknowledge 5 true"),
+        "the key frame starts its holdings afresh"
+    );
+}
+
+/// A key frame request the floors refuse leaves the page counted as holding what its relay
+/// writes: only a request taken brings the key frame that counts the page again.
+#[tokio::test]
+async fn a_key_frame_request_the_floor_refuses_leaves_the_page_counted() {
+    let rig = Rig::new();
+    let mut owner = rig.owner("a").await;
+    let mut beside = rig.controller().await;
+    beside
+        .say(r#"SETTINGS,{"tabId":"b","initialClientWidth":640,"initialClientHeight":480}"#)
+        .await;
+    settle().await;
+    assert!(rig.service.reg.lock().is_beside(beside.id()));
+    let capture = rig.primary_capture();
+    capture.deliver(1, 1, true);
+    settle().await;
+    owner.say("REQUEST_KEYFRAME").await;
+    capture.deliver(2, 2, true);
+    settle().await;
+    let idrs = capture.count("idr");
+    beside.say("REQUEST_KEYFRAME").await;
+    assert_eq!(
+        capture.count("idr"),
+        idrs,
+        "one request per display per 250 ms"
+    );
+    capture.deliver(3, 2, false);
+    settle().await;
+    let pages = rig
+        .service
+        .reg
+        .lock()
+        .common
+        .get(&(PRIMARY_DISPLAY.to_string(), true))
+        .map(|common| common.pages());
+    assert_eq!(
+        pages,
+        Some(2),
+        "both pages hold the frames they were sent since the key frame"
+    );
+}
+
 #[tokio::test]
 async fn every_key_frame_request_is_counted_by_its_cause() {
     let rig = Rig::new();
