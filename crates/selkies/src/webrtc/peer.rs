@@ -1101,15 +1101,9 @@ impl Media {
             }
             let codecs = self.session.receive_codecs(index);
             self.unlisted.retain(|(t, _, _)| *t != track);
-            for codec in &codecs {
-                let listed = transceiver.codecs.iter().any(|c| {
-                    c.payload_type == codec.payload_type
-                        && c.mime_type.eq_ignore_ascii_case(&codec.mime_type)
-                });
-                if !listed {
-                    self.unlisted
-                        .push((track, codec.payload_type, codec.mime_type.clone()));
-                }
+            for codec in self.session.unanswered_codecs(index) {
+                self.unlisted
+                    .push((track, codec.payload_type, codec.mime_type));
             }
             let parameters = receive_parameters(transceiver, &codecs);
             let receiver = match track {

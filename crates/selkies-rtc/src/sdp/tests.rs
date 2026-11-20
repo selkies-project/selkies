@@ -783,6 +783,16 @@ fn an_uplink_receives_every_format_its_offer_named_under_the_offers_numbers() {
         offered,
         "the microphone takes every format the offer named, under the offer's numbers"
     );
+    let red: Vec<(u8, String)> = offered
+        .iter()
+        .filter(|(_, mime)| mime == "audio/red")
+        .cloned()
+        .collect();
+    assert_eq!(
+        formats(&session.unanswered_codecs(mic)),
+        red,
+        "the answer left RED out, and Opus it only renumbered"
+    );
 }
 
 #[test]
