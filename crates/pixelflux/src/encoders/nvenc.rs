@@ -4021,7 +4021,11 @@ impl NvencEncoder {
     ///
     /// 1. **Pick an output buffer** from the ring (`current_buffer_idx` advances modulo the ring
     ///    length) and submit the picture with `nvEncEncodePicture`; `force_idr` sets the force-IDR
-    ///    pic flag.
+    ///    pic flag. Once the session codes through a QP delta map, every picture names one, a
+    ///    map of zeros where it refines, defers, and holds nothing: the driver codes a picture
+    ///    that names none with the last map it was handed, which left the blocks a refresh
+    ///    deferred at the coarsest quantizer in every frame after it, a frame that changed them
+    ///    and the paint-over included.
     /// 2. **Lock the bitstream** (`nvEncLockBitstream`, blocking) to read the encoded bytes. The
     ///    lock has to block: on Linux a `doNotWait` lock answers an unfinished encode with
     ///    `NV_ENC_SUCCESS` and an empty bitstream, not `NV_ENC_ERR_LOCK_BUSY`, so polling it would
@@ -4135,6 +4139,7 @@ impl NvencEncoder {
         }
         let held_qp = self.held_qp.take();
         let band = self.held_band.take();
+        let mut pointed = false;
         let held = held_qp.and_then(|crf| {
             let q = self.codec.hardware_quantizer(Hardware::Nvenc, crf as i32);
             let rest = self
@@ -4154,6 +4159,7 @@ impl NvencEncoder {
                     let held = self.hold_rate(rest, Some(first));
                     if held.is_some() {
                         point_at_qp_map(&mut pic_params, &mut self.qp_map, nvenc_cur_ver());
+                        pointed = true;
                     }
                     held
                 }
@@ -4170,7 +4176,20 @@ impl NvencEncoder {
             .filter(|_| held_qp.is_none() && !force_idr);
         let mapped = (refinement.is_some() || deferred.is_some())
             && self.block_map(refinement.as_ref(), deferred.as_ref());
-        if mapped {
+        let neutral = !mapped
+            && !pointed
+            && self.encode_config.rcParams.qpMapMode == NV_ENC_QP_MAP_MODE::NV_ENC_QP_MAP_DELTA;
+        if neutral {
+            fill_band_map(
+                &mut self.qp_map,
+                self.codec,
+                self.width,
+                self.height,
+                (0.0, 0.0),
+                0,
+            );
+        }
+        if mapped || neutral {
             point_at_qp_map(&mut pic_params, &mut self.qp_map, nvenc_cur_ver());
         }
         let mut result = self.encode_picture(
@@ -8063,6 +8082,57 @@ pub(crate) mod gpu_tests {
             "the session let go of a peak its content overflows"
         );
         assert_eq!(counted, 0, "a refining frame counted toward the release");
+    }
+
+    /// A frame that names no blocks to refine or defer, coded after one that did, codes at the
+    /// session's quantizer: the QP delta map of the frame before leaves no block of it coarser
+    /// or finer. Ignored by default.
+    #[test]
+    #[ignore]
+    fn gpu_a_frame_without_a_block_map_codes_at_the_session_quantizer() {
+        let (w, h) = (640usize, 368usize);
+        let s = CaptureSettings {
+            video_bitrate_kbps: 1_000_000,
+            ..settings(w as i32, h as i32, 60.0)
+        };
+        let qp = Codec::H264.hardware_quantizer(Hardware::Nvenc, s.video_crf);
+        let mut ledger = crate::ledger::BlockLedger::new(w as i32, h as i32);
+        ledger.frame([]);
+        let plan = ledger.plan(0, usize::MAX, usize::MAX).expect("every block");
+        for deferring in [false, true] {
+            let mut enc = host_session(&s).expect("NVENC init");
+            let frame = |i: usize| crate::encoders::scrolled_text(w, h, i);
+            enc.encode_cpu_argb(&frame(0), w * 4, 0, 25, true)
+                .expect("key frame");
+            enc.encode_cpu_argb(&frame(1), w * 4, 1, 25, false)
+                .expect("plain frame");
+            assert_eq!(enc.last_avg_qp, qp, "a plain frame codes at the quantizer");
+            if deferring {
+                enc.defer_blocks(Some(&plan));
+            } else {
+                enc.refine_blocks(&crate::ledger::Refinement {
+                    plan: plan.clone(),
+                    target: 0,
+                    from: 25,
+                    reach: u32::MAX,
+                });
+            }
+            enc.encode_cpu_argb(&frame(2), w * 4, 2, 25, false)
+                .expect("mapped frame");
+            let mapped = enc.last_avg_qp;
+            enc.encode_cpu_argb(&frame(3), w * 4, 3, 25, false)
+                .expect("frame after");
+            println!(
+                "{}: mapped frame at {mapped}, the frame after at {}, the session at {qp}",
+                if deferring { "deferred" } else { "refined" },
+                enc.last_avg_qp
+            );
+            assert_ne!(mapped, qp, "the map moved the mapped frame's quantizer");
+            assert_eq!(
+                enc.last_avg_qp, qp,
+                "the frame after a mapped one codes at the session's quantizer"
+            );
+        }
     }
 
     #[test]
