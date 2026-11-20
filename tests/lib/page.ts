@@ -12,7 +12,7 @@
  * @module
  */
 
-import type { Browser, BrowserContext, Page } from '@playwright/test';
+import type { Browser, BrowserContext, BrowserContextOptions, Page } from '@playwright/test';
 
 import { sleep } from './env.ts';
 import { launchBrowser, type Engine } from './browsers.ts';
@@ -184,14 +184,27 @@ const CLIPBOARD_PERMISSIONS: Readonly<Record<Engine, string[]>> = {
  * Open the client of the server at `url` in a new browser.
  * @param url The server.
  * @param options `hash` appended to the URL (`#display2`), `mode` the
- *   transport the page takes at load (skipping the client's mode probe), and
- *   the `engine`.
+ *   transport the page takes at load (skipping the client's mode probe), the
+ *   `engine`, `httpCredentials` the context answers a Basic-auth challenge
+ *   with and `ignoreHTTPSErrors` to accept a self-signed certificate; these
+ *   two reach the context only when supplied, so a suite fronting the server
+ *   with an authenticating TLS proxy can use them and observe whether its
+ *   sockets pass, which this option does not promise for any engine.
  * @returns The client.
  */
-export async function launchClient(url: string, options: { hash?: string; mode?: string; engine?: Engine } = {}): Promise<Client> {
+export async function launchClient(url: string, options: {
+    hash?: string;
+    mode?: string;
+    engine?: Engine;
+    httpCredentials?: BrowserContextOptions['httpCredentials'];
+    ignoreHTTPSErrors?: boolean;
+} = {}): Promise<Client> {
     const engine = options.engine ?? 'chromium';
     const browser = await launchBrowser(engine);
-    const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1 });
+    const contextOptions: BrowserContextOptions = { viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1 };
+    if (options.httpCredentials !== undefined) contextOptions.httpCredentials = options.httpCredentials;
+    if (options.ignoreHTTPSErrors !== undefined) contextOptions.ignoreHTTPSErrors = options.ignoreHTTPSErrors;
+    const context = await browser.newContext(contextOptions);
     const permissions = CLIPBOARD_PERMISSIONS[engine];
     if (permissions.length) await context.grantPermissions(permissions, { origin: url }).catch(() => undefined);
     if (options.mode) await context.addInitScript({ content: `window.__SELKIES_STREAMING_MODE__ = '${options.mode}';` });

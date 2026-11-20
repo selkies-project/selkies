@@ -4,11 +4,19 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// The transport and backend matrix, {websockets, webrtc} x {x11, wayland},
-// each through the whole checklist: status and health, video (and audio on
-// WebRTC), keys and pointer reaching the desktop, the clipboard both ways, a
-// resize followed, a live settings change, a shared viewer, a second display,
-// and a clean console.
+/**
+ * The transport and backend matrix, {websockets, webrtc} x {x11, wayland},
+ * each through the whole checklist: status and health, video (and audio on
+ * WebRTC), keys and pointer reaching the desktop, the clipboard both ways, a
+ * resize followed, a live settings change, a shared viewer, a second display,
+ * and a clean console.
+ *
+ * The two `-proxy` selectors run the same checklist on X11 with the server
+ * encoding on the CPU (`SELKIES_USE_CPU` forces the encoder choice; it says
+ * nothing about whether a GPU is visible) behind the authenticated TLS proxy,
+ * every URL being the proxy's (`lib/matrix-proxy.ts`).
+ * @module
+ */
 import { test } from '@playwright/test';
 
 import { fields, stringOr } from '../../web/selkies-web-core/lib/narrow.ts';
@@ -17,36 +25,49 @@ import { Checks } from '../lib/checks.ts';
 import { pulseSine, pulseUnload, wlCopy, wlPaste } from '../lib/desktop.ts';
 import { sleep, suiteOf } from '../lib/env.ts';
 import { Host, type Held, type Observer } from '../lib/host.ts';
+import { directFront, frontBehindProxy, refusalChecks, streamChecks, type Front } from '../lib/matrix-proxy.ts';
 import { launchClient, newPage, sendClipboardFromClient, serverClipboardPushed, settingsChange } from '../lib/page.ts';
 import { realConsole, waitWrVideo, waitWsVideo, within } from '../lib/stream.ts';
 
 /** The keysym of `x`. */
 const XK_X = 0x78;
 
-const BLOCKS: readonly [string, string, boolean][] = [
-    ['ws-x11', 'websockets', false],
-    ['wr-x11', 'webrtc', false],
-    ['ws-wl', 'websockets', true],
-    ['wr-wl', 'webrtc', true],
+/** A selector, its transport, whether it captures from Wayland, and whether it is reached through the authenticated TLS proxy. */
+const BLOCKS: readonly [string, string, boolean, boolean][] = [
+    ['ws-x11', 'websockets', false, false],
+    ['wr-x11', 'webrtc', false, false],
+    ['ws-wl', 'websockets', true, false],
+    ['wr-wl', 'webrtc', true, false],
+    ['ws-x11-proxy', 'websockets', false, true],
+    ['wr-x11-proxy', 'webrtc', false, true],
 ];
 
-for (const [selector, mode, wayland] of BLOCKS) {
+for (const [selector, mode, wayland, proxied] of BLOCKS) {
     test(selector, async () => {
-        const tag = `${mode}-${wayland ? 'wl' : 'x11'}`;
+        const tag = proxied ? selector : `${mode}-${wayland ? 'wl' : 'x11'}`;
         const engine = engineFromEnv();
         const res = new Checks(tag);
         const wlSocket = 'wayland-1';
         const host = new Host(suiteOf(import.meta.filename));
+        let front: Front | null = null;
         try {
-            const server = await host.start({ label: tag, mode, wayland, env: { SELKIES_VIDEO_STREAMING_MODE: 'true' } });
-            const status = await fetch(`${server.url}/api/status`, { signal: AbortSignal.timeout(10_000) });
+            const server = await host.start({
+                label: tag,
+                mode,
+                wayland,
+                env: { SELKIES_VIDEO_STREAMING_MODE: 'true', ...(proxied ? { SELKIES_USE_CPU: 'true' } : {}) },
+            });
+            const behind = proxied ? await frontBehindProxy(server) : null;
+            front = behind ?? directFront(server);
+            const status = await front.get('/api/status');
             res.check('server up', true, status.status);
-            const stMode = stringOr(fields(await (await fetch(`${server.url}/api/status`, { signal: AbortSignal.timeout(10_000) })).json()).current_mode);
+            const stMode = stringOr(fields(await (await front.get('/api/status')).json()).current_mode);
             res.check('api/status mode', stMode === mode, stMode);
-            const health = (await fetch(`${server.url}/api/health`, { signal: AbortSignal.timeout(10_000) })).status;
+            const health = (await front.get('/api/health')).status;
             res.check('api/health', health === 200, health);
+            if (behind) await refusalChecks(res, behind);
 
-            const { browser, context, page, consoleErrors, notFound } = await launchClient(server.url, { mode, engine });
+            const { browser, context, page, consoleErrors, notFound } = await launchClient(front.url, { mode, engine, ...front.client });
             let obs: Observer | null = null;
             try {
                 if (mode === 'websockets') {
@@ -67,6 +88,11 @@ for (const [selector, mode, wayland] of BLOCKS) {
                     if (info) res.check('audio: audio track negotiated', (info.audio ?? 0) >= 1, info.audio);
                 }
                 await sleep(1000);
+
+                if (behind) {
+                    await streamChecks(res, behind, page, mode);
+                    await sleep(1000);
+                }
 
                 if (wayland) {
                     obs = await host.observe(wlSocket);
@@ -180,7 +206,7 @@ for (const [selector, mode, wayland] of BLOCKS) {
                     await settingsChange(page, { video_bitrate: 6000 });
                 }
 
-                const vpage = await newPage(context, server.url, { mode, hash: '#shared' });
+                const vpage = await newPage(context, front.url, { mode, hash: '#shared' });
                 await sleep(4000);
                 const vinfo = mode === 'websockets' ? await waitWsVideo(vpage, 12) : await waitWrVideo(vpage, 40);
                 res.check('roles: shared viewer gets video', vinfo !== null, vinfo);
@@ -211,7 +237,7 @@ for (const [selector, mode, wayland] of BLOCKS) {
                 }
                 await vpage.close();
 
-                const dpage = await newPage(context, server.url, { mode, hash: '#display2-right' });
+                const dpage = await newPage(context, front.url, { mode, hash: '#display2-right' });
                 await sleep(6000);
                 if (mode === 'websockets') {
                     let texts: string[] = [];
@@ -265,7 +291,11 @@ for (const [selector, mode, wayland] of BLOCKS) {
                 await obs?.release();
             }
         } finally {
-            await host.close();
+            try {
+                await front?.close();
+            } finally {
+                await host.close();
+            }
         }
         res.finish();
     });
