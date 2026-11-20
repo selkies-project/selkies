@@ -1243,7 +1243,11 @@ impl PyScreenCapture {
     /// and from capture to the end of the encode (`pipeline_ns`). A caller differences two
     /// reads; a restart begins again from zero. Beside them, the extremes since the previous
     /// read, which each read starts again: `pipeline_min_ns` and `pipeline_max_ns`, zero where
-    /// no frame was timed, and `frame_max_bytes`, the largest frame.
+    /// no frame was timed, and `frame_max_bytes`, the largest frame. The recovery counters are
+    /// cumulative too: the key frames a tracked session coded, by cause (`key_frames_requested`,
+    /// `key_frames_loss_out_of_window`, `key_frames_frame_num_wrap`, `key_frames_reconfigure`,
+    /// `key_frames_device_chosen`), and the losses it was told of, by answer
+    /// (`invalidations_recent`, `invalidations_anchor`, `invalidations_key_frame`).
     fn stream_stats(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         let c = self.0.clone();
         let Some(StreamStats { totals, peaks }) = py.detach(move || c.stream_stats()) else {
@@ -1257,6 +1261,16 @@ impl PyScreenCapture {
         d.set_item("pipeline_min_ns", peaks.pipeline_min_ns)?;
         d.set_item("pipeline_max_ns", peaks.pipeline_max_ns)?;
         d.set_item("frame_max_bytes", peaks.frame_max_bytes)?;
+        let keys = totals.key_frames;
+        d.set_item("key_frames_requested", keys.requested)?;
+        d.set_item("key_frames_loss_out_of_window", keys.loss_out_of_window)?;
+        d.set_item("key_frames_frame_num_wrap", keys.frame_num_wrap)?;
+        d.set_item("key_frames_reconfigure", keys.reconfigure)?;
+        d.set_item("key_frames_device_chosen", keys.device_chosen)?;
+        let answers = totals.invalidations;
+        d.set_item("invalidations_recent", answers.recent)?;
+        d.set_item("invalidations_anchor", answers.anchor)?;
+        d.set_item("invalidations_key_frame", answers.key_frame)?;
         Ok(Some(d.into_any().unbind()))
     }
 

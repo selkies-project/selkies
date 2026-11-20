@@ -2585,6 +2585,16 @@ impl VaapiEncoder {
             Some(References::Slots(s)) => s.has_reference(),
             None => !self.fresh,
         };
+        let owed = if self.sequence_start {
+            Some(crate::report::KeyFrameCause::Reconfigure)
+        } else {
+            force_idr.then_some(crate::report::KeyFrameCause::Requested)
+        };
+        match (&mut self.references, owed) {
+            (Some(References::Window(w)), Some(cause)) => w.owe_key(cause),
+            (Some(References::Slots(s)), Some(cause)) => s.owe_key(cause),
+            _ => {}
+        }
         let mut key = force_idr || self.sequence_start || !has_reference;
         let (mut anchor, mut shared) = (None, false);
         if let Some(References::Window(w)) = &mut self.references

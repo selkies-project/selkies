@@ -442,7 +442,15 @@ GPU, so a caller with an event loop makes the call off it.
 `capture.stream_stats()` returns cumulative counters since the start (`frames`, `bytes`,
 `encode_ns`, `pipeline_ns` from capture to the end of the encode), which a caller differences
 into a rate. They are relaxed atomics tallied once per delivered frame and read only on the
-call, so a capture nobody inspects pays nothing for them.
+call, so a capture nobody inspects pays nothing for them. Beside them are the recovery
+counters of a session that tracks its references: the key frames it coded by cause
+(`key_frames_requested` by the caller, `key_frames_loss_out_of_window` where a loss left
+nothing the client holds to predict from, `key_frames_frame_num_wrap`,
+`key_frames_reconfigure` for the first after an open, a reopen, or a reset, and
+`key_frames_device_chosen` for the rest), and the losses it was told of by answer
+(`invalidations_recent`, `invalidations_anchor`, `invalidations_key_frame`). A session without
+a reference model (OpenH264's, x265, kvazaar, V4L2) counts neither, and a striped session
+counts each stripe.
 
 ### Rust API
 

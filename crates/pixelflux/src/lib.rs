@@ -9927,7 +9927,9 @@ impl ScreenCapture {
     /// and from capture to the end of the encode (`pipeline_ns`). A caller differences two
     /// reads; a restart begins again from zero. Beside them, the extremes since the previous
     /// read, which each read starts again: `pipeline_min_ns` and `pipeline_max_ns`, zero where
-    /// no frame was timed, and `frame_max_bytes`, the largest frame.
+    /// no frame was timed, and `frame_max_bytes`, the largest frame. The recovery counters are
+    /// cumulative too: the key frames a tracked session coded by cause (`key_frames`) and the
+    /// losses it was told of by answer (`invalidations`), as `report` counts them.
     pub fn stream_stats(&self) -> Option<StreamStats> {
         let report = self.report()?;
         let totals = report.totals();
