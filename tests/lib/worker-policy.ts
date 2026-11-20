@@ -140,7 +140,7 @@ export async function workerPolicyProxy(upstreamUrl: string, restricted: boolean
         client.once('error', fail);
         tunnel.once('error', fail);
         tunnel.once('connect', () => {
-            const lines = [`${req.method} ${req.url} HTTP/1.1`];
+            const lines = [`${req.method ?? 'GET'} ${req.url ?? '/'} HTTP/1.1`];
             const raw = forwardHeaders(req.rawHeaders);
             for (let i = 0; i < raw.length; i += 2) lines.push(`${raw[i]}: ${raw[i + 1]}`);
             tunnel.write(`${lines.join('\r\n')}\r\n\r\n`);

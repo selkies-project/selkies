@@ -222,9 +222,10 @@ for (const restrict of [false, true]) {
                     const doc = seen.slice(at).find((d) => d.kind === 'document' && d.url.startsWith(url));
                     const path = doc ? new URL(doc.url).pathname + new URL(doc.url).search : null;
                     const upstreamPolicy = responses.slice(sent).find((p) => p.path === path)?.sent ?? [];
-                    const want = (restrict ? [...upstreamPolicy, RESTRICTION] : upstreamPolicy).join(', ') || null;
+                    const want = [...(restrict ? [...upstreamPolicy, RESTRICTION] : upstreamPolicy)].sort();
+                    const got = doc?.policy ? doc.policy.split(',').map((s) => s.trim()).filter(Boolean).sort() : [];
                     res.check(`load ${n}: the document carries ${restrict ? "the server's policies and worker-src 'none'" : "the server's policies alone"}`,
-                        doc !== undefined && doc.policy === want, { got: doc?.policy, want });
+                        doc !== undefined && got.length === want.length && got.every((v, i) => v === want[i]), { got: doc?.policy, want });
                     const connects = await poll(async () => (await host.log(mark)).match(CONNECTED)?.length ?? 0, (c) => c >= 1, 15_000);
                     res.check(`load ${n}: the server takes a new client socket through the proxy`, connects >= 1, { connects, sockets });
                     // A load with no socket can receive nothing; its waits then stay short, so a failure reports
