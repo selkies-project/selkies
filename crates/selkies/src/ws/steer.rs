@@ -477,9 +477,11 @@ impl CongestionSteer {
 /// while probes keep ending that way, and back to `QUIET_S` once a target reaches the ceiling.
 /// A tick that measured no delay pads nothing, nor does the transport pad while its pacer
 /// paces under the target: the padding would leave at the pace, so the probe starts once the
-/// pace is over the target again. A CRF display is never padded: its cap is a
-/// peak, which a still screen's rate factor spends under whatever it is, so there is no picture
-/// a probed headroom would restore; its cap climbs back once motion fills it.
+/// pace is over the target again. A capped CRF display is padded as a constant-rate one is,
+/// under its own ceiling ([`peak_ceiling_kbps`]): a still screen's rate factor spends little of
+/// its peak whatever it is, but the peak is what the next change of the screen is coded under,
+/// and a change is over before a tick can read the path by it, so the path is read ahead of
+/// it, by the padding.
 #[derive(Clone, Debug)]
 pub struct PathProbe {
     /// Whether the last tick asked for padding.
@@ -501,6 +503,14 @@ impl Default for PathProbe {
 impl PathProbe {
     pub const QUIET_S: f64 = 15.0;
     pub const QUIET_MAX_S: f64 = 240.0;
+
+    /// The transport's probe met no queue as far as it went: nothing to wait out before the
+    /// next, which a ceiling that rises asks for.
+    pub fn carried(&mut self, now: f64) {
+        self.padding = false;
+        self.quiet_until = now;
+        self.quiet_s = Self::QUIET_S;
+    }
 
     /// The transport ended the probe on a queue it read apart from the tick: the next one
     /// waits as after a tick that read one.
@@ -763,6 +773,24 @@ impl RateHold {
 /// takes the start without a queue. A lower start costs a second more of climb per halving and
 /// codes the session's first key frame at it.
 pub const START_KBPS: f64 = 4000.0;
+
+/// The ceiling of a capped CRF display's peak, in kbps: the rate at which the largest frame its
+/// stream has sent (`largest_frame_bytes`) could leave on every one of its `fps` frames, from
+/// [`START_KBPS`] up to the configured range's high end `hi_kbps`.
+///
+/// A peak is a burst allowance, the encoder's bucket of a few frames of it
+/// (`pixelflux::encoders::CAPPED_VBV_FRAMES`), so the display needs no more of its path than
+/// holds a run of the frames its content codes to, and its path is sounded no further: under
+/// the range's high end the padding of a probe would climb to a gigabit a second where the
+/// path carries it, and a tick's delivery read past a hop's burst allowance would lift the
+/// peak as far. The largest frame grows as the peak does, a change coded under a binding peak
+/// being cut to it, so a display whose changes outgrow its ceiling takes a few of them to
+/// reach the one they need, each sounded before the peak follows.
+pub fn peak_ceiling_kbps(largest_frame_bytes: u64, fps: f64, hi_kbps: f64) -> f64 {
+    (largest_frame_bytes as f64 * 8.0 * fps.max(1.0) / 1_000.0)
+        .max(START_KBPS)
+        .min(hi_kbps)
+}
 
 /// The rate the page remembered (`ccStartKbps`), or `None` where it sent no positive number.
 pub fn remembered_kbps(remembered: Option<&serde_json::Value>) -> Option<f64> {
@@ -1972,6 +2000,33 @@ pub(crate) mod tests {
             ),
             None
         );
+    }
+
+    /// A capped CRF display's ceiling: its largest frame on every frame, from the start rate
+    /// to the configured rate.
+    #[test]
+    fn a_peaks_ceiling_follows_the_largest_frame() {
+        assert_eq!(peak_ceiling_kbps(0, 60.0, 1_000_000.0), START_KBPS);
+        assert_eq!(peak_ceiling_kbps(67_000, 60.0, 1_000_000.0), 32_160.0);
+        assert_eq!(peak_ceiling_kbps(1_160_000, 60.0, 1_000_000.0), 556_800.0);
+        assert_eq!(peak_ceiling_kbps(4_000_000, 60.0, 1_000_000.0), 1_000_000.0);
+        assert_eq!(peak_ceiling_kbps(67_000, 0.0, 1_000_000.0), START_KBPS);
+    }
+
+    /// A probe the path carried leaves no quiet before the next, where one a queue ended
+    /// waits `QUIET_S`.
+    #[test]
+    fn a_carried_probe_waits_out_nothing() {
+        let pads = |probe: &mut PathProbe, now: f64| {
+            probe.rate_bps(4000.0, 8000.0, Some(0.0), Some(0.0), false, now) > 0.0
+        };
+        let mut probe = PathProbe::default();
+        assert!(pads(&mut probe, 0.0));
+        probe.ended(0.5);
+        assert!(!pads(&mut probe, 1.0), "quiet after a queue");
+        assert!(pads(&mut probe, 0.5 + PathProbe::QUIET_S));
+        probe.carried(20.0);
+        assert!(pads(&mut probe, 20.5), "none after a path that carried it");
     }
 
     #[test]

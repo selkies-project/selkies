@@ -3402,9 +3402,8 @@ impl WsService {
                 self.track_capture(display_id, |cs| cs.video_bitrate_kbps = kbps);
             }
         }
-        // A capped CRF display is never padded (`PathProbe`).
         let pad = PadPermit {
-            announced: !capped && client.as_ref().is_some_and(|c| c.pad()),
+            announced: client.as_ref().is_some_and(|c| c.pad()),
             streaming: video_active && !paused,
         };
         let padded = relay.clone();
@@ -3425,9 +3424,15 @@ impl WsService {
         let outcome = {
             let mut link = link.lock();
             link.loop_late_ms = late_ms;
+            link.capped = capped;
             link.backpressure_tick(display_id, input, at, &mut effects);
             if steered && capturing && link.acknowledged_frame_id != -1 && link.has_sent_any_frame {
                 let target_view = capture.as_ref().map(|c| EncoderTarget(c.clone()));
+                let target = if capped {
+                    link.peak_ceiling(target, configured_fps)
+                } else {
+                    target
+                };
                 link.steer_bitrate_to_link(
                     display_id,
                     at,
@@ -3441,6 +3446,66 @@ impl WsService {
             }
         };
         if let (Some(bps), Some(relay)) = (outcome.pad_bps, padded) {
+            relay.set_padding(bps, at + 2.0 * self.timings.backpressure_check_s);
+        }
+        if let Some(kbps) = outcome.applied_kbps {
+            let kbps = kbps as i32;
+            self.track_capture(display_id, |cs| cs.video_bitrate_kbps = kbps);
+        }
+        if let (Some(kbps), Some(client)) = (outcome.cc_rate, client) {
+            let dead = client
+                .send_live(Frame::text(format!("CC_RATE {kbps}")), "Control message")
+                .await
+                .is_err();
+            if dead {
+                self.discard(&[client.id]);
+            }
+        }
+    }
+
+    /// Land a display's steer on its path's sounding now, between checks, where an ack asked
+    /// for it (`Sounding::land_due`): a queue read under content is cut, and a drain's reading
+    /// landed, without the wait for the next check.
+    pub(crate) async fn land_sounding(&self, display_id: &str, link: &Arc<Mutex<DisplayLink>>) {
+        let (lo, hi) = {
+            let (lo, hi) = settings().video_bitrate();
+            (lo.as_f64(), hi.as_f64())
+        };
+        let target = {
+            let st = self.st.lock();
+            let Some(d) = st.displays.get(display_id) else {
+                return;
+            };
+            d.rate_ceiling(true, hi)
+        };
+        let (capture, relay, client) = {
+            let reg = self.reg.lock();
+            let owner = reg.owners.get(display_id).copied();
+            (
+                reg.captures.get(display_id).cloned(),
+                owner.and_then(|o| reg.relays.get(display_id).and_then(|g| g.get(&o).cloned())),
+                owner.and_then(|o| reg.clients.get(&o).cloned()),
+            )
+        };
+        let at = now();
+        let outcome = {
+            let mut link = link.lock();
+            if !std::mem::take(&mut link.sounding.land_due) {
+                return;
+            }
+            let target_view = capture.as_ref().map(|c| EncoderTarget(c.clone()));
+            link.sound_land(
+                display_id,
+                at,
+                target,
+                lo,
+                target_view.as_ref().map(|t| t as &dyn SteerTarget),
+            )
+        };
+        let Some(outcome) = outcome else {
+            return;
+        };
+        if let (Some(bps), Some(relay)) = (outcome.pad_bps, relay) {
             relay.set_padding(bps, at + 2.0 * self.timings.backpressure_check_s);
         }
         if let Some(kbps) = outcome.applied_kbps {
@@ -4812,7 +4877,14 @@ impl RelayHost for WsService {
             rtp_packets: 1,
             keyframe: item.data.get(1).is_some_and(|kind| kind & 0x01 != 0),
         });
-        link.is_some_and(|link| link.lock().note_send(item.frame_id, item.data.len(), now()))
+        link.is_some_and(|link| {
+            let mut link = link.lock();
+            if item.data.first() == Some(&0x04) {
+                let key = item.data.get(1).is_some_and(|kind| kind & 0x01 != 0);
+                link.note_frame(item.frame_id, item.data.len(), key, now());
+            }
+            link.note_send(item.frame_id, item.data.len(), now())
+        })
     }
 
     fn connection_verdict(&self, client: ClientId, poor: bool) {

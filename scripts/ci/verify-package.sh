@@ -40,7 +40,7 @@ fi
 echo "every program the bundle carries resolves what it links"
 
 interposer="$(find /usr/lib /usr/lib64 -maxdepth 2 -name selkies_input_interposer.so 2>/dev/null | head -n 1)"
-[ -n "${interposer}" ] && [ -f "${interposer}" ] || {
+[ -f "${interposer}" ] || {
     echo "::error::the package linked no interposer under the loader's library directory"
     exit 1
 }

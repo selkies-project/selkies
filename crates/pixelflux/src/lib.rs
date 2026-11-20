@@ -3736,6 +3736,7 @@ fn start_capture_on_display(
         change_pending: false,
         last_change: None,
         merge_hold: None,
+        host_merged: None,
         callbacks_at: None,
         callbacks_owed: false,
     };
@@ -4652,6 +4653,40 @@ fn render_pass(state: &mut AppState, trigger: TickTrigger) -> bool {
     any_pool_busy
 }
 
+/// Whether the change `cap` waits on is held for the next one (`WlCapture::holds_change`). A
+/// host's frame held so is taken at once as the display's content without a frame: the host
+/// copies into two buffers, one of them the content on screen, and a frame left waiting in the
+/// queue would leave it nowhere to copy the next frame the hold waits for. The next frame
+/// rendered publishes it (`WlCapture::host_merged`).
+fn merge_held_host_frame(
+    host: Option<&wayland::host::HostSession>,
+    id: u32,
+    cap: &mut wayland::frontend::WlCapture,
+    now: Instant,
+) -> bool {
+    let period = capture_period(cap);
+    let holding = cap.merge_hold.is_some();
+    if !cap.holds_change(period, now) {
+        return false;
+    }
+    if !holding
+        && let Some(host) = host
+        && host.has_output_for(id)
+        && let Some(frame) = host.try_take_frame(id)
+    {
+        // A frame of another size is retained unpublished, as the render path keeps it.
+        if (frame.width, frame.height) == (cap.settings.width, cap.settings.height) {
+            let merged = cap
+                .host_merged
+                .get_or_insert_with(|| (Vec::new(), frame.stamp_ns));
+            merged.0.extend(frame.damage.iter().copied());
+            merged.1 = frame.stamp_ns;
+        }
+        retain_host_frame(host, Some(cap), id, frame);
+    }
+    true
+}
+
 /// Render each capture a change waits on (`WlCapture::change_pending`: a client's commit,
 /// input, a host frame) once its period is open: a change takes its period's frame as it
 /// lands, the X11 captures' schedule, rather than waiting for the frame timer. A capture whose
@@ -4660,16 +4695,20 @@ fn render_pass(state: &mut AppState, trigger: TickTrigger) -> bool {
 /// (`WlCapture::holds_change`).
 fn serve_changes(state: &mut AppState) {
     let now = Instant::now();
+    let host = state.host.as_ref();
     let open: Vec<u32> = state
         .output_nodes
         .iter_mut()
         .filter_map(|n| {
             let cap = n.capture.as_mut()?;
             let period = capture_period(cap);
-            (cap.change_pending
-                && cap.pace.due(TickTrigger::Damage, period, now)
-                && !cap.holds_change(period, now))
-            .then_some(n.id)
+            if !(cap.change_pending && cap.pace.due(TickTrigger::Damage, period, now)) {
+                return None;
+            }
+            if !merge_held_host_frame(host, n.id, cap, now) {
+                return Some(n.id);
+            }
+            None
         })
         .collect();
     if open.is_empty() {
@@ -5054,6 +5093,12 @@ fn render_node_tick(
         };
         let have_new = new_frame.is_some();
         new_stamp = new_frame.as_ref().map(|f| f.stamp_ns);
+        // A host frame taken while a hold waited for the next (`serve_changes`) is content not yet
+        // published, as a fresh frame's is.
+        let merged = node
+            .capture
+            .as_ref()
+            .is_some_and(|c| c.host_merged.is_some());
         // The host's cursor where this display paints it into the frames itself (a session that
         // streams it as metadata while the consumer wants it painted): a move or a new sprite
         // is published like a new frame, over the retained content, with its own damage.
@@ -5097,6 +5142,7 @@ fn render_node_tick(
             }
         }
         if !have_new
+            && !merged
             && !cursor_moved
             && !want_idr_for_host
             && !take_screenshot
@@ -5128,6 +5174,15 @@ fn render_node_tick(
             cap.change_pending = false;
             cap.merge_hold = None;
         }
+        let (merged_damage, merged_stamp) =
+            match node.capture.as_mut().and_then(|c| c.host_merged.take()) {
+                Some((damage, stamp)) => (damage, Some(stamp)),
+                None => (Vec::new(), None),
+            };
+        if new_stamp.is_none() {
+            new_stamp = merged_stamp;
+        }
+        let fresh = have_new || merged;
         if let Some(f) = new_frame {
             retain_host_frame(&host, node.capture.as_mut(), host_idx, f);
         }
@@ -5146,9 +5201,9 @@ fn render_node_tick(
                 return RETAINED_NONE;
             }
             damage_rects = if have_new {
-                f.damage.clone()
+                f.damage.iter().chain(&merged_damage).copied().collect()
             } else {
-                Vec::new()
+                merged_damage.clone()
             };
             if let Some(cpu) = f.cpu.as_ref() {
                 if gpu_encoder {
@@ -5199,7 +5254,7 @@ fn render_node_tick(
             RETAINED_OK
         });
         // A fresh blit may still be in flight on the GPU when the compositor announces it.
-        if have_new && let Some(src) = source_dmabuf.as_ref() {
+        if fresh && let Some(src) = source_dmabuf.as_ref() {
             wayland::host::wait_gpu_done(src);
         }
         // GPU path: composite the watermark and the host's cursor, and serve screenshot
@@ -5212,7 +5267,7 @@ fn render_node_tick(
                 screenshot_format = computer_use::ScreenshotPixelFormat::Rgbx;
             }
             if let Some(renderer) = state.gles_renderer.as_mut() {
-                if wm_active && !wm_animated && have_new {
+                if wm_active && !wm_animated && fresh {
                     let mut target = src.clone();
                     match draw_host_watermark(
                         renderer,
@@ -8236,6 +8291,19 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
             }
             state.space.refresh();
             render_display(state, id, TickTrigger::HostFrame);
+            // One its window could not take and that the pacing holds for the next is taken as
+            // content as it lands, so the host copies its next frame in time for the next window.
+            let now = Instant::now();
+            let host = state.host.as_ref();
+            if let Some(cap) = state
+                .output_nodes
+                .iter_mut()
+                .find(|n| n.id == id)
+                .and_then(|n| n.capture.as_mut())
+                && cap.change_pending
+            {
+                merge_held_host_frame(host, id, cap, now);
+            }
         })
         .unwrap();
 

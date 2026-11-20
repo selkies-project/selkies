@@ -38,7 +38,11 @@
 //! (`CongestionSteer::cap_probing`): the detector stays armed, and a queue it reads with no
 //! padding to steer has nothing to hold. The tick backs the target off to `HEADROOM` of what
 //! the first acks showed, the path is read through the drain, busy until its queue is gone,
-//! and the landing follows on that longer reading.
+//! and the landing follows on that longer reading. Neither waits for the steer's tick
+//! (`Sounding::land_due`, `WsService::land_sounding`): content over the path's rate queues
+//! by its whole overshoot until the target is cut, half a second of it where a tick was
+//! waited for (a probe that found a link grown from 4 to 10 Mbit/s reached 15 and aged the
+//! picture 480 ms).
 
 use std::collections::VecDeque;
 
@@ -186,6 +190,10 @@ pub struct Sounding {
     pub rate_kbps: Option<f64>,
     /// The queue threshold the running sounding fired on.
     pub over_ms: f64,
+    /// Whether the steer is to land now and not at its next tick: a queue under content grows
+    /// by the stream's whole overshoot until the target is cut, and a provisional target is a
+    /// worse picture than the path carries for as long as it stands.
+    pub land_due: bool,
 }
 
 impl DisplayLink {
@@ -301,6 +309,12 @@ impl DisplayLink {
                     hold.rate = (read * lean - hold.content_bps).clamp(0.0, hold.relay_bps);
                 }
                 self.sounding.phase = SoundPhase::Hold(hold);
+                // Content had the padding's place when the detector fired: this ack is the
+                // one the landing judges that queue by.
+                if hold.pad_bps <= 0.0 && pong == hold.start.pong {
+                    self.sounding.land_due = true;
+                    return;
+                }
                 // A queue the padding's rate does not answer for is content filling the path:
                 // the hold has nothing to steer, and ends on what it has read.
                 let unsteered = pong == hold.start.pong
@@ -308,6 +322,7 @@ impl DisplayLink {
                     && ack.queue_ms > UNSTEERED * self.sound_hold_queue_ms();
                 if now - hold.since >= HOLD_S || unsteered {
                     self.sound_finish(now, unsteered);
+                    self.sounding.land_due = unsteered;
                 }
             }
             // The queue an early hold left drains under the provisional target: the path is
@@ -324,6 +339,7 @@ impl DisplayLink {
                     early_bps,
                 };
                 self.sounding.after = now;
+                self.sounding.land_due = true;
             }
             _ => {}
         }
@@ -484,6 +500,7 @@ impl DisplayLink {
         lo_kbps: f64,
         encoder: Option<&dyn SteerTarget>,
     ) -> Option<SteerOutcome> {
+        self.sounding.land_due = false;
         if let SoundPhase::Hold(hold) = self.sounding.phase {
             if hold.pad_bps <= 0.0 {
                 // Content had the padding's place when the detector fired: nothing to hold,
@@ -524,6 +541,11 @@ impl DisplayLink {
         }
         let current = self.video_bitrate_kbps(target_kbps);
         let steer = self.link_steer.get_or_insert_with(CongestionSteer::default);
+        let carried = matches!(self.sounding.phase, SoundPhase::Carried);
+        let landing = matches!(
+            self.sounding.phase,
+            SoundPhase::Read { .. } | SoundPhase::Drained { .. }
+        );
         let (rate, pad_bps, why) = match self.sounding.phase {
             SoundPhase::Idle => return None,
             SoundPhase::Hold(hold) => (current, hold.pad_bps, ""),
@@ -580,7 +602,12 @@ impl DisplayLink {
             }
             SoundPhase::Carried => {
                 self.sounding.phase = SoundPhase::Idle;
-                steer.land(target_kbps, target_kbps, now);
+                // A peak's ceiling rises with its frames: its steer is left free to follow a
+                // change's own delivery up to the next one, where a landing would hold the
+                // peak at this ceiling until a probe had climbed to that.
+                if !self.capped {
+                    steer.land(target_kbps, target_kbps, now);
+                }
                 (
                     target_kbps,
                     0.0,
@@ -588,9 +615,16 @@ impl DisplayLink {
                 )
             }
         };
+        if landing {
+            self.peak_settled = true;
+        }
         if matches!(self.sounding.phase, SoundPhase::Idle) {
             if let Some(probe) = self.link_probe.as_mut() {
-                probe.ended(now);
+                if carried {
+                    probe.carried(now);
+                } else {
+                    probe.ended(now);
+                }
             }
             self.sounding.armed_until = 0.0;
         }
@@ -600,7 +634,7 @@ impl DisplayLink {
         self.link_padding = pad_bps;
         self.link_kbps = Some(rate);
         let mut outcome = SteerOutcome {
-            cc_rate: self.link_hold.note(rate, now),
+            cc_rate: self.keep_rate(rate, now),
             applied_kbps: None,
             pad_bps: Some(pad_bps),
         };
@@ -789,6 +823,66 @@ mod tests {
             "{:?}",
             link.sounding.phase
         );
+    }
+
+    #[test]
+    fn a_queue_under_content_asks_for_its_landing_at_once() {
+        // Armed, no padding: content probing past the cap.
+        let mut link = padded(0.0);
+        link.link_kbps = Some(13_000.0);
+        link.sounding.armed_until = NOW + 10.0;
+        let mut bytes = 0;
+        let now = held(&mut link, &mut bytes);
+        assert!(matches!(link.sounding.phase, SoundPhase::Hold(_)));
+        assert!(
+            !link.sounding.land_due,
+            "the firing ack alone judges nothing"
+        );
+        let now = acks(&mut link, now, &mut bytes, &[60.0], 10_000_000.0);
+        assert!(link.sounding.land_due, "the next ack does");
+        link.sound_land("primary", now, 30_000.0, 100.0, None)
+            .expect("the provisional landing");
+        assert!(!link.sounding.land_due);
+        let cut = link.link_kbps.expect("cut");
+        assert!(cut < 13_000.0 * CongestionSteer::HEADROOM + 1.0, "{cut}");
+        assert!(matches!(link.sounding.phase, SoundPhase::Drain { .. }));
+        // The drain's end asks for the landing too.
+        let now = acks(
+            &mut link,
+            now,
+            &mut bytes,
+            &[90.0, 70.0, 50.0, 30.0, 20.0, 5.0],
+            10_000_000.0,
+        );
+        assert!(link.sounding.land_due);
+        link.sound_land("primary", now, 30_000.0, 100.0, None)
+            .expect("the landing");
+        let landed = link.link_kbps.expect("landed");
+        assert!((9_000.0..=9_800.0).contains(&landed), "{landed}");
+
+        // A queue that is gone by the next ack was not the path's: no cut.
+        let mut link = padded(0.0);
+        link.link_kbps = Some(13_000.0);
+        link.sounding.armed_until = NOW + 10.0;
+        let now = held(&mut link, &mut bytes);
+        let now = acks(&mut link, now, &mut bytes, &[2.0], 13_000_000.0);
+        assert!(link.sounding.land_due);
+        assert!(
+            link.sound_land("primary", now, 30_000.0, 100.0, None)
+                .is_none()
+        );
+        assert_eq!(link.link_kbps, Some(13_000.0));
+        assert!(matches!(link.sounding.phase, SoundPhase::Idle));
+
+        // A padded hold lands on the steer's tick, as it reads the path for its whole span.
+        let mut link = padded(13_000_000.0);
+        let now = held(&mut link, &mut bytes);
+        acks(&mut link, now, &mut bytes, &[40.0; 17], 10_000_000.0);
+        assert!(matches!(
+            link.sounding.phase,
+            SoundPhase::Read { early: false, .. }
+        ));
+        assert!(!link.sounding.land_due);
     }
 
     #[test]

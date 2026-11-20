@@ -165,6 +165,8 @@ struct State<T> {
     anchored: bool,
     /// Delta frames naming their reference let through, beside `over_budget`.
     passed: u64,
+    /// The bytes of the largest item taken in that was no key frame.
+    largest: usize,
 }
 
 /// One queue between a capture and its consumer (module docblock).
@@ -199,6 +201,7 @@ impl<T: BridgeItem> PipelineBridge<T> {
                 budget_run: 0,
                 anchored: false,
                 passed: 0,
+                largest: 0,
             }),
             available: Notify::new(),
         }
@@ -255,6 +258,12 @@ impl<T: BridgeItem> PipelineBridge<T> {
         self.state.lock().passed
     }
 
+    /// The bytes of the largest item the bridge was handed that was no key frame, dropped or
+    /// not: what the display's content codes a frame to (`ws::steer::peak_ceiling_kbps`).
+    pub fn largest(&self) -> usize {
+        self.state.lock().largest
+    }
+
     /// Whether nothing is queued.
     pub fn is_empty(&self) -> bool {
         self.state.lock().queue.is_empty()
@@ -264,6 +273,9 @@ impl<T: BridgeItem> PipelineBridge<T> {
     /// decodes on its own (module docblock).
     pub fn set_data(&self, data: T, keyframe: bool) {
         let mut s = self.state.lock();
+        if !keyframe {
+            s.largest = s.largest.max(data.byte_len());
+        }
         s.set_data(data, keyframe);
         let queued = !s.queue.is_empty();
         drop(s);

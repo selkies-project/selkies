@@ -1921,9 +1921,10 @@ async fn a_steered_rate_held_is_told_to_its_page() {
     }
 }
 
-/// A CRF display opens capped at the steer's start, its peak climbs under the range's high end
-/// as a CBR target does, its page is told the rate it held, and a client's bitrate, CBR's
-/// alone, leaves the peak where the steer put it.
+/// A CRF display opens capped at the steer's start, its peak climbs as a CBR target does under
+/// the ceiling its largest frame sets (25 kB at 60 frames a second: 12 Mbit/s), its page is
+/// told no peak a queue has not shown its path, and a client's bitrate, CBR's alone, leaves
+/// the peak where the steer put it.
 #[tokio::test]
 async fn a_crf_display_is_steered_by_its_peak() {
     use crate::ws::steer::START_KBPS;
@@ -1959,6 +1960,7 @@ async fn a_crf_display_is_steered_by_its_peak() {
             for ack in 0..10 {
                 bytes += 25_000;
                 l.sent_bytes = bytes;
+                l.note_frame(2, 25_000, false, at);
                 l.note_round_trip(20.0, bytes, at - 0.5 + f64::from(ack) * 0.05);
             }
         }
@@ -1977,14 +1979,17 @@ async fn a_crf_display_is_steered_by_its_peak() {
         peaks.first().is_some_and(|p| *p > START_KBPS as i64),
         "the peak climbs from the start: {peaks:?}"
     );
-    assert!(peaks.iter().all(|p| *p as f64 <= hi), "{peaks:?}");
     assert!(
-        owner
+        hi > 12_000.0 && peaks.iter().all(|p| *p <= 12_000),
+        "under its largest frame's ceiling: {peaks:?}"
+    );
+    assert!(
+        !owner
             .texts()
             .await
             .iter()
             .any(|t| t.starts_with("CC_RATE ")),
-        "{peaks:?}"
+        "a peak no queue showed its path is not one to keep: {peaks:?}"
     );
     let calls = capture.calls.lock().len();
     rig.service
