@@ -330,9 +330,14 @@ fn send_parameters(transceiver: &Transceiver, cname: &str) -> SendParameters {
     }
 }
 
-fn receive_parameters(transceiver: &Transceiver) -> selkies_rtc::rtp::ReceiveParameters {
+/// An uplink receiver's parameters: `codecs` are the formats the transceiver receives
+/// (`Session::receive_codecs`), the encodings what the peer described.
+fn receive_parameters(
+    transceiver: &Transceiver,
+    codecs: &[Codec],
+) -> selkies_rtc::rtp::ReceiveParameters {
     selkies_rtc::rtp::ReceiveParameters {
-        codecs: transceiver.codecs.iter().map(codec_parameters).collect(),
+        codecs: codecs.iter().map(codec_parameters).collect(),
         header_extensions: header_extensions(transceiver),
         encodings: transceiver
             .remote_encodings
@@ -346,8 +351,8 @@ fn receive_parameters(transceiver: &Transceiver) -> selkies_rtc::rtp::ReceivePar
     }
 }
 
-/// Start an uplink's receiver on what its transceiver negotiated, and route the peer's SSRCs
-/// and payload types for it there. The receiver's RTCP goes out under the transceiver's own
+/// Start an uplink's receiver on `codecs`, the formats its transceiver receives
+/// (`Session::receive_codecs`), and route the peer's SSRCs and payload types for it there. The receiver's RTCP goes out under the transceiver's own
 /// SSRC: a receiver without one sends no NACK, PLI or receiver report, so a lost camera packet
 /// would never be asked for again, and a decoder that lost its reference would never get the
 /// key frame it asks for.
@@ -356,8 +361,9 @@ fn start_uplink(
     receiver: &mut RtpReceiver,
     track: Track,
     transceiver: &Transceiver,
+    codecs: &[Codec],
 ) {
-    let parameters = receive_parameters(transceiver);
+    let parameters = receive_parameters(transceiver, codecs);
     receiver.start(&parameters);
     receiver.set_rtcp_ssrc(transceiver.ssrc);
     let ssrcs: Vec<u32> = parameters
@@ -466,6 +472,9 @@ struct Media {
     webcam: Option<RtpReceiver>,
     router: RtpRouter<Track>,
     twcc_rx: TwccReceiver,
+    /// Formats an uplink receives that the page's answer does not list, by payload type and
+    /// MIME type, each logged once as it first arrives.
+    unlisted: Vec<(Track, u8, String)>,
     sctp_out: mpsc::UnboundedSender<Bytes>,
     sctp: Option<SctpTransport>,
     /// The inbound SCTP packets of a negotiated association DTLS has yet to carry.
@@ -580,6 +589,7 @@ impl Peer {
             webcam: webcam_index.map(|_| RtpReceiver::new("video")),
             router: RtpRouter::new(),
             twcc_rx: TwccReceiver::new(),
+            unlisted: Vec::new(),
             sctp_out,
             sctp: None,
             sctp_negotiated: None,
@@ -1113,12 +1123,18 @@ impl Media {
             if transceiver.codecs.is_empty() {
                 continue;
             }
+            let codecs = self.session.receive_codecs(index);
+            self.unlisted.retain(|(t, _, _)| *t != track);
+            for codec in self.session.unanswered_codecs(index) {
+                self.unlisted
+                    .push((track, codec.payload_type, codec.mime_type));
+            }
             let receiver = match track {
                 Track::Microphone => self.microphone.as_mut(),
                 _ => self.webcam.as_mut(),
             };
             let Some(receiver) = receiver else { continue };
-            start_uplink(&mut self.router, receiver, track, transceiver);
+            start_uplink(&mut self.router, receiver, track, transceiver, &codecs);
         }
 
         let Some(ice) = negotiated.ice.clone() else {
@@ -1327,6 +1343,18 @@ impl Media {
             _ => return,
         };
         let Some(receiver) = receiver else { return };
+        if let Some(at) = self
+            .unlisted
+            .iter()
+            .position(|(t, pt, _)| *t == track && *pt == packet.payload_type)
+        {
+            let (_, pt, mime) = self.unlisted.swap_remove(at);
+            let name = match uplink {
+                Uplink::Microphone => "microphone",
+                Uplink::Webcam => "webcam",
+            };
+            info!(target: "webrtc", "Peer {}: the page sends its {name} as {mime} under payload type {pt}, which its answer does not list; it is received as offered.", self.peer_id);
+        }
         let waited = arrived.elapsed().as_secs_f64();
         let arrival_ms = ((now - waited) * 1000.0) as i64;
         for frame in receiver.handle_rtp(packet, arrival_ms, now, &mut self.twcc_rx) {
@@ -1566,7 +1594,13 @@ mod tests {
             rtx_ssrc: None,
         }];
         let (mut router, mut receiver) = (RtpRouter::new(), RtpReceiver::new("video"));
-        start_uplink(&mut router, &mut receiver, Track::Webcam, &transceiver);
+        start_uplink(
+            &mut router,
+            &mut receiver,
+            Track::Webcam,
+            &transceiver,
+            &transceiver.codecs,
+        );
         let mut twcc = TwccReceiver::new();
         for seq in [1u16, 2, 4] {
             let mut packet = RtpPacket::new(h264.payload_type, seq, 3000 * u32::from(seq), 0x2222);

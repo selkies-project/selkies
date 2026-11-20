@@ -713,6 +713,88 @@ fn an_answer_settles_the_codecs_the_peer_took_in_the_offers_order() {
     );
 }
 
+/// A section's formats as payload type and lowercase MIME type.
+fn formats(codecs: &[super::Codec]) -> Vec<(u8, String)> {
+    codecs
+        .iter()
+        .map(|c| (c.payload_type, c.mime_type.to_ascii_lowercase()))
+        .collect()
+}
+
+#[test]
+fn an_uplink_receives_every_format_its_offer_named_under_the_offers_numbers() {
+    let (mut session, offer) = offer("h264enc", 2);
+    let offered_description = SessionDescription::parse(&offer).expect("the offer parses");
+    let microphone = |description: &SessionDescription, direction| {
+        description
+            .media
+            .iter()
+            .position(|m| m.kind == "audio" && m.direction == Some(direction))
+            .expect("a microphone section")
+    };
+    let offered = formats(
+        &offered_description.media[microphone(&offered_description, Direction::RecvOnly)].codecs,
+    );
+    assert!(
+        offered.iter().any(|(_, mime)| mime == "audio/red"),
+        "{offered:?}"
+    );
+    // The page answers with Opus alone, under a number of its own, and sends RED under the
+    // offer's numbers all the same.
+    let free = (96u8..=127)
+        .find(|pt| {
+            !offered_description
+                .media
+                .iter()
+                .any(|m| m.codecs.iter().any(|c| c.payload_type == *pt))
+        })
+        .expect("a payload type the offer left free");
+    let mut answer =
+        SessionDescription::parse(&engine_answer(&offer, &[])).expect("the answer parses");
+    let section = microphone(&answer, Direction::SendOnly);
+    let media = &mut answer.media[section];
+    media.codecs.retain(|c| !c.is_red());
+    for codec in &mut media.codecs {
+        if codec.mime_type.eq_ignore_ascii_case("audio/opus") {
+            codec.payload_type = free;
+        }
+    }
+    media.fmt = media
+        .codecs
+        .iter()
+        .map(|c| c.payload_type.to_string())
+        .collect();
+    session
+        .set_remote_description(SdpType::Answer, &answer.to_sdp())
+        .expect("the answer is taken");
+    let mic = session
+        .transceivers
+        .iter()
+        .position(|t| t.kind == MediaKind::Audio && t.direction == Direction::RecvOnly)
+        .expect("the microphone's transceiver");
+    let negotiated = formats(&session.transceivers[mic].codecs);
+    assert!(
+        negotiated.contains(&(free, "audio/opus".to_owned()))
+            && !negotiated.iter().any(|(_, mime)| mime == "audio/red"),
+        "the answer settled Opus alone: {negotiated:?}"
+    );
+    assert_eq!(
+        formats(&session.receive_codecs(mic)),
+        offered,
+        "the microphone takes every format the offer named, under the offer's numbers"
+    );
+    let red: Vec<(u8, String)> = offered
+        .iter()
+        .filter(|(_, mime)| mime == "audio/red")
+        .cloned()
+        .collect();
+    assert_eq!(
+        formats(&session.unanswered_codecs(mic)),
+        red,
+        "the answer left RED out, and Opus it only renumbered"
+    );
+}
+
 #[test]
 fn an_answer_out_of_turn_or_without_credentials_is_refused() {
     let mut session = Session::new(false, 2);
