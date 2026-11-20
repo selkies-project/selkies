@@ -176,8 +176,10 @@
   (`http/tokens.rs`), the auth gate and the routes over a real loopback listener (`http/route_tests.rs`), the file
   routes' confinement (`files/route_tests.rs`), and the input dispatcher and its authority (`input/tests.rs`). It
   builds pixelflux and pcmflux, so it needs the native libraries they build against (the packages
-  `scripts/ci/server-build-deps.sh` installs); the ICE topology tests in `crates/selkies-rtc/src/ice/tests.rs` need a
-  network interface besides loopback for their host candidates and fail without one.
+  `scripts/ci/server-build-deps.sh` installs). Six tests need a network interface besides loopback and fail without
+  one, as in a container started with `--network none`: the two ICE topology tests in
+  `crates/selkies-rtc/src/ice/tests.rs` for their host candidates, the mDNS test in `ice/mdns.rs` beside them, and
+  the three tests in `crates/selkies/src/webrtc/tests.rs` that hold a peer gathering against a silent STUN server.
 - `cargo xtask suites --tier unit` runs offline from the source tree, as the unprivileged `tester` user the image
   creates, since some suites check that permission errors are handled; the unit tier's audits
   (`tests/tools/*_audit.ts`, run by `node`) drive the web client's modules and the interposers (`tests/tools` builds

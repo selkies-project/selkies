@@ -165,8 +165,9 @@ desktop session's own compositor and sound server share the host.
 
 `.oss-scanner/` serves Anthropic's OSS Scanner. `threat_model.md` states what Selkies does, its principals from any
 peer up to the master token, its entry points, the components that matter most, how to exercise them, and how
-severity is rated; `Dockerfile` builds the tree and runs the unit tier offline, as an unprivileged user, the way CI
-does. The threat model is the rule the code is held to, not a description of it: where the code lets a principal
+severity is rated; `Dockerfile` builds the tree and compiles its tests the way CI's unit tier does, for the scan to
+run them offline as an unprivileged user. The threat model is the rule the code is held to, not a description of
+it: where the code lets a principal
 reach what the model keeps from it, the code is the defect even when `docs/` and a test agree with it, and the fix
 corrects all three. Anyone, an agent included, may change the rule to harden it (a principal reaching less, a
 boundary it did not state yet); loosening it is a maintainer's call. Keep the model current in the commit that moves
