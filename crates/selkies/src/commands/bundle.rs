@@ -13,8 +13,9 @@
 //! - `libexec/selkies/`: the X servers (XLibre's Xvfb, Xwayland), `xkbcomp`, `pulseaudio`, and
 //!   `dbus-daemon`
 //! - `lib/selkies/`: the libraries those link that the host need not have, each found through
-//!   its own `$ORIGIN` run path; `pulse/modules/` and `preload/`, the interposers the session's
-//!   applications preload
+//!   its own `$ORIGIN` run path; `pulse/modules/`, `alsa-lib/`, the ALSA plugin that carries
+//!   an ALSA application to the session's PulseAudio, and `preload/`, the interposers the
+//!   session's applications preload
 //! - `share/selkies/`: the xkb data and the buses' configuration
 //!
 //! The launcher takes each program from the bundle where the bundle has it and from the host
@@ -72,6 +73,15 @@ impl Bundle {
     /// Where the bundled PulseAudio's modules are.
     pub fn pulse_modules(&self) -> PathBuf {
         self.root.join("lib/selkies/pulse/modules")
+    }
+
+    /// The ALSA modules that carry an application's PCM and mixer to a PulseAudio server,
+    /// where the bundle carries both (`infra/bundle/alsa-pulse.sh`).
+    pub fn alsa_pulse_modules(&self) -> Option<[PathBuf; 2]> {
+        let dir = self.root.join("lib/selkies/alsa-lib");
+        let modules =
+            ["pcm", "ctl"].map(|kind| dir.join(format!("libasound_module_{kind}_pulse.so")));
+        modules.iter().all(|m| m.is_file()).then_some(modules)
     }
 
     /// The configuration of the bundled `dbus-daemon` for a bus of `kind`, `session` or
@@ -215,6 +225,25 @@ mod tests {
         assert_eq!(
             selkies[pixelflux::XWAYLAND_VAR],
             root.join("libexec/selkies/Xwayland").to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn the_alsa_bridge_is_offered_only_where_both_its_modules_are() {
+        let root = tree();
+        let bundle = Bundle::at(&root).unwrap();
+        assert_eq!(bundle.alsa_pulse_modules(), None);
+        let dir = root.join("lib/selkies/alsa-lib");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("libasound_module_pcm_pulse.so"), "").unwrap();
+        assert_eq!(bundle.alsa_pulse_modules(), None, "the mixer's is missing");
+        std::fs::write(dir.join("libasound_module_ctl_pulse.so"), "").unwrap();
+        assert_eq!(
+            bundle.alsa_pulse_modules(),
+            Some([
+                dir.join("libasound_module_pcm_pulse.so"),
+                dir.join("libasound_module_ctl_pulse.so")
+            ])
         );
     }
 }

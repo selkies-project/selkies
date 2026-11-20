@@ -157,6 +157,7 @@ program or library under its own license, unmodified but for the patches named:
 | PulseAudio | LGPL-2.1-or-later | the daemon and the modules a session loads, with its libraries, built from the pinned release |
 | libsndfile | LGPL-2.1-or-later | linked statically into PulseAudio's shared `libpulsecommon`, without codecs of its own, from the pinned release (`crates/pcmflux/scripts/build-libpulse.sh`) |
 | libltdl | LGPL-2.1-or-later | `lib/selkies/libltdl.so.7`, built from the pinned libtool release, through which the PulseAudio daemon loads its modules |
+| alsa-plugins' PulseAudio plugin | LGPL-2.1-or-later | `lib/selkies/alsa-lib`, its PCM and control modules alone, built from the pinned release (`infra/bundle/alsa-pulse.sh`), which an application's own libasound loads; no alsa-lib is carried |
 | dbus-daemon | AFL-2.1 OR GPL-2.0-or-later | built from the pinned release (`infra/bundle/dbus.sh`), its own library linked in statically |
 | Expat | MIT | linked statically into dbus-daemon, from the pinned release |
 | libwayland-server | MIT | `lib/selkies/libwayland-server.so.0`, built from the pinned Wayland release, which the server opens at run time for its compositor |

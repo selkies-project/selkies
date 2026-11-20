@@ -12,8 +12,10 @@
 #   libexec/selkies/  Xvfb, Xwayland, xkbcomp (xservers.sh), pulseaudio, dbus-daemon,
 #                     cups/, the print queue's scheduler (cups.sh)
 #   lib/selkies/      the libraries those link that are not glibc's or the GPU
-#                     driver's, pulse/modules/, preload/, the interposers, and on
-#                     glibc egl-x11/, NVIDIA's X11 EGL platform, for the images
+#                     driver's, pulse/modules/, alsa-lib/, the ALSA plugin that
+#                     carries ALSA applications to PulseAudio (alsa-pulse.sh),
+#                     preload/, the interposers, and on glibc egl-x11/, NVIDIA's
+#                     X11 EGL platform, for the images
 #   share/selkies/    the xkb data, the buses' configuration, the logo, fonts/,
 #                     the shell's UI face, and on glibc egl/, that platform's
 #                     configuration
@@ -23,8 +25,10 @@
 # lookups alone and never the libraries a host's GPU driver loads into the same
 # process. What only the host can supply stays the host's: glibc, libstdc++ and
 # libgcc_s, which every glibc distribution installs (musl's are carried, since
-# Alpine installs neither), and the graphics stack (libgbm is reached through gbm-loader.c, the
-# rest is loaded at run time). The X servers carry nothing of their own at all.
+# Alpine installs neither), the graphics stack (libgbm is reached through
+# gbm-loader.c, the rest is loaded at run time), and libasound, by which an
+# application loads the ALSA modules. The X servers carry nothing of their own
+# at all.
 #
 # Runs inside the bundle's toolchain image (infra/bundle/Dockerfile, which
 # infra/bundle/build.sh picks), whose C library is the bundle's floor, and takes
@@ -36,7 +40,8 @@
 # directory kept from a build against another toolchain is emptied, since
 # codec-sys binds the codecs' headers without watching them. PulseAudio
 # (crates/pcmflux/scripts/build-libpulse.sh, with libltdl), dbus-daemon
-# (dbus.sh), and the scheduler's libcrypt (cups.sh) are built from the releases
+# (dbus.sh), the ALSA PulseAudio plugin (alsa-pulse.sh), and the scheduler's
+# libcrypt (cups.sh) are built from the releases
 # their scripts pin, as everything else the toolchain holds, and a library that
 # belongs to a package of the image's distribution, or that the image built
 # itself under /usr/local, fails the build, so nothing a distribution released
@@ -59,7 +64,7 @@ NAME="selkies-${VERSION}-${ARCH}-linux-${LIBC}"
 TREE="${BUILD}/bundle/${NAME}"
 rm -rf "${BUILD}/bundle"
 mkdir -p "${TREE}/bin" "${TREE}/libexec/selkies" "${TREE}/lib/selkies/pulse/modules" \
-    "${TREE}/lib/selkies/preload" "${TREE}/share/selkies/dbus-1"
+    "${TREE}/lib/selkies/alsa-lib" "${TREE}/lib/selkies/preload" "${TREE}/share/selkies/dbus-1"
 
 KEY="$(sh "${REPO}/infra/bundle/toolchain.sh" key)"
 TOOLCHAIN="${SELKIES_TOOLCHAIN:-}"
@@ -78,6 +83,7 @@ export PATH="/opt/python/cp312-cp312/bin:${PATH}"
 "${REPO}/infra/bundle/xservers.sh" "${TREE}"
 "${REPO}/infra/bundle/cups.sh" "${TREE}"
 "${REPO}/infra/bundle/dbus.sh" "${TOOLCHAIN}/dbus"
+"${REPO}/infra/bundle/alsa-pulse.sh" "${TOOLCHAIN}/alsa-pulse"
 
 
 # The server links the libgbm loader and pixman from the archives the X servers
@@ -112,6 +118,8 @@ modules="$(dirname "$(find /usr/lib64 /usr/lib -name module-null-sink.so 2> /dev
 for module in module-native-protocol-unix module-always-sink module-null-sink module-virtual-source; do
     install -m755 "${modules}/${module}.so" "${TREE}/lib/selkies/pulse/modules/"
 done
+# The ALSA PulseAudio plugin a session names to its ALSA applications
+install -m755 "${TOOLCHAIN}"/alsa-pulse/lib/libasound_module_*_pulse.so "${TREE}/lib/selkies/alsa-lib/"
 # Selkies' logo, the desktop's start button and its application-icon wallpaper
 # where the image installs none of its own
 install -m644 "${REPO}/docs/assets/logo/selkies.svg" "${TREE}/share/selkies/icon.svg"
@@ -231,9 +239,9 @@ provider() {
 }
 CXX_RUNTIME='|gcc_s|stdc\+\+'
 [ "${LIBC}" = gnu ] || CXX_RUNTIME=''
-HOST_LIBS="^(ld-linux.*|ld-musl.*|libc\\.musl.*|linux-vdso|lib(c|m|dl|pthread|rt|resolv|util|mvec|anl|nsl|BrokenLocale${CXX_RUNTIME})|lib(GL|GLX|GLdispatch|OpenGL|EGL|GLESv[12]_CM|GLESv2|gbm|drm|vulkan|va|va-drm|va-x11|va-wayland|cuda|nvidia-.*))\\.so"
+HOST_LIBS="^(ld-linux.*|ld-musl.*|libc\\.musl.*|linux-vdso|lib(c|m|dl|pthread|rt|resolv|util|mvec|anl|nsl|BrokenLocale${CXX_RUNTIME})|libasound|lib(GL|GLX|GLdispatch|OpenGL|EGL|GLESv[12]_CM|GLESv2|gbm|drm|vulkan|va|va-drm|va-x11|va-wayland|cuda|nvidia-.*))\\.so"
 LIBDIR="${TREE}/lib/selkies"
-queue="$(find "${TREE}/bin" "${TREE}/libexec" "${LIBDIR}/pulse/modules" -type f \
+queue="$(find "${TREE}/bin" "${TREE}/libexec" "${LIBDIR}/pulse/modules" "${LIBDIR}/alsa-lib" -type f \
     -exec sh -c 'head -c4 "$1" | grep -q ELF' _ {} \; -print)"
 while [ -n "${queue}" ]; do
     next=""
@@ -272,6 +280,11 @@ for elf in "${LIBDIR}"/pulse/modules/*.so; do
         patchelf --set-rpath "\$ORIGIN:\$ORIGIN/../.." "${elf}"
     fi
 done
+# The ALSA modules' as a RUNPATH, since they load into an application's process
+for elf in "${LIBDIR}"/alsa-lib/*.so; do
+    patchelf --set-rpath "\$ORIGIN/.." "${elf}"
+    readelf -d "${elf}" | grep -qF "(RUNPATH)"
+done
 patchelf --force-rpath --set-rpath "\$ORIGIN/../../lib/selkies" "${TREE}/libexec/selkies/pulseaudio"
 patchelf --force-rpath --set-rpath "\$ORIGIN/../../../../lib/selkies" \
     "${TREE}/libexec/selkies/cups/sbin/cupsd"
@@ -280,10 +293,10 @@ patchelf --force-rpath --set-rpath "\$ORIGIN/../../../../../../lib/selkies" \
 patchelf --print-rpath "${TREE}/bin/selkies" | grep -qxF "\$ORIGIN/../lib/selkies"
 
 # Every program resolves every library it links from the tree or from what the
-# host is expected to have
+# host is expected to have; the ALSA modules' libasound is the application's
 missing="$(find "${TREE}/bin" "${TREE}/libexec" "${LIBDIR}" -type f ! -path '*/preload/*' \
     -exec sh -c 'head -c4 "$1" | grep -q ELF || exit 0
-        ldd "$1" 2>&1 | grep "not found" | sed "s|^|$1: |"' _ {} \;)"
+        ldd "$1" 2>&1 | grep "not found" | grep -v "libasound\.so\.2 " | sed "s|^|$1: |"' _ {} \;)"
 [ -z "${missing}" ] || { echo "${missing}" >&2; exit 1; }
 # The server links libxcb in statically and exports none of it, and no libxcb is
 # carried, so the one a host's GPU driver loads (NVIDIA's L4T X and EGL stack

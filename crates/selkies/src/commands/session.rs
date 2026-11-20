@@ -117,6 +117,48 @@ pub fn answers(path: &Path) -> bool {
     UnixStream::connect(path).is_ok()
 }
 
+/// Where alsa-lib reads its configuration when `ALSA_CONFIG_DIR` names no other directory.
+const ALSA_CONFIG_DIR: &str = "/usr/share/alsa";
+
+/// The ALSA configuration that makes the PulseAudio plugin at `pcm` and `ctl` every
+/// application's default device, naming the modules by path so that no plugin directory of the
+/// host's has to hold them. `None` where a path holds what an ALSA string cannot carry as it
+/// is, a quote or a backslash.
+fn alsa_bridge_conf(pcm: &Path, ctl: &Path) -> Option<String> {
+    let (pcm, ctl) = (pcm.to_str()?, ctl.to_str()?);
+    if [pcm, ctl].iter().any(|p| p.contains(['"', '\\'])) {
+        return None;
+    }
+    Some(format!(
+        "pcm_type.pulse {{ lib \"{pcm}\" }}\n\
+         ctl_type.pulse {{ lib \"{ctl}\" }}\n\
+         pcm.!default {{ type pulse hint.description \"Default ALSA Output (PulseAudio)\" }}\n\
+         ctl.!default {{ type pulse }}\n"
+    ))
+}
+
+/// The `ALSA_CONFIG_PATH` that reads `conf` after the configuration alsa-lib reads otherwise:
+/// the list `existing` names where it is set, else `alsa.conf` in `config_dir` where that is a
+/// file. The variable replaces alsa-lib's top-level file rather than adding to it, so that file
+/// comes first and keeps loading the host's `conf.d` directories, `/etc/asound.conf`, and
+/// `~/.asoundrc`; `conf`, loaded last, then names the default device whatever those named.
+/// `None` where there is no such configuration, so no libasound of the host's to bridge, or
+/// where `conf` holds a colon or a space, which alsa-lib splits the list on.
+fn alsa_config_path(existing: Option<&str>, config_dir: &Path, conf: &Path) -> Option<String> {
+    let conf = conf.to_str().filter(|c| !c.contains([':', ' ']))?;
+    let base = match existing.filter(|e| !e.is_empty()) {
+        Some(list) => list.to_string(),
+        None => {
+            let top = config_dir.join("alsa.conf");
+            top.is_file().then(|| top.to_string_lossy().into_owned())?
+        }
+    };
+    if base.split([':', ' ']).any(|file| file == conf) {
+        return Some(base);
+    }
+    Some(format!("{base}:{conf}"))
+}
+
 /// Whether `child` has exited, and with what status (`None` while it runs).
 fn exited(child: &mut Child) -> Option<i32> {
     child
@@ -859,10 +901,47 @@ impl Session {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             log(&format!("{server} serves the session's audio"));
+            if server == "pulseaudio" {
+                self.alsa_bridge();
+            }
             return true;
         }
         log("no sound server came up; the session has no audio");
         false
+    }
+
+    /// Make the bundle's ALSA PulseAudio plugin the default device of the session's ALSA
+    /// applications, which otherwise find no sound card: a configuration naming the modules
+    /// where this bundle has them, written into the runtime directory and read after the
+    /// host's through `ALSA_CONFIG_PATH` ([`alsa_config_path`]), so it reaches what the session
+    /// starts and nothing else, as `PULSE_SERVER` does. The modules are loaded by the
+    /// application's own libasound and find the bundle's libpulse through their run path, or
+    /// the one the application already loaded. A PulseAudio session alone is bridged: a
+    /// PipeWire one is left to PipeWire's own ALSA plugin, and a host session to the host's
+    /// configuration.
+    fn alsa_bridge(&mut self) {
+        let Some([pcm, ctl]) = self.bundle.as_ref().and_then(Bundle::alsa_pulse_modules) else {
+            return;
+        };
+        let Some(conf) = alsa_bridge_conf(&pcm, &ctl) else {
+            return;
+        };
+        let file = self.runtime_dir.join("selkies-alsa.conf");
+        let config_dir = self
+            .env
+            .get("ALSA_CONFIG_DIR")
+            .filter(|d| d.starts_with('/'))
+            .map_or_else(|| PathBuf::from(ALSA_CONFIG_DIR), PathBuf::from);
+        let existing = self.env.get("ALSA_CONFIG_PATH").map(String::as_str);
+        let Some(path) = alsa_config_path(existing, &config_dir, &file) else {
+            return;
+        };
+        if let Err(err) = fs::write(&file, conf) {
+            log(&format!("ALSA applications get no sound: {err}"));
+            return;
+        }
+        self.env.insert("ALSA_CONFIG_PATH".to_string(), path);
+        log("ALSA applications play through PulseAudio");
     }
 
     /// Settle the session's GPU ([`super::session_gpu`]): the driver's loader files, the probe
@@ -1795,6 +1874,53 @@ mod tests {
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn the_alsa_bridge_names_its_modules_and_refuses_paths_alsa_cannot_quote() {
+        let conf = alsa_bridge_conf(Path::new("/b/pcm.so"), Path::new("/b/ctl.so")).unwrap();
+        assert!(conf.contains("pcm_type.pulse { lib \"/b/pcm.so\" }"));
+        assert!(conf.contains("ctl_type.pulse { lib \"/b/ctl.so\" }"));
+        assert!(conf.contains("pcm.!default { type pulse"));
+        assert!(conf.contains("ctl.!default { type pulse }"));
+        assert_eq!(
+            alsa_bridge_conf(Path::new("/b\"/pcm.so"), Path::new("/b/ctl.so")),
+            None
+        );
+    }
+
+    #[test]
+    fn the_alsa_bridge_is_read_after_the_hosts_configuration() {
+        let dir = crate::http::testing::tempfile_dir("selkies-alsa-");
+        let conf = dir.join("selkies-alsa.conf");
+        let conf_str = conf.to_string_lossy();
+        assert_eq!(
+            alsa_config_path(None, &dir, &conf),
+            None,
+            "a host with no alsa.conf has no libasound to bridge"
+        );
+        fs::write(dir.join("alsa.conf"), "").unwrap();
+        let top = dir.join("alsa.conf");
+        assert_eq!(
+            alsa_config_path(None, &dir, &conf),
+            Some(format!("{}:{conf_str}", top.display()))
+        );
+        assert_eq!(
+            alsa_config_path(Some("/etc/mine.conf"), &dir, &conf),
+            Some(format!("/etc/mine.conf:{conf_str}")),
+            "a list the environment names is kept ahead of the bridge"
+        );
+        let once = format!("/etc/mine.conf:{conf_str}");
+        assert_eq!(
+            alsa_config_path(Some(&once), &dir, &conf),
+            Some(once.clone()),
+            "the bridge joins the list once"
+        );
+        assert_eq!(
+            alsa_config_path(None, &dir, Path::new("/run/a b/selkies-alsa.conf")),
+            None,
+            "alsa-lib splits the list on spaces"
+        );
     }
 
     #[test]
