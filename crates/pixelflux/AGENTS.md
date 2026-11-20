@@ -136,7 +136,9 @@ a fixed eight whatever the level, four under NVENC, as many as a frame predicts 
 MiB more a session). NVENC keeps long-term
 frames of that buffer as anchors where the device offers them (H.264 and AV1 one, H.265 two), and VA-API as many
 where the driver codes a picture from the reference it is named (radeonsi's VCE for H.264 and UVD for H.265,
-measured, `keeps_anchors`): one in H.264, long-term, the session writing the marking and the list modification into
+measured, `keeps_anchors`) and the buffer has room for two recent frames beside them (three frames in H.264, four in
+H.265, short of which the session keeps a window without anchors, as a `video_reference_frames` of 1 leaves it):
+one in H.264, long-term, the session writing the marking and the list modification into
 its own slice headers, and two in H.265, listed as short-term pictures in every reference picture set as NVENC's are,
 so a loss older than
 every recent frame, or than a buffer a resize left small (the driver lowers the buffer in place but never raises it),
