@@ -453,6 +453,13 @@ pub static SUITES: &[Suite] = &[
     suite("e2e/subfolder.spec.ts", "e2e", 900),
     suite("e2e/frame_ancestors.spec.ts", "e2e", 300),
     Suite {
+        path: "e2e/worker_src.spec.ts",
+        tier: "e2e",
+        timeout: 300,
+        selectors: &["control", "restricted"],
+        name: None,
+    },
+    Suite {
         path: "e2e/embedded_client.spec.ts",
         tier: "e2e",
         timeout: 600,
