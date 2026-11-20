@@ -3236,7 +3236,9 @@ function logWorkerDecoderConfig(codec: string, w: number, h: number): void {
  * decoder starts at a key frame: one that came with the change is decoded
  * as it is, and a delta frame that came with it costs a key frame request.
  * A delta in avcC framing is dropped before the configure, since the
- * decoder's description comes from a key frame's parameter sets.
+ * decoder's description comes from a key frame's parameter sets. A frame
+ * handed on starts the stream, as one the socket worker diverts to the worker
+ * does, which ends the key frame requests the wait for a first frame makes.
  * @param isKey
  * @param dataBuf The Annex-B payload; transferred, not copied.
  * @param w Coded width.
@@ -3266,6 +3268,7 @@ function feedWorkerDecoder(isKey: boolean, dataBuf: ArrayBuffer, w: number, h: n
   const data = framed ? annexbToAvcc(new Uint8Array(dataBuf)).buffer : dataBuf;
   try { videoWorker!.postMessage({ type: 'chunk', key: isKey, data: data, timestamp: chunkStamp(), frameId: frameId, reference: reference, at: arrival }, [data]); }
   catch (e) { return false; }
+  if (!streamStarted) startStream();
   return true;
 }
 

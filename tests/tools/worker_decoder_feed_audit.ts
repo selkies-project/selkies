@@ -12,12 +12,13 @@
  * that key frame, and one brought on by a delta frame is not. In avcC framing
  * a delta frame cannot configure at all, since the decoder's description
  * comes from a key frame's parameter sets, so it is dropped behind the
- * request.
+ * request. The first frame handed on starts the stream, which ends the key
+ * frame requests the page makes while it waits for a first frame.
  *
  * `feedWorkerDecoder` is taken from the WebSockets core as the browser runs
  * it and driven over stand-ins for the worker and the page state it reads;
- * each case counts the configures and chunks it posts and the key frame
- * requests it sends.
+ * each case counts the configures and chunks it posts, the key frame
+ * requests it sends, and the times it starts the stream.
  *
  * Prints one PASS/FAIL line per check and exits non-zero if any failed.
  * @module
@@ -47,6 +48,8 @@ interface Feed {
   frame: (isKey: boolean, w?: number, h?: number) => boolean;
   /** @returns The log's entries since the last call. */
   take: () => string[];
+  /** @returns How many times the feed started the stream. */
+  starts: () => number;
 }
 
 const CODEC = 'avc1.42e01f';
@@ -60,7 +63,8 @@ const CODEC = 'avc1.42e01f';
 function feed(framing: 'annexb' | 'avcc'): Feed {
   const log: string[] = [];
   let taken = 0;
-  const context = vm.createContext({
+  let starts = 0;
+  const context: Record<string, unknown> = vm.createContext({
     workerDecodeFailed: false,
     workerDecoderCodec: null,
     workerDecoderW: 0,
@@ -79,6 +83,8 @@ function feed(framing: 'annexb' | 'avcc'): Feed {
     annexbToAvcc: (bytes: Uint8Array): Uint8Array => bytes.slice(),
     chunkStamp: (): number => 0,
     requestKeyframe: (): void => { log.push('request'); },
+    streamStarted: false,
+    startStream: (): void => { starts++; context.streamStarted = true; },
   });
   const compiled: unknown = vm.runInContext(
     `${declaration(readSource(CORE), 'feedWorkerDecoder')}\nfeedWorkerDecoder`, context,
@@ -94,6 +100,7 @@ function feed(framing: 'annexb' | 'avcc'): Feed {
       return handled === true;
     },
     take: (): string[] => { const out = log.slice(taken); taken = log.length; return out; },
+    starts: (): number => starts,
   };
 }
 
@@ -112,6 +119,7 @@ for (const framing of ['annexb', 'avcc'] as const) {
   got = f.take();
   check(`${framing}: a key frame at a new size reconfigures, again with no request`,
         out && same(got, ['config', 'key']), got);
+  check(`${framing}: the first frame handed on starts the stream, once`, f.starts() === 1, f.starts());
 }
 
 {
@@ -132,6 +140,7 @@ for (const framing of ['annexb', 'avcc'] as const) {
   const got = f.take();
   check('avcc: a delta frame before any key frame is dropped behind a key frame request',
         out && same(got, ['request']), got);
+  check('and starts no stream, since nothing was handed on', f.starts() === 0, f.starts());
   f.frame(true);
   f.frame(false, 1920, 1080);
   const resized = f.take();
