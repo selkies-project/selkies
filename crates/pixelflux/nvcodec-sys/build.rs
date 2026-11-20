@@ -203,5 +203,10 @@ fn main() -> std::io::Result<()> {
 
 /// @brief No-op build script for ordinary builds: the committed `src/bindgen/*.rs` bindings are
 /// compiled as-is without invoking bindgen.
+/// It reads nothing but itself, and says so: a script that names nothing is rerun whenever any
+/// file of the package has another modification time, as one does after a copy that keeps only
+/// whole seconds (an image layer), and pixelflux and everything above it would rebuild with it.
 #[cfg(not(feature = "regen"))]
-fn main() {}
+fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+}
