@@ -89,6 +89,10 @@ pub const VIEWER_RESUME_MIN_INTERVAL_S: f64 = 1.0;
 pub const RECONNECT_DEBOUNCE_MS: f64 = 500.0;
 /// The reconnect debounce's table is bounded.
 pub const MAX_RECENT_CLIENTS: usize = 1000;
+/// How long after one `LOST_FRAME` reaches a display's encoder the display takes the next.
+const LOST_FRAME_FLOOR_S: f64 = 0.005;
+/// How long after one repair of a kind a page that does not own its display may ask another.
+const REPAIR_FLOOR_S: f64 = 1.0;
 
 /// The periods the suites shorten; the defaults are the module's.
 #[derive(Clone, Copy, Debug)]
@@ -296,7 +300,7 @@ impl WsService {
                 .get(&(client, kind))
                 .copied()
                 .unwrap_or(f64::NEG_INFINITY)
-            < 1.0
+            < REPAIR_FLOOR_S
         {
             return false;
         }
@@ -451,27 +455,71 @@ impl WsService {
         }
     }
 
-    /// `LOST_FRAME`: one report per display per few milliseconds is all a burst of clients can add.
+    /// `LOST_FRAME`: one report per display per few milliseconds is all a burst of clients can
+    /// add, and one a second from a page that does not own the display. A report the display's
+    /// floor holds back is kept, a page's oldest standing for the rest, and told with the page's
+    /// next report past the floor or once it ends: the encoder predicts past a lost frame and
+    /// every frame after it, so the later reports alone would leave it predicting from the first,
+    /// which the page dropped too. The report told beside the kept one is ignored by an encoder
+    /// the kept one covers, and repairs only where that one predates the stream's key frame. A
+    /// report the page's own floor holds back is dropped, and the floor is stamped only by a
+    /// report told: most such reports name frames encoded before the page's last report reached
+    /// the encoder, which it covers, and telling one would hold the floor a second longer.
     pub(crate) fn lost_frame(&self, client: ClientId, display_id: &str, frame_id: i64) {
-        if !self.repair_taken(client, display_id, "lost") {
-            return;
-        }
+        self.tell_lost_frames(client, display_id, Some((frame_id & 0xFFFF) as u16));
+    }
+
+    /// Tell the encoder of the frame kept for `client` on `display_id` and of `frame_id` where
+    /// the floors let a report through; where the display's floor alone holds it, keep the older
+    /// of the two and come back once the floor ends while the page is still connected.
+    fn tell_lost_frames(&self, client: ClientId, display_id: &str, frame_id: Option<u16>) {
         let at = now();
-        {
+        let (told, wait) = {
             let mut reg = self.reg.lock();
-            if at
-                - reg
-                    .last_lost_frame
-                    .get(display_id)
-                    .copied()
-                    .unwrap_or(f64::NEG_INFINITY)
-                < 0.005
-            {
+            let key = (client, display_id.to_string());
+            let kept = reg.lost_kept.remove(&key);
+            let oldest = match (kept, frame_id) {
+                (Some(kept), Some(id)) if kept.wrapping_sub(id).wrapping_sub(1) < 0x7FFF => id,
+                (Some(kept), _) => kept,
+                (None, Some(id)) => id,
+                (None, None) => return,
+            };
+            if frame_id.is_none() && !reg.clients.contains_key(&client) {
                 return;
             }
-            reg.last_lost_frame.insert(display_id.to_string(), at);
+            let owns = reg.owns(client, display_id);
+            let since = |stamp: Option<&f64>| stamp.copied().unwrap_or(f64::NEG_INFINITY);
+            if !owns && at < since(reg.repair_times.get(&(client, "lost"))) + REPAIR_FLOOR_S {
+                return;
+            }
+            let due = since(reg.last_lost_frame.get(display_id)) + LOST_FRAME_FLOOR_S;
+            if at < due {
+                reg.lost_kept.insert(key, oldest);
+                // One timer stands for a page's kept frame: the report keeping it arms it, and
+                // a timer the floor still holds re-arms itself.
+                (
+                    [None, None],
+                    (kept.is_none() || frame_id.is_none()).then_some(due - at),
+                )
+            } else {
+                reg.last_lost_frame.insert(display_id.to_string(), at);
+                if !owns {
+                    reg.repair_times.insert((client, "lost"), at);
+                }
+                ([kept, frame_id.filter(|&id| Some(id) != kept)], None)
+            }
+        };
+        if let Some(wait) = wait {
+            let service = self.arc();
+            let display_id = display_id.to_string();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                service.tell_lost_frames(client, &display_id, None);
+            });
         }
-        self.schedule_invalidation(display_id, frame_id, false);
+        for frame_id in told.into_iter().flatten() {
+            self.schedule_invalidation(display_id, i64::from(frame_id), false);
+        }
     }
 
     /// `REQUEST_KEYFRAME`: one request per display per 250 ms; the log line is throttled harder.

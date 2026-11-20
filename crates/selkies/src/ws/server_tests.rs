@@ -25,6 +25,17 @@ async fn settle() {
     tokio::time::sleep(Duration::from_millis(10)).await;
 }
 
+/// Whether `capture` is given `call` within a second: a call a timer makes.
+async fn given(capture: &FakeCapture, call: &str) -> bool {
+    for _ in 0..100 {
+        if capture.has(call) {
+            return true;
+        }
+        settle().await;
+    }
+    false
+}
+
 fn entry(role: &str, slot: Json) -> TokenEntry {
     TokenEntry {
         role: role.into(),
@@ -420,6 +431,88 @@ async fn lost_frames_and_key_frames_are_floored() {
         idrs + 3,
         "a page that does not own the display repairs once a second"
     );
+    reset_clock();
+}
+
+/// A lost frame a floor holds back reaches the encoder once the floor ends, the oldest of those
+/// held back standing for the rest: the encoder predicts past a frame and every frame after it,
+/// so the later reports alone would leave it predicting from the first, which the page dropped.
+#[tokio::test]
+async fn a_lost_frame_held_back_by_the_floor_is_told_when_it_ends() {
+    let rig = Rig::new();
+    let mut owner = rig.owner("a").await;
+    settle().await;
+    let capture = rig.primary_capture();
+    owner.say("LOST_FRAME 10").await;
+    owner.say("LOST_FRAME 20").await;
+    owner.say("LOST_FRAME 21").await;
+    assert!(capture.has("invalidate 10 false"));
+    assert!(
+        !capture.has("invalidate 20 false"),
+        "one invalidation per display per 5 ms"
+    );
+    assert!(
+        given(&capture, "invalidate 20 false").await,
+        "the first frame held back is told once the floor ends"
+    );
+    assert!(
+        !capture.has("invalidate 21 false"),
+        "the first stands for the frames after it"
+    );
+}
+
+/// A report from a page beside the owner that the display's floor holds back, another page
+/// having just reported, is told once that floor ends, and spends the page's own floor only then.
+#[tokio::test]
+async fn a_page_beside_the_owner_held_back_by_the_display_floor_is_told_when_it_ends() {
+    let rig = Rig::new();
+    let mut owner = rig.owner("a").await;
+    let mut beside = rig.controller().await;
+    beside
+        .say(r#"SETTINGS,{"tabId":"b","initialClientWidth":640,"initialClientHeight":480}"#)
+        .await;
+    settle().await;
+    assert!(rig.service.reg.lock().is_beside(beside.id()));
+    let capture = rig.primary_capture();
+    owner.say("LOST_FRAME 50").await;
+    beside.say("LOST_FRAME 48").await;
+    assert!(capture.has("invalidate 50 false"));
+    assert!(
+        !capture.has("invalidate 48 false"),
+        "one invalidation per display per 5 ms"
+    );
+    assert!(
+        given(&capture, "invalidate 48 false").await,
+        "the page's report is told once the display's floor ends"
+    );
+}
+
+/// A report a page's own floor holds back is dropped and leaves that floor where it was: most
+/// such reports name frames encoded before the page's last report reached the encoder, which
+/// that report already covers, so the next run the page reports past the floor is told at once.
+#[tokio::test]
+async fn a_report_the_pages_own_floor_holds_back_does_not_extend_it() {
+    let rig = Rig::new();
+    let _owner = rig.owner("a").await;
+    let mut beside = rig.controller().await;
+    beside
+        .say(r#"SETTINGS,{"tabId":"b","initialClientWidth":640,"initialClientHeight":480}"#)
+        .await;
+    settle().await;
+    assert!(rig.service.reg.lock().is_beside(beside.id()));
+    let capture = rig.primary_capture();
+    beside.say("LOST_FRAME 30").await;
+    assert!(capture.has("invalidate 30 false"));
+    advance(0.99);
+    beside.say("LOST_FRAME 31").await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    advance(0.2);
+    beside.say("LOST_FRAME 50").await;
+    assert!(
+        capture.has("invalidate 50 false"),
+        "the run past the floor is told at once"
+    );
+    assert!(!capture.has("invalidate 31 false"));
     reset_clock();
 }
 
