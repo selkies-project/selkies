@@ -1075,7 +1075,9 @@ impl WebRtcService {
             if let Some(held) = held {
                 self.engine.send_cc_rate(&did, held);
             }
-            if target != current.round() {
+            // In whole kbps: a capped CRF display's probe can hold the target at its current
+            // rate, fraction and all, which is no change to log or apply.
+            if target.round() != current.round() {
                 let why = if restored {
                     "the queue gone after a stall: the rate before it".to_string()
                 } else {

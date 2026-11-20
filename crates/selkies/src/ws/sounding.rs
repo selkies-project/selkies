@@ -638,12 +638,22 @@ impl DisplayLink {
             applied_kbps: None,
             pad_bps: Some(pad_bps),
         };
-        if rate != current.round()
+        // Compared in whole kbps: a capped CRF display's ceiling carries a fraction, and a
+        // landing on it is no change. A cut is news, a rise the steer's routine, as its own ticks
+        // log them.
+        if rate.round() != current.round()
             && let Some(encoder) = encoder
         {
-            info!(target: "ws", "Congestion control[{display_id}]: video bitrate {current:.0} -> {rate:.0} kbps ({why})");
-            if encoder.update_video_bitrate(rate as i64).is_ok() {
-                outcome.applied_kbps = Some(rate as i64);
+            let line = format!(
+                "Congestion control[{display_id}]: video bitrate {current:.0} -> {rate:.0} kbps ({why})"
+            );
+            if rate < current {
+                info!(target: "ws", "{line}");
+            } else {
+                debug!(target: "ws", "{line}");
+            }
+            if encoder.update_video_bitrate(rate.round() as i64).is_ok() {
+                outcome.applied_kbps = Some(rate.round() as i64);
             }
         }
         Some(outcome)
@@ -992,5 +1002,59 @@ mod tests {
             0.0
         );
         assert_eq!(link.sounding.rate_kbps, None);
+    }
+
+    /// The encoder a landing retargets: every rate it is given.
+    struct Encoder(std::cell::RefCell<Vec<i64>>);
+
+    impl SteerTarget for Encoder {
+        fn update_video_bitrate(&self, kbps: i64) -> Result<(), String> {
+            self.0.borrow_mut().push(kbps);
+            Ok(())
+        }
+        fn update_link_rate(&self, _kbps: i64) {}
+    }
+
+    /// Climbs `link`'s probe under `ceiling` until the path has carried the padding.
+    fn carried(link: &mut DisplayLink, ceiling: f64) -> f64 {
+        let mut now = NOW;
+        while link.sound_rate(4000.0, ceiling, Some(200_000.0), Some(0.0), false, 0.5, now) > 0.0 {
+            now += 0.5;
+        }
+        assert!(matches!(link.sounding.phase, SoundPhase::Carried));
+        now
+    }
+
+    #[test]
+    fn a_capped_display_landing_on_its_own_ceiling_retargets_nothing() {
+        // A capped CRF display's ceiling follows its largest frames and carries a fraction.
+        let ceiling = 124_185.4;
+        let encoder = Encoder(Default::default());
+        // At the ceiling already, as the path last carried it or as the encoder started.
+        for held in [Some(ceiling), None] {
+            let mut link = DisplayLink::new();
+            link.capped = true;
+            link.link_kbps = held;
+            let now = carried(&mut link, ceiling);
+            let outcome = link
+                .sound_land("primary", now, ceiling, 100.0, Some(&encoder))
+                .expect("the landing");
+            assert_eq!(
+                outcome.applied_kbps, None,
+                "held at {held:?}: no change to apply"
+            );
+        }
+        assert!(encoder.0.borrow().is_empty(), "{:?}", encoder.0.borrow());
+
+        // Landing above the rate the path was held to retargets the encoder, in whole kbps.
+        let mut link = DisplayLink::new();
+        link.capped = true;
+        link.link_kbps = Some(100_000.0);
+        let now = carried(&mut link, ceiling);
+        let outcome = link
+            .sound_land("primary", now, ceiling, 100.0, Some(&encoder))
+            .expect("the landing");
+        assert_eq!(outcome.applied_kbps, Some(124_185));
+        assert_eq!(*encoder.0.borrow(), vec![124_185]);
     }
 }
