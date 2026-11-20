@@ -241,7 +241,7 @@ async function wsBlock(res: Checks, host: Host, wayland: boolean): Promise<void>
         res.check('and so is every picture the owner decodes', ownerWorst < CORRUPT_FRACTION, `worst ${ownerWorst.toFixed(3)}`);
         res.check('whose picture moves on between samples', stuck(samples) === 0, `${stuck(samples)} stuck`);
         res.check('it trails the owner by under a second', lag !== undefined && lag < 60, lags);
-        res.check('the drops were answered by the encoder predicting past them', log.includes('lost by a client; the encoder predicts past it'));
+        res.check('the drops were reported to the encoder', /(lost by a client|left out by a relay); the encoder stops predicting from it/.test(log));
         process.stdout.write(`      owner: ${keys} key frames in ${WINDOW_S} s; slow page: ${frames.length} frames (${anchors} anchors), `
             + `longest stall ${stalls(frames).toFixed(0)} ms, lag ${lag ?? '?'} frames (median), worst picture ${worst.toFixed(3)} `
             + `(the owner's ${ownerWorst.toFixed(3)})\n`);

@@ -427,8 +427,8 @@ impl WsService {
     }
 
     /// Tell the display's encoder a client lost `frame_id`, or a relay `withheld` it, so the
-    /// frames after it stop predicting from it; logged once per display per five seconds with
-    /// the count of the rest.
+    /// frames after it stop predicting from it; logged once per display and cause per five
+    /// seconds with the count of the rest ([`invalidation_line`]).
     pub(crate) fn schedule_invalidation(&self, display_id: &str, frame_id: i64, withheld: bool) {
         let Some(capture) = self.capture_of(display_id) else {
             return;
@@ -436,22 +436,16 @@ impl WsService {
         capture.invalidate_reference((frame_id & 0xFFFF) as u16, withheld);
         let at = now();
         let mut reg = self.reg.lock();
-        let (last, more) = reg
+        let entry = reg
             .invalidation_log
-            .get(display_id)
-            .copied()
-            .unwrap_or((f64::NEG_INFINITY, 0));
-        if at - last >= 5.0 {
-            let suffix = if more > 0 {
-                format!(" (+{more} more in the last 5 s)")
-            } else {
-                String::new()
-            };
-            info!(target: "ws", "Display '{display_id}': frame {frame_id} lost by a client; the encoder predicts past it.{suffix}");
-            reg.invalidation_log.insert(display_id.to_string(), (at, 0));
+            .entry((display_id.to_string(), withheld))
+            .or_insert((f64::NEG_INFINITY, 0));
+        if at - entry.0 >= 5.0 {
+            let line = invalidation_line(display_id, frame_id, withheld, entry.1);
+            *entry = (at, 0);
+            info!(target: "ws", "{line}");
         } else {
-            reg.invalidation_log
-                .insert(display_id.to_string(), (last, more + 1));
+            entry.1 += 1;
         }
     }
 
@@ -4563,6 +4557,34 @@ impl WsService {
         self.stop_stats_collectors().await;
         info!(target: "ws", "Transport shutdown complete.");
     }
+}
+
+/// The line a display's invalidations are logged with: the frame reported, whether a client
+/// lost it or a relay left it out (`withheld`), and `more` reported since the last line.
+///
+/// The encoder answers a report on its own thread, predicting from an older frame it still
+/// holds or, where none is left in its window, coding a key frame; the service never learns
+/// which, so the line states only what the report asks of the encoder, and the answer is
+/// pixelflux's to count (`stream_stats`).
+pub(crate) fn invalidation_line(
+    display_id: &str,
+    frame_id: i64,
+    withheld: bool,
+    more: u64,
+) -> String {
+    let cause = if withheld {
+        "left out by a relay"
+    } else {
+        "lost by a client"
+    };
+    let suffix = if more > 0 {
+        format!(" (+{more} more in the last 5 s)")
+    } else {
+        String::new()
+    };
+    format!(
+        "Display '{display_id}': frame {frame_id} {cause}; the encoder stops predicting from it.{suffix}"
+    )
 }
 
 /// Render an absent payload value as `None` in a log line.

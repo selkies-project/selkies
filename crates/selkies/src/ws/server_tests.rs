@@ -423,6 +423,54 @@ async fn lost_frames_and_key_frames_are_floored() {
     reset_clock();
 }
 
+#[test]
+fn the_invalidation_line_names_who_lost_the_frame_and_not_the_encoders_answer() {
+    assert_eq!(
+        crate::ws::server::invalidation_line(PRIMARY_DISPLAY, 71, false, 0),
+        "Display 'primary': frame 71 lost by a client; the encoder stops predicting from it."
+    );
+    assert_eq!(
+        crate::ws::server::invalidation_line(PRIMARY_DISPLAY, 72, true, 3),
+        "Display 'primary': frame 72 left out by a relay; the encoder stops predicting from it. \
+         (+3 more in the last 5 s)"
+    );
+}
+
+#[tokio::test]
+async fn a_relays_invalidations_are_logged_apart_from_a_clients() {
+    let rig = Rig::new();
+    let _owner = rig.owner("a").await;
+    settle().await;
+    let logged = |rig: &Rig, withheld: bool| {
+        rig.service
+            .reg
+            .lock()
+            .invalidation_log
+            .get(&(PRIMARY_DISPLAY.to_string(), withheld))
+            .map(|e| e.1)
+    };
+    rig.service
+        .schedule_invalidation(PRIMARY_DISPLAY, 70, false);
+    rig.service.schedule_invalidation(PRIMARY_DISPLAY, 71, true);
+    assert_eq!(
+        (logged(&rig, false), logged(&rig, true)),
+        (Some(0), Some(0)),
+        "a relay's first report within five seconds of a client's has a line of its own"
+    );
+    rig.service
+        .schedule_invalidation(PRIMARY_DISPLAY, 72, false);
+    assert_eq!(
+        (logged(&rig, false), logged(&rig, true)),
+        (Some(1), Some(0)),
+        "a second report of the same cause is counted into the next line"
+    );
+    advance(5.0);
+    rig.service
+        .schedule_invalidation(PRIMARY_DISPLAY, 73, false);
+    assert_eq!(logged(&rig, false), Some(0), "and logged five seconds on");
+    reset_clock();
+}
+
 #[tokio::test]
 async fn a_rate_change_during_a_layout_pass_is_the_refresh_the_display_keeps() {
     let rig = Rig::new();
