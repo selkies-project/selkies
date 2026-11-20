@@ -146,7 +146,7 @@ impl OverlayState {
 
             let pixels = rgba.into_vec();
             let mut gpu_pixels = pixels.clone();
-            for pixel in gpu_pixels.chunks_exact_mut(4) {
+            for pixel in gpu_pixels.as_chunks_mut::<4>().0 {
                 let alpha = u16::from(pixel[3]);
                 for channel in &mut pixel[..3] {
                     *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
