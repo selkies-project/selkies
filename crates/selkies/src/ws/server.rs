@@ -2597,11 +2597,13 @@ impl WsService {
     ///
     /// Software, VA-API/Intel, V4L2, and Tegra streams keep one reference frame
     /// (`video_reference_frames`) while one page streams the display; NVENC keeps its acknowledged
-    /// references for loss recovery. A deeper buffer lets the encoder predict past a frame a page
-    /// dropped (`LOST_FRAME`, a relay's thinned run) instead of coding a key frame, but every
-    /// client decodes against all of it on every frame: at 2560x1600 eight frames cost FFmpeg's
-    /// decoder 0.3 ms a frame over one. TCP loses nothing, so one page's drop is rare and repaired
-    /// by a key frame. A display two pages or more stream, where a page beside the owner on a
+    /// references for loss recovery. The cap bounds an H.264 or H.265 buffer only
+    /// (`pixelflux::encoders::reference_frames`): libvpx, and SVT-AV1 at a constant rate, keep
+    /// their anchors under it and pin the one every client holds. A deeper buffer lets the
+    /// encoder predict past a frame a page dropped (`LOST_FRAME`, a relay's thinned run) instead
+    /// of coding a key frame, but every client decodes against all of it on every frame: at
+    /// 2560x1600 eight frames cost FFmpeg's decoder 0.3 ms a frame over one. TCP loses nothing,
+    /// so one page's drop is rare and repaired by a key frame. A display two pages or more stream, where a page beside the owner on a
     /// narrower link is left frames, starts at the encoder's own depth, and a running one takes
     /// it as the second page joins (`deepen_references`). The WebRTC pipeline keeps the depth for
     /// the losses its NACK and FEC leave.
