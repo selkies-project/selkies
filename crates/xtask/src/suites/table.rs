@@ -117,6 +117,7 @@ pub static SUITES: &[Suite] = &[
     suite("tools/decode_gate_audit.ts", "unit", 120),
     suite("tools/decode_pace_audit.ts", "unit", 120),
     suite("tools/worker_canvas_audit.ts", "unit", 120),
+    suite("tools/worker_decoder_feed_audit.ts", "unit", 120),
     suite("tools/color_range_audit.ts", "unit", 120),
     Suite {
         path: "tools/stream_stats_audit.ts",
