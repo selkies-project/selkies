@@ -524,10 +524,18 @@ pub struct CaptureSettings {
     /// When true, encoders emit the raw payload without the per-stripe header byte block;
     /// stripe metadata is then carried only on the frame attributes.
     pub omit_stripe_headers: bool,
-    /// The consumer acknowledges the frames every client holds (`acknowledge_reference`), so an
-    /// anchor predicts from a frame every client was sent, and where a session keeps two
-    /// long-term references (H.265, and AV1, which keeps one otherwise) the newest every client
-    /// holds stays pinned beside the one the schedule marks. H.264 keeps one.
+    /// The consumer acknowledges, from the first frame on, the frames every client holds or was
+    /// sent (`acknowledge_reference`); the selkies server sets this on every capture. Read when
+    /// an NVENC or VA-API session opens: an anchor then predicts from a frame every client was
+    /// sent, and where a session keeps two the newest every client holds stays pinned beside the
+    /// one the schedule marks. Where its device and buffer admit anchors (`nvenc::anchor_count`),
+    /// NVENC keeps two for H.265, two for AV1 only when this is set (one otherwise), and one for
+    /// H.264; VA-API H.264 and H.265 keep them on radeonsi only (`keeps_anchors`), one and two.
+    /// Every session also acts on each acknowledgement it is handed, set or not; of those that
+    /// never read this, libvpx, VA-API VP8, and SVT-AV1 at a constant rate pin the anchor buffer
+    /// holding the newest frame every client holds (`ReferenceSlots::acknowledge`), and OpenH264
+    /// (builds without the `gpl` feature) confirms the long-term reference it marked. x264 keeps
+    /// none.
     pub acknowledge_references: bool,
     /// The most frames an H.264 or H.265 stream keeps for reference (its decoded picture
     /// buffer), 0 for as many as the level admits up to `REFERENCE_FRAMES`: a decoder that holds

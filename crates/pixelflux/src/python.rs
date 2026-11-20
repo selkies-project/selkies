@@ -1051,11 +1051,14 @@ struct PyCaptureSettings {
     /// Annex-B access unit and its metadata is on the `StripeFrame` attributes.
     #[pyo3(get, set)]
     omit_stripe_headers: bool,
-    /// The consumer acknowledges the frames every client holds (`acknowledge_reference`): an
-    /// NVENC anchor predicts from a frame every client was sent, and where the session keeps two
-    /// long-term references (H.265, and AV1, which keeps one otherwise) the newest every client
-    /// holds stays pinned, so each client recovers on its own from a loss of any depth. H.264
-    /// keeps one.
+    /// The consumer acknowledges, from the first frame on, the frames every client holds or was
+    /// sent (`acknowledge_reference`). Read when an NVENC or VA-API session opens: an anchor then
+    /// predicts from a frame every client was sent, and where the session keeps two (NVENC's
+    /// H.265, and AV1, which keeps one otherwise; VA-API's H.265 on radeonsi) the newest every
+    /// client holds stays pinned, so each client recovers on its own from a loss of any depth.
+    /// H.264 keeps one. Every session also acts on each acknowledgement it is handed, set or not;
+    /// libvpx, VA-API VP8, SVT-AV1 at a constant rate and OpenH264 (builds without the `gpl`
+    /// feature) never read this. x264 keeps none.
     #[pyo3(get, set)]
     acknowledge_references: bool,
     /// The most frames an H.264 or H.265 stream keeps for reference, 0 for the level's: a
