@@ -61,7 +61,7 @@ use crate::ws::audio::AudioTargets;
 use crate::ws::client::{
     BOUNDED_SEND_SECONDS, Client, ClientId, Frame, Liveness, SendError, broadcast as broadcast_text,
 };
-use crate::ws::host::{CaptureHandle, DroppedDisplay, Input, WsDeps};
+use crate::ws::host::{CaptureHandle, DroppedDisplay, Input, KeyFrameCause, WsDeps};
 use crate::ws::link::{
     BACKPRESSURE_ALLOWED_DESYNC_MS, BACKPRESSURE_CHECK_INTERVAL_S, DisplayLink, GateEffects,
     PadPermit, SteerOutcome, SteerTarget, TickInput,
@@ -70,7 +70,8 @@ use crate::ws::protocol::{
     BULK_DRAIN_TIMEOUT_S, ClientSettings, WS_BULK_BACKLOG_BYTES, WS_BULK_BACKLOG_POLL_S, fps_label,
 };
 use crate::ws::relay::{
-    RelayHost, RelayItem, VIDEO_RELAY_BUDGET_MIN_BYTES, VIDEO_RELAY_BUDGET_SECONDS, VideoRelay,
+    RelayHost, RelayItem, RunEvent, VIDEO_RELAY_BUDGET_MIN_BYTES, VIDEO_RELAY_BUDGET_SECONDS,
+    VideoRelay,
 };
 use crate::ws::state::{
     CaptureInstance, DisplayState, Registry, ServerState, json_f64, json_i64, sanitize,
@@ -317,10 +318,11 @@ impl WsService {
 
     // ---- key frames, lost frames, frames held ----------------------------------------------
 
-    /// Ask the display's encoder for a fresh key frame; non-blocking and idempotent.
-    pub(crate) fn schedule_idr(&self, display_id: &str) {
+    /// Ask the display's encoder for a fresh key frame for `cause`; non-blocking and
+    /// idempotent.
+    pub(crate) fn schedule_idr(&self, display_id: &str, cause: KeyFrameCause) {
         if let Some(capture) = self.capture_of(display_id) {
-            capture.request_idr_frame();
+            request_key_frame(&*capture, self.deps.metrics.as_deref(), display_id, cause);
         }
     }
 
@@ -339,7 +341,7 @@ impl WsService {
         if relay.as_ref().is_some_and(|r| r.sync_pending()) {
             return;
         }
-        self.schedule_idr(display_id);
+        self.schedule_idr(display_id, KeyFrameCause::Page);
         if let Some(relay) = relay {
             relay.hold_sync();
         }
@@ -521,7 +523,12 @@ impl WsService {
                     .or_insert(0) += 1;
             }
         }
-        capture.request_idr_frame();
+        request_key_frame(
+            &*capture,
+            self.deps.metrics.as_deref(),
+            target,
+            KeyFrameCause::Client,
+        );
     }
 
     // ---- the display owner model -------------------------------------------------------------
@@ -1128,7 +1135,7 @@ impl WsService {
                 self.stop_capture_for_display(display_id).await;
                 self.start_capture_for_display(display_id, layout).await;
                 self.start_backpressure_task(display_id);
-                self.schedule_idr(display_id);
+                self.schedule_idr(display_id, KeyFrameCause::Restart);
                 self.broadcast_live_server_settings(display_id).await;
                 if Self::is_wayland() {
                     self.sync_wayland_realized_geometry(display_id, true).await;
@@ -2457,7 +2464,7 @@ impl WsService {
                 self.start_capture_for_display(did, layout).await;
                 self.start_backpressure_task(did);
                 // A static screen must still repaint and clients must relearn the encoder.
-                self.schedule_idr(did);
+                self.schedule_idr(did, KeyFrameCause::Restart);
                 self.broadcast_live_server_settings(did).await;
                 if Self::is_wayland() {
                     self.sync_wayland_realized_geometry(did, true).await;
@@ -2668,7 +2675,12 @@ impl WsService {
             let existing = self.capture_of(display_id);
             match existing {
                 Some(capture) if capture.is_capturing() => {
-                    capture.request_idr_frame();
+                    request_key_frame(
+                        &*capture,
+                        self.deps.metrics.as_deref(),
+                        display_id,
+                        KeyFrameCause::Page,
+                    );
                     debug!(target: "ws", "Capture instance for '{display_id}' already running; requested IDR.");
                     return true;
                 }
@@ -3131,7 +3143,7 @@ impl WsService {
                     for relay in group {
                         relay.drop_for_lag();
                     }
-                    self.schedule_idr(&display_id);
+                    self.schedule_idr(&display_id, KeyFrameCause::FanoutLag);
                     continue;
                 }
                 Err(broadcast::error::RecvError::Closed) => return,
@@ -3261,7 +3273,7 @@ impl WsService {
             }
         }
         if need_sync {
-            self.schedule_idr(display_id);
+            self.schedule_idr(display_id, KeyFrameCause::Relay);
         }
     }
 
@@ -3410,6 +3422,7 @@ impl WsService {
             primary: display_id == PRIMARY_DISPLAY,
         };
         let mut effects = CheckEffects {
+            display: display_id,
             capture: capture.clone(),
             relay,
             client: client.clone(),
@@ -3419,7 +3432,15 @@ impl WsService {
             let mut link = link.lock();
             link.loop_late_ms = late_ms;
             link.capped = capped;
+            let before = link.gate_counts;
             link.backpressure_tick(display_id, input, at, &mut effects);
+            if let Some(metrics) = &self.deps.metrics {
+                for (event, count) in link.gate_counts.since(&before) {
+                    if count > 0 {
+                        metrics.count_gate_events(display_id, event, count);
+                    }
+                }
+            }
             if steered && capturing && link.acknowledged_frame_id != -1 && link.has_sent_any_frame {
                 let target_view = capture.as_ref().map(|c| EncoderTarget(c.clone()));
                 let target = if capped {
@@ -3731,7 +3752,7 @@ impl WsService {
             info!(target: "ws", "Starting the 'primary' capture its hidden owner stopped, for the page beside it.");
             if service.ensure_viewer_capture().await {
                 let _ = page.send_text("PIPELINE_RESETTING primary", true).await;
-                service.schedule_idr(PRIMARY_DISPLAY);
+                service.schedule_idr(PRIMARY_DISPLAY, KeyFrameCause::Page);
             }
         });
     }
@@ -4776,18 +4797,34 @@ impl SteerTarget for EncoderTarget {
     }
 }
 
-/// What one backpressure check reaches: the owner's socket and relay and the display's encoder.
-struct CheckEffects {
+/// Ask `capture` for a key frame for `cause`, counted on `display` where the metrics are on:
+/// every key frame request the plane makes goes through here.
+fn request_key_frame(
+    capture: &dyn CaptureHandle,
+    metrics: Option<&dyn crate::ws::host::Metrics>,
+    display: &str,
+    cause: KeyFrameCause,
+) {
+    capture.request_idr_frame();
+    if let Some(metrics) = metrics {
+        metrics.count_keyframe_request(display, cause);
+    }
+}
+
+/// What one backpressure check of `display` reaches: the owner's socket and relay and the
+/// display's encoder.
+struct CheckEffects<'a> {
+    display: &'a str,
     capture: Option<Arc<dyn CaptureHandle>>,
     relay: Option<Arc<VideoRelay>>,
     client: Option<Arc<Client>>,
     metrics: Option<Arc<dyn crate::ws::host::Metrics>>,
 }
 
-impl GateEffects for CheckEffects {
-    fn request_idr(&mut self) {
+impl GateEffects for CheckEffects<'_> {
+    fn request_idr(&mut self, cause: KeyFrameCause) {
         if let Some(capture) = &self.capture {
-            capture.request_idr_frame();
+            request_key_frame(&**capture, self.metrics.as_deref(), self.display, cause);
         }
     }
 
@@ -4839,6 +4876,12 @@ impl GateEffects for CheckEffects {
 impl RelayHost for WsService {
     fn owns_display(&self, client: ClientId, display_id: &str) -> bool {
         self.reg.lock().owns(client, display_id)
+    }
+
+    fn relay_run(&self, display_id: &str, event: RunEvent) {
+        if let Some(metrics) = &self.deps.metrics {
+            metrics.count_relay_run(display_id, event);
+        }
     }
 
     fn relay_lost(&self, client: ClientId, display_id: &str, frame_id: u16, reach: bool) -> bool {

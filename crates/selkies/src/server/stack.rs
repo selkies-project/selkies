@@ -394,6 +394,33 @@ impl host::Metrics for ServerMetrics {
     fn set_latency(&self, ms: f64) {
         self.0.set_latency(ms);
     }
+
+    fn count_keyframe_request(&self, display: &str, cause: host::KeyFrameCause) {
+        self.0.count_websockets_event(
+            crate::stats::metrics::WsCounter::KeyframeRequests,
+            display,
+            cause.label(),
+            1,
+        );
+    }
+
+    fn count_gate_events(&self, display: &str, event: &'static str, count: u32) {
+        self.0.count_websockets_event(
+            crate::stats::metrics::WsCounter::GateEvents,
+            display,
+            event,
+            count,
+        );
+    }
+
+    fn count_relay_run(&self, display: &str, event: crate::ws::relay::RunEvent) {
+        self.0.count_websockets_event(
+            crate::stats::metrics::WsCounter::RelayRuns,
+            display,
+            event.label(),
+            1,
+        );
+    }
 }
 
 /// The capture-demand transitions on the audit trail.

@@ -48,6 +48,7 @@ use std::collections::VecDeque;
 
 use log::{debug, info, warn};
 
+use crate::ws::host::KeyFrameCause;
 use crate::ws::sounding::{self, SoundPhase, Sounding};
 use crate::ws::steer::{
     CongestionSteer, LinkAllowance, LinkProbeTick, PathProbe, RateHold, SteerTick,
@@ -223,6 +224,26 @@ pub struct GateCounts {
     pub reprobed_desync: u32,
     pub stalled: u32,
     pub reprobed_stall: u32,
+}
+
+impl GateCounts {
+    /// What each count gained since `before`, named as its field: the events of one check,
+    /// for the `websockets_gate_events` metric, which outlives the link a page registers.
+    pub fn since(&self, before: &GateCounts) -> [(&'static str, u32); 5] {
+        [
+            ("triggered", self.triggered - before.triggered),
+            ("lifted", self.lifted - before.lifted),
+            (
+                "reprobed_desync",
+                self.reprobed_desync - before.reprobed_desync,
+            ),
+            ("stalled", self.stalled - before.stalled),
+            (
+                "reprobed_stall",
+                self.reprobed_stall - before.reprobed_stall,
+            ),
+        ]
+    }
 }
 
 impl DisplayLink {
@@ -1144,7 +1165,7 @@ impl DisplayLink {
 /// and the display's encoder.
 pub trait GateEffects {
     /// Ask the encoder for a key frame.
-    fn request_idr(&mut self);
+    fn request_idr(&mut self, cause: KeyFrameCause);
     /// The gate lifted: whether the page's relay resumes on its own (`VideoRelay::ungate`).
     fn relay_ungate(&mut self, resync: bool) -> bool;
     /// A key frame is on its way to the relay (`VideoRelay::hold_sync`).
@@ -1190,6 +1211,18 @@ impl DisplayLink {
         now: f64,
         effects: &mut dyn GateEffects,
     ) {
+        self.move_gate(enabled, resync, KeyFrameCause::GateLift, now, effects);
+    }
+
+    /// [`Self::set_backpressure_enabled`], the key frame a lift asks for counted as `cause`.
+    fn move_gate(
+        &mut self,
+        enabled: bool,
+        resync: bool,
+        cause: KeyFrameCause,
+        now: f64,
+        effects: &mut dyn GateEffects,
+    ) {
         let prev = self.backpressure_enabled;
         self.backpressure_enabled = enabled;
         if enabled != prev {
@@ -1199,7 +1232,7 @@ impl DisplayLink {
             if effects.relay_ungate(resync) {
                 return;
             }
-            effects.request_idr();
+            effects.request_idr(cause);
             self.expect_key_frame(now);
             effects.relay_hold_sync();
         }
@@ -1306,7 +1339,7 @@ impl DisplayLink {
                 info!(target: "ws", "Re-probing stalled client for '{display_id}': reopening on an IDR.");
                 self.stall_gated_at = None;
                 self.unacked_since = None;
-                self.set_backpressure_enabled(true, false, now, effects);
+                self.move_gate(true, false, KeyFrameCause::Reprobe, now, effects);
             }
         } else if standing {
             self.stall_gated_at = None;
@@ -1350,7 +1383,7 @@ impl DisplayLink {
                 self.desync_gated = None;
                 self.sent_timestamps.clear();
                 self.acked_sent_at = Some(now);
-                self.set_backpressure_enabled(true, false, now, effects);
+                self.move_gate(true, false, KeyFrameCause::Reprobe, now, effects);
             } else {
                 self.set_backpressure_enabled(false, false, now, effects);
             }
@@ -1446,7 +1479,7 @@ mod tests {
     }
 
     impl GateEffects for Fake {
-        fn request_idr(&mut self) {
+        fn request_idr(&mut self, _cause: KeyFrameCause) {
             self.idrs += 1;
         }
         fn relay_ungate(&mut self, _resync: bool) -> bool {
@@ -1604,6 +1637,8 @@ mod tests {
         pending: Vec<u64>,
         answered: f64,
         idrs: usize,
+        /// The requests a re-probe made.
+        reprobe_idrs: u32,
     }
 
     impl Sim {
@@ -1630,8 +1665,11 @@ mod tests {
     }
 
     impl GateEffects for Sim {
-        fn request_idr(&mut self) {
+        fn request_idr(&mut self, cause: KeyFrameCause) {
             self.idrs += 1;
+            if cause == KeyFrameCause::Reprobe {
+                self.reprobe_idrs += 1;
+            }
         }
         fn relay_ungate(&mut self, _resync: bool) -> bool {
             false
@@ -1858,6 +1896,10 @@ mod tests {
             "{c:?}, {} IDRs",
             p.sim.idrs
         );
+        assert_eq!(
+            p.sim.reprobe_idrs, c.reprobed_desync,
+            "each re-probe asks for one key frame, counted as a re-probe's"
+        );
         assert!(
             p.longest_closed <= STALLED_CLIENT_REPROBE_SECONDS + 4.0 * 0.05 + 0.3,
             "closed {:.2} s",
@@ -1868,6 +1910,31 @@ mod tests {
             share < 0.5 && p.idrs_sent <= c.reprobed_desync + 2,
             "{share}, {} key frames, {c:?}",
             p.idrs_sent
+        );
+    }
+
+    #[test]
+    fn gate_counts_difference_into_the_events_of_one_check() {
+        let before = GateCounts {
+            triggered: 2,
+            lifted: 1,
+            ..GateCounts::default()
+        };
+        let after = GateCounts {
+            triggered: 3,
+            lifted: 1,
+            reprobed_stall: 1,
+            ..before
+        };
+        assert_eq!(
+            after.since(&before),
+            [
+                ("triggered", 1),
+                ("lifted", 0),
+                ("reprobed_desync", 0),
+                ("stalled", 0),
+                ("reprobed_stall", 1),
+            ]
         );
     }
 

@@ -16,7 +16,7 @@ use serde_json::{Value as Json, json};
 use crate::core::PRIMARY_DISPLAY;
 use crate::ws::client::testing::FakeSocket;
 use crate::ws::clock_tests::{advance, reset_clock};
-use crate::ws::host::{CaptureHandle, TokenEntry};
+use crate::ws::host::{CaptureHandle, KeyFrameCause, TokenEntry};
 use crate::ws::protocol::gzip_frame;
 use crate::ws::relay::RelayHost;
 use crate::ws::testkit::*;
@@ -423,6 +423,55 @@ async fn lost_frames_and_key_frames_are_floored() {
     reset_clock();
 }
 
+#[tokio::test]
+async fn every_key_frame_request_is_counted_by_its_cause() {
+    let rig = Rig::new();
+    let mut owner = rig.owner("a").await;
+    let mut viewer = rig.viewer().await;
+    settle().await;
+    let capture = rig.primary_capture();
+    let metrics = &rig.metrics;
+    let pages = metrics.keyframe_requests(PRIMARY_DISPLAY, "page");
+    rig.service
+        .schedule_idr_for_page(owner.id(), PRIMARY_DISPLAY);
+    assert_eq!(
+        metrics.keyframe_requests(PRIMARY_DISPLAY, "page"),
+        pages + 1,
+        "a page starting on the display decodes from one"
+    );
+    assert_eq!(
+        metrics.all_keyframe_requests(PRIMARY_DISPLAY),
+        capture.count("idr"),
+        "every request that reached the encoder is counted, and nothing else"
+    );
+    owner.say("REQUEST_KEYFRAME").await;
+    owner.say("REQUEST_KEYFRAME").await;
+    assert_eq!(
+        metrics.keyframe_requests(PRIMARY_DISPLAY, "client"),
+        1,
+        "a request the floor thins is not counted"
+    );
+    advance(0.3);
+    viewer.say("REQUEST_KEYFRAME").await;
+    rig.service
+        .schedule_idr(PRIMARY_DISPLAY, KeyFrameCause::FanoutLag);
+    rig.service
+        .schedule_idr(PRIMARY_DISPLAY, KeyFrameCause::Restart);
+    assert_eq!(
+        (
+            metrics.keyframe_requests(PRIMARY_DISPLAY, "client"),
+            metrics.keyframe_requests(PRIMARY_DISPLAY, "fanout_lag"),
+            metrics.keyframe_requests(PRIMARY_DISPLAY, "restart"),
+        ),
+        (2, 1, 1)
+    );
+    assert_eq!(
+        metrics.all_keyframe_requests(PRIMARY_DISPLAY),
+        capture.count("idr")
+    );
+    reset_clock();
+}
+
 #[test]
 fn the_invalidation_line_names_who_lost_the_frame_and_not_the_encoders_answer() {
     assert_eq!(
@@ -554,7 +603,8 @@ async fn a_capture_still_starting_takes_the_live_requests() {
         30.0
     );
     let idrs = capture.count("idr");
-    rig.service.schedule_idr(PRIMARY_DISPLAY);
+    rig.service
+        .schedule_idr(PRIMARY_DISPLAY, KeyFrameCause::Restart);
     assert_eq!(capture.count("idr"), idrs + 1);
     rig.service
         .schedule_invalidation(PRIMARY_DISPLAY, 70000, false);
@@ -1916,12 +1966,47 @@ async fn the_gate_flushes_the_owner_and_the_lift_asks_for_a_key_frame() {
         idrs + 1,
         "the lift asks for one key frame"
     );
+    assert_eq!(
+        rig.metrics.keyframe_requests(PRIMARY_DISPLAY, "gate_lift"),
+        1,
+        "counted as the gate's"
+    );
     capture.deliver(3, 3, false);
     settle().await;
     assert_eq!(owner.binaries().len(), 1, "and the deltas ahead of it wait");
     capture.deliver(4, 4, true);
     settle().await;
     assert_eq!(owner.binaries().len(), 2);
+}
+
+#[tokio::test]
+async fn a_checks_gate_events_reach_the_metrics() {
+    let rig = Rig::new();
+    let _owner = rig.owner("a").await;
+    settle().await;
+    rig.primary_capture().deliver(1, 1, true);
+    settle().await;
+    let link = rig.service.link(PRIMARY_DISPLAY).unwrap();
+    let at = crate::ws::now();
+    {
+        let mut l = link.lock();
+        l.acknowledged_frame_id = 1;
+        l.has_sent_any_frame = true;
+        l.last_sent_frame_id = 1;
+        l.unacked_since = Some(at - 60.0);
+    }
+    rig.service
+        .backpressure_check(PRIMARY_DISPLAY, &link, at, 0.0)
+        .await;
+    rig.service
+        .backpressure_check(PRIMARY_DISPLAY, &link, at + 0.1, 0.0)
+        .await;
+    assert_eq!(link.lock().gate_counts.stalled, 1, "a silent page stalls");
+    assert_eq!(
+        *rig.metrics.gate_events.lock(),
+        vec![(PRIMARY_DISPLAY.to_string(), "stalled", 1)],
+        "once, though the gate is checked twice"
+    );
 }
 
 #[tokio::test]

@@ -440,13 +440,28 @@ pub struct PacerSnapshot {
     pub stale_resets: f64,
 }
 
+/// A family of WebSockets event counters, each per display and labeled by what happened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WsCounter {
+    /// `websockets_keyframe_requests`, by `cause`.
+    KeyframeRequests,
+    /// `websockets_gate_events`, by `event`.
+    GateEvents,
+    /// `websockets_relay_runs`, by `event`.
+    RelayRuns,
+}
+
 /// Prometheus metrics plus optional CSV capture of client WebRTC stats.
 ///
 /// The pacer gauges are per display and exist only while a pacer is attached; the event
 /// counters are cumulative since transport start. The bridge drop gauges are per display,
 /// cumulative since the graph was built, and published whether or not a pacer is attached;
 /// `webrtc_bridge_invalidated_frames` counts the share of those the encoder was told to
-/// predict past, the rest being frames that predicted from one already dropped.
+/// predict past, the rest being frames that predicted from one already dropped. The
+/// WebSockets counters are per display and cumulative since the registry was built: the key
+/// frame requests that reached the encoder by cause, the backpressure gate's events
+/// (`GateCounts`), and the runs of frames a relay left out for a page, by what became of
+/// each.
 pub struct Metrics {
     registry: Registry,
     fps: FloatGauge,
@@ -460,6 +475,9 @@ pub struct Metrics {
     webrtc_pacer_events: Family<Labels, FloatGauge>,
     webrtc_bridge_dropped_frames: Family<Labels, FloatGauge>,
     webrtc_bridge_invalidated_frames: Family<Labels, FloatGauge>,
+    websockets_keyframe_requests: Family<Labels, FloatGauge>,
+    websockets_gate_events: Family<Labels, FloatGauge>,
+    websockets_relay_runs: Family<Labels, FloatGauge>,
     using_webrtc_csv: bool,
     csv: Arc<Mutex<CsvSink>>,
     /// The video and audio CSV paths of the current connection.
@@ -541,6 +559,24 @@ impl Metrics {
             "Dropped frames the encoder was told to predict past, per display",
             webrtc_bridge_invalidated_frames.clone(),
         );
+        let websockets_keyframe_requests = Family::<Labels, FloatGauge>::default();
+        registry.register(
+            "websockets_keyframe_requests",
+            "Cumulative key frame requests that reached the encoder, per display and cause",
+            websockets_keyframe_requests.clone(),
+        );
+        let websockets_gate_events = Family::<Labels, FloatGauge>::default();
+        registry.register(
+            "websockets_gate_events",
+            "Cumulative backpressure gate event counter, per display",
+            websockets_gate_events.clone(),
+        );
+        let websockets_relay_runs = Family::<Labels, FloatGauge>::default();
+        registry.register(
+            "websockets_relay_runs",
+            "Cumulative counter of runs of frames a relay left out for a page, per display and event",
+            websockets_relay_runs.clone(),
+        );
         let csv = Arc::new(Mutex::new(CsvSink::default()));
         let (sender, receiver) = mpsc::channel::<CsvJob>();
         let closing = Arc::new(AtomicBool::new(false));
@@ -573,6 +609,9 @@ impl Metrics {
             webrtc_pacer_events,
             webrtc_bridge_dropped_frames,
             webrtc_bridge_invalidated_frames,
+            websockets_keyframe_requests,
+            websockets_gate_events,
+            websockets_relay_runs,
             using_webrtc_csv,
             csv,
             paths: Mutex::new((None, None)),
@@ -659,6 +698,30 @@ impl Metrics {
                 .get_or_create(&labels(&[("display", display)]))
                 .set(*invalidated as f64);
         }
+    }
+
+    /// Add `count` to the WebSockets `counter` of `display` (`primary` where empty) labeled
+    /// `label`: its `cause` for the key frame requests, else its `event`.
+    pub fn count_websockets_event(
+        &self,
+        counter: WsCounter,
+        display: &str,
+        label: &str,
+        count: u32,
+    ) {
+        let display = if display.is_empty() {
+            "primary"
+        } else {
+            display
+        };
+        let (family, key) = match counter {
+            WsCounter::KeyframeRequests => (&self.websockets_keyframe_requests, "cause"),
+            WsCounter::GateEvents => (&self.websockets_gate_events, "event"),
+            WsCounter::RelayRuns => (&self.websockets_relay_runs, "event"),
+        };
+        family
+            .get_or_create(&labels(&[("display", display), (key, label)]))
+            .inc_by(f64::from(count));
     }
 
     /// Publish a client stats report to Prometheus and, optionally, CSV.
@@ -985,6 +1048,9 @@ mod tests {
             "webrtc_pacer_events",
             "webrtc_bridge_dropped_frames",
             "webrtc_bridge_invalidated_frames",
+            "websockets_keyframe_requests",
+            "websockets_gate_events",
+            "websockets_relay_runs",
         ];
         // A labeled family renders nothing until it holds a sample.
         let feed = |metrics: &Metrics| {
@@ -997,6 +1063,9 @@ mod tests {
                 },
             );
             metrics.set_bridge_drops(&HashMap::from([("primary".to_string(), (1, 1))]));
+            metrics.count_websockets_event(WsCounter::KeyframeRequests, "", "client", 1);
+            metrics.count_websockets_event(WsCounter::GateEvents, "primary", "triggered", 2);
+            metrics.count_websockets_event(WsCounter::RelayRuns, "display2", "opened", 1);
         };
         let first = Metrics::new(false);
         feed(&first);
@@ -1025,5 +1094,26 @@ mod tests {
             "a second build after the first succeeds"
         );
         assert!(text.contains("webrtc_statistics_info"), "{text}");
+    }
+
+    #[test]
+    fn websockets_counters_add_up_per_display_and_label() {
+        let metrics = Metrics::new(false);
+        for _ in 0..2 {
+            metrics.count_websockets_event(WsCounter::KeyframeRequests, "", "client", 1);
+        }
+        metrics.count_websockets_event(WsCounter::KeyframeRequests, "primary", "gate_lift", 1);
+        metrics.count_websockets_event(WsCounter::GateEvents, "display2", "lifted", 3);
+        metrics.count_websockets_event(WsCounter::RelayRuns, "primary", "predicted_past", 1);
+        let text = metrics.render();
+        for line in [
+            "websockets_keyframe_requests{display=\"primary\",cause=\"client\"} 2.0",
+            "websockets_keyframe_requests{display=\"primary\",cause=\"gate_lift\"} 1.0",
+            "websockets_gate_events{display=\"display2\",event=\"lifted\"} 3.0",
+            "websockets_relay_runs{display=\"primary\",event=\"predicted_past\"} 1.0",
+        ] {
+            assert!(text.lines().any(|l| l == line), "{line} in {text}");
+        }
+        metrics.shutdown();
     }
 }
