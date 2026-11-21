@@ -732,8 +732,19 @@ impl Rig {
 
     /// A page as the handshake leaves it, without its pushes on the wire yet read.
     pub async fn connect(&self, token: &str, role: &str, slot: Option<&str>) -> Option<RigPage> {
-        let n = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let page = Page::new(self.service.next_client_id(), "controller");
+        self.seat(page, token, role, slot).await
+    }
+
+    /// `connect`, for a page the test made.
+    pub async fn seat(
+        &self,
+        page: Page,
+        token: &str,
+        role: &str,
+        slot: Option<&str>,
+    ) -> Option<RigPage> {
+        let n = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Every page its own address: the reconnect debounce is per address.
         let _ = n;
         let mut conn = Connection::new(self.service.clone(), page.client.clone());
@@ -741,6 +752,22 @@ impl Rig {
             return None;
         }
         Some(RigPage { page, conn })
+    }
+
+    /// A legacy controller whose frames go through the socket's own writer
+    /// (`Page::over_a_writer`), with the settings of tab `tab` said.
+    pub async fn written(&self, tab: &str) -> RigPage {
+        self.service.st.lock().last_connections.clear();
+        let page = Page::over_a_writer(self.service.next_client_id(), "controller");
+        let mut page = self
+            .seat(page, "", "", None)
+            .await
+            .expect("a legacy controller connects");
+        page.say(&format!(
+            r#"SETTINGS,{{"initialClientWidth":1280,"initialClientHeight":720,"tabId":"{tab}","encoder":"h264enc"}}"#
+        ))
+        .await;
+        page
     }
 
     pub async fn controller(&self) -> RigPage {

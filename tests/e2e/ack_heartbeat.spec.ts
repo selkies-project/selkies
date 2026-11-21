@@ -70,6 +70,47 @@ function acksSince(tap: WsTap, mark: number): [[number, string][], number, numbe
     return [out, reloads, requests];
 }
 
+/**
+ * Whether every frame ack the tap took from `mark` on says the page's clock as
+ * the ack left and the bytes its socket had handed over by then, a count that
+ * never falls on one connection; how many acks there were, and the first that
+ * does not.
+ */
+function acksCounted(tap: WsTap, mark: number): [boolean, number, string] {
+    let last = -1;
+    let acks = 0;
+    for (const { text } of tap.messages.slice(mark)) {
+        if (text.startsWith('SETTINGS,')) last = -1;
+        if (!text.startsWith('CLIENT_FRAME_ACK')) continue;
+        const [, , , sent, received] = text.split(/\s+/);
+        const count = /^\d+$/.test(received ?? '') ? Number(received) : NaN;
+        if (!(Number(sent) > 0) || !(count >= last)) return [false, acks, text];
+        last = count;
+        acks += 1;
+    }
+    return [acks > 0, acks, ''];
+}
+
+/**
+ * The heartbeat among the acks, as the times of its beats, and the longest run of acks
+ * that are not: the page re-acks a frame on every tick for a second after it arrives (each
+ * ack carries the page's clock and its count for the server's late-path gauge), and about
+ * once a second after that, which is the heartbeat. An ack is a beat where none came in
+ * the half second before it, the window's first where none follows it within one; the rest
+ * are a fresh frame's, wherever in the window that frame arrived.
+ */
+function heartbeat(acks: readonly [number, string][]): [number[], number] {
+    const beats: number[] = [];
+    let [run, most] = [0, 0];
+    acks.forEach(([at], i) => {
+        const alone = i > 0 ? at - acks[i - 1][0] >= 0.5 : acks.length < 2 || acks[1][0] - at >= 0.5;
+        if (alone) beats.push(at);
+        run = alone ? 0 : run + 1;
+        most = Math.max(most, run);
+    });
+    return [beats, most];
+}
+
 /** What to close and the page; Firefox runs on the persistent profile. */
 async function openPage(engine: Engine, port: number, software: boolean): Promise<[Browser | BrowserContext, Page]> {
     let ctx: BrowserContext;
@@ -135,7 +176,11 @@ async function drive(res: Checks, host: Host, tap: WsTap, display: string, engin
         const [acks, reloads, requests] = acksSince(tap, mark);
         const chunks1 = await chunks(page);
         const ids = new Set(acks.map(([, id]) => id));
-        const gaps = acks.slice(1).map(([t], i) => t - acks[i][0]);
+        // A chunk that lands in the window (the one the check below allows, or a key frame
+        // a decoder asked for) is re-acked on every tick for its first second: 20 acks,
+        // which are not the heartbeat's, and cost it a beat.
+        const [beats, most] = heartbeat(acks);
+        const gaps = beats.slice(1).map((t, i) => t - beats[i]);
         const mid = median(gaps);
         // A decoder that keeps asking for keyframes is sent them; anything
         // beyond those is the capture sending on its own.
@@ -147,8 +192,12 @@ async function drive(res: Checks, host: Host, tap: WsTap, display: string, engin
             res.skip(`${tag} the still screen sends nothing unasked`, `the decoder acked ${moving} distinct ids in 3 s of motion, so what it is sent says nothing`);
         }
         res.check(`${tag} an unchanged id is re-acked about once a second (worker divert=${divert ? 'True' : 'False'})`,
-            acks.length >= 6 && acks.length <= 10 && ids.size <= 2 && mid !== null && mid >= 0.8 && mid <= 1.3,
-            `${acks.length} acks, ids=${JSON.stringify([...ids].sort())}, median gap=${mid === null ? null : Math.round(mid * 100) / 100} s`);
+            beats.length >= 7 - ids.size && beats.length <= 10 && ids.size <= 2 && most <= 25 && mid !== null && mid >= 0.8 && mid <= 1.3,
+            `${beats.length} beats of ${acks.length} acks, ids=${JSON.stringify([...ids].sort())}, median gap=${mid === null ? null : Math.round(mid * 100) / 100} s, ${most} acks of a fresh id`);
+        // The server reads what its path holds of the stream off these, on either ack path.
+        const [counted, counts, odd] = acksCounted(tap, motionMark);
+        res.check(`${tag} every ack says the page's clock and what its socket has handed over`, counted,
+            counted ? `${counts} acks` : `after ${counts} acks: ${odd.slice(0, 80)}`);
         const stalls = (await host.log(serverMark)).split('Client stall for').length - 1;
         res.check(`${tag} the server declares no stall`, stalls === 0, `${stalls} stalls`);
         if (!decodes) {

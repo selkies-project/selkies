@@ -31,11 +31,12 @@ use futures::{Sink, SinkExt};
 use log::{debug, error, warn};
 use parking_lot::{Mutex, RwLock};
 use serde_json::Value as Json;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio_websockets::{CloseCode, Message};
 
 use crate::files::pacing::{SessionPing, UplinkClock};
 use crate::settings::WS_MESSAGE_SIZE_HARD_CAP;
+use crate::ws::flight::{FLIGHT_LATE_S, Flight, Said, frame_id};
 use crate::ws::now;
 use crate::ws::protocol::{WS_GZIP_MIN_BYTES, WS_GZIP_OFFLOAD_BYTES, gzip_frame};
 use crate::ws::uplink::{Gauge, Uplink};
@@ -60,6 +61,15 @@ pub const AUDIO_STALE_SECONDS: f64 = 0.2;
 /// slow path builds stays in the outbox, where stale audio can be let go, rather than in a
 /// buffer the kernel grows to megabytes. Bytes in flight are not bounded by it.
 pub const NOTSENT_LOWAT_BYTES: libc::c_int = 64 * 1024;
+/// How often the writer looks again at a late path that holds a bulk frame back, between
+/// the acks that wake it.
+const FLIGHT_HELD_TICK: Duration = Duration::from_millis(10);
+/// The longest one bulk frame is held back from a late path: past it the frame goes as the
+/// kernel takes it, whatever the path still holds.
+pub const FLIGHT_HOLD_MAX_S: f64 = 2.0;
+/// A write that took longer than this waited on the socket: the frame went out when the
+/// path made room, not when the stream had it.
+const FLIGHT_WRITE_WAIT_S: f64 = 0.005;
 /// How often a waiting send looks at its socket for that progress.
 pub const SEND_PROBE_SECONDS: f64 = 0.5;
 /// How long a bounded control send (a kill, a `VIDEO_STOPPED` to a superseded page) waits.
@@ -259,7 +269,18 @@ pub struct Outgoing {
     /// When the frame is worth nothing any more (`ws::now()` seconds): one still queued then
     /// is let go when its turn comes rather than written.
     pub stale_at: Option<f64>,
+    /// A bulk frame (video, padding), which waits while a late path delivers what it was
+    /// handed (`ws::flight`), with its sender's word on what waits behind it.
+    pub bulk: Option<Waiting>,
+    /// A ping that reads the path for a sender off this socket (a transfer's gauge): it goes
+    /// ahead of a bulk frame held back, whose wait in the writer is not the path's.
+    pub path_ping: bool,
 }
+
+/// Whether more bulk frames wait with a sender behind the one it handed the writer, asked
+/// each time the writer considers that frame: the sender's backlog grows while its frame is
+/// held.
+pub type Waiting = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// What a connection connected as (`client_permissions[websocket]`).
 #[derive(Clone, Debug, PartialEq)]
@@ -322,10 +343,16 @@ pub struct Client {
     transfer_clock: OnceLock<Arc<UplinkClock>>,
     /// Audio frames let go because they went stale in the outbox.
     stale_audio: AtomicU64,
+    /// What the path still holds of what the writer handed it, and the writer's wake for
+    /// an ack that says more of it arrived.
+    flight: Mutex<Flight>,
+    flight_wake: Notify,
     me: Weak<Client>,
 }
 
-/// A transfer gauge's ping, written behind everything sent so far.
+/// A transfer gauge's ping, written behind everything written so far: the transfer's own
+/// bytes go over another connection, and the queue they stand in is the path's, so the ping
+/// does not wait with a bulk frame the writer holds back.
 struct ClientPing(Weak<Client>);
 
 impl SessionPing for ClientPing {
@@ -333,8 +360,7 @@ impl SessionPing for ClientPing {
         let Some(client) = self.0.upgrade().filter(|c| !c.closed()) else {
             return false;
         };
-        client.fire(Frame::Ping(Bytes::copy_from_slice(payload)));
-        true
+        client.fire_ahead(Frame::Ping(Bytes::copy_from_slice(payload)))
     }
 }
 
@@ -363,6 +389,8 @@ impl Client {
             pad: AtomicBool::new(false),
             pong_answers: Mutex::new(Vec::new()),
             stale_audio: AtomicU64::new(0),
+            flight: Mutex::new(Flight::default()),
+            flight_wake: Notify::new(),
             tx,
             queued: AtomicUsize::new(0),
             closed: AtomicBool::new(false),
@@ -478,6 +506,16 @@ impl Client {
         done: Option<oneshot::Sender<Result<(), SendError>>>,
         stale_at: Option<f64>,
     ) -> Result<(), SendError> {
+        self.enqueue_as(frame, done, stale_at, None)
+    }
+
+    fn enqueue_as(
+        &self,
+        frame: Frame,
+        done: Option<oneshot::Sender<Result<(), SendError>>>,
+        stale_at: Option<f64>,
+        bulk: Option<Waiting>,
+    ) -> Result<(), SendError> {
         if self.closed() {
             return Err(SendError::Closed);
         }
@@ -488,6 +526,8 @@ impl Client {
                 frame,
                 done,
                 stale_at,
+                bulk,
+                path_ping: false,
             })
             .map_err(|_| {
                 self.queued.fetch_sub(len, Ordering::Relaxed);
@@ -500,6 +540,28 @@ impl Client {
         let _ = self.enqueue(frame, None);
     }
 
+    /// `fire` for a ping that asks only whether the peer is there, or how long its path
+    /// takes right now, and says nothing of what was queued before it: it goes ahead of a
+    /// bulk frame the writer holds. Whether it was queued.
+    pub fn fire_ahead(&self, frame: Frame) -> bool {
+        if self.closed() {
+            return false;
+        }
+        let len = frame.len();
+        self.queued.fetch_add(len, Ordering::Relaxed);
+        let queued = self.tx.send(Outgoing {
+            frame,
+            done: None,
+            stale_at: None,
+            bulk: None,
+            path_ping: true,
+        });
+        if queued.is_err() {
+            self.queued.fetch_sub(len, Ordering::Relaxed);
+        }
+        queued.is_ok()
+    }
+
     /// Send one frame, waiting as long as the socket keeps draining; a peer that takes nothing
     /// for `SEND_STALL_SECONDS` is dead and the socket is aborted (`what` names the sender in
     /// the log line that drops it).
@@ -509,16 +571,21 @@ impl Client {
         self.watch_send(done_rx, what).await
     }
 
-    /// `send_live` with a ping written right behind the frame when `ping_behind`: its pong says
-    /// when the whole of that frame reached the peer, which a ping ahead of it would not.
-    pub async fn send_live_pinged(
+    /// `send_live` for a bulk frame (video, padding), `waiting` saying whether more of them
+    /// wait behind it with the caller: the writer holds it while the path is late and still
+    /// delivering what it was handed (`ws::flight`), so the caller's frames wait with the
+    /// caller instead of in the path. A ping is written right behind the frame when
+    /// `ping_behind`: its pong says when the whole of that frame reached the peer, which a
+    /// ping ahead of it would not.
+    pub async fn send_bulk(
         &self,
         frame: Frame,
         what: &str,
         ping_behind: bool,
+        waiting: &Waiting,
     ) -> Result<(), SendError> {
         let (done_tx, done_rx) = oneshot::channel();
-        self.enqueue(frame, Some(done_tx))?;
+        self.enqueue_as(frame, Some(done_tx), None, Some(waiting.clone()))?;
         if ping_behind {
             self.ping_behind();
         }
@@ -557,6 +624,17 @@ impl Client {
     /// Audio frames this socket let go because they went stale in its outbox.
     pub fn stale_audio(&self) -> u64 {
         self.stale_audio.load(Ordering::Relaxed)
+    }
+
+    /// Whether the writer paces this socket's bulk frames to what its late path delivers, a
+    /// stream that has stopped being paced no more.
+    pub fn paced(&self) -> bool {
+        self.flight.lock().paced_at(now())
+    }
+
+    /// `paced`, or was within `span` seconds: what a check that runs every `span` reads.
+    pub fn paced_within(&self, span: f64) -> bool {
+        self.flight.lock().paced_within(now(), span)
     }
 
     /// Wait for a queued frame while the peer keeps taking bytes.
@@ -656,6 +734,8 @@ impl Client {
                 },
                 done: Some(done_tx),
                 stale_at: None,
+                bulk: None,
+                path_ping: false,
             })
             .is_err()
         {
@@ -670,7 +750,11 @@ impl Client {
     }
 
     /// Ping behind everything written so far; the pong says all of that reached the peer.
-    /// The ping's counter, which `ping_outstanding` reads back.
+    /// The ping's counter, which `ping_outstanding` reads back. Behind a bulk frame the
+    /// writer holds too: its pong moves the clock's `answered`, which the link reads as
+    /// everything handed to the writer before the ping having arrived (a key frame's
+    /// crossing, the gate's held path), and a frame held has not. Its round trip then holds
+    /// the hold, which says what it should: what was sent before it is not there yet.
     pub fn ping_behind(&self) -> u64 {
         let payload = {
             let mut uplink = self.uplink.lock();
@@ -690,6 +774,25 @@ impl Client {
         answers.retain(|(c, _)| uplink.ping_outstanding(*c));
         answers.push((counter, answer));
         counter
+    }
+
+    /// The page's own clock, in milliseconds, as it sent the ack just read, and what the ack
+    /// says of the stream (`Flight::note_stamp`).
+    pub fn note_stamp(&self, sent_ms: f64, said: Said) {
+        let (passed, kept_up) = {
+            let mut flight = self.flight.lock();
+            let was = flight.paced();
+            (
+                flight.note_stamp(sent_ms / 1000.0, said, now()),
+                was && !flight.paced(),
+            )
+        };
+        if kept_up {
+            debug!(target: "ws", "Path of {} is a longer way round, not narrowed under its stream: its video is paced no more.", self.remote);
+        }
+        if passed {
+            self.flight_wake.notify_one();
+        }
     }
 
     /// Resolve a received pong against the ping clocks: each ignores the other's payloads. A
@@ -724,7 +827,9 @@ impl Client {
             .clone()
     }
 
-    /// One gauge sample over this socket's clock, pinging where due.
+    /// One gauge sample over this socket's clock, pinging where due. The ping is the same
+    /// clock's as `ping_behind`'s and waits behind a held bulk frame as that one does; the
+    /// transfer it paces is slowed by the hold, on a path that is late.
     pub fn gauge_sample(&self, gauge: &mut Gauge) -> Option<bool> {
         let (ping, verdict) = {
             let mut uplink = self.uplink.lock();
@@ -739,6 +844,28 @@ impl Client {
     /// The round trip the ping clock last measured, in milliseconds.
     pub fn rtt_ms(&self) -> Option<f64> {
         self.uplink.lock().rtt_ms()
+    }
+
+    /// Whether a bulk frame may be written now (`Flight::clear`); `waiting` says whether more
+    /// of them wait behind it with its sender, asked only of a paced path and between two
+    /// lockings of the gauge, so the sender's own lock is never taken under it.
+    fn bulk_clear(&self, waiting: &Waiting) -> bool {
+        let paced = self.flight.lock().paced();
+        let more = paced && waiting();
+        let mut flight = self.flight.lock();
+        let at = now();
+        let was = flight.paced();
+        let clear = flight.clear(at, FLIGHT_LATE_S, more);
+        if flight.paced() != was {
+            debug!(target: "ws", "Path of {} {}: {} KiB in flight, {:.0} kbit/s delivered, least round trip {:.0} ms, {:.0} ms allowed its unevenness.",
+                self.remote,
+                if was { "on time again" } else { "late, its video paced to what it delivers" },
+                flight.in_flight() / 1024,
+                flight.rate(at).map_or(0.0, |rate| rate * 8.0 / 1000.0),
+                flight.floor().map_or(0.0, |floor| floor * 1000.0),
+                flight.slack() * 1000.0);
+        }
+        clear
     }
 
     /// The writer's bookkeeping: a frame left the outbox.
@@ -759,8 +886,12 @@ impl Client {
 /// frame was handed to the kernel, but for audio (the frames that go stale), which leaves
 /// ahead of whatever else is waiting, in its own order: a key frame queued behind the path
 /// does not hold the audio queued after it, as WebRTC's pacer sends audio ahead of video.
-/// A frame already being written stays whole. Ends when the connection is aborted, the sink
-/// fails, or the client is dropped.
+/// A frame already being written stays whole. A bulk frame (video, padding) waits while a late
+/// path delivers what it was handed (`ws::flight`), and what is queued behind it waits with
+/// it, as behind a frame the kernel is slow to take; audio goes on meanwhile, and so does a
+/// transfer's ping. The wait ends as well with a frame a sender awaits queued behind it, and
+/// after `FLIGHT_HOLD_MAX_S`. Ends when the connection is aborted, the sink fails, or the
+/// client is dropped.
 pub async fn run_writer<S>(
     client: Arc<Client>,
     mut rx: mpsc::UnboundedReceiver<Outgoing>,
@@ -772,6 +903,8 @@ pub async fn run_writer<S>(
 {
     let mut audio: VecDeque<Outgoing> = VecDeque::new();
     let mut rest: VecDeque<Outgoing> = VecDeque::new();
+    // Since when the bulk frame at the head of the rest has been held back.
+    let mut held_since: Option<f64> = None;
     let lane = |out: Outgoing, audio: &mut VecDeque<Outgoing>, rest: &mut VecDeque<Outgoing>| {
         if out.stale_at.is_some() {
             audio.push_back(out);
@@ -783,7 +916,32 @@ pub async fn run_writer<S>(
         while let Ok(out) = rx.try_recv() {
             lane(out, &mut audio, &mut rest);
         }
-        let Some(out) = audio.pop_front().or_else(|| rest.pop_front()) else {
+        // A bulk frame at the head of the rest waits for a late path, and what is queued
+        // behind it with it, but never a frame a sender awaits (a reply the reader's own
+        // handler waits on would keep it from the acks that end the wait, and a bounded
+        // send would run out of time), and never longer than `FLIGHT_HOLD_MAX_S`.
+        let held = rest
+            .front()
+            .and_then(|out| out.bulk.as_ref())
+            .is_some_and(|waiting| !client.bulk_clear(waiting))
+            && !rest
+                .iter()
+                .skip(1)
+                .any(|out| out.bulk.is_none() && out.done.is_some())
+            && now() - *held_since.get_or_insert_with(now) < FLIGHT_HOLD_MAX_S;
+        let next = audio.pop_front().or_else(|| {
+            if held {
+                // A transfer's ping reads the path, not this wait.
+                let ahead = rest.iter().position(|out| out.path_ping);
+                ahead.and_then(|index| rest.remove(index))
+            } else {
+                // The frame at the head goes: the next one's wait is its own. (Audio taken
+                // ahead of a frame whose wait just ran out leaves that frame its count.)
+                held_since = None;
+                rest.pop_front()
+            }
+        });
+        let Some(out) = next else {
             tokio::select! {
                 out = rx.recv() => match out {
                     Some(out) => lane(out, &mut audio, &mut rest),
@@ -794,6 +952,9 @@ pub async fn run_writer<S>(
                         break;
                     }
                 }
+                // An ack says more arrived; the tick ends a wait that ran too long.
+                _ = client.flight_wake.notified(), if held => {}
+                _ = tokio::time::sleep(FLIGHT_HELD_TICK), if held => {}
             }
             continue;
         };
@@ -808,6 +969,14 @@ pub async fn run_writer<S>(
             }
             continue;
         }
+        let bulk = out.bulk.is_some();
+        // What the page counts of it: the bytes of a binary message, and the frame it will
+        // name once it has it.
+        let (counted, frame) = match &out.frame {
+            Frame::Binary(data) => (data.len(), frame_id(data).filter(|_| bulk)),
+            _ => (0, None),
+        };
+        let began = now();
         let message = out.frame.into_message();
         let result = tokio::select! {
             sent = sink.send(message) => sent.map_err(|e| {
@@ -816,6 +985,11 @@ pub async fn run_writer<S>(
             }),
             _ = abort.changed() => Err(SendError::Closed),
         };
+        if result.is_ok() {
+            let at = now();
+            let waited = at - began > FLIGHT_WRITE_WAIT_S;
+            client.flight.lock().wrote(counted, at, bulk, frame, waited);
+        }
         let failed = result.is_err();
         if let Some(done) = out.done {
             let _ = done.send(result);
@@ -1128,6 +1302,50 @@ pub(crate) mod testing {
             }
         }
 
+        /// A page whose frames go through the socket's own writer (`run_writer`) into what
+        /// it was sent, the writer's pings among them: what the writer holds back from a
+        /// late path is held from this page too.
+        pub fn over_a_writer(id: ClientId, role: &str) -> Page {
+            let unsent = Arc::new(AtomicI64::new(0));
+            let perms = Perms {
+                token: None,
+                role: role.into(),
+                slot: Json::Null,
+                id: format!("{id:08x}"),
+                connected_at: 0.0,
+            };
+            let (client, rx, abort) = Client::new(
+                id,
+                "127.0.0.1:1".parse().unwrap(),
+                perms,
+                Box::new(PageLink(unsent.clone())),
+                Liveness::default(),
+            );
+            let sent = Arc::new(Mutex::new(Vec::new()));
+            let log = sent.clone();
+            let sink = futures::sink::unfold((), move |(), message: Message| {
+                let log = log.clone();
+                async move {
+                    let frame = if message.is_ping() {
+                        Frame::Ping(Bytes::copy_from_slice(message.as_payload()))
+                    } else if let Some(text) = message.as_text() {
+                        Frame::text(text)
+                    } else {
+                        Frame::Binary(Bytes::copy_from_slice(message.as_payload()))
+                    };
+                    log.lock().push(frame);
+                    Ok::<(), std::io::Error>(())
+                }
+            });
+            let task = tokio::spawn(run_writer(client.clone(), rx, abort, Box::pin(sink)));
+            Page {
+                client,
+                unsent,
+                sent,
+                task,
+            }
+        }
+
         /// The texts the page was sent.
         pub fn texts(&self) -> Vec<String> {
             self.sent
@@ -1152,6 +1370,7 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::*;
     use super::*;
+    use crate::ws::flight::FLIGHT_DISTRUST_S;
 
     /// Audio queued behind a frame the path takes a second to carry is stale by its turn and
     /// let go unwritten, each sender told it is done; audio queued once the path is clear is
@@ -1255,6 +1474,381 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(250)).await;
         assert_eq!(*written.lock(), vec![100_000, 100, 100_001]);
         assert_eq!(client.stale_audio(), 0);
+        writer.abort();
+    }
+
+    /// A socket's client, the sizes of what it was written, the pings it was written, and
+    /// its writer.
+    type Logged = (
+        Arc<Client>,
+        Arc<Mutex<Vec<usize>>>,
+        Arc<Mutex<Vec<Vec<u8>>>>,
+        tokio::task::JoinHandle<()>,
+    );
+
+    /// A socket whose writes are logged by size, the pings among them kept apart.
+    fn logged_socket(id: ClientId) -> Logged {
+        let perms = Perms {
+            token: None,
+            role: "controller".into(),
+            slot: Json::Null,
+            id: format!("{id:08x}"),
+            connected_at: 0.0,
+        };
+        let (client, rx, abort) = Client::new(
+            id,
+            "127.0.0.1:1".parse().unwrap(),
+            perms,
+            Box::new(NoLink),
+            Liveness::default(),
+        );
+        let written = Arc::new(Mutex::new(Vec::<usize>::new()));
+        let pings = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let (log, asked) = (written.clone(), pings.clone());
+        let sink = futures::sink::unfold((), move |(), message: Message| {
+            let (log, asked) = (log.clone(), asked.clone());
+            async move {
+                if message.is_ping() {
+                    asked.lock().push(message.as_payload().to_vec());
+                } else {
+                    log.lock().push(message.as_payload().len());
+                }
+                Ok::<(), std::io::Error>(())
+            }
+        });
+        let writer = tokio::spawn(run_writer(client.clone(), rx, abort, Box::pin(sink)));
+        (client, written, pings, writer)
+    }
+
+    /// A video frame of `len` bytes that carries `id`, as the page reads it.
+    fn video(id: u16, len: usize) -> Frame {
+        let mut data = vec![0u8; len];
+        data[0] = 0x04;
+        data[2..4].copy_from_slice(&id.to_be_bytes());
+        Frame::Binary(Bytes::from(data))
+    }
+
+    /// An ack of the page's that left it now and took no time back, its clock an hour from
+    /// this one: it has counted `received` bytes, frame `frame` the last it got, just now.
+    fn stamp(client: &Client, received: u64, frame: u16) {
+        let said = Said {
+            received,
+            frame,
+            held: 0.0,
+        };
+        client.note_stamp((now() + 3600.0) * 1000.0, said);
+    }
+
+    /// A video frame is written at once while the page counts what it is sent; once a frame
+    /// has stood out past the bound the next one waits in the writer, audio queued meanwhile
+    /// goes out ahead of it, and the ack that says the path took what it held lets it go.
+    #[tokio::test]
+    async fn video_waits_for_a_late_path_while_audio_goes_on() {
+        let (client, written, _pings, writer) = logged_socket(3);
+        let (alone, more): (Waiting, Waiting) = (Arc::new(|| false), Arc::new(|| true));
+        stamp(&client, 0, 0);
+        client
+            .send_bulk(video(1, 1000), "Video", false, &alone)
+            .await
+            .unwrap();
+        stamp(&client, 1000, 1);
+        client
+            .send_bulk(video(2, 2000), "Video", false, &alone)
+            .await
+            .unwrap();
+        assert!(!client.paced());
+        tokio::time::sleep(Duration::from_secs_f64(1.5 * FLIGHT_LATE_S)).await;
+        // The page had not counted it by now, its ack says.
+        stamp(&client, 1000, 1);
+        let held = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .send_bulk(video(3, 3000), "Video", false, &more)
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(client.paced());
+        client
+            .send_audio_later(Frame::Binary(Bytes::from(vec![1u8; 100])))
+            .unwrap()
+            .await
+            .unwrap();
+        assert_eq!(*written.lock(), vec![1000, 2000, 100]);
+        assert!(!held.is_finished(), "the frame waits for the path");
+        // The path takes several times as long over the second frame as its sender took to
+        // write it: it is narrowed under the stream, not merely a longer way round.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(!held.is_finished());
+        stamp(&client, 3100, 2);
+        held.await.unwrap().unwrap();
+        assert_eq!(*written.lock(), vec![1000, 2000, 100, 3000]);
+        assert!(client.paced(), "more waits behind it: the pacing goes on");
+        writer.abort();
+    }
+
+    /// A socket whose second frame is still out, by the page's own word, past the bound.
+    async fn late_socket(id: ClientId) -> Logged {
+        let (client, written, pings, writer) = logged_socket(id);
+        let alone: Waiting = Arc::new(|| false);
+        stamp(&client, 0, 0);
+        client
+            .send_bulk(video(1, 1000), "Video", false, &alone)
+            .await
+            .unwrap();
+        stamp(&client, 1000, 1);
+        client
+            .send_bulk(video(2, 2000), "Video", false, &alone)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs_f64(1.5 * FLIGHT_LATE_S)).await;
+        stamp(&client, 1000, 1);
+        (client, written, pings, writer)
+    }
+
+    #[tokio::test]
+    async fn only_a_page_that_stamps_has_video_held() {
+        // An older page, or one that is not its display's own: its socket carries what it
+        // carried before there was a gauge, nothing more and nothing of the gauge's, and
+        // nothing of its video ever waits.
+        let (client, written, pings, writer) = logged_socket(10);
+        let more: Waiting = Arc::new(|| true);
+        for k in 0..8u16 {
+            client
+                .send_bulk(video(k, 1000), "Video", false, &more)
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+        assert_eq!(written.lock().len(), 8);
+        assert!(!client.paced());
+        // From its first stamp on its frames are told apart: one it counted, and the next
+        // standing out past the bound, hold the one after.
+        stamp(&client, 8000, 7);
+        client
+            .send_bulk(video(8, 2000), "Video", false, &more)
+            .await
+            .unwrap();
+        stamp(&client, 10_000, 8);
+        client
+            .send_bulk(video(9, 2000), "Video", false, &more)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs_f64(1.5 * FLIGHT_LATE_S)).await;
+        stamp(&client, 10_000, 8);
+        let held = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .send_bulk(video(10, 2000), "Video", false, &more)
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(client.paced() && !held.is_finished());
+        assert!(
+            pings.lock().is_empty(),
+            "the gauge writes nothing of its own"
+        );
+        writer.abort();
+    }
+
+    #[tokio::test]
+    async fn video_never_waits_on_a_stamp_that_left_before_it_was_written() {
+        // The second frame stands out past the bound, and the page's last stamp left before
+        // that frame was written: it says nothing of it, and nothing is paced.
+        let (client, written, _pings, writer) = logged_socket(8);
+        let more: Waiting = Arc::new(|| true);
+        stamp(&client, 0, 0);
+        client
+            .send_bulk(video(1, 1000), "Video", false, &more)
+            .await
+            .unwrap();
+        stamp(&client, 1000, 1);
+        client
+            .send_bulk(video(2, 2000), "Video", false, &more)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs_f64(1.5 * FLIGHT_LATE_S)).await;
+        client
+            .send_bulk(video(3, 3000), "Video", false, &more)
+            .await
+            .unwrap();
+        assert_eq!(*written.lock(), vec![1000, 2000, 3000]);
+        assert!(!client.paced());
+        // The page's word that it had not counted the second by now paces the next one.
+        stamp(&client, 1000, 1);
+        let held = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .send_bulk(video(4, 4000), "Video", false, &more)
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(client.paced());
+        assert!(!held.is_finished());
+        writer.abort();
+    }
+
+    /// A frame a sender awaits never waits behind a held video frame: the video frame goes
+    /// ahead of it as the kernel takes it, in the order the two were queued. A frame nobody
+    /// awaits (a ping of the round-trip clock) waits with the video.
+    #[tokio::test]
+    async fn an_awaited_frame_ends_the_wait_of_the_video_ahead_of_it() {
+        let (client, written, _pings, writer) = late_socket(5).await;
+        let more: Waiting = Arc::new(|| true);
+        let held = {
+            let client = client.clone();
+            tokio::spawn(
+                async move { client.send_bulk(video(3, 3000), "Video", true, &more).await },
+            )
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!held.is_finished(), "held, its own ping behind it");
+        assert_eq!(*written.lock(), vec![1000, 2000]);
+        client.send(Frame::text("VIDEO_STOPPED")).await.unwrap();
+        held.await.unwrap().unwrap();
+        assert_eq!(
+            *written.lock(),
+            vec![1000, 2000, 3000, "VIDEO_STOPPED".len()]
+        );
+        writer.abort();
+    }
+
+    /// A transfer's ping goes out while a video frame is held, a ping of the round-trip
+    /// clock waits behind the frame it was written behind.
+    #[tokio::test]
+    async fn a_ping_that_only_measures_does_not_wait_with_the_video_held() {
+        let (client, written, pings, writer) = late_socket(7).await;
+        let more: Waiting = Arc::new(|| true);
+        let held = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .send_bulk(video(3, 3000), "Video", false, &more)
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let behind = client.ping_behind().to_be_bytes().to_vec();
+        assert!(ClientPing(Arc::downgrade(&client)).ping(b"transfer"));
+        // The reader's heartbeat asks only whether the peer is there.
+        assert!(client.fire_ahead(Frame::Ping(Bytes::new())));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!held.is_finished());
+        assert_eq!(*written.lock(), vec![1000, 2000]);
+        let asked = pings.lock().clone();
+        assert!(
+            asked.iter().any(|p| p == b"transfer") && asked.iter().any(|p| p.is_empty()),
+            "ahead of the held frame"
+        );
+        // The clock's own ping says everything queued before it arrived, the held frame
+        // among it: it waits.
+        assert!(!asked.contains(&behind), "behind it");
+        assert_eq!(asked.len(), 2, "and the gauge writes none of its own");
+        stamp(&client, 3000, 2);
+        held.await.unwrap().unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(pings.lock().contains(&behind));
+        writer.abort();
+    }
+
+    /// No frame waits in the writer longer than `FLIGHT_HOLD_MAX_S`, whatever the gauge says.
+    #[tokio::test]
+    async fn a_frame_is_held_no_longer_than_the_cap_while_its_page_stamps_on() {
+        // The path stays late by the word of a page that stamps its acks on and counts
+        // nothing more: nothing in the gauge lets the frame go, its own patience being
+        // seconds longer, so the writer's cap does, at the two seconds no frame is held
+        // past, and the path stays paced for the frames behind. Audio goes on meanwhile, as
+        // it does in a session, a frame every 10 ms ahead of the video held: the cap counts
+        // the frame's wait, not the time since the writer last looked.
+        let (client, written, _pings, writer) = late_socket(9).await;
+        let more: Waiting = Arc::new(|| true);
+        let stamping = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    stamp(&client, 1000, 1);
+                }
+            })
+        };
+        let sounding = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    let _ = client.send_audio_later(Frame::Binary(Bytes::from(vec![1u8; 100])));
+                }
+            })
+        };
+        let start = now();
+        let sent = tokio::time::timeout(
+            Duration::from_secs(3),
+            client.send_bulk(video(3, 3000), "Video", false, &more),
+        )
+        .await;
+        let waited = now() - start;
+        stamping.abort();
+        sounding.abort();
+        assert!(
+            sent.is_ok_and(|sent| sent.is_ok()),
+            "still held after {waited:.2} s"
+        );
+        assert!((1.9..2.5).contains(&waited), "{waited}");
+        let written = written.lock().clone();
+        let audio = written.iter().filter(|len| **len == 100).count();
+        assert!(audio > 100, "{audio} audio frames went ahead meanwhile");
+        let video: Vec<usize> = written.into_iter().filter(|len| *len != 100).collect();
+        assert_eq!(video, vec![1000, 2000, 3000]);
+        assert!(client.paced(), "the path is late still");
+        writer.abort();
+    }
+
+    /// A page that stops stamping holds a video frame back no longer than its last stamp
+    /// says anything.
+    #[tokio::test]
+    async fn a_held_frame_goes_once_its_page_has_stamped_nothing_for_too_long() {
+        // The page's last stamp is half a second old when the frame asks to go: the frame
+        // waits for as long as that stamp still says anything, short of the writer's cap,
+        // and then the path is judged no more.
+        let (client, written, _pings, writer) = late_socket(6).await;
+        let more: Waiting = Arc::new(|| true);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let start = now();
+        client
+            .send_bulk(video(3, 3000), "Video", false, &more)
+            .await
+            .unwrap();
+        let waited = now() - start;
+        assert!(
+            (FLIGHT_DISTRUST_S - 0.7..FLIGHT_DISTRUST_S - 0.2).contains(&waited),
+            "{waited}"
+        );
+        assert_eq!(*written.lock(), vec![1000, 2000, 3000]);
+        assert!(!client.paced());
+        writer.abort();
+    }
+
+    /// A page whose count never passes a frame is written to as the kernel takes it:
+    /// nothing waits.
+    #[tokio::test]
+    async fn video_never_waits_for_a_page_whose_count_never_moved() {
+        let (client, written, _pings, writer) = logged_socket(4);
+        let more: Waiting = Arc::new(|| true);
+        for k in 0..8u16 {
+            stamp(&client, 0, 0);
+            client
+                .send_bulk(video(k, 1000), "Video", false, &more)
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+        assert_eq!(written.lock().len(), 8);
+        assert!(!client.paced());
         writer.abort();
     }
 

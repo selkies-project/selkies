@@ -3484,11 +3484,20 @@ impl WsService {
             allowed_desync_ms: BACKPRESSURE_ALLOWED_DESYNC_MS,
             primary: display_id == PRIMARY_DISPLAY,
         };
+        let waiting = match (&client, &relay) {
+            (Some(client), Some(relay))
+                if client.paced_within(self.timings.backpressure_check_s) =>
+            {
+                relay.waiting_frames()
+            }
+            _ => 0,
+        };
         let mut effects = CheckEffects {
             display: display_id,
             capture: capture.clone(),
             relay,
             client: client.clone(),
+            waiting,
             metrics: self.deps.metrics.clone(),
         };
         let outcome = {
@@ -4881,6 +4890,9 @@ struct CheckEffects<'a> {
     capture: Option<Arc<dyn CaptureHandle>>,
     relay: Option<Arc<VideoRelay>>,
     client: Option<Arc<Client>>,
+    /// Frames the relay holds back from a late path its writer paced within the last check
+    /// interval, read before the link is locked.
+    waiting: usize,
     metrics: Option<Arc<dyn crate::ws::host::Metrics>>,
 }
 
@@ -4933,6 +4945,10 @@ impl GateEffects for CheckEffects<'_> {
             metrics.set_fps(client_fps);
             metrics.set_latency(rtt_ms);
         }
+    }
+
+    fn waiting_frames(&self) -> usize {
+        self.waiting
     }
 }
 

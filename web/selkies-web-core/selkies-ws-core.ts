@@ -33,7 +33,10 @@
  * `START_VIDEO`, `STOP_VIDEO`, `START_AUDIO`, `STOP_AUDIO`,
  * `REQUEST_KEYFRAME`, `LOST_FRAME <id>` (a frame the decoder dropped, which
  * the encoder then predicts past), `DECODE_PACE <fps>` (the rate the decoder
- * keeps up with, 0 for any; lib/decode-pace.ts), `CLIENT_FRAME_ACK <id> <heldMs>`, `cr`, `REQUEST_CLIPBOARD`, the
+ * keeps up with, 0 for any; lib/decode-pace.ts),
+ * `CLIENT_FRAME_ACK <id> <heldMs> <sentMs> <receivedBytes>` (`sentMs`: this
+ * clock as the ack leaves; `receivedBytes`: the bytes of the binary messages
+ * the socket has handed over by then), `cr`, `REQUEST_CLIPBOARD`, the
  * chunked clipboard upload of lib/clipboard-worker-bridge.ts,
  * `cmd,<command>`, `SET_NATIVE_CURSOR_RENDERING,<0|1>`,
  * `vp,<originX>,<originY>,<scaleX>,<scaleY>` (this page's stream box on the
@@ -680,7 +683,10 @@ const BACKPRESSURE_INTERVAL_MS = 50;
  * unanswered for four seconds as a stalled client, and a damage-gated capture
  * sends nothing while the screen is still, so the repeat is what tells an idle
  * client apart from a dead one; the server takes only the first ack of an id
- * as a round trip.
+ * as a round trip. For this long after a frame arrived the id is re-acked on
+ * every tick instead: each ack carries this clock as it left, and the server
+ * tells a path that stopped delivering from one whose answers are held up on
+ * their way back by the acks that keep coming while no frame does.
  */
 const ACK_HEARTBEAT_MS = 1000;
 /** How often the socket worker re-reports a draining send buffer. */
@@ -6849,8 +6855,14 @@ let statsOn = false;
 // 'gone', taken off every report until the count falls below it.
 let sentBytes = 0, gone = 0;
 let busySince = -1;
+// The bytes of the binary messages the socket has handed over. Every ack says
+// the count as it leaves, off which the server reads what its path still holds
+// of the stream, with nothing more sent either way.
+let receivedBytes = 0;
 let probeSeq = 0, probeMark = -1, probeAt = 0;
 function send(data) {
+  // An ack leaves with the count, whoever wrote it: the socket is read here.
+  if (typeof data === 'string' && data.startsWith('CLIENT_FRAME_ACK ')) data += ' ' + receivedBytes;
   // What pongs took off since the last read comes off 'gone' first, or the
   // new bytes would fill the gap and go unreported.
   if (ws.bufferedAmount < gone) gone = ws.bufferedAmount;
@@ -6910,12 +6922,13 @@ function syncVideoAckTimer() {
       if (videoLastId < 0) return;
       if (!ws || ws.readyState !== 1) return;
       const now = performance.now();
-      if (videoLastId === videoAckedId && now - videoAckSentAt < ${ACK_HEARTBEAT_MS}) return;
+      if (videoLastId === videoAckedId && now - videoAckSentAt < ${ACK_HEARTBEAT_MS} && now - videoLastIdAt >= ${ACK_HEARTBEAT_MS}) return;
       // The hold: how long the id waited on this tick, which a backgrounded
       // tab clamps to a second. The server subtracts it, so the round trip it
-      // reports stays the path's rather than this timer's.
+      // reports stays the path's rather than this timer's. The stamp is this
+      // clock as the ack leaves, and 'send' puts the count behind it.
       const held = Math.max(0, Math.round(now - videoLastIdAt));
-      try { send('CLIENT_FRAME_ACK ' + videoLastId + ' ' + held); videoAckedId = videoLastId; videoAckSentAt = now; } catch (err) {}
+      try { send('CLIENT_FRAME_ACK ' + videoLastId + ' ' + held + ' ' + (performance.timeOrigin + now).toFixed(1)); videoAckedId = videoLastId; videoAckSentAt = now; } catch (err) {}
     }, ${BACKPRESSURE_INTERVAL_MS});
   } else if (!want && videoAckTimer) {
     clearInterval(videoAckTimer);
@@ -6986,7 +6999,7 @@ self.onmessage = (e) => {
       return;
     }
     ws.binaryType = 'arraybuffer';
-    sentBytes = 0; gone = 0; busySince = -1; probeMark = -1;
+    sentBytes = 0; gone = 0; busySince = -1; probeMark = -1; receivedBytes = 0;
     ws.onopen = () => self.postMessage({ type: 'open' });
     ws.onerror = () => self.postMessage({ type: 'error' });
     ws.onclose = (ev) => {
@@ -6995,6 +7008,7 @@ self.onmessage = (e) => {
     };
     ws.onmessage = (ev) => {
       const d = ev.data;
+      if (d instanceof ArrayBuffer) receivedBytes += d.byteLength;
       const at = statsOn ? performance.timeOrigin + performance.now() : 0;
       if (audioPort && audioOn && primary && d instanceof ArrayBuffer &&
           d.byteLength >= 2 && new Uint8Array(d, 0, 1)[0] === 0x01) {
@@ -7774,12 +7788,15 @@ class WorkerWebSocket {
   const socketWorkerEnabled = (socketWorkerParam !== null)
     ? (socketWorkerParam.toLowerCase() === 'true')
     : getBoolParam('socket_worker', true);
+  // The count of what a socket read on this page has handed over, where one is.
+  let directReceived: (() => number) | null = null;
   /**
    * Opens the session socket and wires the decoders' lines into it; the page
    * binds its handlers to it next (`bindSessionSocket`). Runs again for each
    * in-place reconnect.
    */
   const openSessionSocket = (): void => {
+    directReceived = null;
     try {
       if (!socketWorkerEnabled) throw new Error('socket_worker=false');
       websocket = new WorkerWebSocket(websocketEndpointURL.href, displayId === 'primary', tokenProtocols);
@@ -7789,8 +7806,15 @@ class WorkerWebSocket {
       // then runs here, where a busy thread costs audio its cadence, which is
       // still better than no session.
       if (socketWorkerEnabled) console.warn('[websockets] socket worker unavailable, reading on the page:', e);
-      websocket = asSessionSocket(new WebSocket(websocketEndpointURL.href, tokenProtocols));
-      websocket!.binaryType = 'arraybuffer';
+      const direct = new WebSocket(websocketEndpointURL.href, tokenProtocols);
+      direct.binaryType = 'arraybuffer';
+      // Read here, the socket is counted here, as the worker counts its own.
+      let received = 0;
+      direct.addEventListener('message', (event: MessageEvent) => {
+        if (event.data instanceof ArrayBuffer) received += event.data.byteLength;
+      });
+      directReceived = () => received;
+      websocket = asSessionSocket(direct);
     }
     // The socket itself is in a worker, so this handle is what page-side
     // tooling has to observe or close the transport through.
@@ -7822,11 +7846,15 @@ class WorkerWebSocket {
         const at = fromPresent ? lastPresentedVideoFrameAt : lastReceivedVideoFrameAt;
         const now = performance.now();
         if (acked !== -1 && acked !== null &&
-            (acked !== lastAckSentId || now - lastAckSentAt >= ACK_HEARTBEAT_MS)) {
+            (acked !== lastAckSentId || now - lastAckSentAt >= ACK_HEARTBEAT_MS || now - at < ACK_HEARTBEAT_MS)) {
           // How long this id waited for the tick; the server subtracts it so a
-          // throttled ack cadence is not reported as network latency.
+          // throttled ack cadence is not reported as network latency. The
+          // stamp is this clock as the ack leaves, and the count of what the
+          // socket has handed over follows it: the socket worker adds its own
+          // as the ack passes it, this page where it reads the socket itself.
           const held = Math.max(0, Math.round(now - at));
-          websocket.send(`CLIENT_FRAME_ACK ${acked} ${held}`);
+          const counted = directReceived ? ` ${directReceived()}` : '';
+          websocket.send(`CLIENT_FRAME_ACK ${acked} ${held} ${(performance.timeOrigin + now).toFixed(1)}${counted}`);
           lastAckSentId = acked; lastAckSentAt = now;
         }
       } catch (error) {
