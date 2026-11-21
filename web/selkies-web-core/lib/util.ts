@@ -172,9 +172,11 @@ export const decoderSupportReady: Promise<Record<string, boolean | null>> = (asy
  * Annex B form decodes (Chromium, Firefox), `avcc` where it is refused and an
  * `avcC` description with length-prefixed NAL units is needed instead (WebKit).
  * Asked once, of a 16x16 key frame, in a worker so a slow refusal never holds
- * the page; `annexb` without WebCodecs or when nothing answers.
+ * the page, or on the page when a policy such as `worker-src 'none'` refuses
+ * the worker; `annexb` without WebCodecs or when nothing answers.
  */
 let h264FramingAnswer = "annexb";
+const H264_FRAMING_TIMEOUT_MS = 5000;
 export const h264FramingReady: Promise<string> = (async () => {
     if (typeof VideoDecoder === "undefined") return "annexb";
     const probe = `self.onmessage = async (e) => {
@@ -188,21 +190,47 @@ export const h264FramingReady: Promise<string> = (async () => {
         } catch (err) { /* refused: the count says so */ }
         self.postMessage(outputs > 0 ? 'annexb' : 'avcc');
     };`;
-    const sample = Uint8Array.from(atob(H264_ANNEXB_SAMPLE), (c) => c.charCodeAt(0));
-    const answer = await new Promise<string>((resolve) => {
+    const sample = (): Uint8Array<ArrayBuffer> => Uint8Array.from(atob(H264_ANNEXB_SAMPLE), (c) => c.charCodeAt(0));
+    const workerAnswer = await new Promise<string | null>((resolve) => {
         let worker: Worker | null = null;
-        const settle = (value: string): void => { resolve(value); if (worker) { try { worker.terminate(); } catch (err) { /* gone */ } } };
-        const timer = setTimeout(() => settle("annexb"), 5000);
+        let url: string | null = null;
+        const settle = (value: string | null): void => {
+            resolve(value);
+            if (worker) { try { worker.terminate(); } catch (err) { /* gone */ } }
+        };
+        const timer = setTimeout(() => settle("annexb"), H264_FRAMING_TIMEOUT_MS);
         try {
-            worker = new Worker(URL.createObjectURL(new Blob([probe], { type: "text/javascript" })));
+            url = URL.createObjectURL(new Blob([probe], { type: "text/javascript" }));
+            worker = new Worker(url);
             worker.onmessage = (e: MessageEvent) => { clearTimeout(timer); settle(String(e.data)); };
-            worker.onerror = () => { clearTimeout(timer); settle("annexb"); };
-            worker.postMessage(sample.buffer, [sample.buffer as ArrayBuffer]);
+            worker.onerror = () => { clearTimeout(timer); settle(null); };
+            const bytes = sample();
+            worker.postMessage(bytes.buffer, [bytes.buffer]);
         } catch (err) {
             clearTimeout(timer);
-            settle("annexb");
+            settle(null);
+        } finally {
+            if (url) URL.revokeObjectURL(url);
         }
     });
+    const answer = workerAnswer ?? await (async (): Promise<string> => {
+        let outputs = 0;
+        let timedOut = false;
+        let decoder: VideoDecoder | null = null;
+        try {
+            decoder = new VideoDecoder({ output: (frame) => { outputs++; frame.close(); }, error: () => {} });
+            decoder.configure({ codec: "avc1.42000A", codedWidth: 16, codedHeight: 16, optimizeForLatency: true });
+            decoder.decode(new EncodedVideoChunk({ type: "key", timestamp: 0, data: sample() }));
+            await Promise.race([
+                decoder.flush(),
+                new Promise<void>((resolve) => setTimeout(() => { timedOut = true; resolve(); }, H264_FRAMING_TIMEOUT_MS)),
+            ]);
+        } catch (err) {
+            // Refused: the count says so.
+        }
+        try { if (decoder && decoder.state !== "closed") decoder.close(); } catch (err) { /* closed by its error */ }
+        return outputs > 0 || timedOut ? "annexb" : "avcc";
+    })();
     h264FramingAnswer = answer;
     return answer;
 })();
