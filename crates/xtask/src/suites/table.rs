@@ -456,7 +456,14 @@ pub static SUITES: &[Suite] = &[
         path: "e2e/worker_src.spec.ts",
         tier: "e2e",
         timeout: 300,
-        selectors: &["control", "restricted"],
+        selectors: &[
+            "control",
+            "control-firefox",
+            "control-webkit",
+            "restricted",
+            "restricted-firefox",
+            "restricted-webkit",
+        ],
         name: None,
     },
     Suite {

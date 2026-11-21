@@ -42,9 +42,9 @@ their logs the same way. A spec that prints no check fails.
 The `worker_src` suite compares the client under the server's existing
 response headers with the same session under an added
 `Content-Security-Policy: worker-src 'none'`, on CPU X11 over WebSockets in
-Chromium. Each case checks the known decoded picture, input, the real
-clipboard both ways, and a reload, with the console and the CSP evidence
-recorded. It shows the client's compatibility with a `worker-src` of
+Chromium, Firefox, and WebKit. Each case checks the known decoded picture,
+input, the clipboard both ways, and a reload, with the console and the CSP
+evidence recorded. It shows the client's compatibility with a `worker-src` of
 `'none'` independently of any gateway: it does not exercise jailoc's TLS,
 login, revocation, or ICE path.
 
