@@ -13,7 +13,10 @@
 //! Key frames are exempt from the budget (part of one is useless), so the true bound is the
 //! budget plus one key frame burst. That budget is the only bound on a slow client: a send
 //! waits for as long as its socket keeps draining, and only a socket that stops draining
-//! costs the client its connection (`Client::send_live`).
+//! costs the client its connection (`Client::send_live`). A send also waits while the path
+//! is late and still delivering what it was handed (`Client::send_bulk`, `ws::flight`), so
+//! the frames a narrowed path cannot take wait here, where the owner's gate counts them and
+//! lets them go, and not in the path ahead of everything written after them.
 //!
 //! Where the encoder names the frame each one predicts from (a whole-frame session; the wire
 //! header's last field), a page that does not own its display is served as a selective
@@ -46,7 +49,7 @@
 //!
 //! The owner's relay also writes the padding its display's path probe asks for
 //! (`set_padding`): `0x07` chunks of `PAD_STEP_S` of the probe's rate, written only while no
-//! frame waits, so a frame waits behind one chunk at most, each counted in what the display
+//! frame waits and the writer paces nothing (`ws::flight`), so a frame waits behind one chunk at most, each counted in what the display
 //! sent (`RelayHost::note_padding`), with a ping behind a chunk every `PAD_PING_S` while no frame
 //! awaits its ack, whose pong acks the bytes sent through it for the steer and for the path's
 //! sounding (`ws::sounding`), which reads a queue building on a still screen from the pongs
@@ -70,7 +73,7 @@ use tokio::sync::Notify;
 
 use crate::core::DisplayId;
 use crate::display::capture::{CommonFrames, FRAME_ANCHOR, FRAME_NUM_WRAP, LOST_FRAME_MEMORY};
-use crate::ws::client::{Client, ClientId, Frame};
+use crate::ws::client::{Client, ClientId, Frame, Waiting};
 use crate::ws::link::{DisplayLink, RTT_SAMPLE_SANE_MAX_MS};
 use crate::ws::now;
 use crate::ws::protocol::{OPCODE_PADDING, OPCODE_VIDEO};
@@ -862,7 +865,7 @@ impl VideoRelay {
     /// a ping at once and the page acks a frame on its own tick, so a ping behind an unacked
     /// frame would ack bytes past it first and the acked history would run out of order.
     /// False where the socket died.
-    async fn write_padding(&self, size: usize) -> bool {
+    async fn write_padding(&self, size: usize, waiting: &Waiting) -> bool {
         let Some((link, sent_bytes)) =
             self.host
                 .note_padding(self.client.id, &self.display_id, size)
@@ -872,7 +875,7 @@ impl VideoRelay {
         let what = format!("Padding for '{}'", self.display_id);
         if self
             .client
-            .send_live(Frame::Binary(PADDING.slice(..size)), &what)
+            .send_bulk(Frame::Binary(PADDING.slice(..size)), &what, false, waiting)
             .await
             .is_err()
         {
@@ -880,7 +883,7 @@ impl VideoRelay {
         }
         let at = now();
         // Read before the relay's own lock is taken: a check takes the link's first.
-        let acked = link.lock().unacked_since.is_none();
+        let acked = !link.lock().awaits_ack();
         let due = {
             let mut inner = self.inner.lock();
             let due = acked && at - inner.pad_pinged >= PAD_PING_S;
@@ -907,7 +910,15 @@ impl VideoRelay {
     /// Drain the backlog onto the socket until stopped or the socket dies, padding the stream
     /// (`set_padding`) while it holds no frame.
     async fn run(self: Arc<Self>) {
+        // What the writer asks while it holds a frame of this relay's back from a late path.
+        let waiting: Waiting = {
+            let relay = Arc::downgrade(&self);
+            Arc::new(move || relay.upgrade().is_some_and(|r| r.backlog_len() > 0))
+        };
         loop {
+            // Read before this relay's lock is taken: neither lock is taken under the other,
+            // here or where the writer asks `waiting`.
+            let paced = self.client.paced();
             let (item, pad, wait) = {
                 let mut inner = self.inner.lock();
                 if inner.stopped {
@@ -926,15 +937,23 @@ impl VideoRelay {
                     }
                     None => {
                         let at = now();
-                        let pad = inner.padding_due(at);
+                        // No padding goes into a path the writer paces: it would stand there
+                        // ahead of the next frame, and such a path is sounded already.
+                        let pad = if paced { None } else { inner.padding_due(at) };
                         let padding = inner.pad_bps > 0.0 && at < inner.pad_until;
-                        let wait = padding.then(|| (inner.pad_next - at).max(0.0));
+                        let wait = padding.then(|| {
+                            if paced {
+                                PAD_STEP_S
+                            } else {
+                                (inner.pad_next - at).max(0.0)
+                            }
+                        });
                         (None, pad, wait)
                     }
                 }
             };
             if let Some(size) = pad {
-                if !self.write_padding(size).await {
+                if !self.write_padding(size, &waiting).await {
                     self.host.socket_died(self.client.id);
                     break;
                 }
@@ -961,7 +980,7 @@ impl VideoRelay {
             let data = item.data;
             match self
                 .client
-                .send_live_pinged(Frame::Binary(data.clone()), &what, ping_behind)
+                .send_bulk(Frame::Binary(data.clone()), &what, ping_behind, &waiting)
                 .await
             {
                 Ok(()) => {
@@ -1001,6 +1020,20 @@ impl VideoRelay {
             .iter()
             .map(|i| i.frame_id)
             .collect()
+    }
+
+    /// The frames waiting to be handed to the socket, a frame's chunks counted once.
+    pub fn waiting_frames(&self) -> usize {
+        let inner = self.inner.lock();
+        let mut frames = 0;
+        let mut last = None;
+        for item in &inner.backlog {
+            if last != Some(item.frame_id) {
+                frames += 1;
+                last = Some(item.frame_id);
+            }
+        }
+        frames
     }
 
     pub fn backlog_len(&self) -> usize {
@@ -1598,6 +1631,27 @@ mod tests {
         }
         assert_eq!(r.ids(), (2..12).collect::<Vec<u16>>());
         assert!(r.server.reports().is_empty());
+    }
+
+    /// What the owner's gate counts behind a paced path: the frames still with the relay,
+    /// a frame's chunks (its rows) once.
+    #[tokio::test]
+    async fn the_frames_waiting_count_a_frames_chunks_once() {
+        reset_clock();
+        let r = rig(true, true, 100_000, None);
+        assert_eq!(r.relay.waiting_frames(), 0);
+        for row in 0..3 {
+            r.relay.offer(chunk(1, 1, true, 400, row, WIRE_H264, false));
+        }
+        assert_eq!(r.relay.waiting_frames(), 1);
+        for n in 2..5 {
+            for row in 0..3 {
+                r.relay
+                    .offer(chunk(n, n - 1, false, 400, row, WIRE_H264, false));
+            }
+        }
+        assert_eq!(r.relay.backlog_len(), 12);
+        assert_eq!(r.relay.waiting_frames(), 4);
     }
 
     #[tokio::test]

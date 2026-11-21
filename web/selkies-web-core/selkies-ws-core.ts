@@ -33,7 +33,8 @@
  * `START_VIDEO`, `STOP_VIDEO`, `START_AUDIO`, `STOP_AUDIO`,
  * `REQUEST_KEYFRAME`, `LOST_FRAME <id>` (a frame the decoder dropped, which
  * the encoder then predicts past), `DECODE_PACE <fps>` (the rate the decoder
- * keeps up with, 0 for any; lib/decode-pace.ts), `CLIENT_FRAME_ACK <id> <heldMs>`, `cr`, `REQUEST_CLIPBOARD`, the
+ * keeps up with, 0 for any; lib/decode-pace.ts), `CLIENT_FRAME_ACK <id> <heldMs> <sentMs>`
+ * (`sentMs`: this clock as the ack leaves), `cr`, `REQUEST_CLIPBOARD`, the
  * chunked clipboard upload of lib/clipboard-worker-bridge.ts,
  * `cmd,<command>`, `SET_NATIVE_CURSOR_RENDERING,<0|1>`,
  * `vp,<originX>,<originY>,<scaleX>,<scaleY>` (this page's stream box on the
@@ -680,7 +681,10 @@ const BACKPRESSURE_INTERVAL_MS = 50;
  * unanswered for four seconds as a stalled client, and a damage-gated capture
  * sends nothing while the screen is still, so the repeat is what tells an idle
  * client apart from a dead one; the server takes only the first ack of an id
- * as a round trip.
+ * as a round trip. For this long after a frame arrived the id is re-acked on
+ * every tick instead: each ack carries this clock as it left, and the server
+ * tells a path that stopped delivering from one whose answers are held up on
+ * their way back by the acks that keep coming while no frame does.
  */
 const ACK_HEARTBEAT_MS = 1000;
 /** How often the socket worker re-reports a draining send buffer. */
@@ -6910,12 +6914,13 @@ function syncVideoAckTimer() {
       if (videoLastId < 0) return;
       if (!ws || ws.readyState !== 1) return;
       const now = performance.now();
-      if (videoLastId === videoAckedId && now - videoAckSentAt < ${ACK_HEARTBEAT_MS}) return;
+      if (videoLastId === videoAckedId && now - videoAckSentAt < ${ACK_HEARTBEAT_MS} && now - videoLastIdAt >= ${ACK_HEARTBEAT_MS}) return;
       // The hold: how long the id waited on this tick, which a backgrounded
       // tab clamps to a second. The server subtracts it, so the round trip it
-      // reports stays the path's rather than this timer's.
+      // reports stays the path's rather than this timer's. The stamp is this
+      // clock as the ack leaves.
       const held = Math.max(0, Math.round(now - videoLastIdAt));
-      try { send('CLIENT_FRAME_ACK ' + videoLastId + ' ' + held); videoAckedId = videoLastId; videoAckSentAt = now; } catch (err) {}
+      try { send('CLIENT_FRAME_ACK ' + videoLastId + ' ' + held + ' ' + (performance.timeOrigin + now).toFixed(1)); videoAckedId = videoLastId; videoAckSentAt = now; } catch (err) {}
     }, ${BACKPRESSURE_INTERVAL_MS});
   } else if (!want && videoAckTimer) {
     clearInterval(videoAckTimer);
@@ -7822,11 +7827,12 @@ class WorkerWebSocket {
         const at = fromPresent ? lastPresentedVideoFrameAt : lastReceivedVideoFrameAt;
         const now = performance.now();
         if (acked !== -1 && acked !== null &&
-            (acked !== lastAckSentId || now - lastAckSentAt >= ACK_HEARTBEAT_MS)) {
+            (acked !== lastAckSentId || now - lastAckSentAt >= ACK_HEARTBEAT_MS || now - at < ACK_HEARTBEAT_MS)) {
           // How long this id waited for the tick; the server subtracts it so a
-          // throttled ack cadence is not reported as network latency.
+          // throttled ack cadence is not reported as network latency. The
+          // stamp is this clock as the ack leaves.
           const held = Math.max(0, Math.round(now - at));
-          websocket.send(`CLIENT_FRAME_ACK ${acked} ${held}`);
+          websocket.send(`CLIENT_FRAME_ACK ${acked} ${held} ${(performance.timeOrigin + now).toFixed(1)}`);
           lastAckSentId = acked; lastAckSentAt = now;
         }
       } catch (error) {

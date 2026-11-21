@@ -315,6 +315,14 @@ async fn frames_fan_out_as_pixelflux_framed_them_and_acks_measure_the_owner() {
     owner.say("CLIENT_FRAME_ACK 2 1.5").await;
     assert_eq!(link.lock().acknowledged_frame_id, 2);
     assert!(link.lock().rtt_floor_ms.is_some());
+    // The page's clock as the ack left rides behind the hold, and an ack is one without it
+    // or with one that says nothing.
+    link.lock().acknowledged_frame_id = -1;
+    owner.say("CLIENT_FRAME_ACK 2 40 1763700000123.4").await;
+    assert_eq!(link.lock().acknowledged_frame_id, 2);
+    link.lock().acknowledged_frame_id = -1;
+    owner.say("CLIENT_FRAME_ACK 2 40 x").await;
+    assert_eq!(link.lock().acknowledged_frame_id, 2);
     for bad in [
         "CLIENT_FRAME_ACK",
         "CLIENT_FRAME_ACK -1",
@@ -324,6 +332,118 @@ async fn frames_fan_out_as_pixelflux_framed_them_and_acks_measure_the_owner() {
         owner.say(bad).await;
         assert_eq!(link.lock().acknowledged_frame_id, 2, "{bad} is refused");
     }
+}
+
+/// The pings a page's writer wrote behind its video (`ws::flight`'s, by their counters).
+fn flight_pings(page: &RigPage) -> usize {
+    page.page
+        .sent
+        .lock()
+        .iter()
+        .filter(
+            |f| matches!(f, crate::ws::client::Frame::Ping(p) if p.len() == 8 && p[0] >> 6 == 1),
+        )
+        .count()
+}
+
+#[tokio::test]
+async fn only_the_displays_own_page_is_pinged_behind_its_video() {
+    let rig = Rig::new();
+    let mut owner = rig.written("a").await;
+    let mut beside = rig.written("b").await;
+    settle().await;
+    {
+        let reg = rig.service.reg.lock();
+        assert!(reg.owns(owner.id(), PRIMARY_DISPLAY) && reg.is_beside(beside.id()));
+    }
+    let capture = rig.primary_capture();
+    capture.deliver(1, 1, true);
+    settle().await;
+    assert_eq!(owner.binaries().len(), 1);
+    assert_eq!(beside.binaries().len(), 1);
+    assert_eq!(
+        (flight_pings(&owner), flight_pings(&beside)),
+        (0, 0),
+        "no page has stamped an ack yet"
+    );
+    // Both ack the frame with their clock on it. The second tab's ack is not its display's:
+    // nothing counts the frames a writer would hold for it, so its word paces nothing.
+    let stamp = (crate::ws::now() + 3600.0) * 1000.0;
+    owner.say(&format!("CLIENT_FRAME_ACK 1 0 {stamp:.1}")).await;
+    beside
+        .say(&format!("CLIENT_FRAME_ACK 1 0 {stamp:.1}"))
+        .await;
+    capture.deliver(2, 1, false);
+    settle().await;
+    assert_eq!(owner.binaries().len(), 2);
+    assert_eq!(beside.binaries().len(), 2);
+    assert_eq!((flight_pings(&owner), flight_pings(&beside)), (1, 0));
+}
+
+/// Every ping the page was sent so far, answered: all it was sent has reached it.
+fn answer_pings(page: &RigPage) {
+    let pings: Vec<Bytes> = page
+        .page
+        .sent
+        .lock()
+        .iter()
+        .filter_map(|f| match f {
+            crate::ws::client::Frame::Ping(p) => Some(p.clone()),
+            _ => None,
+        })
+        .collect();
+    for ping in pings {
+        page.client().note_pong(&ping);
+    }
+}
+
+#[tokio::test]
+async fn the_gate_counts_the_frames_the_writer_holds_back_from_a_late_path() {
+    let rig = Rig::new();
+    let mut owner = rig.written("a").await;
+    settle().await;
+    let capture = rig.primary_capture();
+    let link = rig.service.link(PRIMARY_DISPLAY).unwrap();
+    let stamped = |id: u16| {
+        format!(
+            "CLIENT_FRAME_ACK {id} 0 {:.1}",
+            (crate::ws::now() + 3600.0) * 1000.0
+        )
+    };
+    // The page takes two frames, acks them with its clock on them and answers their pings.
+    for id in 1..=2u16 {
+        capture.deliver(id, 1, id == 1);
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        answer_pings(&owner);
+        owner.say(&stamped(id)).await;
+    }
+    assert_eq!(owner.binaries().len(), 2);
+    // The third stands out past the bound, by the page's word of an ack it repeats.
+    capture.deliver(3, 1, false);
+    tokio::time::sleep(Duration::from_millis(160)).await;
+    owner.say(&stamped(2)).await;
+    // The writer holds the next back, and thirty more wait behind it with the relay.
+    for id in 4..=34u16 {
+        capture.deliver(id, 1, false);
+    }
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert_eq!(owner.binaries().len(), 3, "held back from the late path");
+    assert!(owner.client().paced());
+    assert!(link.lock().backpressure_enabled);
+    // Two frames are out past the newest acked, far under what the gate allows: it shuts
+    // for the frames that wait, which only the writer's pacing has it count.
+    let at = crate::ws::now() + 2.0;
+    for k in 0..2 {
+        rig.service
+            .backpressure_check(PRIMARY_DISPLAY, &link, at + f64::from(k) * 0.5, 0.0)
+            .await;
+    }
+    let l = link.lock();
+    assert!(
+        !l.backpressure_enabled && l.gate_counts.triggered == 1,
+        "{:?}",
+        l.gate_counts
+    );
 }
 
 #[tokio::test]

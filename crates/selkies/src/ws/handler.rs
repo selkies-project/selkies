@@ -249,7 +249,7 @@ async fn run_socket(
                     }
                     if ping_out.is_none_or(|sent| at - sent >= HEARTBEAT_S) && at - last_heard >= HEARTBEAT_S {
                         ping_out = Some(at);
-                        client.fire(Frame::Ping(Bytes::new()));
+                        client.fire_ahead(Frame::Ping(Bytes::new()));
                     }
                     continue;
                 }
@@ -689,26 +689,31 @@ impl Connection {
         Flow::Continue(())
     }
 
-    /// `CLIENT_FRAME_ACK <id> [<held_ms>]`: only the display's registered client acks the frames
-    /// its relay stamped; a viewer's ack would throttle the controller against a stream it never
-    /// got. The -1 sentinel is server-internal: accepted from the wire it would disable the gate.
+    /// `CLIENT_FRAME_ACK <id> [<held_ms> [<sent_ms>]]`: only the display's registered client
+    /// acks the frames its relay stamped; a viewer's ack would throttle the controller against
+    /// a stream it never got. The -1 sentinel is server-internal: accepted from the wire it
+    /// would disable the gate. `sent_ms` is the page's own clock as it sent the ack, which
+    /// tells that client's writer its path's way back from its way out (`ws::flight`). It is
+    /// taken from the display's registered client alone too: the frames a writer holds back
+    /// wait with a relay only that client's gate counts.
     async fn handle_ack(&mut self, message: &str) {
-        let Some(display_id) = self.display_id.clone() else {
-            return;
-        };
         let mut parts = message.split(' ').skip(1);
-        let parsed = (|| -> Option<(u16, f64)> {
+        let parsed = (|| -> Option<(u16, f64, Option<f64>)> {
             let id: i64 = parts.next()?.parse().ok()?;
             let held = match parts.next() {
                 Some(h) => h.parse::<f64>().ok()?.max(0.0),
                 None => 0.0,
             };
+            let sent = parts.next().and_then(|s| s.parse::<f64>().ok());
             (0..=MAX_UINT16_FRAME_ID)
                 .contains(&id)
-                .then_some((id as u16, held))
+                .then_some((id as u16, held, sent))
         })();
-        let Some((frame_id, held_ms)) = parsed else {
+        let Some((frame_id, held_ms, sent_ms)) = parsed else {
             warn!(target: "ws", "Malformed CLIENT_FRAME_ACK from {}: {message}", self.client.remote);
+            return;
+        };
+        let Some(display_id) = self.display_id.clone() else {
             return;
         };
         let link = {
@@ -718,6 +723,9 @@ impl Connection {
                 .flatten()
         };
         if let Some(link) = link {
+            if let Some(sent_ms) = sent_ms {
+                self.client.note_stamp(sent_ms);
+            }
             let land = {
                 let mut state = link.lock();
                 state.note_ack(frame_id, held_ms, now());

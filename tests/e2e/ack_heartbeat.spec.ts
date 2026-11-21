@@ -70,6 +70,25 @@ function acksSince(tap: WsTap, mark: number): [[number, string][], number, numbe
     return [out, reloads, requests];
 }
 
+/**
+ * The heartbeat among the acks, as the times of its beats, and the most acks any one id
+ * got in the second after its first: the page re-acks a frame on every tick for a second
+ * after it arrives (each ack carries the page's clock for the server's late-path gauge),
+ * and about once a second after that, which is the heartbeat. The first id of the window
+ * arrived before it, a still screen's paint-over burst being over by then.
+ */
+function heartbeat(acks: readonly [number, string][]): [number[], number] {
+    const first = new Map<string, number>();
+    const fresh = new Map<string, number>();
+    const beats: number[] = [];
+    acks.forEach(([at, id], i) => {
+        if (!first.has(id)) first.set(id, i === 0 ? Number.NEGATIVE_INFINITY : at);
+        if (at - (first.get(id) ?? at) >= 1) beats.push(at);
+        else fresh.set(id, (fresh.get(id) ?? 0) + 1);
+    });
+    return [beats, Math.max(0, ...fresh.values())];
+}
+
 /** What to close and the page; Firefox runs on the persistent profile. */
 async function openPage(engine: Engine, port: number, software: boolean): Promise<[Browser | BrowserContext, Page]> {
     let ctx: BrowserContext;
@@ -135,7 +154,11 @@ async function drive(res: Checks, host: Host, tap: WsTap, display: string, engin
         const [acks, reloads, requests] = acksSince(tap, mark);
         const chunks1 = await chunks(page);
         const ids = new Set(acks.map(([, id]) => id));
-        const gaps = acks.slice(1).map(([t], i) => t - acks[i][0]);
+        // A chunk that lands in the window (the one the check below allows, or a key frame
+        // a decoder asked for) is re-acked on every tick for its first second: 20 acks,
+        // which are not the heartbeat's, and cost it a beat.
+        const [beats, most] = heartbeat(acks);
+        const gaps = beats.slice(1).map((t, i) => t - beats[i]);
         const mid = median(gaps);
         // A decoder that keeps asking for keyframes is sent them; anything
         // beyond those is the capture sending on its own.
@@ -147,8 +170,8 @@ async function drive(res: Checks, host: Host, tap: WsTap, display: string, engin
             res.skip(`${tag} the still screen sends nothing unasked`, `the decoder acked ${moving} distinct ids in 3 s of motion, so what it is sent says nothing`);
         }
         res.check(`${tag} an unchanged id is re-acked about once a second (worker divert=${divert ? 'True' : 'False'})`,
-            acks.length >= 6 && acks.length <= 10 && ids.size <= 2 && mid !== null && mid >= 0.8 && mid <= 1.3,
-            `${acks.length} acks, ids=${JSON.stringify([...ids].sort())}, median gap=${mid === null ? null : Math.round(mid * 100) / 100} s`);
+            beats.length >= 7 - ids.size && beats.length <= 10 && ids.size <= 2 && most <= 25 && mid !== null && mid >= 0.8 && mid <= 1.3,
+            `${beats.length} beats of ${acks.length} acks, ids=${JSON.stringify([...ids].sort())}, median gap=${mid === null ? null : Math.round(mid * 100) / 100} s, ${most} acks of a fresh id`);
         const stalls = (await host.log(serverMark)).split('Client stall for').length - 1;
         res.check(`${tag} the server declares no stall`, stalls === 0, `${stalls} stalls`);
         if (!decodes) {
