@@ -233,24 +233,25 @@ impl Codec {
     /// VA-API, which agree within a step, each coding a quantizer about three finer than the index
     /// to match x264, and Intel's VA-API (Arc and Alder Lake-N) codes at or past x264 there too;
     /// AMD's VA-API H.265 follows the same curve within a step, NVENC's H.265 is within two steps
-    /// of the index from 22 up and keeps it, and Intel's reads two steps coarser. Below 25 it is
-    /// the still screen a cleanup at that index leaves, where x264's constant quality keeps
+    /// of the index from 22 up and keeps it, and Intel's reads two steps coarser. Below index 25 it
+    /// is the still screen a cleanup at that index leaves, where x264's constant quality keeps
     /// lowering its quantizer as the residual shrinks and a held quantizer does not. Intel's curves
     /// (Arc and Alder Lake-N) and NVENC's (Ampere) read there the finer match of a dense patterned
-    /// desktop and a dark application, as far as the engine reaches it: Intel's down to the floor
-    /// of 10 its low-power HEVC encoder codes (`vaapi::h265::INTEL_LOW_POWER_MIN_QP`), NVENC's
-    /// H.264 to 9, finer than which a cleanup of the patterned desktop more than triples in size,
-    /// and its H.265 to 10 and 11 up to index 16, below which the dark application's x264 is out of
-    /// its reach. AMD's VCN 2 (Renoir) settles the dark application under x264's at every quantizer
-    /// its H.264 codes below index 21, down to the floor of 7 (`vaapi::h264::MIN_QP`), so its H.264
-    /// reads the desktop's match, which is Intel's curve. Its H.265 reads under 16, since after a
-    /// scroll at index 25 a cleanup at 16 to 21 left the picture about where the scroll had, and 9
-    /// to 10 from index 10 to 19, about its finest still picture, which reaches x264's on neither
-    /// desktop below 18. AV1 has a curve per backend: NVENC's is measured on Ada, and VA-API's on
-    /// Intel (Arc) with the in-loop filters its constant-quantizer frames carry, the finer match of
-    /// those two desktops in each role. VA-API's VP9 is matched the same way on Intel (Arc and
-    /// Alder Lake-N), finer than libvpx at the same index on text. VP8 keeps the software table.
-    /// NVENC refuses an AV1 index of zero, so the floor stays one.
+    /// desktop and a dark application, as far as the engine reaches it: Intel's down to QP 10, the
+    /// floor its low-power HEVC encoder codes (`vaapi::h265::INTEL_LOW_POWER_MIN_QP`), NVENC's
+    /// H.264 to QP 9, finer than which a cleanup of the patterned desktop more than triples in
+    /// size, and its H.265 to QP 10 and 11 up to index 16, below which the dark application's x264
+    /// is out of its reach. AMD's VCN 2 (Renoir) settles the dark application under x264's at every
+    /// quantizer its H.264 codes below index 21, down to its floor, QP 7 (`vaapi::h264::MIN_QP`),
+    /// so its H.264 reads the desktop's match, which is Intel's curve. Its H.265 reads QP 15 or
+    /// finer below index 25, and QP 9 to 10 from index 10 to 19, about its finest still picture,
+    /// which reaches x264's on neither desktop below index 18: after a scroll at index 25, a
+    /// cleanup at QP 16 to 21 left the picture about where the scroll had. AV1 has a curve per
+    /// backend: NVENC's is measured on Ada, and VA-API's on Intel (Arc) with the in-loop filters
+    /// its constant-quantizer frames carry, the finer match of those two desktops in each role.
+    /// VA-API's VP9 is matched the same way on Intel (Arc and Alder Lake-N), finer than libvpx at
+    /// the same index on text. VP8 keeps the software table. NVENC refuses an AV1 index of zero, so
+    /// the floor stays one.
     pub fn hardware_quantizer(self, hw: Hardware, crf: i32) -> u32 {
         let crf = crf.clamp(0, 51) as u32;
         match (self, hw) {
