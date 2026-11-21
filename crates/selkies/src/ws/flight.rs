@@ -56,8 +56,9 @@
 //!   at the pace they were written, neither slower (it is narrowed) nor faster (it is
 //!   draining a queue the stream put there), so the frames stood out for a longer way round
 //!   or a queue other traffic keeps, and the least round trip seen since is the path's from
-//!   then on. The two frames lie at least so far apart that the path's slack is within the
-//!   tenth a pace kept may be off by: an uneven path shows nothing over less. Only frames written while nothing was paced, and not as the socket made room,
+//!   then on. The two frames lie at least so far apart that how far the path's round trips
+//!   run apart is within the tenth a pace kept may be off by: an uneven path shows nothing
+//!   over less. Only frames written while nothing was paced, and not as the socket made room,
 //!   can say: what is written while the path is paced, or while the socket pushes back,
 //!   goes out as it is delivered. And only frames that crossed at less than the path
 //!   delivered when it was last paced, while it has shown no more since: a stream cut to
@@ -458,12 +459,13 @@ impl Flight {
             // Two frames that arrived since the path showed late, written before it did,
             // while nothing was paced and by writes the socket took at once: did the bytes
             // between them cross at the pace they were written? The two lie far enough apart
-            // that the path's unevenness is within the tenth a pace kept may be off by, or
-            // an uneven path would show one kept as often as not. And they crossed at less
+            // that how far the path's round trips run apart is within the tenth a pace kept
+            // may be off by, or an uneven path would show one kept as often as not. And they crossed at less
             // than the path carried when it was last paced: a stream at the rate of a
             // narrowed path, behind a queue of its own (a key frame), crosses at the pace it
             // is written too.
-            let span = FLIGHT_RATE_SPAN_S.max(self.slack() / (1.0 - FLIGHT_KEEPS_UP));
+            let uneven = FLIGHT_JITTER_SLACK * self.jitter;
+            let span = FLIGHT_RATE_SPAN_S.max(uneven / (1.0 - FLIGHT_KEEPS_UP));
             let before = self
                 .arrivals
                 .iter()
@@ -614,9 +616,11 @@ impl Flight {
 
     /// What a round trip may run past the floor and the bound on this path without being
     /// late: `FLIGHT_JITTER_SLACK` times how far its round trips lay apart while nothing was
-    /// paced, a path that delivers unevenly being no later for it.
+    /// paced, a path that delivers unevenly being no later for it, less the half of the
+    /// bound that unevenness has to itself. A path whose round trips stay within that half
+    /// is late where an even one is.
     pub fn slack(&self) -> f64 {
-        (FLIGHT_JITTER_SLACK * self.jitter).min(FLIGHT_SLACK_MAX_S)
+        (FLIGHT_JITTER_SLACK * self.jitter - self.bound / 2.0).clamp(0.0, FLIGHT_SLACK_MAX_S)
     }
 
     fn unpace(&mut self, now: f64) {
@@ -1311,10 +1315,29 @@ mod tests {
             let (at, holds) = onset(round_trip, 0.0, 1);
             assert!(at < 0.2 && holds < 0.8, "{round_trip}: {at} {holds}");
         }
-        // An uneven path's line stands further off by its slack, and no further.
+        // A path uneven within half the bound has its line where an even one does: what
+        // its frames arrive later by is its acks' own way back.
         for seed in 1..=8 {
             let (at, holds) = onset(0.04, 0.04, seed);
-            assert!(at < 0.32 && holds < 1.4, "{seed}: {at} {holds}");
+            assert!(at < 0.22 && holds < 0.95, "{seed}: {at} {holds}");
+        }
+    }
+
+    #[test]
+    fn a_path_uneven_within_half_the_bound_is_late_where_an_even_one_is() {
+        // Up to 40 ms more each way, piece by piece, under a stream the path carries: its
+        // round trips never run half the bound past the least, nothing is paced in twenty
+        // seconds, and the line stands where an even path's does.
+        for seed in 1..=8u64 {
+            let mut path = Path::new(2_500_000.0, 0.04);
+            path.jitter = 0.04;
+            path.draw = seed * 7919;
+            let run = stream(true, &mut path, 16_384, 1.0 / 60.0, 20.0, None, 0.0);
+            assert!(
+                run.paced == 0.0 && run.waiting == 0,
+                "{seed}: {}",
+                run.paced
+            );
         }
     }
 
