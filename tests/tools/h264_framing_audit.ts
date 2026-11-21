@@ -146,44 +146,44 @@ async function runScenario(scenario: Scenario): Promise<{ ready: string; current
 
 {
     const res = await runScenario({ worker: 'annexb', decoder: true });
-    check('worker answering annexb settles to annexb without decoding on the page',
-        res.ready === 'annexb' && res.current === 'annexb' && res.pageDecodes === 0, res);
+    check('worker answering annexb settles to annexb, revokes its blob URL, and skips page decode',
+        res.ready === 'annexb' && res.current === 'annexb' && res.pageDecodes === 0 && res.revoked === 1, res);
 }
 
 {
     const res = await runScenario({ worker: 'avcc', decoder: false });
-    check('worker answering avcc settles to avcc without decoding on the page',
-        res.ready === 'avcc' && res.current === 'avcc' && res.pageDecodes === 0, res);
+    check('worker answering avcc settles to avcc, revokes its blob URL, and skips page decode',
+        res.ready === 'avcc' && res.current === 'avcc' && res.pageDecodes === 0 && res.revoked === 1, res);
 }
 
 {
     const res = await runScenario({ worker: 'onerror', decoder: true });
-    check('when the blob worker fails via onerror on an Annex B engine (Chromium/Firefox), the page probe settles to annexb',
-        res.ready === 'annexb' && res.current === 'annexb' && res.pageDecodes === 1, res);
+    check('when the blob worker fails via onerror on an Annex B engine (Chromium/Firefox), the page probe settles to annexb and revokes the blob URL',
+        res.ready === 'annexb' && res.current === 'annexb' && res.pageDecodes === 1 && res.revoked === 1, res);
 }
 
 {
     const res = await runScenario({ worker: 'onerror', decoder: false });
-    check('when the blob worker fails via onerror on an avcC-only engine (WebKit), the page probe settles to avcc',
-        res.ready === 'avcc' && res.current === 'avcc' && res.pageDecodes === 1, res);
+    check('when the blob worker fails via onerror on an avcC-only engine (WebKit), the page probe settles to avcc and revokes the blob URL',
+        res.ready === 'avcc' && res.current === 'avcc' && res.pageDecodes === 1 && res.revoked === 1, res);
 }
 
 {
     const res = await runScenario({ worker: 'throw', decoder: false });
-    check('when new Worker() throws synchronously on an avcC-only engine (WebKit), the page probe settles to avcc',
-        res.ready === 'avcc' && res.current === 'avcc' && res.pageDecodes === 1, res);
+    check('when new Worker() throws synchronously on an avcC-only engine (WebKit), the page probe settles to avcc and revokes the blob URL',
+        res.ready === 'avcc' && res.current === 'avcc' && res.pageDecodes === 1 && res.revoked === 1, res);
 }
 
 {
     const res = await runScenario({ worker: 'throw', decoder: true });
-    check('when new Worker() throws synchronously on an Annex B engine, the page probe settles to annexb',
-        res.ready === 'annexb' && res.current === 'annexb' && res.pageDecodes === 1, res);
+    check('when new Worker() throws synchronously on an Annex B engine, the page probe settles to annexb and revokes the blob URL',
+        res.ready === 'annexb' && res.current === 'annexb' && res.pageDecodes === 1 && res.revoked === 1, res);
 }
 
 {
     const res = await runScenario({ worker: 'onerror', decoder: 'none' });
-    check('without VideoDecoder at all, h264FramingReady settles immediately to annexb',
-        res.ready === 'annexb' && res.current === 'annexb' && res.pageDecodes === 0, res);
+    check('without VideoDecoder at all, h264FramingReady settles immediately to annexb without creating a blob URL',
+        res.ready === 'annexb' && res.current === 'annexb' && res.pageDecodes === 0 && res.revoked === 0, res);
 }
 
 console.log(`[h264-framing] ${passed}/${passed + failed} passed`);
