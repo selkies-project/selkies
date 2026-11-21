@@ -293,11 +293,15 @@ patchelf --force-rpath --set-rpath "\$ORIGIN/../../../../../../lib/selkies" \
 patchelf --print-rpath "${TREE}/bin/selkies" | grep -qxF "\$ORIGIN/../lib/selkies"
 
 # Every program resolves every library it links from the tree or from what the
-# host is expected to have; the ALSA modules' libasound is the application's
+# host is expected to have; the ALSA modules' libasound is the application's,
+# and musl's ldd, which relocates, also names each of its symbols unresolved
 missing="$(find "${TREE}/bin" "${TREE}/libexec" "${LIBDIR}" -type f ! -path '*/preload/*' \
     -exec sh -c 'head -c4 "$1" | grep -q ELF || exit 0
-        case "$1" in */alsa-lib/*) host="libasound\.so\.2 " ;; *) host="^$" ;; esac
-        ldd "$1" 2>&1 | grep "not found" | grep -v "${host}" | sed "s|^|$1: |"' _ {} \;)"
+        case "$1" in
+            */alsa-lib/*) host="libasound\.so\.2 |: snd_[A-Za-z0-9_]+: symbol not found" ;;
+            *) host="^$" ;;
+        esac
+        ldd "$1" 2>&1 | grep "not found" | grep -vE "${host}" | sed "s|^|$1: |"' _ {} \;)"
 [ -z "${missing}" ] || { echo "${missing}" >&2; exit 1; }
 # The server links libxcb in statically and exports none of it, and no libxcb is
 # carried, so the one a host's GPU driver loads (NVIDIA's L4T X and EGL stack
