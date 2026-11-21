@@ -35,7 +35,9 @@
 //!
 //! The steer (`steer_bitrate_to_link`) reads a queue as the least round trip among a window's
 //! acked frames, each less its own crossing time, standing `LINK_QUEUE_MS` (plus half the
-//! path's jitter) over the floor, or as `LINK_RISE_ACKS` round trips each longer than the last;
+//! path's jitter) over the floor, the stream that stood with the relay behind a paced path
+//! through two checks counted with it, or as `LINK_RISE_ACKS` round trips each longer than
+//! the last;
 //! a queue that outlasts the cuts it answers, sent well under what the path delivered, is a
 //! longer path's or other traffic's and becomes the floor (`settle_path_floor`).
 //!
@@ -181,6 +183,10 @@ pub struct DisplayLink {
     pub produced_at: f64,
     queue_over_at: Option<f64>,
     queue_over_since: Option<f64>,
+    /// The stream that waited with the relay behind a paced path at the last check, in ms of
+    /// it, and the least of that over the last two checks: what stood there, not a moment's.
+    waiting_ms: f64,
+    waiting_stood_ms: f64,
     hold_ping: Option<u64>,
     fps_sample: Option<(i64, f64)>,
     measured_client_fps: Option<f64>,
@@ -889,7 +895,11 @@ impl DisplayLink {
             let rising = row.len() >= LINK_RISE_ACKS
                 && row.windows(2).all(|w| w[1] > w[0])
                 && row.last().copied().unwrap_or(0.0) - floor_ms > allowed_ms;
-            let standing = least_ms - floor_ms > allowed_ms;
+            // The writer's pacing keeps a late path to its bound and the rest of the stream
+            // with the relay (`ws::flight`): that stands queued as what is in the path does,
+            // and is read with it, or a target a little over the path would go on until the
+            // gate let the frames go.
+            let standing = least_ms - floor_ms + self.waiting_stood_ms > allowed_ms;
             let queued = (standing || rising) && !catching_up;
             if rising && !standing {
                 // A queue that only builds stood over the row's acks, not the window's: what
@@ -1265,6 +1275,8 @@ impl DisplayLink {
         now: f64,
         effects: &mut dyn GateEffects,
     ) {
+        let waited_ms = std::mem::take(&mut self.waiting_ms);
+        self.waiting_stood_ms = 0.0;
         if !input.capturing {
             if !self.backpressure_enabled {
                 debug!(target: "ws", "Backpressure LIFTED for '{display_id}' (video pipeline is not active).");
@@ -1309,6 +1321,10 @@ impl DisplayLink {
             None => wrapped as f64,
             Some(at) => self.sent_timestamps.iter().filter(|e| e.1 > at).count() as f64,
         } + effects.waiting_frames() as f64;
+        // What waits with the relay is the stream's queue to the steer as well, once it has
+        // stood through two checks.
+        self.waiting_ms = effects.waiting_frames() as f64 / client_fps.max(1.0) * 1000.0;
+        self.waiting_stood_ms = waited_ms.min(self.waiting_ms);
         let allowed_desync_frames = input.allowed_desync_ms / 1000.0 * client_fps;
         let floor_ms = self.rtt_floor_ms.unwrap_or(0.0);
         let effective_desync_frames = frame_desync - floor_ms / 1000.0 * client_fps;
@@ -1635,6 +1651,40 @@ mod tests {
         let standing = gate_states_paced(&[0.0, 300.0, 300.0, 300.0, 0.0, 0.0]);
         assert_eq!(&standing[..3], &[true, true, false], "{standing:?}");
         assert_eq!(&standing[3..], &[false, true, true], "{standing:?}");
+    }
+
+    /// What waits with the relay behind a paced path is kept for the steer as the least of
+    /// two checks on end: a backlog that stood, not one check's.
+    #[test]
+    fn what_waits_with_the_relay_is_the_steers_once_it_stood_through_two_checks() {
+        let mut link = DisplayLink::new();
+        link.acknowledged_frame_id = 100;
+        link.last_sent_frame_id = 100;
+        link.has_sent_any_frame = true;
+        link.rtt_floor_ms = Some(FLOOR_MS);
+        let mut fake = Fake {
+            now: 1000.0,
+            ..Default::default()
+        };
+        let input = TickInput {
+            capturing: true,
+            configured_fps: FPS,
+            steered: true,
+            interval_s: INTERVAL,
+            allowed_desync_ms: BACKPRESSURE_ALLOWED_DESYNC_MS,
+            primary: false,
+        };
+        let mut stood = Vec::new();
+        for (n, waiting) in [0usize, 6, 9, 3, 0].into_iter().enumerate() {
+            let clock = 1000.0 + (n + 1) as f64 * INTERVAL;
+            fake.now = clock;
+            fake.waiting = waiting;
+            link.acked_at = clock;
+            fake.heard_at = Some(clock);
+            link.backpressure_tick("primary", input, clock, &mut fake);
+            stood.push((link.waiting_stood_ms / 1000.0 * FPS).round() as usize);
+        }
+        assert_eq!(stood, vec![0, 0, 6, 3, 0]);
     }
 
     #[test]
@@ -2452,6 +2502,25 @@ mod tests {
         p.state.note_ack(8, 0.0, t);
         p.run(20.0, t, 2.0, Some(0.0), None);
         assert!(p.pad_bps > 0.0, "{:?}", p.calls);
+    }
+
+    #[test]
+    fn stream_that_stands_with_the_relay_behind_a_paced_path_is_a_queue_to_the_steer() {
+        // The round trips stand 30 ms over the floor, under what the steer takes for a
+        // queue: the writer's pacing keeps the path to its bound, and what the stream sends
+        // over that waits with the relay. Read as the queue it is, it cuts the target to
+        // what the path delivers; left unread it would stand until the gate let it go.
+        let mut s = Steer::new();
+        let t = s.flat(20.0, 0.0, 10.0, Some(3000.0));
+        let t = s.flat(50.0, t, 2.0, Some(3000.0));
+        assert!(s.rates().is_empty(), "{:?}", s.rates());
+        s.state.waiting_stood_ms = 100.0;
+        s.flat(50.0, t, 0.5, Some(3000.0));
+        assert!(
+            s.current() < 3000.0 && s.current() > 2000.0,
+            "{:?}",
+            s.rates()
+        );
     }
 
     #[test]

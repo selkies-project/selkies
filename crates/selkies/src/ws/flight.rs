@@ -56,9 +56,13 @@
 //!   at the pace they were written, neither slower (it is narrowed) nor faster (it is
 //!   draining a queue the stream put there), so the frames stood out for a longer way round
 //!   or a queue other traffic keeps, and the least round trip seen since is the path's from
-//!   then on. Only frames written while nothing was paced, and not as the socket made room,
+//!   then on. The two frames lie at least so far apart that the path's slack is within the
+//!   tenth a pace kept may be off by: an uneven path shows nothing over less. Only frames written while nothing was paced, and not as the socket made room,
 //!   can say: what is written while the path is paced, or while the socket pushes back,
-//!   goes out as it is delivered;
+//!   goes out as it is delivered. And only frames that crossed at less than the path
+//!   delivered when it was last paced, while it has shown no more since: a stream cut to
+//!   the rate of a narrowed path keeps its pace behind a queue of its own, a key frame's,
+//!   which is no longer way round;
 //! - with a bulk frame that asks after none did for `FLIGHT_RATE_WINDOW_S` and finds none in
 //!   flight (the stream had stopped);
 //! - after `FLIGHT_PACED_MAX_S` on end, the least round trip of the stretch becoming the
@@ -234,6 +238,10 @@ pub struct Flight {
     paced_floor: f64,
     /// When the pacing last ended.
     unpaced_at: f64,
+    /// The most the path delivered a second while it is paced, and while it last was: what
+    /// it carries when it is given more than it takes, until it shows it carries more.
+    paced_rate: f64,
+    carried: Option<f64>,
     /// Since when no round trip came within the late line while those of frames that found
     /// none in flight stood past it, the least of those, how many, and when the last one
     /// came.
@@ -388,11 +396,19 @@ impl Flight {
             .rev()
             .find(|arrival| arrived - arrival.at >= FLIGHT_RATE_SPAN_S)
             .copied();
-        if let Some(before) = before
-            && sent.through > before.through
-        {
-            let rate = (sent.through - before.through) as f64 / (arrived - before.at);
+        let rate = before
+            .filter(|before| sent.through > before.through)
+            .map(|before| (sent.through - before.through) as f64 / (arrived - before.at));
+        if let Some(rate) = rate {
             self.rates.push_back((now, rate));
+            if self.paced {
+                self.paced_rate = self.paced_rate.max(rate);
+            } else if self
+                .carried
+                .is_some_and(|carried| rate * FLIGHT_KEEPS_UP > carried)
+            {
+                self.carried = None;
+            }
         }
         while self
             .rates
@@ -441,10 +457,26 @@ impl Flight {
             self.paced_floor = self.paced_floor.min(out);
             // Two frames that arrived since the path showed late, written before it did,
             // while nothing was paced and by writes the socket took at once: did the bytes
-            // between them cross at the pace they were written?
+            // between them cross at the pace they were written? The two lie far enough apart
+            // that the path's unevenness is within the tenth a pace kept may be off by, or
+            // an uneven path would show one kept as often as not. And they crossed at less
+            // than the path carried when it was last paced: a stream at the rate of a
+            // narrowed path, behind a queue of its own (a key frame), crosses at the pace it
+            // is written too.
+            let span = FLIGHT_RATE_SPAN_S.max(self.slack() / (1.0 - FLIGHT_KEEPS_UP));
+            let before = self
+                .arrivals
+                .iter()
+                .rev()
+                .find(|arrival| arrived - arrival.at >= span)
+                .copied();
             let kept_up = before.is_some_and(|before| {
                 let (apart, sent_apart) = (arrived - before.at, sent.at - before.sent);
+                let rate = sent.through.saturating_sub(before.through) as f64 / apart;
                 named
+                    && self
+                        .carried
+                        .is_none_or(|carried| rate < FLIGHT_KEEPS_UP * carried)
                     && before.exact
                     && before.at >= self.paced_mark
                     && before.sent >= self.unpaced_at
@@ -459,8 +491,8 @@ impl Flight {
             // over, whatever the floor says.
             let long = now - self.paced_at > FLIGHT_PACED_MAX_S;
             if (kept_up || long) && self.paced_floor.is_finite() {
-                self.move_floor(self.paced_floor, now);
                 self.unpace(now);
+                self.move_floor(self.paced_floor, now);
             }
         }
         true
@@ -490,6 +522,8 @@ impl Flight {
         self.floor = Some(floor);
         self.over_since = None;
         self.last_round_trip = 0.0;
+        // A path that is longer was not shown to carry less.
+        self.carried = None;
     }
 
     /// How long on its way out past which the path is late: the floor, the bound, and the
@@ -519,12 +553,12 @@ impl Flight {
         if self.delivered >= self.bulk_written {
             // No bulk frame is in flight: the pacing ends with the sender's backlog, or
             // with a stream that had stopped.
+            let unpaced_at = self.unpaced_at;
             if self.paced && (idle || !more) {
+                self.unpace(now);
                 if idle {
                     // Nothing was paced over the pause: the stretch ended when it began.
-                    self.paced = false;
-                } else {
-                    self.unpace(now);
+                    self.unpaced_at = unpaced_at;
                 }
                 self.rates.clear();
             }
@@ -555,6 +589,7 @@ impl Flight {
             self.rates.clear();
             self.paced_at = now;
             self.paced_mark = mark;
+            self.paced_rate = 0.0;
             self.paced_floor = f64::INFINITY;
             self.last_round_trip = 0.0;
         }
@@ -588,6 +623,9 @@ impl Flight {
         if self.paced {
             self.paced = false;
             self.unpaced_at = now;
+            if self.paced_rate > 0.0 {
+                self.carried = Some(self.paced_rate);
+            }
         }
     }
 
@@ -1476,6 +1514,63 @@ mod tests {
         assert!(path.worst < 0.25, "{}", path.worst);
         assert!(flight.floor().unwrap() < 0.05, "{:?}", flight.floor());
         assert!(waiting > 30, "{waiting}");
+    }
+
+    /// The path narrows to 1.5 Mbit/s under 8 Mbit/s at 12 s and is paced; the frames that
+    /// waited are let go (the gate), and at 14 s the stream comes back cut to what the path
+    /// carries, a key frame of 80 kB first: the path's least round trip at the end, and the
+    /// most a byte waited in its queue from 15 s on. `jitter` is how unevenly it delivers.
+    fn behind_its_own_key_frame(jitter: f64, seed: u64) -> (f64, f64) {
+        let mut flight = Flight::default();
+        let mut path = Path::new(2_500_000.0, 0.02);
+        path.jitter = jitter;
+        path.draw = seed * 7919;
+        let (mut waiting, mut due, mut now) = (0usize, 10.0, 10.0);
+        let mut key = true;
+        while now < 20.0 {
+            if now >= 12.0 {
+                path.rate = 187_500.0;
+            }
+            if (13.5..14.0).contains(&now) {
+                waiting = 0;
+                due = 14.0;
+            }
+            if (15.0..15.001).contains(&now) {
+                path.worst = 0.0;
+            }
+            path.deliver(&mut flight, now);
+            if now >= due {
+                waiting += 1;
+                due += 1.0 / 60.0;
+            }
+            while waiting > 0 && flight.clear(now, FLIGHT_LATE_S, waiting > 1) {
+                let len = match (now < 14.0, key) {
+                    (true, _) => 16_384,
+                    (false, true) => 80_000,
+                    (false, false) => 3_125,
+                };
+                key = key && now < 14.0;
+                path.write(&mut flight, len, now, true);
+                waiting -= 1;
+            }
+            now += 0.001;
+        }
+        (flight.floor().unwrap(), path.worst)
+    }
+
+    #[test]
+    fn a_stream_at_the_narrowed_paths_rate_behind_its_own_key_frame_is_no_longer_way_round() {
+        // The frames behind the key frame reach the page as far apart as they were written,
+        // each the path's whole rate for its sixtieth of a second: the pace is kept, behind
+        // a queue that is the stream's own.
+        let (floor, worst) = behind_its_own_key_frame(0.0, 1);
+        assert!(floor < 0.05 && worst < 0.3, "{floor} {worst}");
+        // On a path that delivers up to 40 ms unevenly each way two frames a twentieth of a
+        // second apart show a pace kept as often as not, whatever the path did.
+        for seed in 1..=8 {
+            let (floor, worst) = behind_its_own_key_frame(0.04, seed);
+            assert!(floor < 0.1 && worst < 0.35, "{seed}: {floor} {worst}");
+        }
     }
 
     #[test]
