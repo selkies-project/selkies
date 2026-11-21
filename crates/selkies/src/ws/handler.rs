@@ -731,17 +731,17 @@ impl Connection {
                 .flatten()
         };
         if let Some(link) = link {
-            if let Some((sent_ms, received)) = stamp {
+            let back_ms = stamp.map_or(0.0, |(sent_ms, received)| {
                 let said = Said {
                     received,
                     frame: frame_id,
                     held: held_ms / 1000.0,
                 };
-                self.client.note_stamp(sent_ms, said);
-            }
+                self.client.note_stamp(sent_ms, said) * 1000.0
+            });
             let land = {
                 let mut state = link.lock();
-                state.note_ack(frame_id, held_ms, now());
+                state.note_ack_held_back(frame_id, held_ms, back_ms, now());
                 state.sounding.land_due
             };
             if land {

@@ -777,14 +777,16 @@ impl Client {
     }
 
     /// The page's own clock, in milliseconds, as it sent the ack just read, and what the ack
-    /// says of the stream (`Flight::note_stamp`).
-    pub fn note_stamp(&self, sent_ms: f64, said: Said) {
-        let (passed, kept_up) = {
+    /// says of the stream (`Flight::note_stamp`): how long its way back held that ack, in
+    /// seconds.
+    pub fn note_stamp(&self, sent_ms: f64, said: Said) -> f64 {
+        let (passed, kept_up, back) = {
             let mut flight = self.flight.lock();
             let was = flight.paced();
             (
                 flight.note_stamp(sent_ms / 1000.0, said, now()),
                 was && !flight.paced(),
+                flight.way_back(now()),
             )
         };
         if kept_up {
@@ -793,6 +795,12 @@ impl Client {
         if passed {
             self.flight_wake.notify_one();
         }
+        back
+    }
+
+    /// How long its way back held the page's last ack, by its stamp (`Flight::way_back`).
+    pub fn held_back(&self) -> f64 {
+        self.flight.lock().way_back(now())
     }
 
     /// Resolve a received pong against the ping clocks: each ignores the other's payloads. A

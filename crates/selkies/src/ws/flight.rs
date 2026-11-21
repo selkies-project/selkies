@@ -508,9 +508,19 @@ impl Flight {
             .then_some(self.stamped_at - self.back)
     }
 
+    /// How long its way back held the last stamp taken, past the least any took, while that
+    /// stamp says anything: the ack it came with left the page that much before it arrived.
+    pub fn way_back(&self, now: f64) -> f64 {
+        if self.mark(now).is_some() {
+            self.back
+        } else {
+            0.0
+        }
+    }
+
     /// How long the way back holds what the page sends, past the least it took: the least
     /// its last few stamps were held, while one says.
-    fn back(&self, now: f64) -> f64 {
+    fn held_back(&self, now: f64) -> f64 {
         if self.mark(now).is_some() {
             self.backs.iter().copied().reduce(f64::min).unwrap_or(0.0)
         } else {
@@ -606,7 +616,7 @@ impl Flight {
         let in_flight = (self.written - self.delivered) as f64;
         let since = (now - self.stamped_at).clamp(0.0, FLIGHT_STAMP_S);
         let fits = self.rate(now).is_some_and(|rate| {
-            in_flight <= rate * (floor + bound.max(floor) + self.back(now) + since)
+            in_flight <= rate * (floor + bound.max(floor) + self.held_back(now) + since)
         });
         if fits && !late && !more {
             self.unpace(now);

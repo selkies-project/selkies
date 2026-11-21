@@ -310,6 +310,20 @@ impl DisplayLink {
     /// longer than that send has been out, moves the gate's reference to that send, is dated,
     /// and yields a round trip less the hold. Whether the ack was a stale earlier frame's.
     pub fn note_ack(&mut self, frame_id: u16, held_ms: f64, now: f64) -> bool {
+        self.note_ack_held_back(frame_id, held_ms, 0.0, now)
+    }
+
+    /// `note_ack` for an ack its way back held `back_ms` past the least it took, by the
+    /// page's own stamps (`ws::flight`): an upload filling its uplink. That comes off the
+    /// round trip as the page's own hold does: it is none of the stream's queue, which is
+    /// what the steer reads round trips for.
+    pub fn note_ack_held_back(
+        &mut self,
+        frame_id: u16,
+        held_ms: f64,
+        back_ms: f64,
+        now: f64,
+    ) -> bool {
         self.acknowledged_frame_id = i64::from(frame_id);
         self.unacked_since = None;
         let Some(index) = self.sent_timestamps.iter().position(|e| e.0 == frame_id) else {
@@ -331,6 +345,14 @@ impl DisplayLink {
         self.acked_sent_at = Some(send_time);
         self.acked_at = now;
         let rtt_sample_ms = rtt_sample_ms.max(0.0);
+        // What the way back held the ack comes off, down to the least round trip known and
+        // no further: a hold read longer than that (a page's clock losing time against this
+        // one) says the path took no less than it ever did, and a round trip of 0 would be
+        // the floor for ten minutes.
+        let least = self
+            .rtt_floor_ms
+            .map_or(rtt_sample_ms, |floor| floor.min(rtt_sample_ms));
+        let rtt_sample_ms = (rtt_sample_ms - back_ms.max(0.0)).max(least);
         self.sounding.ack_held_ms = held_ms.max(0.0);
         self.sounding.ack_is_frame = true;
         if let Some(crossing) = self.key_crossing
@@ -1211,6 +1233,11 @@ pub trait GateEffects {
     fn waiting_frames(&self) -> usize {
         0
     }
+    /// How long the page's last ack was held on its way back, past the least any took, in
+    /// seconds, where its stamps tell (`ws::flight`): an upload filling its uplink.
+    fn held_back(&self) -> f64 {
+        0.0
+    }
 }
 
 /// What a check knows about the display beyond its link.
@@ -1327,7 +1354,10 @@ impl DisplayLink {
         self.waiting_stood_ms = waited_ms.min(self.waiting_ms);
         let allowed_desync_frames = input.allowed_desync_ms / 1000.0 * client_fps;
         let floor_ms = self.rtt_floor_ms.unwrap_or(0.0);
-        let effective_desync_frames = frame_desync - floor_ms / 1000.0 * client_fps;
+        // The frames sent while the newest ack was on its way are not behind: over the round
+        // trip's least, and over what its way back held it past that, by the page's stamp.
+        let on_its_way = floor_ms / 1000.0 + effects.held_back();
+        let effective_desync_frames = frame_desync - on_its_way * client_fps;
         let unanswered_for = self.unacked_since.map(|s| now - s).unwrap_or(0.0);
         let over = !self.key_frame_pending(now, effects.answered())
             && effective_desync_frames > allowed_desync_frames
@@ -1500,6 +1530,7 @@ mod tests {
         idrs: usize,
         now: f64,
         waiting: usize,
+        held_back: f64,
     }
 
     impl Fake {
@@ -1545,6 +1576,9 @@ mod tests {
         }
         fn waiting_frames(&self) -> usize {
             self.waiting
+        }
+        fn held_back(&self) -> f64 {
+            self.held_back
         }
     }
 
@@ -1638,6 +1672,101 @@ mod tests {
             seen.push(link.backpressure_enabled);
         }
         seen
+    }
+
+    /// `gate_states` for a steered display whose acks keep coming, each `back_ms` late on
+    /// its way back by the page's stamps: every check finds `ms` of stream sent past the
+    /// newest acked frame and the floor.
+    fn gate_states_held_back(ms: f64, back_ms: f64, checks: usize) -> Vec<bool> {
+        let mut link = DisplayLink::new();
+        link.acknowledged_frame_id = 100;
+        link.last_sent_frame_id = 100;
+        link.has_sent_any_frame = true;
+        link.rtt_floor_ms = Some(FLOOR_MS);
+        let mut fake = Fake {
+            now: 1000.0,
+            held_back: back_ms / 1000.0,
+            ..Default::default()
+        };
+        let input = TickInput {
+            capturing: true,
+            configured_fps: FPS,
+            steered: true,
+            interval_s: INTERVAL,
+            allowed_desync_ms: BACKPRESSURE_ALLOWED_DESYNC_MS,
+            primary: false,
+        };
+        let mut clock = 1000.0;
+        let mut seen = Vec::new();
+        for _ in 0..checks {
+            clock += INTERVAL;
+            fake.now = clock;
+            let in_flight = ((FLOOR_MS + ms) / 1000.0 * FPS).round() as usize;
+            link.acked_sent_at = Some(clock - 2.0);
+            link.sent_timestamps = (0..in_flight)
+                .map(|i| (101 + i as u16, clock - 1.9 + i as f64 / 1000.0, 20000))
+                .collect();
+            link.last_sent_frame_id = 100 + in_flight as u16;
+            link.acked_at = clock;
+            fake.heard_at = Some(clock);
+            link.backpressure_tick("primary", input, clock, &mut fake);
+            seen.push(link.backpressure_enabled);
+        }
+        seen
+    }
+
+    /// What the way back held an ack is none of its frame's round trip: the steer reads the
+    /// path's, whatever fills the page's uplink.
+    #[test]
+    fn a_round_trip_is_less_what_the_way_back_held_its_ack() {
+        let mut link = DisplayLink::new();
+        link.note_send(1, 1000, 10.0);
+        link.note_ack_held_back(1, 5.0, 0.0, 10.03);
+        assert!(
+            (link.smoothed_rtt - 25.0).abs() < 1e-6,
+            "{}",
+            link.smoothed_rtt
+        );
+        link.note_send(2, 1000, 11.0);
+        link.note_ack_held_back(2, 5.0, 1000.0, 12.03);
+        assert!(
+            (link.smoothed_rtt - 25.0).abs() < 1e-6,
+            "{}",
+            link.smoothed_rtt
+        );
+        assert!(
+            link.rtt_floor_ms
+                .is_some_and(|floor| (floor - 25.0).abs() < 1e-6)
+        );
+        // A hold read longer than the ack took leaves the least round trip where it was,
+        // and one read before any round trip is known takes nothing off.
+        link.note_send(3, 1000, 13.0);
+        link.note_ack_held_back(3, 5.0, 400.0, 13.03);
+        assert!(
+            link.rtt_floor_ms
+                .is_some_and(|floor| (floor - 25.0).abs() < 1e-6)
+        );
+        let mut link = DisplayLink::new();
+        link.note_send(1, 1000, 10.0);
+        link.note_ack_held_back(1, 5.0, 400.0, 10.03);
+        assert!(
+            link.rtt_floor_ms
+                .is_some_and(|floor| (floor - 25.0).abs() < 1e-6)
+        );
+    }
+
+    /// Frames sent while the page's acks are held on their way back (an upload filling its
+    /// uplink) have reached the page as the ones before them did: the gate stays open on
+    /// what it shuts on where the same frames stand in the path, and still shuts on what
+    /// the hold does not explain.
+    #[test]
+    fn the_gate_counts_no_frame_whose_ack_is_only_held_on_its_way_back() {
+        let standing = gate_states_held_back(400.0, 0.0, 4);
+        assert_eq!(&standing[..2], &[true, false], "{standing:?}");
+        let held = gate_states_held_back(400.0, 300.0, 4);
+        assert!(held.iter().all(|o| *o), "{held:?}");
+        let both = gate_states_held_back(700.0, 300.0, 4);
+        assert_eq!(&both[..2], &[true, false], "{both:?}");
     }
 
     /// Frames a late path's pacing keeps with the relay stand queued for the page as the ones

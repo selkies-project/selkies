@@ -438,6 +438,31 @@ async fn padding_is_pinged_only_with_no_frame_awaiting_its_ack() {
 }
 
 #[tokio::test]
+async fn an_ack_held_on_its_way_back_is_no_longer_a_round_trip_for_it() {
+    let rig = Rig::new();
+    let mut owner = rig.written("a").await;
+    settle().await;
+    let capture = rig.primary_capture();
+    let link = rig.service.link(PRIMARY_DISPLAY).unwrap();
+    for id in 1..=2u16 {
+        capture.deliver(id, 1, id == 1);
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        owner.say(&stamped(id, counted(&owner))).await;
+    }
+    let before = link.lock().smoothed_rtt;
+    assert!(before < 80.0, "{before}");
+    // The third frame's ack left the page as promptly, by its stamp, and took 300 ms to
+    // come back behind an upload: the round trip the steer reads is the path's still.
+    capture.deliver(3, 1, false);
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let ack = stamped(3, counted(&owner));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    owner.say(&ack).await;
+    let after = link.lock().smoothed_rtt;
+    assert!(after < before + 40.0, "{before} {after}");
+}
+
+#[tokio::test]
 async fn the_gate_counts_the_frames_the_writer_holds_back_from_a_late_path() {
     let rig = Rig::new();
     let mut owner = rig.written("a").await;

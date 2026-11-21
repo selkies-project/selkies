@@ -3498,6 +3498,7 @@ impl WsService {
             relay,
             client: client.clone(),
             waiting,
+            held_back: client.as_ref().map_or(0.0, |c| c.held_back()),
             metrics: self.deps.metrics.clone(),
         };
         let outcome = {
@@ -4891,8 +4892,10 @@ struct CheckEffects<'a> {
     relay: Option<Arc<VideoRelay>>,
     client: Option<Arc<Client>>,
     /// Frames the relay holds back from a late path its writer paced within the last check
-    /// interval, read before the link is locked.
+    /// interval, and how long the way back holds the page's acks, both read before the link
+    /// is locked.
     waiting: usize,
+    held_back: f64,
     metrics: Option<Arc<dyn crate::ws::host::Metrics>>,
 }
 
@@ -4949,6 +4952,10 @@ impl GateEffects for CheckEffects<'_> {
 
     fn waiting_frames(&self) -> usize {
         self.waiting
+    }
+
+    fn held_back(&self) -> f64 {
+        self.held_back
     }
 }
 
