@@ -7,10 +7,11 @@
 # musllinux_1_2 image rather than from this tree: what the server's build needs
 # (infra/packaging/portable-deps.sh, PulseAudio's client libraries among it),
 # the PulseAudio server of that same release, the tools and headers the X
-# servers, NVIDIA's X11 EGL platform, dbus-daemon, and libxcrypt build against
-# (Perl's open module for libxcrypt, and IPC::Cmd, Time::Piece, and Data::Dumper
-# for OpenSSL's Configure, which Enterprise Linux packages apart), and, on glibc,
-# a 32-bit toolchain for the interposers.
+# servers, NVIDIA's X11 EGL platform, dbus-daemon, the ALSA plugin, and
+# libxcrypt build against (Perl's open module for libxcrypt, IPC::Cmd,
+# Time::Piece, and Data::Dumper for OpenSSL's Configure, which Enterprise Linux
+# packages apart, and bzip2 for the ALSA releases), and, on glibc, a 32-bit
+# toolchain for the interposers.
 # infra/bundle/Dockerfile runs it once into the toolchain image the build then
 # runs in; build-in-image.sh runs it itself in a bare manylinux image.
 #
@@ -42,7 +43,7 @@ PATH="/opt/python/cp312-cp312/bin:${PATH}" sh "${REPO}/crates/pcmflux/scripts/bu
     /usr "${libdir}" daemon
 if command -v dnf > /dev/null; then
     dnf install -y --disablerepo='epel*' bison flex expat-devel mesa-libgbm-devel \
-        mesa-libEGL-devel mesa-libGL-devel libX11-devel libxslt gettext perl-XML-Parser xz \
+        mesa-libEGL-devel mesa-libGL-devel libX11-devel libxslt gettext perl-XML-Parser xz bzip2 \
         perl-open perl-IPC-Cmd perl-Time-Piece
     dnf install -y --disablerepo='epel*' glibc-devel.i686 libgcc.i686 || true
     dnf clean all
@@ -50,7 +51,7 @@ if command -v dnf > /dev/null; then
 elif command -v yum > /dev/null; then
     yum install -y --disablerepo='epel*' --disablerepo='centos-sclo*' bison flex expat-devel \
         mesa-libgbm-devel mesa-libEGL-devel mesa-libGL-devel libX11-devel libxslt gettext \
-        perl-XML-Parser xz perl-IPC-Cmd perl-Time-Piece perl-Data-Dumper
+        perl-XML-Parser xz bzip2 perl-IPC-Cmd perl-Time-Piece perl-Data-Dumper
     yum install -y --disablerepo='epel*' --disablerepo='centos-sclo*' glibc-devel.i686 \
         libgcc.i686 || true
     yum clean all
@@ -94,6 +95,6 @@ elif command -v yum > /dev/null; then
     [ "$(pkg-config --modversion gbm)" = 23.1.4 ]
     rm -f "/tmp/${gbm_devel}"
 else
-    apk add --no-cache bison flex expat-dev mesa-dev libxslt gettext perl-xml-parser xz \
+    apk add --no-cache bison flex expat-dev mesa-dev libxslt gettext perl-xml-parser xz bzip2 \
         linux-headers patch
 fi

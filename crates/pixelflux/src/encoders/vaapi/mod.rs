@@ -894,6 +894,29 @@ pub(super) struct Frame<'a> {
     pub slot_surfaces: [VASurfaceID; 3],
 }
 
+impl Frame<'_> {
+    /// The frame a predicted picture searches after its reference, as AV1's and VP9's GOLDEN:
+    /// the newest the decoder holds from before the one it predicts from, since its key frame
+    /// and not lost, which every client that decoded the reference decoded too, since the window
+    /// forgets every frame after a loss. A window that keeps anchors or reads acknowledgments
+    /// holds frames some client may lack, so a session that keeps either must not name this one.
+    /// Intel's motion search (Arc A750) against the reference alone codes a desktop scrolling
+    /// under a still panel poorly, every other frame two to three times the size of the one
+    /// before; searching the frame before as well took a 1080p scroll from 31.4 to 12.2 kB a
+    /// frame at 0.8 dB more on AV1, as FFmpeg's AV1 encoder over the same driver codes it
+    /// (11.1 kB), and from 47.6 to 24.7 kB at 0.5 dB more on VP9 (Alder Lake-N, whose search
+    /// copes with the panel, 18.8 to 17.7), at the same encode time. `None` for a key frame and
+    /// a frame with no such frame to search.
+    pub fn golden(&self) -> Option<(u64, VASurfaceID)> {
+        let (reference, _) = self.reference.filter(|_| !self.key)?;
+        self.held
+            .iter()
+            .rev()
+            .find(|&&(pts, _, lost)| !lost && pts >= self.key_pts && pts < reference)
+            .map(|&(pts, surface, _)| (pts, surface))
+    }
+}
+
 /// The codec arm of a session.
 enum Arm {
     H264(Box<h264::Arm>),
@@ -2562,6 +2585,16 @@ impl VaapiEncoder {
             Some(References::Slots(s)) => s.has_reference(),
             None => !self.fresh,
         };
+        let owed = if self.sequence_start {
+            Some(crate::report::KeyFrameCause::Reconfigure)
+        } else {
+            force_idr.then_some(crate::report::KeyFrameCause::Requested)
+        };
+        match (&mut self.references, owed) {
+            (Some(References::Window(w)), Some(cause)) => w.owe_key(cause),
+            (Some(References::Slots(s)), Some(cause)) => s.owe_key(cause),
+            _ => {}
+        }
         let mut key = force_idr || self.sequence_start || !has_reference;
         let (mut anchor, mut shared) = (None, false);
         if let Some(References::Window(w)) = &mut self.references

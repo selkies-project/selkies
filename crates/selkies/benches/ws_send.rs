@@ -42,7 +42,7 @@ use selkies::capture::frame_bytes;
 use selkies::display::capture::CommonFrames;
 use selkies::ws::client::{Client, ClientId, Liveness, NoLink, Perms, run_writer};
 use selkies::ws::link::DisplayLink;
-use selkies::ws::relay::{RelayHost, RelayItem, VideoRelay};
+use selkies::ws::relay::{RelayHost, RelayItem, RunEvent, VideoRelay};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::runtime::Runtime;
 use tokio::sync::Notify;
@@ -130,6 +130,8 @@ impl RelayHost for Host {
     fn socket_died(&self, _: ClientId) {}
 
     fn relay_finished(&self, _: &str, _: &Arc<VideoRelay>) {}
+
+    fn relay_run(&self, _: &str, _: RunEvent) {}
 
     fn note_padding(
         &self,

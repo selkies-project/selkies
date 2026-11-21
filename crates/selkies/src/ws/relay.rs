@@ -31,11 +31,12 @@
 //! key frame gate; elsewhere a drop skips ahead to the next key frame.
 //!
 //! Each frame a relay writes is one its page holds (`CommonFrames`, joined at a key frame and
-//! left at the gate), and the display's encoder is told of each frame every page holds. An
-//! encoder that keeps long-term references then pins the newest such anchor, so a run of any
-//! depth is predicted past on its report, and flags an anchor predicting from such a frame
-//! (`FRAME_ANCHOR`), which every page decodes: it goes to a page without room as a key frame
-//! does, unless the page is too far behind for one, and ends the page's run.
+//! left at the gate and at a `REQUEST_KEYFRAME` of the page's the server takes), and the
+//! display's encoder is told of each frame every page holds. An encoder that keeps long-term
+//! references then pins the newest such anchor, so a run of any depth is predicted past on its
+//! report, and flags an anchor predicting from such a frame (`FRAME_ANCHOR`), which every page
+//! decodes: it goes to a page without room as a key frame does, unless the page is too far
+//! behind for one, and ends the page's run.
 //!
 //! The read of the page's queue moves its floor onto a least round trip that stood
 //! `VIDEO_RELAY_LAG_SECONDS` or more past it through `VIDEO_RELAY_SETTLE_SECONDS` of pongs (a
@@ -166,6 +167,36 @@ fn video_header(data: &[u8]) -> Option<VideoHeader> {
     })
 }
 
+/// What became of a page's run of frames left out: the `event` label of the
+/// `websockets_relay_runs` metric. Every run opens once and ends at most once, as one of the
+/// last three.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RunEvent {
+    /// A frame left out opened a run.
+    Opened,
+    /// The encoder was told of the run's first frame (`RelayHost::relay_lost`).
+    Reported,
+    /// A frame predicting past the run reached the page and ended it.
+    PredictedPast,
+    /// The run waited out its recovery window; the page waits for a key frame.
+    TimedOut,
+    /// A key frame, the byte budget, or the fan-out's lag ended the run.
+    Reset,
+}
+
+impl RunEvent {
+    /// The metric label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Opened => "opened",
+            Self::Reported => "reported",
+            Self::PredictedPast => "predicted_past",
+            Self::TimedOut => "timed_out",
+            Self::Reset => "reset",
+        }
+    }
+}
+
 /// What a relay needs from the server it serves.
 pub trait RelayHost: Send + Sync {
     /// Whether `client` is the page that owns `display_id`.
@@ -197,6 +228,9 @@ pub trait RelayHost: Send + Sync {
 
     /// The relay's drain task ended; the host forgets the relay where it still lists this one.
     fn relay_finished(&self, display_id: &str, relay: &Arc<VideoRelay>);
+
+    /// Count a run `event` of a page of `display_id`.
+    fn relay_run(&self, display_id: &str, event: RunEvent);
 
     /// A padding chunk of `size` bytes is being written: counted in what the display sent
     /// (`sent_bytes`, and `pad_bytes` apart), with the link it was counted in and the bytes
@@ -279,23 +313,29 @@ impl Inner {
         self.sent_set.clear();
     }
 
-    /// Count a frame lost to this client, starting a run where none is open.
-    fn lose(&mut self, frame_id: u16, now: f64) {
+    /// Count a frame lost to this client, starting a run where none is open; whether it
+    /// opened one.
+    fn lose(&mut self, frame_id: u16, now: f64) -> bool {
         self.lost_run += 1;
         if self.lost_first.is_none() {
             self.lost_first = Some(frame_id);
             self.lost_since = now;
             self.lost_told = false;
+            return true;
         }
+        false
     }
 
-    /// The run is over: the encoder predicted past it, or a key frame came.
-    fn end_lost(&mut self) {
+    /// The run is over: the encoder predicted past it, or a key frame came. Whether one was
+    /// open.
+    fn end_lost(&mut self) -> bool {
+        let open = self.lost_first.is_some();
         self.lost_run = 0;
         self.lost_first = None;
         self.lost_since = 0.0;
         self.lost_told = false;
         self.lost_gated = false;
+        open
     }
 }
 
@@ -394,6 +434,12 @@ impl VideoRelay {
         self.inner.lock().stopped
     }
 
+    /// The page asked for a key frame: its decoder holds nothing it was sent, so the page holds
+    /// no frame in common until it holds a key frame again.
+    pub fn await_key_frame(&self) {
+        self.leave_common();
+    }
+
     fn leave_common(&self) {
         let client = self.client.id;
         for held in [false, true] {
@@ -468,13 +514,14 @@ impl VideoRelay {
                         let diff = header.frame_id.wrapping_sub(first);
                         if diff > 0 && diff < 32768 {
                             inner.end_lost();
+                            self.count(RunEvent::PredictedPast);
                         }
                     }
                     kept.push(it);
                     continue;
                 }
                 inner.forget_sent(header.frame_id);
-                inner.lose(header.frame_id, at);
+                self.lose(&mut inner, header.frame_id, at);
             }
             // The chunk held back counts whether or not one was handed in, as the backlog does.
             let missed = (1 + backlog_len).saturating_sub(kept.len()) as u64;
@@ -637,12 +684,13 @@ impl VideoRelay {
         let at = now();
         let kept = inner.numbered && inner.since_key.is_multiple_of(FRAME_NUM_WRAP);
         if !inner.sent_set.contains(&reference) {
-            inner.lose(frame_id, at);
+            self.lose(inner, frame_id, at);
             return self.repair(inner);
         }
         if inner.lost_first.is_some() {
             if !anchor || kept || self.anchor_room(inner) {
                 inner.end_lost();
+                self.count(RunEvent::PredictedPast);
                 return Some(true);
             }
             inner.lost_first = Some(frame_id);
@@ -658,10 +706,28 @@ impl VideoRelay {
             return Some(true);
         }
         if !kept && !self.room(inner) {
-            inner.lose(frame_id, at);
+            self.lose(inner, frame_id, at);
             return self.repair(inner);
         }
         Some(true)
+    }
+
+    /// [`Inner::lose`], counting the run it opens.
+    fn lose(&self, inner: &mut Inner, frame_id: u16, at: f64) {
+        if inner.lose(frame_id, at) {
+            self.count(RunEvent::Opened);
+        }
+    }
+
+    /// [`Inner::end_lost`] for `event`, counted where a run was open.
+    fn end_run(&self, inner: &mut Inner, event: RunEvent) {
+        if inner.end_lost() {
+            self.count(event);
+        }
+    }
+
+    fn count(&self, event: RunEvent) {
+        self.host.relay_run(&self.display_id, event);
     }
 
     /// A frame of the open run was held back: tell the encoder of the run's first frame once
@@ -690,6 +756,9 @@ impl VideoRelay {
                     first,
                     inner.lost_run <= VIDEO_RELAY_REACH_FRAMES,
                 );
+                if inner.lost_told {
+                    self.count(RunEvent::Reported);
+                }
             }
         }
         Some(false)
@@ -709,7 +778,7 @@ impl VideoRelay {
             inner.backlog.clear();
             inner.backlog_bytes = 0;
             inner.live_rows.clear();
-            inner.end_lost();
+            self.end_run(&mut inner, RunEvent::Reset);
             self.leave_common();
             dropped = true;
         }
@@ -723,7 +792,7 @@ impl VideoRelay {
                 inner.numbered = h.codec == WIRE_H264;
                 inner.anchored = false;
                 inner.live_rows.insert(h.row);
-                inner.end_lost();
+                self.end_run(&mut inner, RunEvent::Reset);
                 inner.clear_sent();
                 self.join_common();
             } else if !inner.live_rows.contains(&h.row) {
@@ -736,7 +805,7 @@ impl VideoRelay {
                 deliver = forward == Some(true);
                 if forward.is_none() {
                     inner.live_rows.clear();
-                    inner.end_lost();
+                    self.end_run(&mut inner, RunEvent::TimedOut);
                     self.leave_common();
                     dropped = true;
                 }
@@ -763,7 +832,7 @@ impl VideoRelay {
         {
             let mut inner = self.inner.lock();
             inner.live_rows.clear();
-            inner.end_lost();
+            self.end_run(&mut inner, RunEvent::Reset);
         }
         self.leave_common();
     }
@@ -810,15 +879,15 @@ impl VideoRelay {
             return false;
         }
         let at = now();
+        // Read before the relay's own lock is taken: a check takes the link's first.
+        let acked = link.lock().unacked_since.is_none();
         let due = {
             let mut inner = self.inner.lock();
-            let due = at - inner.pad_pinged >= PAD_PING_S;
-            if due && link.lock().unacked_since.is_none() {
+            let due = acked && at - inner.pad_pinged >= PAD_PING_S;
+            if due {
                 inner.pad_pinged = at;
-                true
-            } else {
-                false
             }
+            due
         };
         if due {
             let (host, client, display_id) =
@@ -1076,6 +1145,7 @@ mod tests {
         common: Mutex<HashMap<(String, bool), CommonFrames<ClientId>>>,
         verdicts: Mutex<Vec<(ClientId, bool)>>,
         died: Mutex<Vec<ClientId>>,
+        runs: Mutex<Vec<RunEvent>>,
     }
 
     impl Server {
@@ -1089,11 +1159,16 @@ mod tests {
                 common: Mutex::new(HashMap::new()),
                 verdicts: Mutex::new(Vec::new()),
                 died: Mutex::new(Vec::new()),
+                runs: Mutex::new(Vec::new()),
             })
         }
 
         fn reports(&self) -> Vec<(u16, bool)> {
             self.reports.lock().clone()
+        }
+
+        fn runs(&self) -> Vec<RunEvent> {
+            self.runs.lock().clone()
         }
     }
 
@@ -1147,6 +1222,10 @@ mod tests {
         }
 
         fn relay_finished(&self, _display_id: &str, _relay: &Arc<VideoRelay>) {}
+
+        fn relay_run(&self, _display_id: &str, event: RunEvent) {
+            self.runs.lock().push(event);
+        }
 
         fn note_padding(
             &self,
@@ -1240,6 +1319,15 @@ mod tests {
         asks.push(r.relay.offer(delta(9, 8)));
         assert_eq!(r.ids(), vec![8, 9]);
         assert!(!asks.iter().any(|a| *a), "without a key frame asked for");
+        assert_eq!(
+            r.server.runs(),
+            vec![
+                RunEvent::Opened,
+                RunEvent::Reported,
+                RunEvent::PredictedPast
+            ],
+            "one run, opened, reported, and predicted past"
+        );
     }
 
     #[tokio::test]
@@ -1488,6 +1576,15 @@ mod tests {
         assert_ne!(r.ids().last(), Some(&20), "the client waits for it, gated");
         r.relay.offer(key(21));
         assert_eq!(r.ids().last(), Some(&21));
+        let runs = r.server.runs();
+        assert_eq!(
+            (
+                runs.iter().filter(|e| **e == RunEvent::Opened).count(),
+                runs.last()
+            ),
+            (1, Some(&RunEvent::TimedOut)),
+            "the run ends timed out, and the key frame after it ends none: {runs:?}"
+        );
     }
 
     #[tokio::test]

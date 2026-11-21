@@ -440,7 +440,7 @@ pub static DEFINITIONS: &[SettingDef] = &[
         name: "keyframe_interval",
         kind: Kind::Float,
         default: "0.0",
-        help: "Seconds between scheduled video recovery keyframes (any video codec). 0 (default) keeps the GOP infinite: keyframes are sent only on demand (client join/reset, keyframe requests), which keeps bitrate and quality steady.",
+        help: "Seconds between scheduled video recovery keyframes (any video codec). 0 (default) keeps the GOP infinite: keyframes are sent only on demand (client join/reset, keyframe requests), which keeps bitrate and quality steady. The Tegra encoder and a stateful V4L2 encoder take 0 as 10 seconds, and space keyframes at most 600 frames apart.",
         env_vars: &[],
         allowed: &[],
         value_range: None,

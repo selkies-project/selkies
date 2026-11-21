@@ -327,6 +327,14 @@ impl Win {
         self.mapped && !self.minimized && !self.hidden
     }
 
+    /// Keep the window's geometry to return to from a maximize or fullscreen, where it has a
+    /// size; one with none yet has nothing to return to.
+    fn save_geometry(&mut self) {
+        if self.rect.w > 0 && self.rect.h > 0 {
+            self.saved = Some(self.rect);
+        }
+    }
+
     /// Whether the window takes part in the taskbar and Alt-Tab.
     fn listed(&self) -> bool {
         !self.skip_taskbar
@@ -955,7 +963,13 @@ impl Engine {
         let has_size = self.win(id).is_some_and(|w| w.rect.w > 0 && w.rect.h > 0);
         if has_size {
             self.place(id);
+            if let Some(win) = self.windows.get_mut(&id)
+                && (win.maximized || win.fullscreen)
+            {
+                win.save_geometry();
+            }
         }
+        self.fit_state(id);
         self.configure(id);
     }
 
@@ -1125,16 +1139,9 @@ impl Engine {
             win.rect.w = size.w;
             win.rect.h = size.h;
         }
-        let output = win.output;
-        let (minimized, focusable, fullscreen, maximized) =
-            (win.minimized, win.focusable, win.fullscreen, win.maximized);
+        let (minimized, focusable) = (win.minimized, win.focusable);
         self.place(id);
-        if fullscreen {
-            let area = self.output_rect(output);
-            self.set_rect(id, area);
-        } else if maximized {
-            self.fit_maximized(id);
-        }
+        self.fit_state(id);
         if !self.stack.contains(&id) && !minimized {
             self.stack.push(id);
         }
@@ -1278,6 +1285,7 @@ impl Engine {
         };
         if decoration_changed {
             self.apply_decoration_choice(id);
+            self.fit_state(id);
             self.configure(id);
         }
         if parent_changed {
@@ -1329,6 +1337,24 @@ impl Engine {
         self.out.push(Command::Configure { id, rect, states });
         // A window's layer can follow its rectangle (`stands_in_for_fullscreen`).
         self.emit_stack();
+    }
+
+    /// Size a fullscreen window to its output and a maximized one to its output's work area.
+    ///
+    /// A window that opens in either state, or changes its decoration in it, is sized this way
+    /// before the configure that follows, not only once it maps: xdg-shell binds a client to
+    /// the size of a maximized configure and bounds it by a fullscreen one, and Chromium's
+    /// Wayland backend aborts on a maximized configure that carries no size.
+    fn fit_state(&mut self, id: WindowId) {
+        let Some(win) = self.win(id) else {
+            return;
+        };
+        if win.fullscreen {
+            let area = self.output_rect(win.output);
+            self.set_rect(id, area);
+        } else if win.maximized {
+            self.fit_maximized(id);
+        }
     }
 
     fn fit_maximized(&mut self, id: WindowId) {
@@ -1610,7 +1636,7 @@ impl Engine {
         let Some(win) = self.windows.get_mut(&id) else {
             return;
         };
-        if win.maximized == on || !win.mapped {
+        if win.maximized == on {
             return;
         }
         if win.fullscreen {
@@ -1620,7 +1646,7 @@ impl Engine {
         let from = win.rect;
         if on {
             if win.tile.is_none() {
-                win.saved = Some(win.rect);
+                win.save_geometry();
             }
             win.tile = None;
             win.maximized = true;
@@ -1628,17 +1654,36 @@ impl Engine {
             self.fit_maximized(id);
         } else {
             win.maximized = false;
-            let saved = win.saved.take();
-            let extents = self.extents_of(id);
-            let area = self.workarea(self.windows[&id].output);
-            let frame = match saved {
-                Some(restored) => place::clamp(restored.grown(extents), area),
-                None => self.first_restore_frame(id, area),
-            };
-            self.set_rect(id, grab::client_of(frame, extents));
+            self.restore_geometry(id);
         }
         self.glide(id, from);
         self.render_frame(id);
+    }
+
+    /// Return a window leaving maximized or fullscreen to the geometry it had before, kept on
+    /// its work area.
+    ///
+    /// A window with none of its own goes, before it maps, back to having no size, so the
+    /// client chooses one and the window is placed when it maps as any other; once mapped it
+    /// takes [`Engine::first_restore_frame`].
+    fn restore_geometry(&mut self, id: WindowId) {
+        let Some(win) = self.windows.get_mut(&id) else {
+            return;
+        };
+        let (saved, output) = (win.saved.take(), win.output);
+        if saved.is_none() && !win.mapped {
+            win.rect = win.info.requested.unwrap_or(Rect::new(0, 0, 0, 0));
+            win.placed = false;
+            self.configure(id);
+            return;
+        }
+        let extents = self.extents_of(id);
+        let area = self.workarea(output);
+        let frame = match saved {
+            Some(restored) => place::clamp(restored.grown(extents), area),
+            None => self.first_restore_frame(id, area),
+        };
+        self.set_rect(id, grab::client_of(frame, extents));
     }
 
     /// Where a window restores to that was maximized from the moment it opened, as the
@@ -2263,7 +2308,7 @@ impl Engine {
         if let Some(output) = output.filter(|o| self.outputs.iter().any(|x| x.id == *o)) {
             win.output = output;
         }
-        let (already, win_output, maximized, rect) = (win.fullscreen, win.output, win.maximized, win.rect);
+        let (already, win_output, maximized) = (win.fullscreen, win.output, win.maximized);
         if already == on {
             if on {
                 let area = self.output_rect(win_output);
@@ -2274,7 +2319,7 @@ impl Engine {
         if on {
             if let Some(win) = self.windows.get_mut(&id) {
                 if !maximized {
-                    win.saved = Some(rect);
+                    win.save_geometry();
                 }
                 win.fullscreen = true;
                 win.shaded = false;
@@ -2290,15 +2335,7 @@ impl Engine {
             if maximized {
                 self.fit_maximized(id);
             } else {
-                let restored = self
-                    .windows
-                    .get_mut(&id)
-                    .and_then(|w| w.saved.take())
-                    .unwrap_or(rect);
-                let extents = self.extents_of(id);
-                let area = self.workarea(win_output);
-                let frame = place::clamp(restored.grown(extents), area);
-                self.set_rect(id, grab::client_of(frame, extents));
+                self.restore_geometry(id);
             }
             self.render_frame(id);
         }
@@ -5257,6 +5294,207 @@ mod tests {
             &mut out,
         );
         assert!(!engine.win(2).unwrap().maximized);
+    }
+
+    /// The configures sent a window, oldest first.
+    fn configures(out: &[Command], id: WindowId) -> Vec<(Rect, States)> {
+        out.iter()
+            .filter_map(|c| match c {
+                Command::Configure { id: i, rect, states } if *i == id => Some((*rect, *states)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The client area a maximized window fills on the test output's work area, framed or not.
+    fn maximized_client(engine: &Engine, decorated: bool) -> Rect {
+        let extents = if decorated {
+            frame::extents(&engine.theme.look.style, true, false)
+        } else {
+            Extents::default()
+        };
+        grab::client_of(Rect::new(0, 0, 1280, 768), extents)
+    }
+
+    /// A window that opens maximized or fullscreen, before it has a size of its own, is first
+    /// configured to its work area or its output, never to an empty size in that state.
+    #[test]
+    fn a_window_opening_maximized_or_fullscreen_is_configured_with_a_size() {
+        let (mut engine, _) = engine();
+        let mut out = Vec::new();
+        engine.handle(
+            Event::Added(WindowInfo {
+                wants_maximized: true,
+                ..info(1)
+            }),
+            &mut out,
+        );
+        engine.handle(
+            Event::Added(WindowInfo {
+                wants_fullscreen: true,
+                ..info(2)
+            }),
+            &mut out,
+        );
+        assert!(engine.win(1).unwrap().decorated);
+        let (rect, states) = configures(&out, 1)[0];
+        assert!(states.maximized);
+        assert_eq!(rect, maximized_client(&engine, true));
+        let (rect, states) = configures(&out, 2)[0];
+        assert!(states.fullscreen);
+        assert_eq!(rect, Rect::new(0, 0, 1280, 800));
+    }
+
+    /// A maximized window that changes its decoration before it maps is configured again to
+    /// fill its work area with the frame it now has.
+    #[test]
+    fn a_maximized_window_changing_its_decoration_is_fitted_again() {
+        let (mut engine, _) = engine();
+        let mut out = Vec::new();
+        engine.handle(
+            Event::Added(WindowInfo {
+                wants_maximized: true,
+                ..info(1)
+            }),
+            &mut out,
+        );
+        out.clear();
+        engine.handle(
+            Event::Changed(WindowInfo {
+                wants_maximized: true,
+                decoration: pixelflux::wm::Decoration::Client,
+                ..info(1)
+            }),
+            &mut out,
+        );
+        assert!(!engine.win(1).unwrap().decorated);
+        let (rect, states) = *configures(&out, 1).last().expect("configured again");
+        assert!(states.maximized);
+        assert_eq!(rect, maximized_client(&engine, false));
+    }
+
+    /// A client's maximize before its first commit is taken and configured with the work area;
+    /// its unmaximize before it maps leaves it to choose its own size and be placed on map.
+    #[test]
+    fn a_maximize_asked_before_mapping_is_taken() {
+        let (mut engine, _) = engine();
+        let mut out = Vec::new();
+        engine.handle(Event::Added(info(1)), &mut out);
+        out.clear();
+        engine.handle(
+            Event::Request {
+                id: 1,
+                request: Request::Maximize,
+            },
+            &mut out,
+        );
+        assert!(engine.win(1).unwrap().maximized);
+        let (rect, states) = *configures(&out, 1).last().expect("configured maximized");
+        assert!(states.maximized);
+        assert_eq!(rect, maximized_client(&engine, true));
+        engine.handle(
+            Event::Request {
+                id: 1,
+                request: Request::Unmaximize,
+            },
+            &mut out,
+        );
+        let (rect, states) = *configures(&out, 1).last().unwrap();
+        assert!(!states.maximized);
+        assert_eq!((rect.w, rect.h), (0, 0));
+        engine.handle(
+            Event::Mapped {
+                id: 1,
+                size: Size { w: 400, h: 300 },
+            },
+            &mut out,
+        );
+        let win = engine.win(1).unwrap();
+        assert!(win.placed && !win.maximized);
+        assert_eq!((win.rect.w, win.rect.h), (400, 300));
+    }
+
+    /// A window that goes fullscreen before it maps and leaves it is not left without a size:
+    /// before mapping it chooses its own, after mapping it takes the first restore frame.
+    #[test]
+    fn a_window_leaving_a_fullscreen_it_opened_in_keeps_a_size() {
+        let (mut engine, _) = engine();
+        let mut out = Vec::new();
+        engine.handle(Event::Added(info(1)), &mut out);
+        engine.handle(
+            Event::Request {
+                id: 1,
+                request: Request::Fullscreen(None),
+            },
+            &mut out,
+        );
+        assert_eq!(engine.win(1).unwrap().saved, None);
+        engine.handle(
+            Event::Request {
+                id: 1,
+                request: Request::Unfullscreen,
+            },
+            &mut out,
+        );
+        assert!(!engine.win(1).unwrap().placed);
+        engine.handle(
+            Event::Added(WindowInfo {
+                wants_fullscreen: true,
+                ..info(2)
+            }),
+            &mut out,
+        );
+        engine.handle(
+            Event::Mapped {
+                id: 2,
+                size: Size { w: 1280, h: 800 },
+            },
+            &mut out,
+        );
+        engine.handle(
+            Event::Request {
+                id: 2,
+                request: Request::Unfullscreen,
+            },
+            &mut out,
+        );
+        let win = engine.win(2).unwrap();
+        assert!(!win.fullscreen);
+        let frame = engine.frame_rect(2);
+        assert_eq!((frame.w, frame.h), (1280 * 2 / 3, 768 * 2 / 3));
+    }
+
+    /// A window that opens maximized at a geometry of its own, as an X11 client maps one,
+    /// returns to that geometry when it is unmaximized.
+    #[test]
+    fn a_window_opening_maximized_at_its_own_geometry_restores_to_it() {
+        let (mut engine, _) = engine();
+        let mut out = Vec::new();
+        engine.handle(
+            Event::Added(WindowInfo {
+                wants_maximized: true,
+                requested: Some(Rect::new(100, 100, 600, 400)),
+                ..info(1)
+            }),
+            &mut out,
+        );
+        engine.handle(
+            Event::Mapped {
+                id: 1,
+                size: Size { w: 600, h: 400 },
+            },
+            &mut out,
+        );
+        assert_eq!(engine.win(1).unwrap().rect, maximized_client(&engine, true));
+        engine.handle(
+            Event::Request {
+                id: 1,
+                request: Request::Unmaximize,
+            },
+            &mut out,
+        );
+        let rect = engine.win(1).unwrap().rect;
+        assert_eq!((rect.w, rect.h), (600, 400));
     }
 
     /// Switching to the application alone tells the launcher and maximizes the windows already

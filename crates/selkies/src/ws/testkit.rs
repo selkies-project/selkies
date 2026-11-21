@@ -574,10 +574,63 @@ impl Clipboard for FakeClipboard {
     async fn set_binary_enabled(&self, _enabled: bool) {}
 }
 
+/// The server-side metrics, recording each count as `(display, label)` per family.
+#[derive(Default)]
+pub struct FakeMetrics {
+    pub keyframe_requests: Mutex<Vec<(String, &'static str)>>,
+    pub gate_events: Mutex<Vec<(String, &'static str, u32)>>,
+    pub relay_runs: Mutex<Vec<(String, &'static str)>>,
+}
+
+impl FakeMetrics {
+    /// The key frame requests counted for `display` by `cause`.
+    pub fn keyframe_requests(&self, display: &str, cause: &str) -> usize {
+        self.keyframe_requests
+            .lock()
+            .iter()
+            .filter(|(d, c)| d == display && *c == cause)
+            .count()
+    }
+
+    /// Every key frame request counted for `display`, whatever its cause.
+    pub fn all_keyframe_requests(&self, display: &str) -> usize {
+        self.keyframe_requests
+            .lock()
+            .iter()
+            .filter(|(d, _)| d == display)
+            .count()
+    }
+}
+
+impl Metrics for FakeMetrics {
+    fn set_fps(&self, _fps: f64) {}
+
+    fn set_latency(&self, _ms: f64) {}
+
+    fn count_keyframe_request(&self, display: &str, cause: KeyFrameCause) {
+        self.keyframe_requests
+            .lock()
+            .push((display.to_string(), cause.label()));
+    }
+
+    fn count_gate_events(&self, display: &str, event: &'static str, count: u32) {
+        self.gate_events
+            .lock()
+            .push((display.to_string(), event, count));
+    }
+
+    fn count_relay_run(&self, display: &str, event: crate::ws::relay::RunEvent) {
+        self.relay_runs
+            .lock()
+            .push((display.to_string(), event.label()));
+    }
+}
+
 /// A service over the stand-ins, with short periods, and its pages.
 pub struct Rig {
     pub service: Arc<WsService>,
     pub captures: Arc<FakeCaptures>,
+    pub metrics: Arc<FakeMetrics>,
     pub display: Arc<FakeDisplay>,
     pub audio: Arc<FakeAudio>,
     pub tokens: Arc<FakeTokens>,
@@ -651,6 +704,7 @@ impl Rig {
         let audio = Arc::new(FakeAudio::default());
         let tokens = Arc::new(FakeTokens::default());
         let input = Arc::new(FakeInput::default());
+        let metrics = Arc::new(FakeMetrics::default());
         let deps = WsDeps {
             tokens: tokens.clone(),
             clipboard: Arc::new(FakeClipboard),
@@ -660,13 +714,14 @@ impl Rig {
             webcam: Arc::new(FakeWebcam),
             stats: Arc::new(FakeStats),
             supervisor: Arc::new(FakeSupervisor),
-            metrics: None,
+            metrics: Some(metrics.clone()),
         };
         let service = WsService::with_timings(deps, timings);
         service.attach_input(input.clone());
         Rig {
             service,
             captures,
+            metrics,
             display,
             audio,
             tokens,

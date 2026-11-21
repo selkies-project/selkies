@@ -61,7 +61,7 @@ use crate::ws::audio::AudioTargets;
 use crate::ws::client::{
     BOUNDED_SEND_SECONDS, Client, ClientId, Frame, Liveness, SendError, broadcast as broadcast_text,
 };
-use crate::ws::host::{CaptureHandle, DroppedDisplay, Input, WsDeps};
+use crate::ws::host::{CaptureHandle, DroppedDisplay, Input, KeyFrameCause, WsDeps};
 use crate::ws::link::{
     BACKPRESSURE_ALLOWED_DESYNC_MS, BACKPRESSURE_CHECK_INTERVAL_S, DisplayLink, GateEffects,
     PadPermit, SteerOutcome, SteerTarget, TickInput,
@@ -70,7 +70,8 @@ use crate::ws::protocol::{
     BULK_DRAIN_TIMEOUT_S, ClientSettings, WS_BULK_BACKLOG_BYTES, WS_BULK_BACKLOG_POLL_S, fps_label,
 };
 use crate::ws::relay::{
-    RelayHost, RelayItem, VIDEO_RELAY_BUDGET_MIN_BYTES, VIDEO_RELAY_BUDGET_SECONDS, VideoRelay,
+    RelayHost, RelayItem, RunEvent, VIDEO_RELAY_BUDGET_MIN_BYTES, VIDEO_RELAY_BUDGET_SECONDS,
+    VideoRelay,
 };
 use crate::ws::state::{
     CaptureInstance, DisplayState, Registry, ServerState, json_f64, json_i64, sanitize,
@@ -88,6 +89,10 @@ pub const VIEWER_RESUME_MIN_INTERVAL_S: f64 = 1.0;
 pub const RECONNECT_DEBOUNCE_MS: f64 = 500.0;
 /// The reconnect debounce's table is bounded.
 pub const MAX_RECENT_CLIENTS: usize = 1000;
+/// How long after one `LOST_FRAME` reaches a display's encoder the display takes the next.
+const LOST_FRAME_FLOOR_S: f64 = 0.005;
+/// How long after one repair of a kind a page that does not own its display may ask another.
+const REPAIR_FLOOR_S: f64 = 1.0;
 
 /// The periods the suites shorten; the defaults are the module's.
 #[derive(Clone, Copy, Debug)]
@@ -295,7 +300,7 @@ impl WsService {
                 .get(&(client, kind))
                 .copied()
                 .unwrap_or(f64::NEG_INFINITY)
-            < 1.0
+            < REPAIR_FLOOR_S
         {
             return false;
         }
@@ -317,10 +322,11 @@ impl WsService {
 
     // ---- key frames, lost frames, frames held ----------------------------------------------
 
-    /// Ask the display's encoder for a fresh key frame; non-blocking and idempotent.
-    pub(crate) fn schedule_idr(&self, display_id: &str) {
+    /// Ask the display's encoder for a fresh key frame for `cause`; non-blocking and
+    /// idempotent.
+    pub(crate) fn schedule_idr(&self, display_id: &str, cause: KeyFrameCause) {
         if let Some(capture) = self.capture_of(display_id) {
-            capture.request_idr_frame();
+            request_key_frame(&*capture, self.deps.metrics.as_deref(), display_id, cause);
         }
     }
 
@@ -339,7 +345,7 @@ impl WsService {
         if relay.as_ref().is_some_and(|r| r.sync_pending()) {
             return;
         }
-        self.schedule_idr(display_id);
+        self.schedule_idr(display_id, KeyFrameCause::Page);
         if let Some(relay) = relay {
             relay.hold_sync();
         }
@@ -427,8 +433,8 @@ impl WsService {
     }
 
     /// Tell the display's encoder a client lost `frame_id`, or a relay `withheld` it, so the
-    /// frames after it stop predicting from it; logged once per display per five seconds with
-    /// the count of the rest.
+    /// frames after it stop predicting from it; logged once per display and cause per five
+    /// seconds with the count of the rest ([`invalidation_line`]).
     pub(crate) fn schedule_invalidation(&self, display_id: &str, frame_id: i64, withheld: bool) {
         let Some(capture) = self.capture_of(display_id) else {
             return;
@@ -436,49 +442,91 @@ impl WsService {
         capture.invalidate_reference((frame_id & 0xFFFF) as u16, withheld);
         let at = now();
         let mut reg = self.reg.lock();
-        let (last, more) = reg
+        let entry = reg
             .invalidation_log
-            .get(display_id)
-            .copied()
-            .unwrap_or((f64::NEG_INFINITY, 0));
-        if at - last >= 5.0 {
-            let suffix = if more > 0 {
-                format!(" (+{more} more in the last 5 s)")
-            } else {
-                String::new()
-            };
-            info!(target: "ws", "Display '{display_id}': frame {frame_id} lost by a client; the encoder predicts past it.{suffix}");
-            reg.invalidation_log.insert(display_id.to_string(), (at, 0));
+            .entry((display_id.to_string(), withheld))
+            .or_insert((f64::NEG_INFINITY, 0));
+        if at - entry.0 >= 5.0 {
+            let line = invalidation_line(display_id, frame_id, withheld, entry.1);
+            *entry = (at, 0);
+            info!(target: "ws", "{line}");
         } else {
-            reg.invalidation_log
-                .insert(display_id.to_string(), (last, more + 1));
+            entry.1 += 1;
         }
     }
 
-    /// `LOST_FRAME`: one report per display per few milliseconds is all a burst of clients can add.
+    /// `LOST_FRAME`: one report per display per few milliseconds is all a burst of clients can
+    /// add, and one a second from a page that does not own the display. A report the display's
+    /// floor holds back is kept, a page's oldest standing for the rest, and told with the page's
+    /// next report past the floor or once it ends: the encoder predicts past a lost frame and
+    /// every frame after it, so the later reports alone would leave it predicting from the first,
+    /// which the page dropped too. The report told beside the kept one is ignored by an encoder
+    /// the kept one covers, and repairs only where that one predates the stream's key frame. A
+    /// report the page's own floor holds back is dropped, and the floor is stamped only by a
+    /// report told: most such reports name frames encoded before the page's last report reached
+    /// the encoder, which it covers, and telling one would hold the floor a second longer.
     pub(crate) fn lost_frame(&self, client: ClientId, display_id: &str, frame_id: i64) {
-        if !self.repair_taken(client, display_id, "lost") {
-            return;
-        }
+        self.tell_lost_frames(client, display_id, Some((frame_id & 0xFFFF) as u16));
+    }
+
+    /// Tell the encoder of the frame kept for `client` on `display_id` and of `frame_id` where
+    /// the floors let a report through; where the display's floor alone holds it, keep the older
+    /// of the two and come back once the floor ends while the page is still connected.
+    fn tell_lost_frames(&self, client: ClientId, display_id: &str, frame_id: Option<u16>) {
         let at = now();
-        {
+        let (told, wait) = {
             let mut reg = self.reg.lock();
-            if at
-                - reg
-                    .last_lost_frame
-                    .get(display_id)
-                    .copied()
-                    .unwrap_or(f64::NEG_INFINITY)
-                < 0.005
-            {
+            let key = (client, display_id.to_string());
+            let kept = reg.lost_kept.remove(&key);
+            let oldest = match (kept, frame_id) {
+                (Some(kept), Some(id)) if kept.wrapping_sub(id).wrapping_sub(1) < 0x7FFF => id,
+                (Some(kept), _) => kept,
+                (None, Some(id)) => id,
+                (None, None) => return,
+            };
+            if frame_id.is_none() && !reg.clients.contains_key(&client) {
                 return;
             }
-            reg.last_lost_frame.insert(display_id.to_string(), at);
+            let owns = reg.owns(client, display_id);
+            let since = |stamp: Option<&f64>| stamp.copied().unwrap_or(f64::NEG_INFINITY);
+            if !owns && at < since(reg.repair_times.get(&(client, "lost"))) + REPAIR_FLOOR_S {
+                return;
+            }
+            let due = since(reg.last_lost_frame.get(display_id)) + LOST_FRAME_FLOOR_S;
+            if at < due {
+                reg.lost_kept.insert(key, oldest);
+                // One timer stands for a page's kept frame: the report keeping it arms it, and
+                // a timer the floor still holds re-arms itself.
+                (
+                    [None, None],
+                    (kept.is_none() || frame_id.is_none()).then_some(due - at),
+                )
+            } else {
+                reg.last_lost_frame.insert(display_id.to_string(), at);
+                if !owns {
+                    reg.repair_times.insert((client, "lost"), at);
+                }
+                ([kept, frame_id.filter(|&id| Some(id) != kept)], None)
+            }
+        };
+        if let Some(wait) = wait {
+            let service = self.arc();
+            let display_id = display_id.to_string();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                service.tell_lost_frames(client, &display_id, None);
+            });
         }
-        self.schedule_invalidation(display_id, frame_id, false);
+        for frame_id in told.into_iter().flatten() {
+            self.schedule_invalidation(display_id, i64::from(frame_id), false);
+        }
     }
 
     /// `REQUEST_KEYFRAME`: one request per display per 250 ms; the log line is throttled harder.
+    /// A request taken has the page hold no frame in common until it holds a key frame again: it
+    /// leaves before the key frame is asked for, so the key frame answering it rejoins the page.
+    /// A request the floors refuse brings no key frame and leaves the page counted, until the
+    /// page's next request is taken.
     pub(crate) fn request_keyframe(&self, client: &Client, display_id: Option<&str>) {
         let target = display_id.unwrap_or(PRIMARY_DISPLAY);
         if !self.repair_taken(client.id, target, "keyframe") {
@@ -527,7 +575,21 @@ impl WsService {
                     .or_insert(0) += 1;
             }
         }
-        capture.request_idr_frame();
+        let relay = self
+            .reg
+            .lock()
+            .relays
+            .get(target)
+            .and_then(|group| group.get(&client.id).cloned());
+        if let Some(relay) = relay {
+            relay.await_key_frame();
+        }
+        request_key_frame(
+            &*capture,
+            self.deps.metrics.as_deref(),
+            target,
+            KeyFrameCause::Client,
+        );
     }
 
     // ---- the display owner model -------------------------------------------------------------
@@ -1134,7 +1196,7 @@ impl WsService {
                 self.stop_capture_for_display(display_id).await;
                 self.start_capture_for_display(display_id, layout).await;
                 self.start_backpressure_task(display_id);
-                self.schedule_idr(display_id);
+                self.schedule_idr(display_id, KeyFrameCause::Restart);
                 self.broadcast_live_server_settings(display_id).await;
                 if Self::is_wayland() {
                     self.sync_wayland_realized_geometry(display_id, true).await;
@@ -2463,7 +2525,7 @@ impl WsService {
                 self.start_capture_for_display(did, layout).await;
                 self.start_backpressure_task(did);
                 // A static screen must still repaint and clients must relearn the encoder.
-                self.schedule_idr(did);
+                self.schedule_idr(did, KeyFrameCause::Restart);
                 self.broadcast_live_server_settings(did).await;
                 if Self::is_wayland() {
                     self.sync_wayland_realized_geometry(did, true).await;
@@ -2535,11 +2597,13 @@ impl WsService {
     ///
     /// Software, VA-API/Intel, V4L2, and Tegra streams keep one reference frame
     /// (`video_reference_frames`) while one page streams the display; NVENC keeps its acknowledged
-    /// references for loss recovery. A deeper buffer lets the encoder predict past a frame a page
-    /// dropped (`LOST_FRAME`, a relay's thinned run) instead of coding a key frame, but every
-    /// client decodes against all of it on every frame: at 2560x1600 eight frames cost FFmpeg's
-    /// decoder 0.3 ms a frame over one. TCP loses nothing, so one page's drop is rare and repaired
-    /// by a key frame. A display two pages or more stream, where a page beside the owner on a
+    /// references for loss recovery. The cap bounds an H.264 or H.265 buffer only
+    /// (`pixelflux::encoders::reference_frames`): libvpx, and SVT-AV1 at a constant rate, keep
+    /// their anchors under it and pin the one every client holds. A deeper buffer lets the
+    /// encoder predict past a frame a page dropped (`LOST_FRAME`, a relay's thinned run) instead
+    /// of coding a key frame, but every client decodes against all of it on every frame: at
+    /// 2560x1600 eight frames cost FFmpeg's decoder 0.3 ms a frame over one. TCP loses nothing,
+    /// so one page's drop is rare and repaired by a key frame. A display two pages or more stream, where a page beside the owner on a
     /// narrower link is left frames, starts at the encoder's own depth, and a running one takes
     /// it as the second page joins (`deepen_references`). The WebRTC pipeline keeps the depth for
     /// the losses its NACK and FEC leave.
@@ -2674,7 +2738,12 @@ impl WsService {
             let existing = self.capture_of(display_id);
             match existing {
                 Some(capture) if capture.is_capturing() => {
-                    capture.request_idr_frame();
+                    request_key_frame(
+                        &*capture,
+                        self.deps.metrics.as_deref(),
+                        display_id,
+                        KeyFrameCause::Page,
+                    );
                     debug!(target: "ws", "Capture instance for '{display_id}' already running; requested IDR.");
                     return true;
                 }
@@ -3137,7 +3206,7 @@ impl WsService {
                     for relay in group {
                         relay.drop_for_lag();
                     }
-                    self.schedule_idr(&display_id);
+                    self.schedule_idr(&display_id, KeyFrameCause::FanoutLag);
                     continue;
                 }
                 Err(broadcast::error::RecvError::Closed) => return,
@@ -3267,7 +3336,7 @@ impl WsService {
             }
         }
         if need_sync {
-            self.schedule_idr(display_id);
+            self.schedule_idr(display_id, KeyFrameCause::Relay);
         }
     }
 
@@ -3416,6 +3485,7 @@ impl WsService {
             primary: display_id == PRIMARY_DISPLAY,
         };
         let mut effects = CheckEffects {
+            display: display_id,
             capture: capture.clone(),
             relay,
             client: client.clone(),
@@ -3425,7 +3495,15 @@ impl WsService {
             let mut link = link.lock();
             link.loop_late_ms = late_ms;
             link.capped = capped;
+            let before = link.gate_counts;
             link.backpressure_tick(display_id, input, at, &mut effects);
+            if let Some(metrics) = &self.deps.metrics {
+                for (event, count) in link.gate_counts.since(&before) {
+                    if count > 0 {
+                        metrics.count_gate_events(display_id, event, count);
+                    }
+                }
+            }
             if steered && capturing && link.acknowledged_frame_id != -1 && link.has_sent_any_frame {
                 let target_view = capture.as_ref().map(|c| EncoderTarget(c.clone()));
                 let target = if capped {
@@ -3737,7 +3815,7 @@ impl WsService {
             info!(target: "ws", "Starting the 'primary' capture its hidden owner stopped, for the page beside it.");
             if service.ensure_viewer_capture().await {
                 let _ = page.send_text("PIPELINE_RESETTING primary", true).await;
-                service.schedule_idr(PRIMARY_DISPLAY);
+                service.schedule_idr(PRIMARY_DISPLAY, KeyFrameCause::Page);
             }
         });
     }
@@ -4565,6 +4643,34 @@ impl WsService {
     }
 }
 
+/// The line a display's invalidations are logged with: the frame reported, whether a client
+/// lost it or a relay left it out (`withheld`), and `more` reported since the last line.
+///
+/// The encoder answers a report on its own thread, predicting from an older frame it still
+/// holds or, where none is left in its window, coding a key frame; the service never learns
+/// which, so the line states only what the report asks of the encoder, and the answer is
+/// pixelflux's to count (`stream_stats`).
+pub(crate) fn invalidation_line(
+    display_id: &str,
+    frame_id: i64,
+    withheld: bool,
+    more: u64,
+) -> String {
+    let cause = if withheld {
+        "left out by a relay"
+    } else {
+        "lost by a client"
+    };
+    let suffix = if more > 0 {
+        format!(" (+{more} more in the last 5 s)")
+    } else {
+        String::new()
+    };
+    format!(
+        "Display '{display_id}': frame {frame_id} {cause}; the encoder stops predicting from it.{suffix}"
+    )
+}
+
 /// Render an absent payload value as `None` in a log line.
 fn opt(value: Option<i64>) -> String {
     value
@@ -4754,18 +4860,34 @@ impl SteerTarget for EncoderTarget {
     }
 }
 
-/// What one backpressure check reaches: the owner's socket and relay and the display's encoder.
-struct CheckEffects {
+/// Ask `capture` for a key frame for `cause`, counted on `display` where the metrics are on:
+/// every key frame request the plane makes goes through here.
+fn request_key_frame(
+    capture: &dyn CaptureHandle,
+    metrics: Option<&dyn crate::ws::host::Metrics>,
+    display: &str,
+    cause: KeyFrameCause,
+) {
+    capture.request_idr_frame();
+    if let Some(metrics) = metrics {
+        metrics.count_keyframe_request(display, cause);
+    }
+}
+
+/// What one backpressure check of `display` reaches: the owner's socket and relay and the
+/// display's encoder.
+struct CheckEffects<'a> {
+    display: &'a str,
     capture: Option<Arc<dyn CaptureHandle>>,
     relay: Option<Arc<VideoRelay>>,
     client: Option<Arc<Client>>,
     metrics: Option<Arc<dyn crate::ws::host::Metrics>>,
 }
 
-impl GateEffects for CheckEffects {
-    fn request_idr(&mut self) {
+impl GateEffects for CheckEffects<'_> {
+    fn request_idr(&mut self, cause: KeyFrameCause) {
         if let Some(capture) = &self.capture {
-            capture.request_idr_frame();
+            request_key_frame(&**capture, self.metrics.as_deref(), self.display, cause);
         }
     }
 
@@ -4817,6 +4939,12 @@ impl GateEffects for CheckEffects {
 impl RelayHost for WsService {
     fn owns_display(&self, client: ClientId, display_id: &str) -> bool {
         self.reg.lock().owns(client, display_id)
+    }
+
+    fn relay_run(&self, display_id: &str, event: RunEvent) {
+        if let Some(metrics) = &self.deps.metrics {
+            metrics.count_relay_run(display_id, event);
+        }
     }
 
     fn relay_lost(&self, client: ClientId, display_id: &str, frame_id: u16, reach: bool) -> bool {

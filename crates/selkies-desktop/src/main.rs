@@ -225,6 +225,9 @@ fn run() -> i32 {
         }
         let layered = backend.layered_desktop();
         for id in desktop.background_ids() {
+            if !desktop.background_due(id, now) {
+                continue;
+            }
             if layered {
                 if let Some(frames) = desktop.render_background_layers(id) {
                     if let Some(wallpaper) = frames.wallpaper.as_ref() {

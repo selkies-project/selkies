@@ -384,7 +384,9 @@ Each is documented in full where named; read that before changing the subsystem.
   encoder takes its own depth (`deepen_references`: x264 reopens in place on the key frame the joining page starts
   from, a hardware session restarts its capture) and keeps it until its capture next starts, or x264's next resize,
   so a page beside the owner that its link leaves frames is predicted past, as NVENC and the encoders that keep a
-  buffer of their own (libvpx, SVT-AV1, VA-API's VP8, VP9, and AV1) predict past it.
+  buffer of their own (libvpx, SVT-AV1 at a constant rate from 4.2, VA-API's VP8 and VP9, and its AV1 where the
+  driver takes the session's picture headers) predict past it; where the session names no reference, the relay
+  skips such a page ahead to the next key frame instead (`crates/selkies/src/ws/relay.rs` module docblock).
 - The webcam uplink mirrors the microphone: nothing about a frame is decoded or copied in the server
   (`web/selkies-web-core/lib/webcam-capture.ts` header, `crates/selkies/src/webcam` module docblock,
   `addons/v4l2-interposer/v4l2_interposer.c` header for the interposer's locking rules).

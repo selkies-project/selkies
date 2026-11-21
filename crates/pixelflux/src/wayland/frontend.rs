@@ -184,7 +184,7 @@ pub fn wayland_time() -> InputTime {
     )
 }
 
-use crate::pace::FramePace;
+use crate::pace::{FramePace, TickTrigger};
 
 /// One capture pipeline bound to one output (display id): its settings, encoder set,
 /// frame pools, delivery thread, and per-stream bookkeeping. Exactly one capture may run per
@@ -246,6 +246,11 @@ pub struct WlCapture {
     /// A change (a client's commit, input, a host frame) found its period's frame taken and
     /// waits for the next period to open (`serve_changes`); any frame rendered clears it.
     pub change_pending: bool,
+    /// The clients, by the surface their frame callbacks go out through ([`callback_root`]),
+    /// whose commit is not rendered yet ([`Self::note_commit`]): their callbacks wait for its
+    /// render (`answer_frame_callbacks`), every other client's go out on the boundary, and input
+    /// and the compositor's own changes hold back none.
+    pub pending_commits: Vec<ObjectId>,
     /// When the last change arrived ([`Self::note_change`]).
     pub last_change: Option<Instant>,
     /// A pending change held for the next change (`FramePace::merge_until`): since when, and
@@ -258,8 +263,53 @@ pub struct WlCapture {
     pub host_merged: Option<(Vec<Rectangle<i32, smithay::utils::Physical>>, i64)>,
     /// The window boundary whose frame callbacks went out (`answer_frame_callbacks`).
     pub callbacks_at: Option<Instant>,
-    /// A boundary's frame callbacks wait for the render of a change still pending at it.
-    pub callbacks_owed: bool,
+    /// The clients a boundary's frame callbacks skipped for their commit still pending at it,
+    /// answered by the render that shows it.
+    pub owed_callbacks: Vec<ObjectId>,
+    /// Each client's last commit and the average spacing of its commits, by
+    /// [`callback_root`], from which the client drawing at the cadence is read
+    /// ([`Self::follows_source`]).
+    pub commit_rhythm: Vec<(ObjectId, Instant, Option<Duration>)>,
+    /// The client drawing at the cadence that the capture's frames follow while it does.
+    pub source: Option<ObjectId>,
+}
+
+/// How long past a source's last frame its next one is waited for, in periods, before the
+/// changes waiting on it are paced as on any other screen.
+const SOURCE_WAIT_PERIODS: f64 = 1.25;
+/// The average spacing of a client's commits, in periods, that counts as drawing at the
+/// cadence: one a boundary, as a client drawing on frame callbacks does, a missed callback now
+/// and then included. No sooner than the pacing's own bound on the rate (a thirty-second over
+/// the cadence), so following a client never raises the display's rate, and no slower than an
+/// eighth of a period, so a client drawing at a lower rate of its own (a 50 fps video on a 60 fps
+/// display) is not followed and the display keeps its cadence.
+const SOURCE_SPACING: (f64, f64) = (1.0 - 1.0 / 32.0, 1.0 + 1.0 / 8.0);
+/// How long a client's commits are remembered for reading its rhythm.
+const RHYTHM_MEMORY: Duration = Duration::from_secs(1);
+
+/// The surface a commit on `surface` is answered through: the root of its subsurface tree, and
+/// for a popup the toplevel or layer surface it opens from, whose `send_frame` reaches its
+/// popups and subsurfaces too.
+pub fn callback_root(popups: &PopupManager, surface: &WlSurface) -> WlSurface {
+    let mut root = surface.clone();
+    while let Some(parent) = smithay::wayland::compositor::get_parent(&root) {
+        root = parent;
+    }
+    match popups.find_popup(&root) {
+        Some(kind) => smithay::desktop::find_popup_root_surface(&kind).unwrap_or(root),
+        None => root,
+    }
+}
+
+/// Whether `output` shows the client whose callbacks go out through `root`: one of its windows
+/// or layer surfaces, as `answer_frame_callbacks` reaches them.
+fn shows_surface(space: &Space<Window>, output: &Output, root: &WlSurface) -> bool {
+    space
+        .elements_for_output(output)
+        .any(|w| w.wl_surface().is_some_and(|s| *s == *root))
+        || layer_map_for_output(output)
+            .layers()
+            .any(|l| l.wl_surface() == root)
 }
 
 impl WlCapture {
@@ -267,6 +317,103 @@ impl WlCapture {
     pub fn note_change(&mut self) {
         self.change_pending = true;
         self.last_change = Some(Instant::now());
+    }
+
+    /// A client this capture's output shows committed new content ([`Self::note_change`]);
+    /// `root` is the surface its frame callbacks go out through ([`callback_root`]), and
+    /// `on_root` says the commit was on that surface itself, the one commit of the client's
+    /// frame its rhythm is read from: its subsurfaces and popups commit beside it.
+    pub fn note_commit(&mut self, root: &ObjectId, on_root: bool) {
+        self.note_change();
+        if !self.pending_commits.contains(root) {
+            self.pending_commits.push(root.clone());
+        }
+        if !on_root {
+            return;
+        }
+        let now = Instant::now();
+        self.commit_rhythm
+            .retain(|(_, at, _)| now.saturating_duration_since(*at) < RHYTHM_MEMORY);
+        match self.commit_rhythm.iter_mut().find(|(id, _, _)| id == root) {
+            Some((_, at, spacing)) => {
+                let dt = now.saturating_duration_since(*at);
+                *spacing = Some(spacing.map_or(dt, |avg| avg.mul_f64(0.875) + dt.mul_f64(0.125)));
+                *at = now;
+            }
+            None => self.commit_rhythm.push((root.clone(), now, None)),
+        }
+    }
+
+    /// When `client` last committed, if it draws at the cadence of `period`: its commits come
+    /// a period apart on average ([`SOURCE_SPACING`]), and the last is younger than
+    /// [`SOURCE_WAIT_PERIODS`].
+    fn paced_at(&self, client: &ObjectId, period: Duration, now: Instant) -> Option<Instant> {
+        let (fastest, slowest) = SOURCE_SPACING;
+        self.commit_rhythm
+            .iter()
+            .find(|(id, _, _)| id == client)
+            .filter(|(_, at, spacing)| {
+                spacing
+                    .is_some_and(|s| s >= period.mul_f64(fastest) && s <= period.mul_f64(slowest))
+                    && now.saturating_duration_since(*at) < period.mul_f64(SOURCE_WAIT_PERIODS)
+            })
+            .map(|(_, at, _)| *at)
+    }
+
+    /// Whether a render for `trigger` follows the client drawing at the cadence: `Some(true)`
+    /// renders now, `Some(false)` waits for that client's next frame, and `None` leaves it to
+    /// the pacing.
+    ///
+    /// A client drawing on frame callbacks at the cadence already gives the display its frame
+    /// rate, one commit a boundary, so its commit is rendered as it lands, and everything else
+    /// (input, another client's commit, the compositor's own change) goes out with its next
+    /// frame rather than rendering on its own. The window pacing (`FramePace::windowed`) is
+    /// for sources on a clock of their own: here, a change taking the window ahead of the
+    /// client's frame, an extra frame, or a hold of the client's own commit for a next frame it
+    /// cannot draw until it is answered, each moves its frames off the boundaries its callbacks
+    /// keep, and it loses frames until its rhythm is back. A source that misses its next frame
+    /// by [`SOURCE_WAIT_PERIODS`] leaves the changes to the pacing, and one source is followed
+    /// while it keeps the cadence.
+    pub fn follows_source(
+        &mut self,
+        trigger: TickTrigger,
+        period: Duration,
+        now: Instant,
+    ) -> Option<bool> {
+        if trigger == TickTrigger::Timer {
+            return None;
+        }
+        if self
+            .source
+            .as_ref()
+            .is_none_or(|s| self.paced_at(s, period, now).is_none())
+        {
+            self.source = self
+                .commit_rhythm
+                .iter()
+                .map(|(id, _, _)| id)
+                .find(|id| self.paced_at(id, period, now).is_some())
+                .cloned();
+        }
+        let source = self.source.as_ref()?;
+        Some(self.pending_commits.contains(source))
+    }
+
+    /// Until when a pending change waits for the source's next frame ([`Self::follows_source`]).
+    fn source_wait(&self, period: Duration, now: Instant) -> Option<Instant> {
+        let source = self.source.as_ref()?;
+        if self.pending_commits.contains(source) {
+            return None;
+        }
+        self.paced_at(source, period, now)
+            .map(|at| at + period.mul_f64(SOURCE_WAIT_PERIODS))
+    }
+
+    /// A frame was rendered: whatever was pending is on it.
+    pub fn changes_rendered(&mut self) {
+        self.change_pending = false;
+        self.pending_commits.clear();
+        self.merge_hold = None;
     }
 
     /// Whether the pending change waits for the next one at `now` rather than taking the
@@ -282,10 +429,18 @@ impl WlCapture {
     }
 
     /// When the event loop next has to wake for this capture: the end of a hold where a change
-    /// is held, else what the pacing says (`FramePace::next_wake`).
+    /// is held, else what the pacing says (`FramePace::next_wake`). A hold never sleeps past the
+    /// next window boundary either, where the clients' frame callbacks go out.
     pub fn next_wake(&self, period: std::time::Duration, now: Instant) -> Instant {
+        if self.change_pending
+            && let Some(until) = self.source_wait(period, now)
+        {
+            return until.min(self.pace.next_wake(period, now, false));
+        }
         match self.merge_hold {
-            Some((_, until)) if self.change_pending => until.min(self.pace.next_due(period, now)),
+            Some((_, until)) if self.change_pending => {
+                until.min(self.pace.next_wake(period, now, false))
+            }
             _ => self.pace.next_wake(period, now, self.change_pending),
         }
     }
@@ -1361,9 +1516,21 @@ impl CompositorHandler for AppState {
         });
         // Under host capture the host's frames are what is captured, and they mark their own.
         if new_content && self.host.is_none() {
-            for node in &mut self.output_nodes {
+            let root = callback_root(&self.popups, surface);
+            let shown: Vec<bool> = self
+                .output_nodes
+                .iter()
+                .map(|node| shows_surface(&self.space, &node.output, &root))
+                .collect();
+            let on_root = root == *surface;
+            let root = root.id();
+            for (node, shown) in self.output_nodes.iter_mut().zip(shown) {
                 if let Some(cap) = node.capture.as_mut() {
-                    cap.note_change();
+                    if shown {
+                        cap.note_commit(&root, on_root);
+                    } else {
+                        cap.note_change();
+                    }
                 }
             }
         }
@@ -1854,8 +2021,11 @@ impl AppState {
     /// override-redirect window on top under the point, a top layer surface, then a window, then
     /// a bottom or background layer surface, each through its popup where one lies under the
     /// point, since a popup takes pointer events on its own surface. That is the order they are
-    /// drawn in. Layer geometry is output-local, so layers are hit-tested with the point local to
-    /// the output under it. Whatever is found is then resolved to the subsurface of its tree that
+    /// drawn in: off a fullscreen output an override-redirect window anywhere in the stacking
+    /// lies over the top layer, and on an output a window shows fullscreen on
+    /// ([`crate::wayland::wm::fullscreen_on_top`]) the top layer comes after the windows and an
+    /// override-redirect window counts only where it is stacked topmost. Layer geometry is
+    /// output-local, so layers are hit-tested with the point local to the output under it. Whatever is found is then resolved to the subsurface of its tree that
     /// takes input at the point ([`FocusTarget::under_point`]): a subsurface takes pointer events
     /// on its own surface too, and handed to the surface below it, a click on a browser's bubble
     /// lands on the page under the bubble.
@@ -1898,14 +2068,28 @@ impl AppState {
         if let Some(menu) = self.x11_menu_open() {
             return Some(menu);
         }
+        let under_fullscreen = self.node_idx_under(p).is_some_and(|idx| {
+            crate::wayland::wm::fullscreen_on_top(
+                &self.space,
+                self.wm.as_ref(),
+                &self.output_nodes[idx].output,
+            )
+        });
         let found = layer_hit(&[Layer::Overlay])
             .or_else(|| {
-                self.space
-                    .element_under(p)
-                    .filter(|(window, _)| is_override_redirect(window))
-                    .map(|(window, loc)| (FocusTarget::Window(window.clone()), loc.to_f64()))
+                if under_fullscreen {
+                    self.space
+                        .element_under(p)
+                        .filter(|(window, _)| is_override_redirect(window))
+                } else {
+                    self.override_redirect_under(p)
+                }
+                .map(|(window, loc)| (FocusTarget::Window(window.clone()), loc.to_f64()))
             })
-            .or_else(|| layer_hit(&[Layer::Top]))
+            .or_else(|| match under_fullscreen {
+                true => None,
+                false => layer_hit(&[Layer::Top]),
+            })
             .or_else(|| {
                 self.space.element_under(p).map(|(window, loc)| {
                     window
@@ -1914,8 +2098,32 @@ impl AppState {
                         .unwrap_or_else(|| (FocusTarget::Window(window.clone()), loc.to_f64()))
                 })
             })
+            .or_else(|| match under_fullscreen {
+                true => layer_hit(&[Layer::Top]),
+                false => None,
+            })
             .or_else(|| layer_hit(&[Layer::Bottom, Layer::Background]));
         found.map(|(target, origin)| target.under_point(origin, p))
+    }
+
+    /// The topmost X11 override-redirect window whose input region holds the point, with where
+    /// its surface is drawn, whatever window is stacked above it: off a fullscreen output the
+    /// frame lifts every such window over the top layer and the other windows.
+    fn override_redirect_under(
+        &self,
+        p: Point<f64, Logical>,
+    ) -> Option<(&Window, Point<i32, Logical>)> {
+        use smithay::desktop::space::SpaceElement;
+        self.space
+            .elements()
+            .rev()
+            .filter(|window| is_override_redirect(window))
+            .find_map(|window| {
+                let loc = self.space.element_location(window)? - window.geometry().loc;
+                window
+                    .is_in_input_region(&(p - loc.to_f64()))
+                    .then_some((window, loc))
+            })
     }
 
     /// The topmost X11 popup menu that is open, with where it lies. A menu Xwayland has not yet

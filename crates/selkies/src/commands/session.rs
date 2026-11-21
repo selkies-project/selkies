@@ -117,6 +117,87 @@ pub fn answers(path: &Path) -> bool {
     UnixStream::connect(path).is_ok()
 }
 
+/// Where alsa-lib reads its configuration when `ALSA_CONFIG_DIR` names no other directory.
+const ALSA_CONFIG_DIR: &str = "/usr/share/alsa";
+
+/// alsa-lib's plugin directories for the session's own ABI under `root`: the multiarch one,
+/// `lib64`, and `lib` where `lib64` is no directory of its own, since a distribution with one
+/// keeps its 32-bit libraries in `lib`.
+fn alsa_plugin_dirs(root: &Path) -> Vec<PathBuf> {
+    let usr = root.join("usr");
+    let mut dirs = vec![
+        usr.join(format!("lib/{}-linux-gnu/alsa-lib", std::env::consts::ARCH)),
+        usr.join("lib64/alsa-lib"),
+    ];
+    if !fs::symlink_metadata(usr.join("lib64")).is_ok_and(|m| m.is_dir()) {
+        dirs.push(usr.join("lib/alsa-lib"));
+    }
+    dirs
+}
+
+/// Whether the host under `root` carries ALSA's `name` plugin (`pcm_pulse`, `pcm_pipewire`) for
+/// the session's ABI.
+fn host_alsa_plugin(root: &Path, name: &str) -> bool {
+    alsa_plugin_dirs(root)
+        .iter()
+        .any(|dir| dir.join(format!("libasound_module_{name}.so")).is_file())
+}
+
+/// The two ALSA configuration files that make the PulseAudio plugin every application's default
+/// device: the one `ALSA_CONFIG_PATH` names, and the one it loads last, at `defaults`.
+///
+/// alsa-lib reads every file of its list before it runs the hooks they declare, and the one
+/// `alsa.conf` declares, `@hooks.0`, is what loads the host's `conf.d` directories,
+/// `/etc/asound.conf`, and `~/.asoundrc`, so a default those name would replace one the list
+/// names. The first file therefore declares the next hook, `@hooks.1`, which alsa-lib runs
+/// after it, loading `defaults` once the host's and the user's files are read; it names the
+/// defaults itself as well, for a list whose files declare no `@hooks.0`. `modules`, the
+/// bundle's PCM and control modules, are named by path where the host carries no plugin of its
+/// own, so that no plugin directory of the host's has to hold them; where it does, every
+/// libasound takes the host's of its own ABI, a 32-bit one included, which a 64-bit module
+/// named by path would refuse it. `None` where a path holds what an ALSA string cannot carry
+/// as it is, a quote or a backslash.
+fn alsa_bridge_confs(modules: Option<&[PathBuf; 2]>, defaults: &Path) -> Option<(String, String)> {
+    fn quotable(path: &Path) -> Option<&str> {
+        path.to_str().filter(|p| !p.contains(['"', '\\']))
+    }
+    let mut conf = String::new();
+    if let Some([pcm, ctl]) = modules {
+        let (pcm, ctl) = (quotable(pcm)?, quotable(ctl)?);
+        conf.push_str(&format!(
+            "pcm_type.pulse {{ lib \"{pcm}\" }}\nctl_type.pulse {{ lib \"{ctl}\" }}\n"
+        ));
+    }
+    conf.push_str(
+        "pcm.!default { type pulse hint.description \"Default ALSA Output (PulseAudio)\" }\n\
+         ctl.!default { type pulse }\n",
+    );
+    let defaults = quotable(defaults)?;
+    let first = format!("{conf}@hooks.1 {{ func load files [ \"{defaults}\" ] errors false }}\n");
+    Some((first, conf))
+}
+
+/// The `ALSA_CONFIG_PATH` that reads `conf` after the configuration alsa-lib reads otherwise:
+/// the list `existing` names where it is set, else `alsa.conf` in `config_dir` where that is a
+/// file. The variable replaces alsa-lib's top-level file rather than adding to it, so that file
+/// comes first and keeps loading the host's configuration through its hook
+/// ([`alsa_bridge_confs`]). `None` where there is no such configuration, so no libasound of the
+/// host's to bridge, or where `conf` holds a colon or a space, which alsa-lib splits the list on.
+fn alsa_config_path(existing: Option<&str>, config_dir: &Path, conf: &Path) -> Option<String> {
+    let conf = conf.to_str().filter(|c| !c.contains([':', ' ']))?;
+    let base = match existing.filter(|e| !e.is_empty()) {
+        Some(list) => list.to_string(),
+        None => {
+            let top = config_dir.join("alsa.conf");
+            top.is_file().then(|| top.to_string_lossy().into_owned())?
+        }
+    };
+    if base.split([':', ' ']).any(|file| file == conf) {
+        return Some(base);
+    }
+    Some(format!("{base}:{conf}"))
+}
+
 /// Whether `child` has exited, and with what status (`None` while it runs).
 fn exited(child: &mut Child) -> Option<i32> {
     child
@@ -774,7 +855,12 @@ impl Session {
     /// microphone source it streams, when the server moves those streams onto them. The
     /// socket admits whoever reaches it, since it sits in the session's private runtime
     /// directory, which is the access control, rather than asking for the cookie a fresh home
-    /// has none of.
+    /// has none of. Its memory pools are POSIX shared memory rather than memfd
+    /// (`--enable-memfd=no`): a memfd pool is registered with one connection alone, so a block
+    /// an application plays passes from its connection to the recorder capturing the sink's
+    /// monitor only as a copy over the socket, which PulseAudio logs as an error on every
+    /// low-latency recording stream, while a segment in `/dev/shm` any client of the same user
+    /// opens by name hands it over without one.
     pub fn sound(&mut self) -> bool {
         if self.host && self.host_sound() {
             return true;
@@ -809,6 +895,7 @@ impl Session {
                     "--daemonize=no".into(),
                     "--exit-idle-time=-1".into(),
                     "--use-pid-file=no".into(),
+                    "--enable-memfd=no".into(),
                     "-n".into(),
                     "--load=module-native-protocol-unix auth-anonymous=1 auth-cookie-enabled=0"
                         .into(),
@@ -853,10 +940,75 @@ impl Session {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             log(&format!("{server} serves the session's audio"));
+            if !self.host {
+                self.alsa_bridge(&server);
+            }
             return true;
         }
         log("no sound server came up; the session has no audio");
         false
+    }
+
+    /// Make ALSA's PulseAudio plugin the default device of the session's ALSA applications,
+    /// which otherwise find no sound card: a configuration written into the runtime directory
+    /// and read after the host's through `ALSA_CONFIG_PATH` ([`alsa_bridge_confs`],
+    /// [`alsa_config_path`]), so it reaches what the session starts and nothing else, as
+    /// `PULSE_SERVER` does. The plugin is the host's where it has one, else the bundle's, whose
+    /// modules the application's own libasound loads and which find the bundle's libpulse
+    /// through their run path, or the one the application already loaded. `server`, the sound
+    /// server the session started, takes the plugin through its PulseAudio protocol, PipeWire's
+    /// included, where the host carries no ALSA plugin of PipeWire's, whose own configuration
+    /// names its default. A host session is left to the host's configuration.
+    fn alsa_bridge(&mut self, server: &str) {
+        let root = Path::new("/");
+        if server != "pulseaudio" && host_alsa_plugin(root, "pcm_pipewire") {
+            return;
+        }
+        let modules = if host_alsa_plugin(root, "pcm_pulse") {
+            None
+        } else if let Some(modules) = self.bundle.as_ref().and_then(Bundle::alsa_pulse_modules) {
+            Some(modules)
+        } else {
+            log(
+                "ALSA applications get no sound: neither the host nor a bundle carries ALSA's PulseAudio plugin",
+            );
+            return;
+        };
+        let first = self.runtime_dir.join("selkies-alsa.conf");
+        let last = self.runtime_dir.join("selkies-alsa-defaults.conf");
+        let Some((first_conf, last_conf)) = alsa_bridge_confs(modules.as_ref(), &last) else {
+            log(
+                "ALSA applications get no sound: the plugin's or the runtime directory's path holds a quote or a backslash",
+            );
+            return;
+        };
+        let config_dir = self
+            .env
+            .get("ALSA_CONFIG_DIR")
+            .filter(|d| d.starts_with('/'))
+            .map_or_else(|| PathBuf::from(ALSA_CONFIG_DIR), PathBuf::from);
+        let existing = self.env.get("ALSA_CONFIG_PATH").map(String::as_str);
+        let Some(path) = alsa_config_path(existing, &config_dir, &first) else {
+            log(&format!(
+                "ALSA applications get no sound: no {}/alsa.conf to read first, or a colon or a space in {}",
+                config_dir.display(),
+                self.runtime_dir.display()
+            ));
+            return;
+        };
+        if let Err(err) = fs::write(&last, last_conf).and_then(|()| fs::write(&first, first_conf)) {
+            log(&format!("ALSA applications get no sound: {err}"));
+            return;
+        }
+        self.env.insert("ALSA_CONFIG_PATH".to_string(), path);
+        let plugin = if modules.is_some() {
+            "the bundle's"
+        } else {
+            "the host's"
+        };
+        log(&format!(
+            "ALSA applications play through {server}, by {plugin} ALSA plugin"
+        ));
     }
 
     /// Settle the session's GPU ([`super::session_gpu`]): the driver's loader files, the probe
@@ -1789,6 +1941,97 @@ mod tests {
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn the_alsa_bridge_names_its_defaults_again_after_the_hosts_hooks() {
+        let modules = [PathBuf::from("/b/pcm.so"), PathBuf::from("/b/ctl.so")];
+        let (first, last) =
+            alsa_bridge_confs(Some(&modules), Path::new("/run/s/defaults.conf")).unwrap();
+        for conf in [&first, &last] {
+            assert!(conf.contains("pcm_type.pulse { lib \"/b/pcm.so\" }"));
+            assert!(conf.contains("ctl_type.pulse { lib \"/b/ctl.so\" }"));
+            assert!(conf.contains("pcm.!default { type pulse"));
+            assert!(conf.contains("ctl.!default { type pulse }"));
+        }
+        assert!(first.contains("@hooks.1 { func load files [ \"/run/s/defaults.conf\" ]"));
+        assert!(
+            !last.contains("@hooks"),
+            "the defaults load nothing further"
+        );
+        let (first, _) = alsa_bridge_confs(None, Path::new("/run/s/defaults.conf")).unwrap();
+        assert!(
+            !first.contains("_type.pulse"),
+            "the host's plugin is left to each libasound"
+        );
+        let quoted = [PathBuf::from("/b\"/pcm.so"), PathBuf::from("/b/ctl.so")];
+        assert_eq!(
+            alsa_bridge_confs(Some(&quoted), Path::new("/run/d.conf")),
+            None
+        );
+        assert_eq!(alsa_bridge_confs(None, Path::new("/run\\/d.conf")), None);
+    }
+
+    #[test]
+    fn the_hosts_alsa_plugin_is_found_for_the_sessions_own_abi() {
+        let root = crate::http::testing::tempfile_dir("selkies-alsa-plugins-");
+        assert!(!host_alsa_plugin(&root, "pcm_pulse"));
+        let lib = root.join("usr/lib/alsa-lib");
+        fs::create_dir_all(&lib).unwrap();
+        fs::write(lib.join("libasound_module_pcm_pulse.so"), "").unwrap();
+        assert!(
+            host_alsa_plugin(&root, "pcm_pulse"),
+            "lib is the native directory where lib64 is none of its own"
+        );
+        fs::create_dir_all(root.join("usr/lib64")).unwrap();
+        assert!(
+            !host_alsa_plugin(&root, "pcm_pulse"),
+            "lib holds the 32-bit plugins beside a lib64"
+        );
+        let multiarch = root.join(format!(
+            "usr/lib/{}-linux-gnu/alsa-lib",
+            std::env::consts::ARCH
+        ));
+        fs::create_dir_all(&multiarch).unwrap();
+        fs::write(multiarch.join("libasound_module_pcm_pulse.so"), "").unwrap();
+        assert!(host_alsa_plugin(&root, "pcm_pulse"));
+        assert!(!host_alsa_plugin(&root, "pcm_pipewire"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_alsa_bridge_is_read_after_the_hosts_configuration() {
+        let dir = crate::http::testing::tempfile_dir("selkies-alsa-");
+        let conf = dir.join("selkies-alsa.conf");
+        let conf_str = conf.to_string_lossy();
+        assert_eq!(
+            alsa_config_path(None, &dir, &conf),
+            None,
+            "a host with no alsa.conf has no libasound to bridge"
+        );
+        fs::write(dir.join("alsa.conf"), "").unwrap();
+        let top = dir.join("alsa.conf");
+        assert_eq!(
+            alsa_config_path(None, &dir, &conf),
+            Some(format!("{}:{conf_str}", top.display()))
+        );
+        assert_eq!(
+            alsa_config_path(Some("/etc/mine.conf"), &dir, &conf),
+            Some(format!("/etc/mine.conf:{conf_str}")),
+            "a list the environment names is kept ahead of the bridge"
+        );
+        let once = format!("/etc/mine.conf:{conf_str}");
+        assert_eq!(
+            alsa_config_path(Some(&once), &dir, &conf),
+            Some(once.clone()),
+            "the bridge joins the list once"
+        );
+        assert_eq!(
+            alsa_config_path(None, &dir, Path::new("/run/a b/selkies-alsa.conf")),
+            None,
+            "alsa-lib splits the list on spaces"
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

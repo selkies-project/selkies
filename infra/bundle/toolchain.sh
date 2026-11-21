@@ -7,8 +7,8 @@
 # makes for one C library and architecture, holding everything a bundle carries
 # or links that this tree does not compile itself (the build tools and headers,
 # the Rust toolchain, the X servers and their static dependencies, CUPS, the
-# codecs, libxkbcommon, PipeWire's headers, dbus-daemon, and NVIDIA's X11 EGL
-# platform), so a bundle build compiles only the server, the shell, and the
+# codecs, libxkbcommon, PipeWire's headers, dbus-daemon, the ALSA PulseAudio
+# plugin, and NVIDIA's X11 EGL platform), so a bundle build compiles only the server, the shell, and the
 # interposers.
 #
 # The image is named for its inputs rather than for a branch: its tag is the C
@@ -50,7 +50,8 @@ files() {
     printf '%s\n' infra/bundle/Dockerfile infra/bundle/toolchain.sh infra/bundle/deps.sh \
         infra/packaging/portable-deps.sh crates/pcmflux/scripts/build-libpulse.sh \
         infra/packaging/rust.sh infra/packaging/xkbcommon.sh infra/bundle/pipewire.sh \
-        infra/bundle/egl-x11.sh infra/bundle/dbus.sh infra/packaging/codecs.sh \
+        infra/bundle/egl-x11.sh infra/bundle/dbus.sh infra/bundle/alsa-pulse.sh \
+        infra/packaging/codecs.sh \
         crates/pixelflux/pyproject.toml \
         infra/bundle/xservers.sh infra/bundle/gbm-loader.c infra/bundle/gl-loader.c \
         infra/bundle/cups.sh

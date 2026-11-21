@@ -2047,10 +2047,10 @@ const VIDEO_WORKER_MAX_IN_FLIGHT = 3;
  * and only encoded bytes cross the boundary. The `workerDecoder*` fields track
  * the config last pushed to it; `workerKeyframeCodec` is the SPS codec of the
  * last keyframe, sticky on a parse miss, since a codec string that oscillates
- * reconfigures the worker decoder and requests a keyframe at every boundary,
- * stalling playback; `workerDecodeFailed` sticks on a worker decoder error
- * and routes decoding back to the main thread, with the worker sink or the 2D
- * canvas presenting.
+ * reconfigures the worker decoder at every boundary and leaves each delta
+ * frame that changed it waiting for a key frame, stalling playback;
+ * `workerDecodeFailed` sticks on a worker decoder error and routes decoding
+ * back to the main thread, with the worker sink or the 2D canvas presenting.
  */
 let decodeInWorker = false;
 let workerDecoderCodec: string | null = null, workerDecoderW = 0, workerDecoderH = 0;
@@ -3232,8 +3232,13 @@ function logWorkerDecoderConfig(codec: string, w: number, h: number): void {
 
 /**
  * Forwards an encoded full-frame H.264 chunk to the worker's own decoder,
- * reconfiguring it when the codec or coded dimensions change and requesting
- * the keyframe WebCodecs needs after a configure.
+ * reconfiguring it when the codec or coded dimensions change. A configured
+ * decoder starts at a key frame: one that came with the change is decoded
+ * as it is, and a delta frame that came with it costs a key frame request.
+ * A delta in avcC framing is dropped before the configure, since the
+ * decoder's description comes from a key frame's parameter sets. A frame
+ * handed on starts the stream, as one the socket worker diverts to the worker
+ * does, which ends the key frame requests the wait for a first frame makes.
  * @param isKey
  * @param dataBuf The Annex-B payload; transferred, not copied.
  * @param w Coded width.
@@ -3258,11 +3263,12 @@ function feedWorkerDecoder(isKey: boolean, dataBuf: ArrayBuffer, w: number, h: n
                                 software: preferSoftwareDecode, description: description });
     } catch (e) { return false; }
     workerDecoderCodec = codec; workerDecoderW = w; workerDecoderH = h;
-    requestKeyframe();
+    if (!isKey) requestKeyframe();
   }
   const data = framed ? annexbToAvcc(new Uint8Array(dataBuf)).buffer : dataBuf;
   try { videoWorker!.postMessage({ type: 'chunk', key: isKey, data: data, timestamp: chunkStamp(), frameId: frameId, reference: reference, at: arrival }, [data]); }
   catch (e) { return false; }
+  if (!streamStarted) startStream();
   return true;
 }
 

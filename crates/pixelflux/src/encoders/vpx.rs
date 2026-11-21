@@ -909,6 +909,10 @@ impl VpxEncoder {
         self.planes
             .convert(pixels, stride, rgba, false, bt601, self.threads as usize)?;
 
+        if force_idr {
+            self.references
+                .owe_key(crate::report::KeyFrameCause::Requested);
+        }
         let key = force_idr || !self.references.has_reference();
         let pts = self.references.next_pts();
         let mut flags: c_long = if key {
@@ -1395,6 +1399,8 @@ mod tests {
     #[test]
     fn a_loss_past_the_window_costs_a_key_frame() {
         for codec in [Codec::Vp8, Codec::Vp9] {
+            let report = crate::report::StreamReport::new("x11");
+            let _scope = crate::report::enter(&report);
             let s = settings(codec);
             let mut enc = VpxEncoder::new(&s, codec, false).expect("session");
             for t in 0..40u64 {
@@ -1414,6 +1420,16 @@ mod tests {
             enc.encode_host(&frame(41), W * 4, false, 41, 25, false)
                 .expect("encode");
             assert_eq!(enc.last_reference(), Reference::Frame(40), "{codec:?}");
+            let totals = report.totals();
+            assert_eq!(
+                (
+                    totals.key_frames.reconfigure,
+                    totals.key_frames.loss_out_of_window,
+                    totals.invalidations.key_frame,
+                ),
+                (1, 1, 1),
+                "{codec:?}: {totals:?}"
+            );
         }
     }
 

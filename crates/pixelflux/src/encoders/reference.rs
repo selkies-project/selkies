@@ -3,6 +3,8 @@
 
 use std::collections::VecDeque;
 
+use crate::report::{self, InvalidationAnswer, KeyFrameCause};
+
 /// How many frames back a prediction may reach: the decoded picture buffer every session asks
 /// for, where its level admits it.
 pub const REFERENCE_FRAMES: u32 = 8;
@@ -140,6 +142,8 @@ pub struct ReferenceWindow {
     acknowledged: bool,
     common: VecDeque<u64>,
     sent: VecDeque<u64>,
+    /// Why the next key frame is coded, where something made it due ([`Self::owe_key`]).
+    owed: Option<KeyFrameCause>,
 }
 
 /// How far a frame id lies behind the newest frame recorded, in capture frames counted across
@@ -185,7 +189,19 @@ impl ReferenceWindow {
             acknowledged: false,
             common: VecDeque::new(),
             sent: VecDeque::new(),
+            owed: None,
         }
+    }
+
+    /// The next key frame is coded for `cause`, unless something made one due before it: the
+    /// session's encode says so when it forces one (`KeyFrameCause::Requested`), and the
+    /// window itself when a loss leaves nothing to predict from. The cause is counted
+    /// ([`report::key_frame`]) when that key frame is recorded, and dropped with any frame
+    /// recorded that is not one; a key frame into an empty window, the first after an open or
+    /// a reset, counts as `KeyFrameCause::Reconfigure` whatever was owed, and one nothing was
+    /// owed for as `KeyFrameCause::DeviceChosen`.
+    pub fn owe_key(&mut self, cause: KeyFrameCause) {
+        self.owed.get_or_insert(cause);
     }
 
     /// A window over a decoded picture buffer of `capacity` frames, `count` of them anchors (one
@@ -432,7 +448,7 @@ impl ReferenceWindow {
             return None;
         }
         let &(first, _, _) = self.recent.iter().find(|f| f.1 > shared && !f.2)?;
-        Some(self.invalidate(first))
+        Some(self.forget_from(first))
     }
 
     /// Before an H.264 frame: where the newest frame held is a recent one further back than the
@@ -462,7 +478,7 @@ impl ReferenceWindow {
             Some(anchor) => self.recent.iter().find(|f| f.1 > anchor && !f.2)?.0,
             None => self.frames.iter().find(|f| !f.2)?.0,
         };
-        Some(self.invalidate(first))
+        Some(self.forget_from(first))
     }
 
     /// The anchor the next frame predicts from, where the newest frame held is an anchor; the
@@ -577,6 +593,15 @@ impl ReferenceWindow {
         let pts = self.next_pts;
         self.next_pts += 1;
         self.age.record(frame_id, key);
+        let owed = self.owed.take();
+        if key {
+            let fresh = self.frames.is_empty() && self.anchor_frames().next().is_none();
+            report::key_frame(if fresh {
+                KeyFrameCause::Reconfigure
+            } else {
+                owed.unwrap_or(KeyFrameCause::DeviceChosen)
+            });
+        }
         let reference = if key {
             self.frames.clear();
             self.anchors.iter_mut().for_each(|a| *a = None);
@@ -632,11 +657,31 @@ impl ReferenceWindow {
         true
     }
 
-    /// Leave `frame_id` and every frame encoded after it out of the references. A report for
-    /// a picture already removed by an earlier invalidation leaves the recovered chain intact.
-    /// The bounded history dates those reports across capture-id gaps and wrap; a loss older
-    /// than the history keeps the conservative key-frame fallback.
+    /// Leave `frame_id`, which a consumer reported lost, and every frame encoded after it out
+    /// of the references, counting the answer ([`report::invalidation`]) by what is left: a
+    /// key frame where nothing is, which a `Forget` of the only frame held is as much as a
+    /// `KeyFrame`, else the anchor or the recent frame the next frame predicts from.
     pub fn invalidate(&mut self, frame_id: u16) -> Invalidation {
+        let action = self.forget_from(frame_id);
+        if action != Invalidation::Ignored {
+            report::invalidation(if !self.has_reference() {
+                self.owe_key(KeyFrameCause::LossOutOfWindow);
+                InvalidationAnswer::KeyFrame
+            } else if self.predicting_anchor().is_some() {
+                InvalidationAnswer::Anchor
+            } else {
+                InvalidationAnswer::Recent
+            });
+        }
+        action
+    }
+
+    /// Leave `frame_id` and every frame encoded after it out of the references, for a loss or
+    /// for the session's own `settle` and `forget_stale`. A report for a picture already
+    /// removed by an earlier invalidation leaves the recovered chain intact. The bounded
+    /// history dates those reports across capture-id gaps and wrap; a loss older than the
+    /// history keeps the conservative key-frame fallback.
+    fn forget_from(&mut self, frame_id: u16) -> Invalidation {
         if self
             .recent
             .iter()
@@ -681,6 +726,7 @@ impl ReferenceWindow {
                     f.2 = true;
                 }
                 if wraps {
+                    self.owe_key(KeyFrameCause::FrameNumWrap);
                     Invalidation::KeyFrame
                 } else {
                     Invalidation::Forget(pts)
@@ -694,6 +740,7 @@ impl ReferenceWindow {
                 for f in self.frames.iter_mut() {
                     f.2 = true;
                 }
+                self.owe_key(KeyFrameCause::LossOutOfWindow);
                 Invalidation::KeyFrame
             }
             None => Invalidation::Ignored,
@@ -741,6 +788,11 @@ impl ReferenceWindow {
             a.2 = true;
         }
         if wraps || !self.has_reference() {
+            self.owe_key(if wraps {
+                KeyFrameCause::FrameNumWrap
+            } else {
+                KeyFrameCause::LossOutOfWindow
+            });
             Invalidation::KeyFrame
         } else {
             Invalidation::Forget(lost_pts)
@@ -771,6 +823,8 @@ pub struct ReferenceSlots {
     acknowledged: bool,
     common: VecDeque<u64>,
     sent: VecDeque<u64>,
+    /// Why the next key frame is coded, where something made it due ([`Self::owe_key`]).
+    owed: Option<KeyFrameCause>,
 }
 
 /// How many recent frames are remembered by id, about eight seconds at 60 frames a second: a
@@ -844,7 +898,14 @@ impl ReferenceSlots {
             acknowledged: false,
             common: VecDeque::new(),
             sent: VecDeque::new(),
+            owed: None,
         }
+    }
+
+    /// The next key frame is coded for `cause`, unless something made one due before it, as
+    /// `ReferenceWindow::owe_key` keeps it.
+    pub fn owe_key(&mut self, cause: KeyFrameCause) {
+        self.owed.get_or_insert(cause);
     }
 
     /// The timestamp the next frame is encoded with.
@@ -1024,6 +1085,15 @@ impl ReferenceSlots {
         let pts = self.next_pts;
         self.next_pts += 1;
         self.age.record(frame_id, plan.predict_from == 0);
+        let owed = self.owed.take();
+        if plan.predict_from == 0 {
+            let fresh = self.slots[..self.count].iter().all(Option::is_none);
+            report::key_frame(if fresh {
+                KeyFrameCause::Reconfigure
+            } else {
+                owed.unwrap_or(KeyFrameCause::DeviceChosen)
+            });
+        }
         let reference = match plan.predict_from {
             0 => {
                 self.key_pts = pts;
@@ -1046,8 +1116,43 @@ impl ReferenceSlots {
         reference
     }
 
-    /// Leave `frame_id` and every frame encoded after it out of the references.
+    /// Leave `frame_id`, which a consumer reported lost, and every frame encoded after it out
+    /// of the references, counting the answer ([`report::invalidation`]): from an anchor
+    /// buffer where the newest frame left is held in no buffer of the recent frames (VP8's
+    /// LAST, VP9's first `RING`), else from a recent frame, or a key frame where none is left.
     pub fn invalidate(&mut self, frame_id: u16) -> Invalidation {
+        let action = self.forget_from(frame_id);
+        match action {
+            Invalidation::Forget(_) if self.predicts_from_anchor() => {
+                report::invalidation(InvalidationAnswer::Anchor);
+            }
+            Invalidation::Forget(_) => report::invalidation(InvalidationAnswer::Recent),
+            Invalidation::KeyFrame => {
+                self.owe_key(KeyFrameCause::LossOutOfWindow);
+                report::invalidation(InvalidationAnswer::KeyFrame);
+            }
+            Invalidation::Ignored => {}
+        }
+        action
+    }
+
+    /// Whether the newest frame a buffer still holds for the client is held in none of the
+    /// buffers the recent frames take turns in.
+    fn predicts_from_anchor(&self) -> bool {
+        let recent = if self.count == 3 { 1 } else { RING as usize };
+        let live: Vec<(usize, u64)> = self.slots[..self.count]
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.filter(|s| !s.2).map(|s| (i, s.1)))
+            .collect();
+        live.iter()
+            .map(|&(_, pts)| pts)
+            .max()
+            .is_some_and(|newest| !live.iter().any(|&(i, pts)| pts == newest && i < recent))
+    }
+
+    /// Leave `frame_id` and every frame encoded after it out of the references.
+    fn forget_from(&mut self, frame_id: u16) -> Invalidation {
         let lost_pts = match self.recent.iter().find(|r| r.0 == frame_id) {
             Some(&(_, pts)) if pts >= self.key_pts => pts,
             Some(_) => return Invalidation::Ignored,
@@ -1523,6 +1628,116 @@ mod tests {
             "before the key frame"
         );
         assert_eq!(w.invalidate(id(39_995)), Invalidation::Forget(39_995));
+    }
+
+    /// Each reported loss is counted by its answer and each key frame by why it was coded, in
+    /// the report bound to the encoding thread; a cause no key frame followed is dropped.
+    #[test]
+    fn losses_and_key_frames_are_counted_by_answer_and_cause() {
+        use crate::report::{InvalidationCounts, KeyFrameCounts, StreamReport};
+        let mut anchors = anchored(20);
+        let report = StreamReport::new("x11");
+        let _scope = report::enter(&report);
+        let mut w = ReferenceWindow::new(3);
+        w.record(0, true);
+        for id in 1..6u16 {
+            w.record(id, false);
+        }
+        assert_eq!(w.invalidate(4), Invalidation::Forget(4));
+        assert_eq!(
+            w.invalidate(4),
+            Invalidation::Ignored,
+            "a second report is none"
+        );
+        w.record(6, false);
+        assert_eq!(w.invalidate(1), Invalidation::KeyFrame);
+        w.record(7, true);
+        w.owe_key(KeyFrameCause::Requested);
+        w.record(8, true);
+        w.owe_key(KeyFrameCause::Requested);
+        w.record(9, false);
+        w.record(10, true);
+        w.reset();
+        w.owe_key(KeyFrameCause::Requested);
+        w.record(11, true);
+        let mut lone = ReferenceWindow::new(1);
+        lone.record(0, true);
+        lone.record(1, false);
+        assert_eq!(lone.invalidate(1), Invalidation::Forget(1));
+        assert!(!lone.has_reference());
+        lone.record(2, true);
+        let mut wrap = ReferenceWindow::new(8);
+        wrap.set_frame_num_range(16);
+        wrap.record(0, true);
+        for id in 1..=18u16 {
+            wrap.record(id, false);
+        }
+        assert_eq!(wrap.invalidate(15), Invalidation::KeyFrame);
+        wrap.record(19, true);
+        assert_eq!(anchors.invalidate(16), Invalidation::Forget(16));
+        assert_eq!(
+            anchors.record_marked(21, false, anchors.plan_anchor(false)),
+            Reference::Frame(12)
+        );
+        let totals = report.totals();
+        assert_eq!(
+            totals.key_frames,
+            KeyFrameCounts {
+                requested: 1,
+                loss_out_of_window: 2,
+                frame_num_wrap: 1,
+                reconfigure: 4,
+                device_chosen: 1,
+            },
+            "three windows opening and a reset, which outranks the request after it; 10 unasked"
+        );
+        assert_eq!(
+            totals.invalidations,
+            InvalidationCounts {
+                recent: 1,
+                anchor: 1,
+                key_frame: 3,
+            },
+            "a lone reference forgotten leaves a key frame as a loss past the window does"
+        );
+    }
+
+    /// A VP8 loss is answered from GOLDEN and ALTREF where LAST held the frame lost, and a
+    /// loss of every buffer costs a key frame counted as one.
+    #[test]
+    fn slot_losses_are_counted_by_the_buffer_answering_them() {
+        use crate::report::{InvalidationCounts, StreamReport};
+        let report = StreamReport::new("x11");
+        let _scope = report::enter(&report);
+        let mut s = ReferenceSlots::new();
+        s.record(0, SlotPlan::KEY);
+        let last = SlotPlan {
+            predict_from: SlotRefresh::LAST,
+            refresh: SlotRefresh(SlotRefresh::LAST),
+        };
+        s.record(1, last);
+        s.record(2, last);
+        assert_eq!(s.invalidate(2), Invalidation::Forget(2));
+        assert_eq!(s.invalidate(1), Invalidation::Forget(1));
+        assert_eq!(s.invalidate(0), Invalidation::KeyFrame);
+        s.record(3, SlotPlan::KEY);
+        let totals = report.totals();
+        assert_eq!(
+            totals.invalidations,
+            InvalidationCounts {
+                recent: 0,
+                anchor: 2,
+                key_frame: 1,
+            },
+            "with LAST lost, 0 is left in GOLDEN and ALTREF alone"
+        );
+        assert_eq!(
+            (
+                totals.key_frames.reconfigure,
+                totals.key_frames.loss_out_of_window
+            ),
+            (1, 1)
+        );
     }
 
     /// A window over four frames that keeps anchors, fed a key frame and `n` frames after it as
