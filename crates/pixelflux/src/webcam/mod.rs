@@ -146,9 +146,11 @@ struct Queue {
 
 /// What [`Queue::pop_within`] found.
 enum Popped {
+    /// The oldest frame of the uplink.
     Job(Job),
     /// Nothing arrived within the wait.
     Idle,
+    /// The camera stopped.
     Closed,
 }
 
@@ -167,12 +169,15 @@ const KEEPALIVE_HOLD: Duration = Duration::from_secs(5);
 enum Repeat {
     /// The last picture again.
     Held,
+    /// Black, or the last picture on a device with no black frame (MJPEG without its encoder).
     Black,
 }
 
 /// When a camera whose uplink has stopped hands its readers a frame, and which.
 struct Keepalive {
+    /// The last frame due or published, the uplink's or a repeat: the interval runs from it.
     last_publish: Instant,
+    /// The last frame of the uplink published, `None` before the first: the hold runs from it.
     fresh_at: Option<Instant>,
 }
 
@@ -430,11 +435,25 @@ fn fan_out(
     }
 }
 
+/// Whether anything may be reading the camera: an interposer client, a linked PipeWire consumer,
+/// or a kernel device, whose openers only a walk of `/proc` finds, so its write is kept.
+fn has_reader(
+    server: &Server,
+    v4l2out: Option<&V4l2Output>,
+    pipewire: Option<&PipeWireSink>,
+) -> bool {
+    server.client_count() > 0
+        || v4l2out.is_some()
+        || pipewire.is_some_and(PipeWireSink::is_streaming)
+}
+
 /// Decoder thread body: decode, fit, publish, wake clients. A dropped or undecodable inter-coded
 /// frame parks the stream until the next keyframe and asks the client for one, so a consumer never
 /// sees the smear of predictions built on a missing reference. While no frame comes out (a stall, a
 /// key frame awaited, a page reconnecting, a camera turned off) the readers are handed the last
-/// picture again and then black ([`Keepalive`]), so none of them gives the device up.
+/// picture again and then black ([`Keepalive`]), so none of them gives the device up. A repeat is
+/// due only once the queue is empty, so it never delays a frame waiting behind it, and is skipped
+/// while nothing reads the camera ([`has_reader`]).
 fn worker(cfg: WorkerConfig) {
     let WorkerConfig {
         queue,
@@ -491,34 +510,36 @@ fn worker(cfg: WorkerConfig) {
 
     let mut keepalive = Keepalive::new(Instant::now());
     loop {
-        if let Some(repeat) = keepalive.due(Instant::now()) {
-            let held = match repeat {
-                Repeat::Held => ring.latest_frame().map(<[u8]>::to_vec),
-                Repeat::Black => None,
-            };
-            if let Some(frame) = held.as_deref().or(black.as_deref()) {
-                let ts = monotonic_ns();
-                if ring.publish(ts, |slot| {
-                    slot.get_mut(..frame.len()).map_or(0, |s| {
-                        s.copy_from_slice(frame);
-                        frame.len()
-                    })
-                }) {
-                    fan_out(
-                        &ring,
-                        &server,
-                        &mut v4l2out,
-                        &device_path,
-                        &mut pipewire,
-                        ts,
-                        &stats,
-                    );
-                }
-            }
-        }
         let job = match queue.pop_within(keepalive.wait(Instant::now())) {
             Popped::Job(job) => job,
-            Popped::Idle => continue,
+            Popped::Idle => {
+                if let Some(repeat) = keepalive.due(Instant::now())
+                    && has_reader(&server, v4l2out.as_ref(), pipewire.as_ref())
+                {
+                    let ts = monotonic_ns();
+                    let published = match (repeat, black.as_deref()) {
+                        (Repeat::Black, Some(frame)) => ring.publish(ts, |slot| {
+                            slot.get_mut(..frame.len()).map_or(0, |s| {
+                                s.copy_from_slice(frame);
+                                frame.len()
+                            })
+                        }),
+                        _ => ring.republish(ts),
+                    };
+                    if published {
+                        fan_out(
+                            &ring,
+                            &server,
+                            &mut v4l2out,
+                            &device_path,
+                            &mut pipewire,
+                            ts,
+                            &stats,
+                        );
+                    }
+                }
+                continue;
+            }
             Popped::Closed => break,
         };
         if mjpeg_device && job.codec == Codec::Jpeg && job.orientation.is_upright() {

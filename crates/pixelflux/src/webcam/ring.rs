@@ -266,6 +266,28 @@ impl Ring {
     /// Publish one frame: `fill` writes the frame into the next slot and returns the byte count.
     /// A `fill` returning 0 (or more than the slot holds) abandons the slot without publishing it.
     pub fn publish<F: FnOnce(&mut [u8]) -> usize>(&mut self, ts_ns: u64, fill: F) -> bool {
+        let slot_size = self.slot_size;
+        self.publish_at(ts_ns, |map, data_off| {
+            fill(&mut map[data_off..data_off + slot_size])
+        })
+    }
+
+    /// Publish the latest frame again, copied within the mapping into the next slot, which is
+    /// never the latest one since a ring has at least [`MIN_SLOTS`]; `false` before any frame.
+    pub fn republish(&mut self, ts_ns: u64) -> bool {
+        let Some((slot, used)) = self.last_published else {
+            return false;
+        };
+        let src = DATA_OFFSET as usize + slot * self.slot_size;
+        self.publish_at(ts_ns, |map, data_off| {
+            map.copy_within(src..src + used, data_off);
+            used
+        })
+    }
+
+    /// The seqlock around one publish: `fill` is handed the whole mapping and the offset of the
+    /// slot it writes, and returns the byte count as [`Ring::publish`]'s does.
+    fn publish_at<F: FnOnce(&mut [u8], usize) -> usize>(&mut self, ts_ns: u64, fill: F) -> bool {
         let slot = self.next_slot as usize;
         let ctrl = CTRL_OFFSET as usize + slot * CTRL_STRIDE as usize;
         let data_off = DATA_OFFSET as usize + slot * self.slot_size;
@@ -274,7 +296,7 @@ impl Ring {
         self.atomic_u32(ctrl)
             .store(seq.wrapping_add(1), Ordering::Release);
         let slot_size = self.slot_size;
-        let used = fill(&mut self.map[data_off..data_off + slot_size]);
+        let used = fill(&mut self.map[..], data_off);
         if used == 0 || used > slot_size {
             self.atomic_u32(ctrl)
                 .store(seq.wrapping_add(2), Ordering::Release);
@@ -418,6 +440,24 @@ mod tests {
         assert_eq!(ring.frame_seq(), 5);
         assert!(!ring.publish(0, |_| 0));
         assert_eq!(ring.frame_seq(), 5);
+    }
+
+    #[test]
+    fn republish_repeats_the_latest_frame_in_the_next_slot() {
+        let f = RingFormat::raw(V4L2_PIX_FMT_YUYV, 16, 8, 30, 1).unwrap();
+        let mut ring = Ring::new(f, 2).unwrap();
+        assert!(!ring.republish(0));
+        let n = f.sizeimage as usize;
+        assert!(ring.publish(1, |slot| {
+            slot[..n].fill(7);
+            n
+        }));
+        for seq in 2..=3u64 {
+            assert!(ring.republish(seq));
+            let (used, got_seq, bytes) = ring.read_latest().unwrap();
+            assert_eq!((used as usize, got_seq), (n, seq));
+            assert!(bytes.iter().all(|b| *b == 7));
+        }
     }
 
     #[test]
