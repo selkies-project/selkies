@@ -26,7 +26,9 @@
 //   download-static  6 Mbit/s downlink, 3 Mbit/s static cap: the cap is
 //                    honored and the stream stays clean.
 //   upload-static    6 Mbit/s uplink, 3 Mbit/s cap: upload reads pace the
-//                    client down to the cap.
+//                    client down to the cap, and the stream, whose acks and
+//                    pongs the upload holds up on their way back, loses no
+//                    frame to the gate for it.
 //   upload-auto      6 Mbit/s uplink behind a fat first-hop buffer, no cap: a
 //                    small request beside the upload crosses near its unloaded
 //                    latency instead of waiting out the buffer.
@@ -64,6 +66,9 @@ declare global {
 }
 
 type Transfer = (root: string) => Promise<[number, number]>;
+
+/** What the server logs of a transfer it served, as it starts or ends. */
+const TRANSFER_LINE = /Download '|HTTP upload finished/;
 
 /** A program's exit, without blocking the samples taken meanwhile. */
 function exited(child: ChildProcess): Promise<number | null> {
@@ -129,11 +134,12 @@ const show = (samples: (number | null)[]): string => `[${samples.map((f) => (f =
 
 /**
  * Boot server and relay, stream with churn, run `transfer(filesRoot)` while
- * sampling fps and small-request latency once a second. `rcvbuf` sizes the
- * relay's modeled first-hop queue; the default models a shallow hop.
+ * sampling fps and small-request latency once a second, and count the times
+ * the gate let frames go over the transfer. `rcvbuf` sizes the relay's modeled
+ * first-hop queue; the default models a shallow hop.
  */
 async function scenario(res: Checks, host: Host, tag: string, downKbit: number, upKbit: number, limitMbps: number,
-    transfer: Transfer, rcvbuf = 0): Promise<[[number, number], (number | null)[], number[]]> {
+    transfer: Transfer, rcvbuf = 0): Promise<[[number, number], (number | null)[], number[], number]> {
     const filesRoot = join(WORKDIR, 'sat-files');
     mkdirSync(filesRoot, { recursive: true });
     const blob = join(filesRoot, 'blob.bin');
@@ -150,6 +156,7 @@ async function scenario(res: Checks, host: Host, tag: string, downKbit: number, 
     const fps: (number | null)[] = [];
     const latency: number[] = [];
     let result: [number, number] = [0, 0];
+    let flushes: number;
     try {
         for (let i = 0; i < 50 && Number.isNaN(await smallRequestMs()); i++) await sleep(200);
         const browser = await launchChromium();
@@ -162,6 +169,7 @@ async function scenario(res: Checks, host: Host, tag: string, downKbit: number, 
             res.check(`${tag}: stream up`, info !== null, info);
             await page.waitForTimeout(3000);
             let done = false;
+            const mark = await host.mark();
             const running = transfer(filesRoot).then((r) => { result = r; done = true; });
             while (!done) {
                 fps.push(await page.evaluate(() => window.fps ?? null));
@@ -170,6 +178,11 @@ async function scenario(res: Checks, host: Host, tag: string, downKbit: number, 
                 if (!done) await sleep(0);
             }
             await running;
+            // The gate's line is the one crates/selkies-suites' stall_recovery counts as it
+            // shutting. A log that does not hold the transfer's own line was not read over
+            // the transfer, and counts as no reading rather than as no flush.
+            const log = await host.log(mark);
+            flushes = TRANSFER_LINE.test(log) ? log.split('Backpressure TRIGGERED').length - 1 : Number.NaN;
         } finally {
             await browser.close();
         }
@@ -178,7 +191,7 @@ async function scenario(res: Checks, host: Host, tag: string, downKbit: number, 
         relay.kill('SIGTERM');
         await host.stop();
     }
-    return [result, fps, latency];
+    return [result, fps, latency, flushes];
 }
 
 test('transfer_saturation', async () => {
@@ -209,11 +222,16 @@ test('transfer_saturation', async () => {
         const up: Transfer = (root) => timedCurl(['-X', 'POST', '-H', 'X-Upload-Path: sat-upload.bin',
             '--data-binary', `@${join(root, 'blob.bin')}`, `${BASE_URL}/api/upload`]);
 
-        [[mbps], fps] = await scenario(res, host, 'upload-static', 50000, 6000, 3, up);
+        const capped = await scenario(res, host, 'upload-static', 50000, 6000, 3, up);
+        [[mbps], fps] = capped;
+        const flushes = capped[3];
         [med, stall] = fpsHealth(fps);
         res.check('upload-static: upload reads pace the client to the cap', mbps >= 2.2 && mbps <= 3.8, `${mbps.toFixed(2)} Mbit/s`);
         res.check('upload-static: stream unaffected on the wide downlink', med >= 45 && stall <= 0.10,
             `median fps=${med} stall_frac=${stall.toFixed(2)}`);
+        // The upload holds the page's acks and pongs up on their way back, with the stream
+        // arriving on time: nothing of it is to be held, or let go by the gate, for that.
+        res.check('upload-static: the gate lets no frame go beside the upload', flushes === 0, `${flushes} flushes`);
 
         // A fat first-hop buffer is what turns an upload into session-wide lag:
         // 1 MiB at 6 Mbit/s is well over a second of queue for anything the
