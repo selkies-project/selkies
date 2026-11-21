@@ -12,11 +12,11 @@
  * re-priming one packet deeper once a late packet ends it, the server's quiet
  * mark playing a sound shorter than the priming depth at once and making the
  * silence after it no underrun (also when the mark trails the queue running
- * dry), the standing-depth trim, the clean-stretch decay, the drop-oldest
- * ceiling, and the depths sized from the frame duration are pinned without a
- * browser, and so is the smoothing of every seam: a continuous tone stays
- * continuous through a trim, a ceiling drop, running dry, and the re-prime
- * after it. The frame the server sends behind the mark, carrying the end of
+ * dry), the standing-depth trim, the clean-stretch decay, the ceiling that
+ * cuts a backlog to the target at once, and the depths sized from the frame
+ * duration are pinned without a browser, and so is the smoothing of every
+ * seam: a continuous tone stays continuous through a trim, a cut at the
+ * ceiling, running dry, and the re-prime after it. The frame the server sends behind the mark, carrying the end of
  * the sound and marked quiet too, is appended to that sound and never taken
  * for new sound or a late one.
  *
@@ -172,10 +172,31 @@ const trimStats = `before=${before} after=${p.audioBufferQueue.length} ` +
 out.decayedOverProvenSlack = (p.target <= 3);
 out.reclaimWasSilentFree = (p.underrunSamples === underBefore);
 
-// Drop-oldest ceiling is intact.
-for (let v = 0; v < 12; v++) feed(v);
-out.ringCapped = (p.audioBufferQueue.length === p.MAX_BUFFER_PACKETS);
-out.droppedCounted = (p.droppedOldest > 0);
+// A packet arriving at the ceiling cuts the queue to the target in one seam.
+while (p.audioBufferQueue.length < p.MAX_BUFFER_PACKETS) feed(0.9);
+const cutBefore = p.droppedOldest;
+feed(0.9);
+out.ceilingCutsToTarget = (p.audioBufferQueue.length === p.target);
+out.droppedCounted = (p.droppedOldest - cutBefore === p.MAX_BUFFER_PACKETS - p.target + 1);
+
+// A backlog reaching the page three times faster than it plays (three seconds
+// of it, four packets every five quanta) is skipped through in cuts, each to
+// the target, not shed a packet per arrival: far fewer seams than packets shed.
+let backlogStats: string;
+{
+  const q = new Cls({ processorOptions: { channels: 1 } });
+  const quantum = (): void => { q.process([], [[new Float32Array(128)]], {}); };
+  let seams = 0;
+  for (let i = 0; i < 375; i++) {
+    quantum();
+    if (i % 5 === 4) continue;
+    const before = q.droppedOldest;
+    q.enqueue(new Float32Array(PKT).fill(0.5).buffer);
+    if (q.droppedOldest > before) seams++;
+  }
+  out.backlogCutNotShed = q.droppedOldest >= 150 && seams * 4 <= q.droppedOldest;
+  backlogStats = `shed=${q.droppedOldest} seams=${seams}`;
+}
 
 // The direct port line feeds the same queue and carries the quiet mark.
 const fakePort: StandInPort = { onmessage: null };
@@ -204,7 +225,7 @@ out.sized60ms = sized(2880) === '2,2,1,3';
 // Seams on tonal content: a 1037 Hz tone (10 ms is not a whole number of its
 // periods, so every dropped packet shifts its phase) must step from sample to
 // sample no more than about its own slope, 0.068 at half scale, through a
-// trim, a ceiling drop, running dry, and the fade back in.
+// trim, a cut at the ceiling, running dry, and the fade back in.
 let seamStats: string;
 {
   const q = new Cls({ processorOptions: { channels: 1 } });
@@ -221,22 +242,23 @@ let seamStats: string;
     for (const x of buf) { maxStep = Math.max(maxStep, Math.abs(x - prev)); prev = x; }
   };
   for (let i = 0; i < 12; i++) q.enqueue(tone());
+  out.seamsCutAtCeiling = q.droppedOldest > 0;
   const droppedBefore = q.droppedOldest;
   for (let i = 0; i < 1200; i++) {
     step();
     if (i % 15 === 3 || i % 15 === 7 || i % 15 === 11 || i % 15 === 14) q.enqueue(tone());
   }
-  out.seamsDropped = q.droppedOldest - droppedBefore >= 2;
+  out.seamsTrimmed = q.droppedOldest - droppedBefore >= 1;
   for (let i = 0; i < 60; i++) step();
   out.seamsRanDry = q.priming;
   for (let i = 0; i < 3; i++) q.enqueue(tone());
   for (let i = 0; i < 20; i++) step();
   out.seamsStepSmall = maxStep < 0.08;
-  seamStats = `dropped=${q.droppedOldest - droppedBefore} maxStep=${maxStep.toFixed(4)}`;
+  seamStats = `dropped=${q.droppedOldest} maxStep=${maxStep.toFixed(4)}`;
 }
 
 for (const [name, ok] of Object.entries(out)) {
-  check(name, ok, name === 'trimmed' ? trimStats : name === 'seamsStepSmall' ? seamStats : '');
+  check(name, ok, name === 'trimmed' ? trimStats : name === 'seamsStepSmall' ? seamStats : name === 'backlogCutNotShed' ? backlogStats : '');
 }
 console.log(`[audio-worklet] ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
