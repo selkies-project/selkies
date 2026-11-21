@@ -1353,7 +1353,8 @@ impl Settings {
     /// neither server-local nor sensitive with its `value`, `locked` and `overridden` flags
     /// and its enum or range metadata, plus the clipboard gates derived from
     /// `enable_clipboard`, the start and on-demand booleans of the microphone and webcam
-    /// policies, `encoder_backends` once the startup probe ran, and `apps_local_repo`.
+    /// policies, `encoder_backends` once the startup probe ran, and `apps_catalog`: the URL the page
+    /// reads the apps catalog from, empty where this server serves it (`/api/apps/`).
     pub fn client_payload(&self) -> Map<String, Json> {
         let mut out = Map::new();
         for def in DEFINITIONS {
@@ -1435,11 +1436,48 @@ impl Settings {
         if let Some(backends) = self.encoder_backends() {
             out.insert("encoder_backends".into(), json!({"value": backends}));
         }
-        out.insert(
-            "apps_local_repo".into(),
-            json!({"value": !self.apps_repo_path().is_empty()}),
-        );
+        let catalog = match self.apps_catalog_source() {
+            AppsCatalog::Remote(url) => url,
+            AppsCatalog::Repo(_) | AppsCatalog::File(_) => String::new(),
+        };
+        out.insert("apps_catalog".into(), json!({"value": catalog}));
         out
+    }
+
+    /// Where the apps catalog is read, by precedence: a local repository, since the runner then
+    /// installs only what it holds; else `apps_catalog`, a file where it names no http or https
+    /// URL (a `file://` URL's path, on no host or `localhost`, percent-decoded; `~` expanded;
+    /// made absolute), and none for a URL of another scheme or a file on another host.
+    pub fn apps_catalog_source(&self) -> AppsCatalog {
+        let repo = self.apps_repo_path();
+        if !repo.is_empty() {
+            return AppsCatalog::Repo(repo);
+        }
+        let catalog = self.apps_catalog().trim();
+        let lowered = catalog.to_ascii_lowercase();
+        if lowered.starts_with("http://") || lowered.starts_with("https://") {
+            return AppsCatalog::Remote(catalog.to_string());
+        }
+        let path = if lowered.starts_with("file://") {
+            let rest = &catalog["file://".len()..];
+            let (host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+            if host.is_empty() || host.eq_ignore_ascii_case("localhost") {
+                percent_encoding::percent_decode_str(path)
+                    .decode_utf8()
+                    .map(|p| p.into_owned())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            }
+        } else if catalog.contains("://") {
+            String::new()
+        } else {
+            catalog.to_string()
+        };
+        if path.is_empty() {
+            return AppsCatalog::File(String::new());
+        }
+        AppsCatalog::File(absolute_path(&path))
     }
 
     /// The proot-apps local repository as an absolute path, or empty for the remote one.
@@ -1448,12 +1486,7 @@ impl Settings {
         if folder.is_empty() {
             return String::new();
         }
-        let expanded = crate::core::expand_user(folder);
-        std::path::absolute(&expanded)
-            .map(|p| p.components().collect::<std::path::PathBuf>())
-            .unwrap_or(expanded)
-            .to_string_lossy()
-            .into_owned()
+        absolute_path(folder)
     }
 
     /// Clamp or validate one client-provided setting against the server's limits, the
@@ -1624,6 +1657,35 @@ fn default_span(def: &SettingDef) -> Result<(Num, Num), String> {
         split_span(def.default).ok_or_else(|| format!("default {:?} is no span", def.default))?;
     let (lo, hi) = (Num::parse(a)?, Num::parse(b)?);
     Ok((lo.min(hi), lo.max(hi)))
+}
+
+/// Where the apps catalog is read ([`Settings::apps_catalog_source`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AppsCatalog {
+    /// A proot-apps local repository's folder, absolute: its `metadata/` catalog, else the
+    /// applications it holds.
+    Repo(String),
+    /// A catalog file on the server, absolute, its icons in `img/` beside it; empty for none.
+    File(String),
+    /// A catalog at an http or https URL, its icons under `img/` beside it.
+    Remote(String),
+}
+
+impl Default for AppsCatalog {
+    /// No catalog.
+    fn default() -> AppsCatalog {
+        AppsCatalog::File(String::new())
+    }
+}
+
+/// A configured path with `~` expanded, made absolute and normalized.
+fn absolute_path(path: &str) -> String {
+    let expanded = crate::core::expand_user(path);
+    std::path::absolute(&expanded)
+        .map(|p| p.components().collect::<std::path::PathBuf>())
+        .unwrap_or(expanded)
+        .to_string_lossy()
+        .into_owned()
 }
 
 static GLOBAL: OnceLock<RwLock<Settings>> = OnceLock::new();
@@ -1940,6 +2002,58 @@ mod tests {
             parse(&["--webcam-max-bitrate=10"], &[]).webcam_max_bitrate(),
             50,
             "a ceiling below the floor is raised to it"
+        );
+    }
+
+    /// The catalog is read from the URL the setting names, from a file where it names a path,
+    /// and from a local repository over either, and the page is told the URL only where it reads
+    /// one itself.
+    #[test]
+    fn the_apps_catalog_follows_the_setting_and_a_local_repository() {
+        let s = parse(&[], &[]);
+        let AppsCatalog::Remote(url) = s.apps_catalog_source() else {
+            panic!("the default is a remote catalog")
+        };
+        assert!(url.starts_with("https://raw.githubusercontent.com/linuxserver/proot-apps/"));
+        assert_eq!(s.client_payload()["apps_catalog"]["value"], json!(url));
+        let s = parse(&["--apps-catalog=HTTPS://example.com/m.yml"], &[]);
+        assert_eq!(
+            s.apps_catalog_source(),
+            AppsCatalog::Remote("HTTPS://example.com/m.yml".into())
+        );
+        for written in [
+            "/srv/apps/m.yml",
+            "file:///srv/apps/m.yml",
+            "FILE:///srv/apps/m.yml",
+            "file://localhost/srv/apps/m.yml",
+            "/srv/apps/./m.yml",
+        ] {
+            let s = parse(&[&format!("--apps-catalog={written}")], &[]);
+            assert_eq!(
+                s.apps_catalog_source(),
+                AppsCatalog::File("/srv/apps/m.yml".into()),
+                "{written}"
+            );
+            assert_eq!(s.client_payload()["apps_catalog"]["value"], json!(""));
+        }
+        for elsewhere in ["ftp://host/m.yml", "file://nas/srv/apps/m.yml"] {
+            assert_eq!(
+                parse(&[&format!("--apps-catalog={elsewhere}")], &[]).apps_catalog_source(),
+                AppsCatalog::File(String::new()),
+                "{elsewhere} names no catalog here"
+            );
+        }
+        assert_eq!(
+            parse(&["--apps-catalog=file:///srv/my%20apps/m.yml"], &[]).apps_catalog_source(),
+            AppsCatalog::File("/srv/my apps/m.yml".into())
+        );
+        let s = parse(
+            &["--apps-catalog=/srv/apps/m.yml"],
+            &[("PA_REPO_FOLDER", "/mnt/apps")],
+        );
+        assert_eq!(
+            s.apps_catalog_source(),
+            AppsCatalog::Repo("/mnt/apps".into())
         );
     }
 }

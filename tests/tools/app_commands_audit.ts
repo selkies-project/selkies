@@ -140,28 +140,36 @@ state = applyAppsEvent(state, 'state', { installed: null, jobs: [] });
 check('a runner that could not say what is installed leaves the last answer standing',
       state.installed!.join() === 'firefox' && state.jobs.length === 0);
 
-// Where the catalog is read from is the server's answer: a session installing
-// from a proot-apps local repository lists that folder's catalog, served by the
-// server behind the session's own authentication, and never the remote one.
+// Where the catalog is read from is the server's answer: the remote catalog its
+// setting names, or the one it serves itself (a catalog file, a proot-apps local
+// repository) behind the session's own authentication.
 const tokenize = (url: string): string => `${url}?token=t`;
-const withoutRepo = { apps_local_repo: null, command_enabled: { value: true } };
-const remote = appsCatalog(withoutRepo, tokenize);
-check('without a local repository the catalog is the remote one',
+const published = 'https://example.com/fork/metadata/metadata.yml';
+const remote = appsCatalog({ apps_catalog: { value: published } }, tokenize);
+check('a remote catalog is read where the server says, its icons beside it',
       remote.local === false
-      && remote.metadata === 'https://raw.githubusercontent.com/linuxserver/proot-apps/master/metadata/metadata.yml'
-      && remote.icon('firefox.svg') === 'https://raw.githubusercontent.com/linuxserver/proot-apps/master/metadata/img/firefox.svg',
+      && remote.metadata === published
+      && remote.icon('firefox.svg') === 'https://example.com/fork/metadata/img/firefox.svg',
       JSON.stringify(remote));
-check('no session token ever reaches the remote catalog',
+check('a remote catalog\'s icons resolve beside it, not into its query',
+      appsCatalog({ apps_catalog: { value: 'https://host/get?path=fork/metadata.yml' } }).icon('a b.svg')
+        === 'https://host/img/a%20b.svg');
+check('no session token ever reaches a remote catalog',
       !remote.metadata.includes('token') && !remote.icon('x.svg').includes('token'));
-check('before the server settings arrive the catalog is the remote one',
-      appsCatalog(null).local === false && appsCatalog(undefined).local === false);
-const local = appsCatalog({ apps_local_repo: { value: true } }, tokenize);
-check('a local repository is read from the server, page-relative, with the session token',
+const local = appsCatalog({ apps_catalog: { value: '' } }, tokenize);
+check('a catalog the server serves is read from it, page-relative, with the session token',
       local.local === true
       && local.metadata === 'api/apps/metadata.yml?token=t'
       && local.icon('firefox.svg') === 'api/apps/img/firefox.svg?token=t',
       JSON.stringify(local));
-check('a local repository without a tokenizer is still read from the server',
-      appsCatalog({ apps_local_repo: { value: true } }).metadata === 'api/apps/metadata.yml');
+check('an icon name is one path segment of a served catalog, before the session token',
+      local.icon('my icon#1.svg') === 'api/apps/img/my%20icon%231.svg?token=t', local.icon('my icon#1.svg'));
+check('a served catalog without a tokenizer is still read from the server',
+      appsCatalog({ apps_catalog: { value: '' } }).metadata === 'api/apps/metadata.yml');
+check('an address that is not http or https is never fetched from the page',
+      ['javascript:alert(1)', '//evil.example/m.yml', 7, null].every(
+        (value) => appsCatalog({ apps_catalog: { value } }).local === true));
+check('without the server settings no remote address is assumed',
+      appsCatalog(null).local === true && appsCatalog(undefined).local === true);
 
 process.exit(failed ? 1 : 0);

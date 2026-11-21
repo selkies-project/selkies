@@ -25,10 +25,16 @@
 //! is asked (`list`) whenever a page wants to know -- the panel opening, a job ending -- and its
 //! answer is never kept, since listing a directory costs less than keeping a second record
 //! current against installs made from a terminal.
+//!
+//! The server keeps one runner for both transports, since the applications install into the same
+//! session whichever one carries the panel: one queue, so two installs of an application never
+//! run at once across a transport switch, reporting through a host that reaches the transport
+//! serving now ([`AppsRunner::set_host`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -38,10 +44,10 @@ use serde_json::json;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-use super::app_jobs::{FLUSH_INTERVAL, JobBoard, JobOp, JobState};
+use super::app_jobs::{FLUSH_INTERVAL, JobBoard, JobOp, JobState, Refused};
 use crate::commands::sessions::which;
 use crate::input::command::spawn_merged;
-use crate::settings::settings;
+use crate::settings::{AppsCatalog, settings};
 
 /// The wrapper the apps panel works through.
 pub const APP_RUNNER: &str = "selkies-proot";
@@ -147,6 +153,8 @@ pub struct AppsRunner {
     usable: Mutex<Option<bool>>,
     /// The panel's jobs.
     pub jobs: JobBoard,
+    /// Where the jobs [`AppsRunner::queue`] runs report and find their environment.
+    host: OnceLock<Arc<dyn JobHost>>,
 }
 
 impl Default for AppsRunner {
@@ -162,7 +170,27 @@ impl AppsRunner {
             name: name.into(),
             usable: Mutex::new(None),
             jobs: JobBoard::default(),
+            host: OnceLock::new(),
         }
+    }
+
+    /// Name where the jobs report and find their environment, once.
+    pub fn set_host(&self, host: Arc<dyn JobHost>) {
+        let _ = self.host.set(host);
+    }
+
+    /// Queue a job, tell every page of it, and start the queue where nothing runs it: the
+    /// panel's `apps` verb and Pelorus queue alike, so each sees the other's jobs. The job's id;
+    /// [`Refused::NoSession`] before [`AppsRunner::set_host`].
+    pub fn queue(self: &Arc<Self>, op: JobOp, app: &str) -> Result<u64, Refused> {
+        let host = self.host.get().cloned().ok_or(Refused::NoSession)?;
+        let (id, action, start) = self.jobs.enqueue(op, app)?;
+        host.broadcast(&action);
+        if start {
+            let me = self.clone();
+            tokio::spawn(async move { me.drive(&*host).await });
+        }
+        Ok(id)
     }
 
     fn resolved(&self) -> Option<PathBuf> {
@@ -199,8 +227,32 @@ impl AppsRunner {
             }
             return;
         }
+        let (catalog, source) = {
+            let settings = settings();
+            (
+                settings.apps_catalog().trim().to_string(),
+                settings.apps_catalog_source(),
+            )
+        };
         if folder.is_empty() {
             info!(target: "input", "Apps panel enabled: {APP_RUNNER} can run here.");
+            match source {
+                AppsCatalog::File(file) if file.is_empty() => {
+                    warn!(target: "input", "The apps catalog {catalog:?} names no catalog: it is not an http or https URL, nor a file on this host (a file:// URL naming another host, or one whose escapes are not UTF-8, is neither); the panel lists nothing.");
+                }
+                AppsCatalog::File(file) => {
+                    let present = {
+                        let file = file.clone();
+                        tokio::task::spawn_blocking(move || Path::new(&file).is_file())
+                            .await
+                            .unwrap_or(false)
+                    };
+                    if !present {
+                        warn!(target: "input", "The apps catalog {file} is not a file; the catalog fails to load until it is there.");
+                    }
+                }
+                _ => {}
+            }
         } else if Path::new(&folder).is_dir() {
             let count = crate::files::apps::listed_apps(Path::new(&folder)).len();
             let plural = if count == 1 { "" } else { "s" };

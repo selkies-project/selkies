@@ -21,6 +21,8 @@
 //! numbers its last look gave, and a retired number is refused with a sentence saying to look
 //! again, which is what a caller holding a stale list needs to hear.
 //!
+//! `apps` is the dashboard's apps panel for a model ([`super::apps`]).
+//!
 //! `shell` runs a command as the session's user in the session's environment, and exists only
 //! where the server lets a controller run commands at all (`command_enabled`), the setting the
 //! hardened images turn off: Pelorus is never a way around it. Its output is cut to a bound,
@@ -74,14 +76,14 @@ pub struct Output {
 }
 
 impl Output {
-    fn ok(text: impl Into<String>) -> Output {
+    pub(super) fn ok(text: impl Into<String>) -> Output {
         Output {
             text: text.into(),
             ..Output::default()
         }
     }
 
-    fn fail(text: impl Into<String>) -> Output {
+    pub(super) fn fail(text: impl Into<String>) -> Output {
         Output {
             text: text.into(),
             failed: true,
@@ -148,10 +150,12 @@ pub async fn capabilities(vision: bool) -> Capabilities {
     let windows = tokio::task::spawn_blocking(|| crate::wm::desktop_view().is_some())
         .await
         .unwrap_or(false);
+    let apps = super::apps::available().await;
     Capabilities {
         shell: settings().command_enabled().on,
         vision,
         windows,
+        apps,
     }
 }
 
@@ -827,6 +831,7 @@ pub async fn call(name: &str, args: &Json, capabilities: Capabilities) -> Output
         "drag" => drag(args).await,
         "window" => window(args).await,
         "launch" => launch(args).await,
+        "apps" => super::apps::call(args, capabilities.windows).await,
         "shell" => shell(args).await,
         "screenshot" => screenshot(args).await,
         "wait" => {

@@ -44,8 +44,9 @@ import { fields, hasFields } from "../../../selkies-web-core/lib/narrow.ts";
  * beyond the tab last chosen. Requests run server-side only while the
  * `command_enabled` server setting is on; without it the core drops them, so
  * the modal says why. Its catalog location is `appsCatalog`'s answer (the
- * remote repository's metadata, or this server's `api/apps/` for a local
- * repository). Listens for `serverSettings` messages.
+ * remote catalog the server's settings name, or this server's `api/apps/` for
+ * a catalog file or a local repository), read once those settings arrived.
+ * Listens for `serverSettings` messages.
  * @module
  */
 
@@ -365,7 +366,9 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
 
     // Entering a fetch (opening without the catalog, a Retry, another catalog)
     // shows it loading from the render that starts it.
-    const fetchKey = isOpen && !appData ? `${fetchAttempt} ${catalog.metadata}` : null;
+    // The catalog's address is the server's answer, so until its settings arrive
+    // the panel shows it loading rather than reading from anywhere.
+    const fetchKey = isOpen && !appData ? `${fetchAttempt} ${commandsKnown ? catalog.metadata : ''}` : null;
     const [fetchingFor, setFetchingFor] = useState<string | null>(null);
     if (fetchKey !== fetchingFor) {
         setFetchingFor(fetchKey);
@@ -375,7 +378,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
         }
     }
     useEffect(() => {
-        if (!isOpen || appData) return;
+        if (!isOpen || appData || !commandsKnown) return;
         const controller = new AbortController();
         const timeoutId = window.setTimeout(() => controller.abort(), METADATA_FETCH_TIMEOUT_MS);
         // Suppresses any setState landing after cleanup.
@@ -408,7 +411,7 @@ const parsedData = { include: Array.isArray(listed) ? listed.filter(isApp) : [] 
             clearTimeout(timeoutId);
             controller.abort();
         };
-    }, [isOpen, appData, fetchAttempt, catalog.metadata]);
+    }, [isOpen, appData, fetchAttempt, catalog.metadata, commandsKnown]);
 
     const installable = useMemo(() => (appData?.include ?? []).filter(app => !app.disabled), [appData]);
     const installed = useMemo(() => new Set(apps.installed ?? []), [apps.installed]);
