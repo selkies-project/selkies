@@ -2021,8 +2021,11 @@ impl AppState {
     /// override-redirect window on top under the point, a top layer surface, then a window, then
     /// a bottom or background layer surface, each through its popup where one lies under the
     /// point, since a popup takes pointer events on its own surface. That is the order they are
-    /// drawn in. Layer geometry is output-local, so layers are hit-tested with the point local to
-    /// the output under it. Whatever is found is then resolved to the subsurface of its tree that
+    /// drawn in: off a fullscreen output an override-redirect window anywhere in the stacking
+    /// lies over the top layer, and on an output a window shows fullscreen on
+    /// ([`crate::wayland::wm::fullscreen_on_top`]) the top layer comes after the windows and an
+    /// override-redirect window counts only where it is stacked topmost. Layer geometry is
+    /// output-local, so layers are hit-tested with the point local to the output under it. Whatever is found is then resolved to the subsurface of its tree that
     /// takes input at the point ([`FocusTarget::under_point`]): a subsurface takes pointer events
     /// on its own surface too, and handed to the surface below it, a click on a browser's bubble
     /// lands on the page under the bubble.
@@ -2065,14 +2068,28 @@ impl AppState {
         if let Some(menu) = self.x11_menu_open() {
             return Some(menu);
         }
+        let under_fullscreen = self.node_idx_under(p).is_some_and(|idx| {
+            crate::wayland::wm::fullscreen_on_top(
+                &self.space,
+                self.wm.as_ref(),
+                &self.output_nodes[idx].output,
+            )
+        });
         let found = layer_hit(&[Layer::Overlay])
             .or_else(|| {
-                self.space
-                    .element_under(p)
-                    .filter(|(window, _)| is_override_redirect(window))
-                    .map(|(window, loc)| (FocusTarget::Window(window.clone()), loc.to_f64()))
+                if under_fullscreen {
+                    self.space
+                        .element_under(p)
+                        .filter(|(window, _)| is_override_redirect(window))
+                } else {
+                    self.override_redirect_under(p)
+                }
+                .map(|(window, loc)| (FocusTarget::Window(window.clone()), loc.to_f64()))
             })
-            .or_else(|| layer_hit(&[Layer::Top]))
+            .or_else(|| match under_fullscreen {
+                true => None,
+                false => layer_hit(&[Layer::Top]),
+            })
             .or_else(|| {
                 self.space.element_under(p).map(|(window, loc)| {
                     window
@@ -2081,8 +2098,32 @@ impl AppState {
                         .unwrap_or_else(|| (FocusTarget::Window(window.clone()), loc.to_f64()))
                 })
             })
+            .or_else(|| match under_fullscreen {
+                true => layer_hit(&[Layer::Top]),
+                false => None,
+            })
             .or_else(|| layer_hit(&[Layer::Bottom, Layer::Background]));
         found.map(|(target, origin)| target.under_point(origin, p))
+    }
+
+    /// The topmost X11 override-redirect window whose input region holds the point, with where
+    /// its surface is drawn, whatever window is stacked above it: off a fullscreen output the
+    /// frame lifts every such window over the top layer and the other windows.
+    fn override_redirect_under(
+        &self,
+        p: Point<f64, Logical>,
+    ) -> Option<(&Window, Point<i32, Logical>)> {
+        use smithay::desktop::space::SpaceElement;
+        self.space
+            .elements()
+            .rev()
+            .filter(|window| is_override_redirect(window))
+            .find_map(|window| {
+                let loc = self.space.element_location(window)? - window.geometry().loc;
+                window
+                    .is_in_input_region(&(p - loc.to_f64()))
+                    .then_some((window, loc))
+            })
     }
 
     /// The topmost X11 popup menu that is open, with where it lies. A menu Xwayland has not yet

@@ -2649,13 +2649,7 @@ where
     // layer, as Xwayland compositors stack them, since they place themselves; under a fullscreen
     // window they keep their place in the stacking, so a tray's strip stays under the game with
     // the panel it sits on.
-    let fullscreen_on_top = scene
-        .space
-        .elements_for_output(scene.output)
-        .rfind(|window| !wayland::frontend::is_override_redirect(window))
-        .and_then(|window| wayland::frontend::window_meta(window).map(|m| m.id))
-        .and_then(|id| scene.wm.and_then(|wm| wm.states.get(&id)))
-        .is_some_and(|states| states.fullscreen);
+    let fullscreen_on_top = wayland::wm::fullscreen_on_top(scene.space, scene.wm, scene.output);
     {
         let layer_map = layer_map_for_output(scene.output);
         push_layer_elements(renderer, &mut elements, &layer_map, Layer::Overlay, scale);
