@@ -253,10 +253,23 @@ pub fn draw_launchers(d: &mut Desktop, id: u32, canvas: &mut Canvas<'_>) {
         }
     }
     if let Some(band) = d.desktop_band.as_ref() {
-        let rect = band.rect();
-        canvas.fill_rect(rect, ui::accent_alpha(0x30));
-        canvas.stroke_rounded(rect, 0.0, 1.0, ui::accent_alpha(0xc0));
+        draw_band(canvas, band.rect());
     }
+}
+
+/// Draws the selection box: a tinted fill and a one-pixel edge inside its rectangle, each a
+/// plain fill, so a strip of it redrawn under a clip needs no mask of the layer
+/// (`Canvas::clip_intersects`). A box with no area draws nothing, its edges included.
+fn draw_band(canvas: &mut Canvas<'_>, rect: Rect) {
+    if rect.is_empty() {
+        return;
+    }
+    let edge = ui::accent_alpha(0xc0);
+    canvas.fill_rect(rect, ui::accent_alpha(0x30));
+    canvas.fill_rect(Rect::new(rect.x, rect.y, rect.w, 1), edge);
+    canvas.fill_rect(Rect::new(rect.x, rect.bottom() - 1, rect.w, 1), edge);
+    canvas.fill_rect(Rect::new(rect.x, rect.y + 1, 1, rect.h - 2), edge);
+    canvas.fill_rect(Rect::new(rect.right() - 1, rect.y + 1, 1, rect.h - 2), edge);
 }
 
 /// Where each icon is drawn: on its cell, or where the pointer takes it for the desktop's own
@@ -281,12 +294,13 @@ fn drawn_cells(d: &Desktop) -> Vec<Rect> {
 }
 
 /// What the launcher layer shows, as far as telling one frame from the next: each icon's
-/// rectangle where it is drawn and whether it is selected and hovered, and the marks drawn
-/// over the icons, the cells a drag would drop on and the selection box.
+/// rectangle where it is drawn and whether it is selected and hovered, the cells a drag would
+/// drop on, and the selection box.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LauncherScene {
     icons: Vec<(Rect, bool, bool)>,
     marks: Vec<Rect>,
+    band: Option<Rect>,
 }
 
 /// The launcher layer's scene on a background surface, empty off the primary one.
@@ -310,37 +324,93 @@ pub fn scene(d: &Desktop, id: u32) -> LauncherScene {
             )
         })
         .collect();
-    let mut marks: Vec<Rect> = drop_targets(d)
+    let marks = drop_targets(d)
         .into_iter()
         .map(|c| cell_rect_in(area, c))
         .collect();
-    marks.extend(d.desktop_band.as_ref().map(|band| band.rect()));
-    LauncherScene { icons, marks }
+    let band = d.desktop_band.as_ref().map(|band| band.rect());
+    LauncherScene { icons, marks, band }
 }
 
-/// The rectangle a frame of the launcher layer draws again going from one scene to the next:
+/// What a stroke or a highlight drawn on an icon or a mark reaches past its rectangle.
+const MARK_REACH: i32 = 4;
+
+/// The rectangles a frame of the launcher layer draws again going from one scene to the next:
 /// around every icon that moved or changed its selection or hover, where it was and where it
-/// is, and every mark of either scene where the marks changed, grown by what a stroke reaches
-/// past its edge; `None` where nothing changed. A selection box dragged across the desktop
-/// redraws the box and the icons it reaches rather than the whole layer.
-pub fn damage(before: &LauncherScene, after: &LauncherScene) -> Option<Rect> {
-    let mut out: Option<Rect> = None;
-    let mut add = |rect: Rect| out = Some(out.map_or(rect, |o| o.union(&rect)));
+/// is, every mark of either scene where the marks changed, and where the selection box
+/// changed, each grown by what a stroke reaches past its edge; empty where nothing changed.
+///
+/// A box dragged from one corner changes only along its edges: the inside both boxes cover,
+/// short of their one-pixel edges, is tinted alike over the same icons, so only the strips
+/// between the two boxes' edges are drawn again (`band_strips`), not the whole box, which at
+/// the size of a screen is most of the layer every frame. Each strip is grown to the whole of
+/// every icon it reaches (`whole_icons`), so no icon is drawn cut by a clip, which would cost
+/// a mask of the whole layer.
+pub fn damage(before: &LauncherScene, after: &LauncherScene) -> Vec<Rect> {
+    let mut out = Vec::new();
     let longest = before.icons.len().max(after.icons.len());
     for index in 0..longest {
         let (old, new) = (before.icons.get(index), after.icons.get(index));
         if old != new {
-            old.into_iter().chain(new).for_each(|(rect, ..)| add(*rect));
+            out.extend(
+                old.into_iter()
+                    .chain(new)
+                    .map(|(rect, ..)| rect.inflate(MARK_REACH)),
+            );
         }
     }
     if before.marks != after.marks {
-        before
-            .marks
-            .iter()
-            .chain(&after.marks)
-            .for_each(|rect| add(*rect));
+        out.extend(
+            before
+                .marks
+                .iter()
+                .chain(&after.marks)
+                .map(|r| r.inflate(MARK_REACH)),
+        );
     }
-    out.map(|rect| rect.inflate(4))
+    if before.band != after.band {
+        let strips = match (before.band, after.band) {
+            (Some(old), Some(new)) => band_strips(old, new),
+            (old, new) => old.into_iter().chain(new).collect(),
+        };
+        out.extend(strips.into_iter().map(|strip| whole_icons(strip, &after.icons)));
+    }
+    crate::geom::coalesce(&mut out);
+    out
+}
+
+/// Where a selection box going from `old` to `new` changes: the cover of both less the inside
+/// both share short of their edges, as up to four strips.
+fn band_strips(old: Rect, new: Rect) -> Vec<Rect> {
+    let outer = old.union(&new);
+    let inner = old.intersect(&new).inflate(-1);
+    if inner.is_empty() {
+        return vec![outer];
+    }
+    vec![
+        Rect::new(outer.x, outer.y, outer.w, inner.y - outer.y),
+        Rect::new(outer.x, inner.bottom(), outer.w, outer.bottom() - inner.bottom()),
+        Rect::new(outer.x, inner.y, inner.x - outer.x, inner.h),
+        Rect::new(inner.right(), inner.y, outer.right() - inner.right(), inner.h),
+    ]
+}
+
+/// `rect` grown until every icon it cuts lies wholly inside it, with what the icon's highlight
+/// reaches past its cell. An icon counts as cut where `rect` reaches past the margin of
+/// [`MARK_REACH`] inside its cell: the cells tile without a gap, so a cell taken whole reaches
+/// that far into its neighbors, where only a selected or hovered neighbor's highlight draws,
+/// and counting that as a cut would grow the strip across every icon in the row or column.
+fn whole_icons(mut rect: Rect, icons: &[(Rect, bool, bool)]) -> Rect {
+    loop {
+        let cut = icons.iter().find(|(cell, ..)| {
+            let whole = cell.inflate(MARK_REACH);
+            !rect.intersect(&cell.inflate(-MARK_REACH)).is_empty() && rect.intersect(&whole) != whole
+        });
+        match cut {
+            Some((cell, ..)) => rect = rect.union(&cell.inflate(MARK_REACH)),
+            None => return rect,
+        }
+    }
 }
 
 /// The cells a drag over the desktop marks: a folder icon it would drop into, else the cells
@@ -664,12 +734,137 @@ mod tests {
         let frames = d.render_background_layers(7).expect("the box redraws");
         assert!(frames.wallpaper.is_none(), "the wallpaper stays as it was");
         let damage = frames.launchers.expect("the launchers redraw").damage;
-        assert_eq!(damage.len(), 1);
         assert!(
-            damage[0].w < 200 && damage[0].h < 200,
-            "{:?} is the box, not the layer",
-            damage[0]
+            damage.iter().all(|r| r.w < 200 && r.h < 200),
+            "{damage:?} is the box, not the layer"
         );
-        assert!(damage[0].contains(620.0, 420.0));
+        assert!(damage.iter().any(|r| r.contains(620.0, 420.0)));
+    }
+
+    /// A configured primary 1280x720 background with no icons, drawn once.
+    fn empty_desktop() -> Desktop {
+        let mut d = Desktop::load(false);
+        d.desktop_items = Vec::new();
+        d.desktop_layout.clear();
+        d.handle(Event::Configured {
+            surface: SurfaceId::Background(7),
+            width: 1280,
+            height: 720,
+            scale: 1,
+        });
+        d.handle(Event::BackgroundLayout {
+            surface: 7,
+            monitors: vec![Rect::new(0, 0, 1280, 720)],
+            primary: true,
+        });
+        assert!(d.render_background_layers(7).is_some());
+        d
+    }
+
+    /// Presses on the background at `x`,`y`, starting a selection box there.
+    fn press_at(d: &mut Desktop, x: f64, y: f64) {
+        d.handle(Event::PointerButton {
+            surface: SurfaceId::Background(7),
+            x,
+            y,
+            button: crate::event::Button::Left,
+            pressed: true,
+            time: 1000,
+            modifiers: crate::event::Modifiers::default(),
+        });
+    }
+
+    /// Moves the pointer to `x`,`y` and renders the launcher layer: its damage and pixels.
+    fn drag_to(d: &mut Desktop, x: f64, y: f64) -> (Vec<Rect>, Vec<u8>) {
+        d.handle(Event::PointerMotion {
+            surface: SurfaceId::Background(7),
+            x,
+            y,
+        });
+        let frames = d.render_background_layers(7).expect("the box redraws");
+        let launchers = frames.launchers.expect("the launchers redraw");
+        (launchers.damage, launchers.pixmap.data().to_vec())
+    }
+
+    /// A box dragged further draws again the strips between its old edges and its new ones,
+    /// not the inside both cover, and leaves the layer as drawing the final box at once does.
+    #[test]
+    fn a_growing_selection_box_redraws_its_edges_not_its_inside() {
+        let mut d = empty_desktop();
+        press_at(&mut d, 300.0, 200.0);
+        drag_to(&mut d, 900.0, 600.0);
+        let (damage, strips) = drag_to(&mut d, 910.0, 612.0);
+        assert!(
+            !damage.iter().any(|r| r.contains(600.0, 400.0)),
+            "{damage:?} leaves the inside as it was"
+        );
+        for (x, y) in [(905.0, 400.0), (600.0, 606.0), (300.0, 400.0), (600.0, 200.0)] {
+            assert!(
+                damage.iter().any(|r| r.contains(x, y)),
+                "{damage:?} redraws the edge at {x},{y}"
+            );
+        }
+        let area: i32 = damage.iter().map(|r| r.w * r.h).sum();
+        assert!(area < 610 * 412 / 10, "{area} px is a tenth of the box at most");
+        let mut at_once = empty_desktop();
+        press_at(&mut at_once, 300.0, 200.0);
+        let (_, whole) = drag_to(&mut at_once, 910.0, 612.0);
+        assert!(
+            strips == whole,
+            "the strips leave the layer as the box drawn at once"
+        );
+    }
+
+    /// Between two frames a frame period apart, a background waits however often the pointer
+    /// moves the box over it, and the main loop is woken when the next is due.
+    #[test]
+    fn a_dragged_box_is_drawn_once_a_frame() {
+        let mut d = empty_desktop();
+        let now = std::time::Instant::now();
+        assert!(!d.background_due(7, now), "one just drawn waits");
+        assert!(d.background_due(7, now + ui::FRAME));
+        press_at(&mut d, 300.0, 200.0);
+        d.handle(Event::PointerMotion {
+            surface: SurfaceId::Background(7),
+            x: 400.0,
+            y: 300.0,
+        });
+        let wake = d.next_deadline(now).expect("a pending frame wakes the loop");
+        assert!(wake <= now + ui::FRAME);
+    }
+
+    /// A box dragged flat, with no height, draws no edge, so nothing is left on the layer when
+    /// it grows or goes.
+    #[test]
+    fn a_flat_selection_box_draws_nothing() {
+        let mut d = empty_desktop();
+        press_at(&mut d, 300.0, 200.0);
+        drag_to(&mut d, 600.0, 300.0);
+        let (_, pixels) = drag_to(&mut d, 600.0, 200.0);
+        let stride = 1280 * 4;
+        for y in [199, 200, 250] {
+            let alpha = pixels[y * stride + 400 * 4 + 3];
+            assert_eq!(alpha, 0, "row {y} under a box dragged flat stays clear");
+        }
+    }
+
+    /// A strip crossing a column of icons grows to the icons it crosses and stops there, though
+    /// each icon taken whole reaches into the next.
+    #[test]
+    fn a_strip_takes_the_icons_it_crosses_and_no_more() {
+        let icons: Vec<(Rect, bool, bool)> = (0..12)
+            .map(|i| (Rect::new(0, i * 100, 100, 100), true, false))
+            .collect();
+        let grown = whole_icons(Rect::new(50, 20, 2, 150), &icons);
+        for (cell, ..) in &icons[..2] {
+            assert_eq!(
+                grown.intersect(&cell.inflate(MARK_REACH)),
+                cell.inflate(MARK_REACH)
+            );
+        }
+        assert!(
+            grown.intersect(&icons[2].0.inflate(-MARK_REACH)).is_empty(),
+            "{grown:?} stops short of the third icon"
+        );
     }
 }

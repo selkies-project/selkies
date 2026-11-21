@@ -184,6 +184,9 @@ pub struct BackgroundSurface {
     /// What the launchers showed in the last frame, which the next draws only the changes of;
     /// `None` where the whole surface, the wallpaper with it, is drawn again.
     scene: Option<background::LauncherScene>,
+    /// When the last frame was drawn, which the next waits a frame period after
+    /// ([`Desktop::background_due`]).
+    drawn_at: Option<Instant>,
     /// The wallpaper layer rendered for the geometry and monitors, drawn
     /// under the icons.
     pub wallpaper_cache: Option<(WallpaperKey, Pixmap)>,
@@ -1443,6 +1446,18 @@ impl Desktop {
         self.backgrounds.iter().map(|b| b.id).collect()
     }
 
+    /// Whether a background may draw its next frame at `now`: a frame period after its last
+    /// (`ui::FRAME`), so a box or an icon dragged across the desktop, whose pointer moves many
+    /// times a frame, is drawn once a frame rather than once a move; a change after a pause is
+    /// drawn at once.
+    pub fn background_due(&self, id: u32, now: Instant) -> bool {
+        self.backgrounds
+            .iter()
+            .find(|b| b.id == id)
+            .and_then(|b| b.drawn_at)
+            .is_none_or(|at| now >= at + ui::FRAME)
+    }
+
     /// Marks every background for redraw.
     fn redraw_backgrounds(&mut self) {
         for background in &mut self.backgrounds {
@@ -2491,6 +2506,7 @@ impl Desktop {
                         launchers_pix: None,
                         dirty: true,
                         scene: None,
+                        drawn_at: None,
                         wallpaper_cache: None,
                     });
                     return;
@@ -2651,6 +2667,16 @@ impl Desktop {
             deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
         }
         if let Some(due) = self.settings.next_poll() {
+            deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
+        }
+        let paced = self
+            .backgrounds
+            .iter()
+            .filter(|b| b.dirty)
+            .filter_map(|b| b.drawn_at.map(|at| at + ui::FRAME))
+            .filter(|due| *due > now)
+            .min();
+        if let Some(due) = paced {
             deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
         }
         deadline
@@ -3490,12 +3516,17 @@ impl Desktop {
         let (mut pix, fresh) = sized_pixmap(self.backgrounds[index].pix.take(), w, h)?;
         let scene = background::scene(self, id);
         let damage = match self.backgrounds[index].scene.as_ref() {
-            Some(before) if !fresh => background::damage(before, &scene).map(|r| r.intersect(&whole)),
-            _ => Some(whole),
+            Some(before) if !fresh => within(background::damage(before, &scene), whole),
+            _ => vec![whole],
         };
-        if let Some(rect) = damage {
+        {
             let mut canvas = Canvas::new(pix.as_mut(), geometry.scale);
-            canvas.clipped(rect, |canvas| background::draw(self, id, canvas));
+            for rect in &damage {
+                canvas.clipped(*rect, |canvas| background::draw(self, id, canvas));
+            }
+        }
+        if !damage.is_empty() {
+            self.backgrounds[index].drawn_at = Some(Instant::now());
         }
         let input = if self.backgrounds[index].primary {
             vec![whole]
@@ -3504,11 +3535,13 @@ impl Desktop {
         };
         self.backgrounds[index].pix = Some(pix);
         self.backgrounds[index].scene = Some(scene);
-        let damage = damage?;
+        if damage.is_empty() {
+            return None;
+        }
         Some(Frame {
             pixmap: self.backgrounds[index].pix.as_ref()?,
             scale: geometry.scale,
-            damage: vec![damage],
+            damage,
             input,
             visible: vec![whole],
             grab: false,
@@ -3544,19 +3577,24 @@ impl Desktop {
         let full = pix_fresh || launchers_fresh || self.backgrounds[index].scene.is_none();
         let scene = background::scene(self, id);
         let damage = match self.backgrounds[index].scene.as_ref() {
-            Some(before) if !full => background::damage(before, &scene).map(|r| r.intersect(&whole)),
-            _ => Some(whole),
+            Some(before) if !full => within(background::damage(before, &scene), whole),
+            _ => vec![whole],
         };
         if full {
             let mut canvas = Canvas::new(pix.as_mut(), geometry.scale);
             background::draw_wallpaper_layer(self, id, &mut canvas);
         }
-        if let Some(rect) = damage {
+        {
             let mut canvas = Canvas::new(launchers.as_mut(), geometry.scale);
-            canvas.clipped(rect, |canvas| {
-                canvas.clear(rect);
-                background::draw_launchers(self, id, canvas);
-            });
+            for rect in &damage {
+                canvas.clipped(*rect, |canvas| {
+                    canvas.clear(*rect);
+                    background::draw_launchers(self, id, canvas);
+                });
+            }
+        }
+        if full || !damage.is_empty() {
+            self.backgrounds[index].drawn_at = Some(Instant::now());
         }
         let (input, cells) = if self.backgrounds[index].primary {
             // A dragged icon, the cells a drag would land on, and a selection box are drawn
@@ -3587,12 +3625,13 @@ impl Desktop {
                     grab: false,
                     bar: None,
                 }),
-            launchers: damage
-                .zip(surface.launchers_pix.as_ref())
-                .map(|(rect, pixmap)| Frame {
+            launchers: (!damage.is_empty())
+                .then_some(surface.launchers_pix.as_ref())
+                .flatten()
+                .map(|pixmap| Frame {
                     pixmap,
                     scale: geometry.scale,
-                    damage: vec![rect],
+                    damage,
                     input,
                     visible: cells,
                     grab: false,
@@ -3756,6 +3795,15 @@ fn seed_favorites(config: &mut Config, apps: &Apps) {
     seeded.retain(|id| !config.favorites.contains(id));
     seeded.append(&mut config.favorites);
     config.favorites = seeded;
+}
+
+/// The parts of `rects` inside `whole`, the empty ones dropped.
+fn within(rects: Vec<Rect>, whole: Rect) -> Vec<Rect> {
+    rects
+        .into_iter()
+        .map(|r| r.intersect(&whole))
+        .filter(|r| !r.is_empty())
+        .collect()
 }
 
 /// A `w` by `h` pixmap from the one a surface kept, and whether it is fresh: the kept one at
