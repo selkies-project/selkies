@@ -956,6 +956,7 @@ impl Engine {
         if has_size {
             self.place(id);
         }
+        self.fit_state(id);
         self.configure(id);
     }
 
@@ -1125,16 +1126,9 @@ impl Engine {
             win.rect.w = size.w;
             win.rect.h = size.h;
         }
-        let output = win.output;
-        let (minimized, focusable, fullscreen, maximized) =
-            (win.minimized, win.focusable, win.fullscreen, win.maximized);
+        let (minimized, focusable) = (win.minimized, win.focusable);
         self.place(id);
-        if fullscreen {
-            let area = self.output_rect(output);
-            self.set_rect(id, area);
-        } else if maximized {
-            self.fit_maximized(id);
-        }
+        self.fit_state(id);
         if !self.stack.contains(&id) && !minimized {
             self.stack.push(id);
         }
@@ -1329,6 +1323,23 @@ impl Engine {
         self.out.push(Command::Configure { id, rect, states });
         // A window's layer can follow its rectangle (`stands_in_for_fullscreen`).
         self.emit_stack();
+    }
+
+    /// Size a fullscreen window to its output and a maximized one to its output's work area.
+    ///
+    /// A window that opens in either state is sized this way before its first configure, not
+    /// only once it maps: xdg-shell makes the size of a maximized or fullscreen configure binding
+    /// on the client, and Chromium's Wayland backend aborts on one that carries none.
+    fn fit_state(&mut self, id: WindowId) {
+        let Some(win) = self.win(id) else {
+            return;
+        };
+        if win.fullscreen {
+            let area = self.output_rect(win.output);
+            self.set_rect(id, area);
+        } else if win.maximized {
+            self.fit_maximized(id);
+        }
     }
 
     fn fit_maximized(&mut self, id: WindowId) {
@@ -5257,6 +5268,41 @@ mod tests {
             &mut out,
         );
         assert!(!engine.win(2).unwrap().maximized);
+    }
+
+    /// A window that opens maximized or fullscreen, before it has a size of its own, is first
+    /// configured to its work area or its output, never to an empty size in that state.
+    #[test]
+    fn a_window_opening_maximized_or_fullscreen_is_configured_with_a_size() {
+        let (mut engine, _) = engine();
+        let mut out = Vec::new();
+        engine.handle(
+            Event::Added(WindowInfo {
+                wants_maximized: true,
+                ..info(1)
+            }),
+            &mut out,
+        );
+        engine.handle(
+            Event::Added(WindowInfo {
+                wants_fullscreen: true,
+                ..info(2)
+            }),
+            &mut out,
+        );
+        let first = |id: WindowId| {
+            out.iter().find_map(|c| match c {
+                Command::Configure { id: i, rect, states } if *i == id => Some((*rect, *states)),
+                _ => None,
+            })
+        };
+        let (rect, states) = first(1).expect("the maximized window is configured");
+        assert!(states.maximized);
+        assert_eq!(rect, engine.win(1).unwrap().rect);
+        assert!(rect.w > 0 && rect.h > 0 && rect.h <= 768);
+        let (rect, states) = first(2).expect("the fullscreen window is configured");
+        assert!(states.fullscreen);
+        assert_eq!(rect, Rect::new(0, 0, 1280, 800));
     }
 
     /// Switching to the application alone tells the launcher and maximizes the windows already
