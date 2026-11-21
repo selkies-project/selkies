@@ -139,7 +139,19 @@ pub fn theme() -> Theme {
 /// # Arguments
 /// * `opacity` - Opacity from 0 to 100.
 pub fn panel_bg(opacity: i32) -> Color {
-    with_alpha(theme().panel, (opacity.clamp(0, 100) * 255 / 100) as u8)
+    with_alpha(theme().panel, percent_alpha(opacity))
+}
+/// The start menu's background at the bar's opacity in percent, so the menu's paints follow the
+/// bar's while its text and icons stay opaque.
+///
+/// # Arguments
+/// * `opacity` - Opacity from 0 to 100.
+pub fn menu_bg(opacity: i32) -> Color {
+    with_alpha(theme().popup, percent_alpha(opacity))
+}
+/// An opacity in percent as an alpha from 0 to 255.
+fn percent_alpha(opacity: i32) -> u8 {
+    (opacity.clamp(0, 100) * 255 / 100) as u8
 }
 /// Popup background.
 pub fn popup_bg() -> Color {
@@ -295,8 +307,18 @@ impl Scrollbar {
 /// * `canvas` - The target.
 /// * `rect` - The popup's rectangle.
 pub fn draw_popup_frame(canvas: &mut Canvas<'_>, rect: Rect) {
+    draw_popup_frame_in(canvas, rect, popup_bg());
+}
+
+/// Draws a popup's rounded background in a color of its own, with its border.
+///
+/// # Arguments
+/// * `canvas` - The target.
+/// * `rect` - The popup's rectangle.
+/// * `bg` - The background.
+pub fn draw_popup_frame_in(canvas: &mut Canvas<'_>, rect: Rect, bg: Color) {
     let radius = popup_radius();
-    fill_surface(canvas, rect, radius, popup_bg());
+    fill_surface(canvas, rect, radius, bg);
     canvas.stroke_rounded(rect, radius, 1.0, popup_border());
 }
 

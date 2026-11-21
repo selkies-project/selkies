@@ -1242,7 +1242,7 @@ fn scroll_to_selection(d: &mut Desktop) {
 pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Rect {
     ensure_items(d);
     let layout = layout(d);
-    ui::draw_popup_frame(canvas, layout.frame);
+    ui::draw_popup_frame_in(canvas, layout.frame, ui::menu_bg(d.menu_opacity()));
 
     canvas.fill_rounded(layout.search, 6.0, ui::field_bg());
     if let Some(glass) = ui::search_path(layout.search.x + 16, layout.search.y + layout.search.h / 2) {
@@ -1370,7 +1370,7 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Rect {
             ui::popup_radius(),
             crate::render::rgba(0, 0, 0, 0x50),
         );
-        ui::draw_popup_frame(canvas, rect);
+        ui::draw_popup_frame_in(canvas, rect, ui::menu_bg(d.menu_opacity()));
         for (i, (label, _, _)) in context_rows(d, index).into_iter().enumerate() {
             let item = Rect::new(
                 rect.x + 6,
@@ -1670,13 +1670,18 @@ fn draw_tiles(d: &mut Desktop, canvas: &mut Canvas<'_>, layout: &Layout) {
     canvas.reset_clip();
 }
 
-/// A favorite tile's color: the menu's own a few shades lighter on a dark theme and darker on
-/// a light one, a little more while hovered, so the tiles stand off the menu without the
-/// accent's clash.
+/// A favorite tile's color: a light veil over the menu on a dark theme and a dark one on a
+/// light theme, a little stronger while hovered, so the tiles stand off the menu without the
+/// accent's clash. A veil rather than a color of its own keeps a translucent menu's tiles about
+/// as see-through as the menu around them, since any fill over a translucent background adds to
+/// its coverage.
 fn tile_color(hovered: bool) -> tiny_skia::Color {
-    let base = ui::popup_bg();
-    let step = if hovered { 30 } else { 18 };
-    ui::shifted(base, if ui::luminance(base) < 0.5 { step } else { -step })
+    let veil = if ui::luminance(ui::popup_bg()) < 0.5 {
+        tiny_skia::Color::WHITE
+    } else {
+        tiny_skia::Color::BLACK
+    };
+    ui::with_alpha(veil, if hovered { 0x22 } else { 0x15 })
 }
 
 #[cfg(test)]

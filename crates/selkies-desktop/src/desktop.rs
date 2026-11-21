@@ -1604,6 +1604,17 @@ impl Desktop {
         (lerp(float_x, attached_x), lerp(float_w, attached_w))
     }
 
+    /// The opacity the start menu's background takes in percent: the bar's, except on a display
+    /// that drops alpha, where the panel is blended over the wallpaper and a menu over a window
+    /// would show the wallpaper through it, so the menu stays opaque.
+    pub fn menu_opacity(&self) -> i32 {
+        if self.opaque_output {
+            100
+        } else {
+            self.config.panel_opacity
+        }
+    }
+
     /// The bar's background in panel surface coordinates with its corner
     /// radius: the items' rectangle while the bar floats, growing to fill
     /// the band the bar reserves as it attaches, its corners easing square
