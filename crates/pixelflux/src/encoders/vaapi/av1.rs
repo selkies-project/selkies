@@ -57,6 +57,15 @@ pub(super) struct Arm {
     qindex_offset: u32,
 }
 
+/// The finest quantizer a constant-quantizer frame filters with CDEF at. Finer, Intel's encoder
+/// (Arc A750) recodes a still screen under CDEF on every frame and the picture decays: a 1080p
+/// desktop of text and patterned tiles held still under Turbo at quantizer 80 cost 18 kB a frame
+/// and fell from 40.4 to 39.7 dB in two seconds, against 0.4 kB a frame rising to 41.7 without
+/// it, and still 6 kB a frame against 0.7 at 136; its scroll came to 40.5 dB on 40.7 kB a frame
+/// against 41.5 on 29.6. From 160 the still screen costs 1 to 3 kB a frame and CDEF lifts a
+/// scroll's SSIM (0.954 against 0.940 at 163).
+const CDEF_MIN_QINDEX: u32 = 160;
+
 /// The in-loop filters of a frame: the deblocking level of every plane and edge, and the one
 /// CDEF strength (primary in the high four bits, secondary in the low two) with its damping.
 /// A constant-rate driver chooses its own and rewrites the header; a constant-quantizer
@@ -71,11 +80,16 @@ struct Filters {
 impl Filters {
     /// The filters of a constant-quantizer frame at `qindex`, measured on Intel Arc on a
     /// text desktop and a gradient wallpaper: deblocking rises with the quantizer, CDEF holds
-    /// primary 8 and secondary 2, and its damping widens as the steps coarsen.
+    /// primary 8 and secondary 2 from `CDEF_MIN_QINDEX` up, and its damping widens as the
+    /// steps coarsen.
     fn at(qindex: u32) -> Self {
         Self {
             level: (qindex / 8).min(63) as u8,
-            cdef_strength: (8 << 2) | 2,
+            cdef_strength: if qindex >= CDEF_MIN_QINDEX {
+                (8 << 2) | 2
+            } else {
+                0
+            },
             cdef_damping_minus_3: (qindex >> 6).min(3) as u8,
         }
     }
