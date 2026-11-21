@@ -1033,8 +1033,26 @@ fn vp8_follows_the_slot_plan() {
     });
 }
 
-/// AV1 names the slot of the frame it predicts from as every reference and as the source of
-/// its probability contexts, in the picture parameters and in the frame header it packs.
+/// The frame after an AV1 key frame holds nothing older than its reference, so it names the key
+/// frame's slot as every reference and searches it alone.
+#[test]
+fn av1_after_a_key_frame_searches_its_reference_alone() {
+    mock::reset(Driver::generous());
+    let mut enc = session(Codec::Av1, true);
+    encode(&mut enc, 0, true);
+    encode(&mut enc, 1, false);
+    mock::with(|d| {
+        let pic: VAEncPictureParameterBufferAV1 =
+            d.last_param(VAEncPictureParameterBufferType).unwrap();
+        assert_eq!(pic.ref_frame_idx, [0; 7]);
+        assert_eq!(unsafe { pic.ref_frame_ctrl_l0.fields.search_idx0() }, 1);
+        assert_eq!(unsafe { pic.ref_frame_ctrl_l0.fields.search_idx1() }, 0);
+    });
+}
+
+/// AV1 names the slot of the frame it predicts from as every reference but GOLDEN, and as the
+/// source of its probability contexts, and the newest frame before it as GOLDEN, which it searches
+/// second, in the picture parameters and in the frame header it packs.
 #[test]
 fn av1_names_its_reference_slot_in_the_frame_header() {
     mock::reset(Driver::generous());
@@ -1053,7 +1071,9 @@ fn av1_names_its_reference_slot_in_the_frame_header() {
     mock::with(|d| {
         let pic: VAEncPictureParameterBufferAV1 =
             d.last_param(VAEncPictureParameterBufferType).unwrap();
-        assert_eq!(pic.ref_frame_idx, [4; 7]);
+        assert_eq!(pic.ref_frame_idx, [4, 4, 4, 3, 4, 4, 4]);
+        assert_eq!(unsafe { pic.ref_frame_ctrl_l0.fields.search_idx0() }, 1);
+        assert_eq!(unsafe { pic.ref_frame_ctrl_l0.fields.search_idx1() }, 4);
         assert_eq!(pic.primary_ref_frame, 0);
         assert_eq!(pic.refresh_frame_flags, 1 << 0);
         assert_eq!(pic.order_hint, 8);
@@ -1083,8 +1103,8 @@ fn av1_names_its_reference_slot_in_the_frame_header() {
         assert_eq!(r.u(3), 0, "primary_ref_frame");
         assert_eq!(r.u(8), 1, "refresh_frame_flags");
         assert_eq!(r.u(1), 0, "frame_refs_short_signaling");
-        for i in 0..7 {
-            assert_eq!(r.u(3), 4, "ref_frame_idx[{i}]");
+        for (i, slot) in [4, 4, 4, 3, 4, 4, 4].into_iter().enumerate() {
+            assert_eq!(r.u(3), slot, "ref_frame_idx[{i}]");
         }
         assert_eq!(r.u(1), 1, "render_and_frame_size_different");
         assert_eq!(r.u(16), (W - 1) as u32, "render_width_minus_1");

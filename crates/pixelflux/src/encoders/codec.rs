@@ -416,7 +416,7 @@ const AV1_VAAPI_QINDEX: [(u32, u32); 14] = [
     (20, 20),
     (22, 25),
     (24, 30),
-    (25, 66),
+    (25, 73),
     (30, 106),
     (35, 136),
     (40, 171),
@@ -1119,10 +1119,10 @@ mod tests {
         assert_eq!(Codec::H264.hardware_quantizer(Hardware::Vaapi, 25), 22);
         assert_eq!(Codec::H265.hardware_quantizer(Hardware::Nvenc, 25), 25);
         assert_eq!(Codec::H265.hardware_quantizer(Hardware::Vaapi, 25), 22);
-        assert_eq!(Codec::Av1.hardware_quantizer(Hardware::Vaapi, 25), 66);
+        assert_eq!(Codec::Av1.hardware_quantizer(Hardware::Vaapi, 25), 73);
         assert_eq!(Codec::H265.hardware_quantizer(Hardware::VaapiIntel, 25), 24);
         assert_eq!(Codec::H264.hardware_quantizer(Hardware::VaapiIntel, 25), 22);
-        assert_eq!(Codec::Av1.hardware_quantizer(Hardware::VaapiIntel, 25), 66);
+        assert_eq!(Codec::Av1.hardware_quantizer(Hardware::VaapiIntel, 25), 73);
         assert_eq!(Codec::H264.hardware_quantizer(Hardware::VaapiIntel, 18), 13);
         assert_eq!(Codec::H265.hardware_quantizer(Hardware::VaapiIntel, 18), 14);
         assert_eq!(Codec::Av1.hardware_quantizer(Hardware::Nvenc, 0), 1);
