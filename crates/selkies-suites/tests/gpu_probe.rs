@@ -152,11 +152,12 @@ fn the_gpu_report_has_the_shape_the_container_reads() {
         !recorded.contains("renderD999"),
         excerpt(&recorded),
     );
-    let (_, _, given) = probe(&[("XDG_RUNTIME_DIR", &runtime_dir), ("DRINODE", "/dev/null")]);
+    let (given, _, _) = probe(&[("XDG_RUNTIME_DIR", &runtime_dir), ("DRINODE", "/dev/null")]);
+    let given_node = fact(&given, "SELKIES_GPU_RENDER_NODE");
     checks.check(
         "what the probe is actually given wins",
-        given.contains("/dev/null"),
-        excerpt(&given),
+        given_node == "/dev/null",
+        given_node,
     );
     let _ = std::fs::remove_dir_all(&runtime);
 

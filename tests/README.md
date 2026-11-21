@@ -81,14 +81,30 @@ firefox webkit` in `tests/`. Python is needed only by the soak tier and by the
 Jupyter suite, whose Jupyter server is Python's (`jupyter-server` and
 `jupyter-server-proxy` beside the `python3` on `PATH`).
 
+The authenticated-proxy cells of the matrix, `ws-x11-proxy` and `wr-x11-proxy`, run natively with no
+container: the server is forced onto CPU encoding and put behind a reverse proxy the test starts on
+loopback only, which terminates TLS and requires Basic auth. The certificate is an ephemeral one `openssl`
+makes and the test holds in memory, so there is no auth file, certificate, or `.pem` to set up. A
+WebRTC cell sends its signaling through the proxy as WSS; its RTP media still travels over ICE, not the
+proxy. They need the ordinary native harness (a built web client and server, a dedicated `E2E_DISPLAY`,
+PulseAudio, and the browsers) plus `openssl`, and nothing from `jailoc`. `E2E_ENGINE` picks the
+browser as it does for the rest of the matrix. Forced CPU encoding does not show that a host has no GPU,
+and these cells cover no other architecture, no real Safari, and no long session.
+
+```bash
+node tests/tools/auth_proxy_audit.ts                                  # the proxy fixture, no display
+cargo xtask suites --match 'matrix and proxy'                       # both transports
+(cd tests && npx playwright test e2e/matrix.spec.ts --grep "ws-x11-proxy$")   # one cell
+```
+
 ## Tiers
 
 | Tier | Needs |
 | --- | --- |
-| `unit` | The source tree, `node`, and `gcc` for `tests/tools`. The example session scripts are parsed with `bash -n` (their Python helpers byte-compiled), and every shell script the tree ships is linted at `shellcheck`'s lowest severity where it is installed. Which findings that severity reports differs between `shellcheck` releases, so CI pins the version rather than taking the runner image's; a distro build may disagree with it in either direction. |
+| `unit` | The source tree, `node`, `openssl` for the proxy audit, and `gcc` for `tests/tools`. The example session scripts are parsed with `bash -n` (their Python helpers byte-compiled), and every shell script the tree ships is linted at `shellcheck`'s lowest severity where it is installed. Which findings that severity reports differs between `shellcheck` releases, so CI pins the version rather than taking the runner image's; a distro build may disagree with it in either direction. |
 | `integration` | An X display named by `E2E_DISPLAY` or the Wayland backend, PulseAudio, a built `selkies` server, and the `pixelflux`/`pcmflux` wheels. Suites needing an X server of their own start a throwaway `Xvfb` on a free display number instead, and need nothing set. The output-layout suite wants the Xvfb the images ship, XLibre's patched to offer pluggable outputs, which the bundle carries at `libexec/selkies/Xvfb` (the CI job puts the run's bundle's on the path); on a stock one it skips. The Wayland seam suite wants a labwc patched with the control socket and the seam cursor path, which `scripts/ci/build-labwc.sh` builds (the CI job does exactly that); on a stock labwc it skips its held-grab checks. The lone-display suite builds its GDK client (`tools/crtc_probe.c`) against GTK3 and Xrandr through `pkg-config` (`libgtk-3-dev`, `libxrandr-dev`). The gamepad and Unix-socket suites drive Chromium on Playwright Test, from the tests package (`npm ci` in `tests/`). |
 | `e2e` | The above plus Playwright browsers (WebKit on Linux also needs GStreamer's `opengl` plugin, `gstreamer1.0-gl`, which `npx playwright install --with-deps webkit` brings; without it WebKit paints every `<video>` through a software fallback sink, so the harness refuses to launch it), the built web client (`scripts/ci/build-web.sh`), `wl-clipboard` for the Wayland clipboard checks, `wmctrl` for the two-display desktop-window check (skipped with a notice when absent), `tests/tools/fetch-openh264.sh` for the Firefox WebRTC blocks, and a coturn `turnserver` on `PATH` (or named by `E2E_TURNSERVER`) for the TURN relay suite, which skips with the install command when there is none. The pointer-motion suite drives the *installed* Chrome and Firefox on the test display with XTEST, and skips when neither is on `PATH`. The pointer-lock suite's game-view block needs `libsdl2-2.0-0` (skipped without it), and its desktop selectors need `openbox`, `kwin-x11`, and `kwin-wayland` plus `dbus-run-session`, and the `labwc` the Wayland suites already use (each skipped with the missing binary named). The host-portal suite runs a KDE stack on a private bus: `kwin-wayland` (with KWin 6 also `kwin-common`, where Debian and Ubuntu ship its screencast plugin), PipeWire, WirePlumber, `xdg-desktop-portal` and its KDE backend with the Qt Wayland plugins it is built on (`qtwayland5` for Plasma 5, `qt6-wayland` for 6), and `gdbus`; KWin 6 casts the screen only on a render node, which a host without a GPU gets from the `vgem` module (`sudo modprobe vgem`, the node readable and writable by the user), and the suite skips with what is missing named. Its `gnome` blocks run headless `mutter` instead, with the crate's `mutter-portal` program as the portal's backend, and skip the same way. The gaming-mode suite drives the installed Chrome, windowed under `openbox` on a private X server, and skips without either. |
-| `perf` | A long constrained-link pacer benchmark, whose client is the crate's headless WebRTC client (`webrtc-peer`) behind shaped relays, plus `xterm` and `xdotool` for the screen-damage load generator; and the file-transfer saturation suite behind the crate's `bwrelay`. Run on request. |
+| `perf` | A long constrained-link pacer benchmark, whose client is the crate's headless WebRTC client (`webrtc-peer`) behind shaped relays, plus `xterm` and `xdotool` for the screen-damage load generator; and the file-transfer saturation suite behind the crate's `bwrelay`, with `glxgears` (`mesa-utils`) as its screen load. Run on request. |
 | `image` | A published desktop image and somewhere to run it (Kubernetes, Docker, or a session already up), installed Chrome, release Firefox, Playwright's WebKit, `xdotool` and `xclip` on the client display, and the in-session helper built static for the image's architecture (`rustup target add x86_64-unknown-linux-musl`). Run on request; see [Image tier](#image-tier). |
 | `soak` | The whole `pixelflux`/`pcmflux` API surface, including recording and Wayland, through their Python bindings: Python and both wheels. Run on request. |
 

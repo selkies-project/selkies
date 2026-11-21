@@ -16,13 +16,24 @@ use serde_json::{Value as Json, json};
 use crate::core::PRIMARY_DISPLAY;
 use crate::ws::client::testing::FakeSocket;
 use crate::ws::clock_tests::{advance, reset_clock};
-use crate::ws::host::{CaptureHandle, TokenEntry};
+use crate::ws::host::{CaptureHandle, KeyFrameCause, TokenEntry};
 use crate::ws::protocol::gzip_frame;
 use crate::ws::relay::RelayHost;
 use crate::ws::testkit::*;
 
 async fn settle() {
     tokio::time::sleep(Duration::from_millis(10)).await;
+}
+
+/// Whether `capture` is given `call` within a second: a call a timer makes.
+async fn given(capture: &FakeCapture, call: &str) -> bool {
+    for _ in 0..100 {
+        if capture.has(call) {
+            return true;
+        }
+        settle().await;
+    }
+    false
 }
 
 fn entry(role: &str, slot: Json) -> TokenEntry {
@@ -423,6 +434,260 @@ async fn lost_frames_and_key_frames_are_floored() {
     reset_clock();
 }
 
+/// A lost frame a floor holds back reaches the encoder once the floor ends, the oldest of those
+/// held back standing for the rest: the encoder predicts past a frame and every frame after it,
+/// so the later reports alone would leave it predicting from the first, which the page dropped.
+#[tokio::test]
+async fn a_lost_frame_held_back_by_the_floor_is_told_when_it_ends() {
+    let rig = Rig::new();
+    let mut owner = rig.owner("a").await;
+    settle().await;
+    let capture = rig.primary_capture();
+    owner.say("LOST_FRAME 10").await;
+    owner.say("LOST_FRAME 20").await;
+    owner.say("LOST_FRAME 21").await;
+    assert!(capture.has("invalidate 10 false"));
+    assert!(
+        !capture.has("invalidate 20 false"),
+        "one invalidation per display per 5 ms"
+    );
+    assert!(
+        given(&capture, "invalidate 20 false").await,
+        "the first frame held back is told once the floor ends"
+    );
+    assert!(
+        !capture.has("invalidate 21 false"),
+        "the first stands for the frames after it"
+    );
+}
+
+/// A report from a page beside the owner that the display's floor holds back, another page
+/// having just reported, is told once that floor ends, and spends the page's own floor only then.
+#[tokio::test]
+async fn a_page_beside_the_owner_held_back_by_the_display_floor_is_told_when_it_ends() {
+    let rig = Rig::new();
+    let mut owner = rig.owner("a").await;
+    let mut beside = rig.controller().await;
+    beside
+        .say(r#"SETTINGS,{"tabId":"b","initialClientWidth":640,"initialClientHeight":480}"#)
+        .await;
+    settle().await;
+    assert!(rig.service.reg.lock().is_beside(beside.id()));
+    let capture = rig.primary_capture();
+    owner.say("LOST_FRAME 50").await;
+    beside.say("LOST_FRAME 48").await;
+    assert!(capture.has("invalidate 50 false"));
+    assert!(
+        !capture.has("invalidate 48 false"),
+        "one invalidation per display per 5 ms"
+    );
+    assert!(
+        given(&capture, "invalidate 48 false").await,
+        "the page's report is told once the display's floor ends"
+    );
+}
+
+/// A report a page's own floor holds back is dropped and leaves that floor where it was: most
+/// such reports name frames encoded before the page's last report reached the encoder, which
+/// that report already covers, so the next run the page reports past the floor is told at once.
+#[tokio::test]
+async fn a_report_the_pages_own_floor_holds_back_does_not_extend_it() {
+    let rig = Rig::new();
+    let _owner = rig.owner("a").await;
+    let mut beside = rig.controller().await;
+    beside
+        .say(r#"SETTINGS,{"tabId":"b","initialClientWidth":640,"initialClientHeight":480}"#)
+        .await;
+    settle().await;
+    assert!(rig.service.reg.lock().is_beside(beside.id()));
+    let capture = rig.primary_capture();
+    beside.say("LOST_FRAME 30").await;
+    assert!(capture.has("invalidate 30 false"));
+    advance(0.99);
+    beside.say("LOST_FRAME 31").await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    advance(0.2);
+    beside.say("LOST_FRAME 50").await;
+    assert!(
+        capture.has("invalidate 50 false"),
+        "the run past the floor is told at once"
+    );
+    assert!(!capture.has("invalidate 31 false"));
+    reset_clock();
+}
+
+/// A page asking for a key frame holds none of the frames sent before the one it asked for:
+/// its decoder waits for that one, so the encoder is told of no frame until the page holds it.
+#[tokio::test]
+async fn a_page_asking_for_a_key_frame_holds_nothing_until_it_takes_one() {
+    let rig = Rig::new();
+    let mut owner = rig.owner("a").await;
+    settle().await;
+    let capture = rig.primary_capture();
+    capture.deliver(1, 1, true);
+    settle().await;
+    capture.deliver(2, 1, false);
+    settle().await;
+    assert!(
+        capture.has("acknowledge 2 true"),
+        "the page holds what its relay wrote"
+    );
+    owner.say("REQUEST_KEYFRAME").await;
+    capture.deliver(3, 2, false);
+    settle().await;
+    assert!(
+        !capture.has("acknowledge 3 true"),
+        "nor what its relay writes while it waits for the key frame"
+    );
+    assert!(!capture.has("acknowledge 3 false"));
+    capture.deliver(4, 4, true);
+    settle().await;
+    capture.deliver(5, 4, false);
+    settle().await;
+    assert!(
+        capture.has("acknowledge 5 true"),
+        "the key frame starts its holdings afresh"
+    );
+}
+
+/// A key frame request the floors refuse leaves the page counted as holding what its relay
+/// writes: only a request taken brings the key frame that counts the page again.
+#[tokio::test]
+async fn a_key_frame_request_the_floor_refuses_leaves_the_page_counted() {
+    let rig = Rig::new();
+    let mut owner = rig.owner("a").await;
+    let mut beside = rig.controller().await;
+    beside
+        .say(r#"SETTINGS,{"tabId":"b","initialClientWidth":640,"initialClientHeight":480}"#)
+        .await;
+    settle().await;
+    assert!(rig.service.reg.lock().is_beside(beside.id()));
+    let capture = rig.primary_capture();
+    capture.deliver(1, 1, true);
+    settle().await;
+    owner.say("REQUEST_KEYFRAME").await;
+    capture.deliver(2, 2, true);
+    settle().await;
+    let idrs = capture.count("idr");
+    beside.say("REQUEST_KEYFRAME").await;
+    assert_eq!(
+        capture.count("idr"),
+        idrs,
+        "one request per display per 250 ms"
+    );
+    capture.deliver(3, 2, false);
+    settle().await;
+    let pages = rig
+        .service
+        .reg
+        .lock()
+        .common
+        .get(&(PRIMARY_DISPLAY.to_string(), true))
+        .map(|common| common.pages());
+    assert_eq!(
+        pages,
+        Some(2),
+        "both pages hold the frames they were sent since the key frame"
+    );
+}
+
+#[tokio::test]
+async fn every_key_frame_request_is_counted_by_its_cause() {
+    let rig = Rig::new();
+    let mut owner = rig.owner("a").await;
+    let mut viewer = rig.viewer().await;
+    settle().await;
+    let capture = rig.primary_capture();
+    let metrics = &rig.metrics;
+    let pages = metrics.keyframe_requests(PRIMARY_DISPLAY, "page");
+    rig.service
+        .schedule_idr_for_page(owner.id(), PRIMARY_DISPLAY);
+    assert_eq!(
+        metrics.keyframe_requests(PRIMARY_DISPLAY, "page"),
+        pages + 1,
+        "a page starting on the display decodes from one"
+    );
+    assert_eq!(
+        metrics.all_keyframe_requests(PRIMARY_DISPLAY),
+        capture.count("idr"),
+        "every request that reached the encoder is counted, and nothing else"
+    );
+    owner.say("REQUEST_KEYFRAME").await;
+    owner.say("REQUEST_KEYFRAME").await;
+    assert_eq!(
+        metrics.keyframe_requests(PRIMARY_DISPLAY, "client"),
+        1,
+        "a request the floor thins is not counted"
+    );
+    advance(0.3);
+    viewer.say("REQUEST_KEYFRAME").await;
+    rig.service
+        .schedule_idr(PRIMARY_DISPLAY, KeyFrameCause::FanoutLag);
+    rig.service
+        .schedule_idr(PRIMARY_DISPLAY, KeyFrameCause::Restart);
+    assert_eq!(
+        (
+            metrics.keyframe_requests(PRIMARY_DISPLAY, "client"),
+            metrics.keyframe_requests(PRIMARY_DISPLAY, "fanout_lag"),
+            metrics.keyframe_requests(PRIMARY_DISPLAY, "restart"),
+        ),
+        (2, 1, 1)
+    );
+    assert_eq!(
+        metrics.all_keyframe_requests(PRIMARY_DISPLAY),
+        capture.count("idr")
+    );
+    reset_clock();
+}
+
+#[test]
+fn the_invalidation_line_names_who_lost_the_frame_and_not_the_encoders_answer() {
+    assert_eq!(
+        crate::ws::server::invalidation_line(PRIMARY_DISPLAY, 71, false, 0),
+        "Display 'primary': frame 71 lost by a client; the encoder stops predicting from it."
+    );
+    assert_eq!(
+        crate::ws::server::invalidation_line(PRIMARY_DISPLAY, 72, true, 3),
+        "Display 'primary': frame 72 left out by a relay; the encoder stops predicting from it. \
+         (+3 more in the last 5 s)"
+    );
+}
+
+#[tokio::test]
+async fn a_relays_invalidations_are_logged_apart_from_a_clients() {
+    let rig = Rig::new();
+    let _owner = rig.owner("a").await;
+    settle().await;
+    let logged = |rig: &Rig, withheld: bool| {
+        rig.service
+            .reg
+            .lock()
+            .invalidation_log
+            .get(&(PRIMARY_DISPLAY.to_string(), withheld))
+            .map(|e| e.1)
+    };
+    rig.service
+        .schedule_invalidation(PRIMARY_DISPLAY, 70, false);
+    rig.service.schedule_invalidation(PRIMARY_DISPLAY, 71, true);
+    assert_eq!(
+        (logged(&rig, false), logged(&rig, true)),
+        (Some(0), Some(0)),
+        "a relay's first report within five seconds of a client's has a line of its own"
+    );
+    rig.service
+        .schedule_invalidation(PRIMARY_DISPLAY, 72, false);
+    assert_eq!(
+        (logged(&rig, false), logged(&rig, true)),
+        (Some(1), Some(0)),
+        "a second report of the same cause is counted into the next line"
+    );
+    advance(5.0);
+    rig.service
+        .schedule_invalidation(PRIMARY_DISPLAY, 73, false);
+    assert_eq!(logged(&rig, false), Some(0), "and logged five seconds on");
+    reset_clock();
+}
+
 #[tokio::test]
 async fn a_rate_change_during_a_layout_pass_is_the_refresh_the_display_keeps() {
     let rig = Rig::new();
@@ -506,7 +771,8 @@ async fn a_capture_still_starting_takes_the_live_requests() {
         30.0
     );
     let idrs = capture.count("idr");
-    rig.service.schedule_idr(PRIMARY_DISPLAY);
+    rig.service
+        .schedule_idr(PRIMARY_DISPLAY, KeyFrameCause::Restart);
     assert_eq!(capture.count("idr"), idrs + 1);
     rig.service
         .schedule_invalidation(PRIMARY_DISPLAY, 70000, false);
@@ -1868,12 +2134,47 @@ async fn the_gate_flushes_the_owner_and_the_lift_asks_for_a_key_frame() {
         idrs + 1,
         "the lift asks for one key frame"
     );
+    assert_eq!(
+        rig.metrics.keyframe_requests(PRIMARY_DISPLAY, "gate_lift"),
+        1,
+        "counted as the gate's"
+    );
     capture.deliver(3, 3, false);
     settle().await;
     assert_eq!(owner.binaries().len(), 1, "and the deltas ahead of it wait");
     capture.deliver(4, 4, true);
     settle().await;
     assert_eq!(owner.binaries().len(), 2);
+}
+
+#[tokio::test]
+async fn a_checks_gate_events_reach_the_metrics() {
+    let rig = Rig::new();
+    let _owner = rig.owner("a").await;
+    settle().await;
+    rig.primary_capture().deliver(1, 1, true);
+    settle().await;
+    let link = rig.service.link(PRIMARY_DISPLAY).unwrap();
+    let at = crate::ws::now();
+    {
+        let mut l = link.lock();
+        l.acknowledged_frame_id = 1;
+        l.has_sent_any_frame = true;
+        l.last_sent_frame_id = 1;
+        l.unacked_since = Some(at - 60.0);
+    }
+    rig.service
+        .backpressure_check(PRIMARY_DISPLAY, &link, at, 0.0)
+        .await;
+    rig.service
+        .backpressure_check(PRIMARY_DISPLAY, &link, at + 0.1, 0.0)
+        .await;
+    assert_eq!(link.lock().gate_counts.stalled, 1, "a silent page stalls");
+    assert_eq!(
+        *rig.metrics.gate_events.lock(),
+        vec![(PRIMARY_DISPLAY.to_string(), "stalled", 1)],
+        "once, though the gate is checked twice"
+    );
 }
 
 #[tokio::test]

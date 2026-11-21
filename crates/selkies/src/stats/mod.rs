@@ -679,6 +679,7 @@ mod tests {
                     bytes: 0,
                     encode_ns: frames * 2_000_000,
                     pipeline_ns: frames * 3_000_000,
+                    ..StreamTotals::default()
                 },
                 peaks,
             })

@@ -134,6 +134,8 @@ pub(crate) fn blend_pixel_premultiplied(dst: &mut [u8], r: u8, g: u8, b: u8, a: 
 impl OverlayState {
     /// Load the watermark image from disk; `output_scale` is the output's fractional
     /// scale, ceiled to the integer buffer scale of the upload. A failed load clears the overlay.
+    /// Smithay's render buffer uses premultiplied alpha; CPU blending and [`Self::sprite`]
+    /// keep the decoded image's straight-alpha pixels.
     pub fn load_watermark(&mut self, path: &str, output_scale: f64) {
         if let Ok(img) = image::open(Path::new(path)) {
             let rgba = img.to_rgba8();
@@ -143,8 +145,15 @@ impl OverlayState {
             let buffer_scale = output_scale.ceil().max(1.0) as i32;
 
             let pixels = rgba.into_vec();
+            let mut gpu_pixels = pixels.clone();
+            for pixel in gpu_pixels.as_chunks_mut::<4>().0 {
+                let alpha = u16::from(pixel[3]);
+                for channel in &mut pixel[..3] {
+                    *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
+                }
+            }
             self.render_buffer = Some(MemoryRenderBuffer::from_slice(
-                &pixels,
+                &gpu_pixels,
                 Fourcc::Abgr8888,
                 (self.wm_width as i32, self.wm_height as i32),
                 buffer_scale,
@@ -370,5 +379,52 @@ impl OverlayState {
             Kind::Cursor,
         )
         .ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watermark_upload_is_premultiplied_while_cpu_pixels_remain_straight() {
+        let pixels = vec![255, 64, 32, 255, 255, 128, 64, 128, 255, 128, 64, 0];
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "pixelflux-watermark-{}-{nonce}.png",
+            std::process::id()
+        ));
+        image::RgbaImage::from_raw(3, 1, pixels.clone())
+            .unwrap()
+            .save(&path)
+            .unwrap();
+        let mut overlay = OverlayState::default();
+        overlay.load_watermark(path.to_str().unwrap(), 1.25);
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(overlay.wm_loaded);
+        assert_eq!(overlay.wm_pixels, pixels);
+        assert_eq!(overlay.sprite(), Some((pixels.as_slice(), 3, 1)));
+        let mut frame = vec![0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255];
+        overlay.blend_bgra(&mut frame, 12, 3, 1);
+        assert_eq!(frame, [32, 64, 255, 255, 32, 64, 128, 255, 0, 0, 0, 255]);
+        overlay
+            .render_buffer
+            .as_mut()
+            .unwrap()
+            .render()
+            .draw(|uploaded| {
+                assert_eq!(uploaded, [255, 64, 32, 255, 128, 64, 32, 128, 0, 0, 0, 0]);
+                Ok::<_, std::convert::Infallible>(Vec::new())
+            })
+            .unwrap();
+
+        overlay.load_watermark(path.to_str().unwrap(), 1.0);
+        assert!(!overlay.wm_loaded);
+        assert!(overlay.wm_pixels.is_empty());
+        assert!(overlay.render_buffer.is_none());
     }
 }

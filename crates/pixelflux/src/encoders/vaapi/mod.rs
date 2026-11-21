@@ -894,6 +894,29 @@ pub(super) struct Frame<'a> {
     pub slot_surfaces: [VASurfaceID; 3],
 }
 
+impl Frame<'_> {
+    /// The frame a predicted picture searches after its reference, as AV1's and VP9's GOLDEN:
+    /// the newest the decoder holds from before the one it predicts from, since its key frame
+    /// and not lost, which every client that decoded the reference decoded too, since the window
+    /// forgets every frame after a loss. A window that keeps anchors or reads acknowledgments
+    /// holds frames some client may lack, so a session that keeps either must not name this one.
+    /// Intel's motion search (Arc A750) against the reference alone codes a desktop scrolling
+    /// under a still panel poorly, every other frame two to three times the size of the one
+    /// before; searching the frame before as well took a 1080p scroll from 31.4 to 12.2 kB a
+    /// frame at 0.8 dB more on AV1, as FFmpeg's AV1 encoder over the same driver codes it
+    /// (11.1 kB), and from 47.6 to 24.7 kB at 0.5 dB more on VP9 (Alder Lake-N, whose search
+    /// copes with the panel, 18.8 to 17.7), at the same encode time. `None` for a key frame and
+    /// a frame with no such frame to search.
+    pub fn golden(&self) -> Option<(u64, VASurfaceID)> {
+        let (reference, _) = self.reference.filter(|_| !self.key)?;
+        self.held
+            .iter()
+            .rev()
+            .find(|&&(pts, _, lost)| !lost && pts >= self.key_pts && pts < reference)
+            .map(|&(pts, surface, _)| (pts, surface))
+    }
+}
+
 /// The codec arm of a session.
 enum Arm {
     H264(Box<h264::Arm>),
@@ -2336,7 +2359,8 @@ impl VaapiEncoder {
     }
 
     /// A VA surface over a dmabuf: through the PRIME 2 descriptor, which carries the format
-    /// modifier, else the older external-buffer one.
+    /// modifier, else the older external-buffer one where it reads the buffer as laid out
+    /// (`legacy_descriptor_reads`).
     fn import_dmabuf(&mut self, dmabuf: &Dmabuf) -> Result<VASurfaceID, String> {
         let api = self.device.api;
         let display = self.device.display;
@@ -2377,7 +2401,7 @@ impl VaapiEncoder {
         };
         let planes: Vec<(u32, u32)> = dmabuf.strides().zip(dmabuf.offsets()).collect();
         let modifier = u64::from(dmabuf.format().modifier);
-        if modifier == 0
+        if modifier == DRM_FORMAT_MOD_LINEAR
             && !self.negotiated.fullcolor
             && self.device.rounds_linear_pitch()
             && !planes[0].0.is_multiple_of(64)
@@ -2395,7 +2419,8 @@ impl VaapiEncoder {
         attribs[1].type_ = VASurfaceAttribExternalBufferDescriptor;
         attribs[1].flags = VA_SURFACE_ATTRIB_SETTABLE;
         attribs[1].value.type_ = VAGenericValueTypePointer;
-        if modifier != 0x00ff_ffff_ffff_ffff {
+        let mut prime2 = None;
+        if modifier != DRM_FORMAT_MOD_INVALID {
             let mut desc: VADRMPRIMESurfaceDescriptor = unsafe { std::mem::zeroed() };
             desc.fourcc = fourcc;
             desc.width = width;
@@ -2431,6 +2456,15 @@ impl VaapiEncoder {
             if status == VA_STATUS_SUCCESS as VAStatus {
                 return Ok(surface);
             }
+            prime2 = Some(status);
+        }
+        if let Some(status) = prime2
+            && !legacy_descriptor_reads(modifier, prime2)
+        {
+            return Err(format!(
+                "this VA-API driver does not import a dmabuf of modifier {modifier:#x}: {}",
+                error_text(&api, status)
+            ));
         }
         // The older descriptor carries one object.
         if objects.len() != 1 {
@@ -2551,6 +2585,16 @@ impl VaapiEncoder {
             Some(References::Slots(s)) => s.has_reference(),
             None => !self.fresh,
         };
+        let owed = if self.sequence_start {
+            Some(crate::report::KeyFrameCause::Reconfigure)
+        } else {
+            force_idr.then_some(crate::report::KeyFrameCause::Requested)
+        };
+        match (&mut self.references, owed) {
+            (Some(References::Window(w)), Some(cause)) => w.owe_key(cause),
+            (Some(References::Slots(s)), Some(cause)) => s.owe_key(cause),
+            _ => {}
+        }
         let mut key = force_idr || self.sequence_start || !has_reference;
         let (mut anchor, mut shared) = (None, false);
         if let Some(References::Window(w)) = &mut self.references
@@ -2975,6 +3019,26 @@ fn image_format(device: &Device, fourcc: u32) -> Option<VAImageFormat> {
         .copied()
 }
 
+/// The DRM format modifier of a buffer laid out as its allocator chose, unnamed.
+const DRM_FORMAT_MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
+
+/// The DRM format modifier of rows packed one after another.
+const DRM_FORMAT_MOD_LINEAR: u64 = 0;
+
+/// Whether the external-buffer descriptor reads a dmabuf of `modifier` as it is laid out, once
+/// the PRIME 2 descriptor answered `prime2` (None where it was not tried).
+///
+/// That descriptor carries no modifier: the driver takes the layout from what the kernel says of
+/// the object, which is nothing for a buffer in a discrete GPU's local memory and never a
+/// compression. A buffer whose modifier is unnamed or linear reads as laid out there, as does any
+/// on a driver that does not know the PRIME 2 memory type at all. A buffer of another modifier
+/// the driver refused through PRIME 2 does not: iHD refuses Arc's compressed Tile 4 layouts, and
+/// read as linear they encode as noise.
+fn legacy_descriptor_reads(modifier: u64, prime2: Option<VAStatus>) -> bool {
+    matches!(modifier, DRM_FORMAT_MOD_INVALID | DRM_FORMAT_MOD_LINEAR)
+        || prime2 == Some(VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE as VAStatus)
+}
+
 /// The dma-buf object `fd` names, as its device and inode: two fds of one buffer give the same.
 fn object_identity(fd: i32) -> Option<(u64, u64)> {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
@@ -2993,6 +3057,19 @@ mod tests {
         assert!(refines(700_000, 8.0, 1920, 1080));
         assert!(!refines(2_000_000, 60.0, 1920, 1080));
         assert!(!refines(500_000, 8.0, 1920, 1080));
+    }
+
+    /// A compressed Tile 4 buffer PRIME 2 refused is not read again without its layout; an
+    /// unnamed or linear one is, and any on a driver without the PRIME 2 memory type.
+    #[test]
+    fn a_refused_tiled_dmabuf_is_not_imported_without_its_modifier() {
+        let dg2_rc_ccs_cc = 0x0100_0000_0000_000c;
+        let refused = Some(VA_STATUS_ERROR_INVALID_SURFACE as VAStatus);
+        let unknown = Some(VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE as VAStatus);
+        assert!(!legacy_descriptor_reads(dg2_rc_ccs_cc, refused));
+        assert!(legacy_descriptor_reads(DRM_FORMAT_MOD_LINEAR, refused));
+        assert!(legacy_descriptor_reads(DRM_FORMAT_MOD_INVALID, None));
+        assert!(legacy_descriptor_reads(dg2_rc_ccs_cc, unknown));
     }
 
     /// Intel's low-power H.264 encoder is named no more regions than its three native zones at a

@@ -280,7 +280,7 @@ settings.video_paintover_burst_frames = 5          # Frames sent after a cleanup
 settings.video_fullcolor = False                   # Use 4:4:4 chroma instead of 4:2:0 where the codec carries it (H.264 and H.265): software x264/x265 and NVENC take it, VA-API negotiates it per device.
 settings.video_bit_depth = 8                       # Bits per sample, 8 or 10: 10 where the codec has a 10-bit profile an encoder here codes (H.264 on x264; H.265, VP9, and AV1 on VA-API, x265, libvpx, and SVT-AV1; H.265 and AV1 on NVENC). An engine without it hands the session to the software encoder, as it does a 4:4:4 it lacks; OpenH264, kvazaar, and VP8 stay 8-bit. A software encoder pays for it in CPU, and the source is 8-bit, so it is recommended only with 4:4:4 (`video_fullcolor`).
 settings.video_streaming_mode = False              # Bypass all VNC logic and work like a normal video encoder, higher constant CPU usage for fullscreen gaming/videos
-settings.keyframe_interval_s = 0.0                   # Periodic keyframe interval in seconds (0 = keyframes only on demand/paint-over)
+settings.keyframe_interval_s = 0.0                   # Periodic keyframe interval in seconds (0 = keyframes only on demand/paint-over; 10 s on Tegra and V4L2 M2M)
 settings.video_cbr_mode = False                    # Switches to CBR mode and ignores CRF value. Used in conjunction with video_bitrate_kbps.
 settings.video_bitrate_kbps = 4000                 # Target bitrate for CBR mode. Required when video_cbr_mode is enabled.
 settings.video_vbv_multiplier = 0.0                # Optional VBV size as a multiple of one frame's bit budget. CBR: 0 = auto (1.5, or 3 with periodic keyframes). CRF: a positive value caps software x264 at a peak of video_bitrate_kbps (capped CRF); 0 = uncapped.
@@ -336,7 +336,7 @@ settings.omit_stripe_headers = True
 Points to code against:
 
 - The frame kind is not in the bytes. A key frame is told by its IDR NAL unit (type 5). `reference_frame_id` is -1 on a key frame only where the session tracks references; a session that does not (a hardware encoder that cannot invalidate a reference) reports -2 on every frame. The sequence and picture parameter sets are repeated on every key frame, so a decoder configured from any key frame can start there.
-- The GOP is infinite unless `keyframe_interval_s` is positive, so a key frame comes only when asked: at the start, from `capture.request_idr_frame()`, or from the cleanup and recovery policies. A client that joins late, reconnects, or resets its decoder must call `request_idr_frame()`, and a decoder must not be fed delta frames before the key frame that follows.
+- The GOP is infinite unless `keyframe_interval_s` is positive, so a key frame comes only when asked: at the start, from `capture.request_idr_frame()`, or from the cleanup and recovery policies. Tegra's encoder and a stateful V4L2 device are the exception: they code a key frame every ten seconds where `keyframe_interval_s` is 0, and no further apart than 600 frames at any interval. A resize also starts the stream again on a key frame, and so do these changes: on NVENC a rate or frame rate that raises the level the stream declares; on VA-API a changed `target_fps`, a changed `video_vbv_multiplier` at a constant rate, or a `video_bitrate_kbps` past the declared level, while one within it goes out with the next picture; on libx264 a changed `target_fps` or `video_reference_frames`, either of which reopens the encoder; and on OpenH264 at a constant quality any move of its quantizer, a cleanup's included, since it takes a new one only by rebuilding. A client that joins late, reconnects, or resets its decoder must call `request_idr_frame()`, and a decoder must not be fed delta frames before the key frame that follows.
 - A software encoder that does not honor the request still labels the frame by what it produced, so decide on the frame that arrives rather than on the request.
 - NVENC is configured without access unit delimiters, so a unit begins at its first parameter-set or slice NAL unit.
 
@@ -442,7 +442,15 @@ GPU, so a caller with an event loop makes the call off it.
 `capture.stream_stats()` returns cumulative counters since the start (`frames`, `bytes`,
 `encode_ns`, `pipeline_ns` from capture to the end of the encode), which a caller differences
 into a rate. They are relaxed atomics tallied once per delivered frame and read only on the
-call, so a capture nobody inspects pays nothing for them.
+call, so a capture nobody inspects pays nothing for them. Beside them are the recovery
+counters of a session that tracks its references: the key frames it coded by cause
+(`key_frames_requested` by the caller, `key_frames_loss_out_of_window` where a loss left
+nothing the client holds to predict from, `key_frames_frame_num_wrap`,
+`key_frames_reconfigure` for the first after an open, a reopen, or a reset, and
+`key_frames_device_chosen` for the rest), and the losses it was told of by answer
+(`invalidations_recent`, `invalidations_anchor`, `invalidations_key_frame`). A session without
+a reference model (OpenH264's, x265, kvazaar, V4L2) counts neither, and a striped session
+counts each stripe.
 
 ### Rust API
 
@@ -766,7 +774,9 @@ so no frame is converted on a CPU core.
     client that never received it and the stream costs no keyframe. Each frame says what it
     predicts from (`StripeFrame.reference_frame_id`), which is what a consumer holds the frames
     behind a loss back by. Every session whose encoder lets it name its references tracks them:
-    libx264 and libvpx always, NVENC on the devices whose driver offers reference invalidation,
+    libx264 and libvpx always, OpenH264 always as well, though it predicts past a loss only from a
+    confirmed long-term reference before it (its keyframe, or one every client holds) and answers
+    any other with a keyframe, NVENC on the devices whose driver offers reference invalidation,
     VA-API where the driver takes the session's slice headers (H.264, H.265) or addresses
     reference slots (VP8, VP9, AV1), Tegra for H.265 through the vendor's external reference set
     (L4T R32 and R36), and SVT-AV1 at a constant rate where the release takes reference commands
@@ -793,7 +803,18 @@ so no frame is converted on a CPU core.
     (Firefox's for WebRTC H.264 where no FFmpeg decodes it) reaches only the first long-term
     index of a CABAC stream, and decodes a frame naming a second against another picture without
     an error. In H.264 the frame at the `frame_num` wrap is an anchor too, reaching back however
-    far.
+    far. VA-API keeps and flags its anchors the same way where the driver is radeonsi (one in
+    H.264, two in H.265) and its decoded picture buffer, which the level bounds and
+    `video_reference_frames` caps, has room for two frames beside them (three in H.264, four in
+    H.265); libvpx's VP8 and VP9, SVT-AV1 at a constant rate (4.2 on), and VA-API's VP8 pin the
+    anchor buffer holding the newest frame every client holds, and the first two flag an anchor
+    on their schedule that predicts from a frame every client was sent; OpenH264 takes the
+    long-term reference it marked for a recovery once every client holds it, and flags a frame
+    marking one from a frame every client was sent and one predicting past a loss from a
+    confirmed one. Elsewhere (libx264, x265, kvazaar, SVT-AV1 at a constant quantizer or before
+    4.2, VA-API's H.264 and H.265 on other drivers or with a smaller buffer, its VP9 and AV1,
+    Tegra, a stateful V4L2 device) no anchor is kept, and a loss reaching past the recent frames
+    costs a keyframe.
 
 ### Color conversion
 
@@ -892,7 +913,8 @@ asked for.
     *   **Reference invalidation:** `invalidate_reference(frame_id)` has the encoder predict past a
         frame a client lost, so recovery costs no keyframe; `acknowledge_reference(frame_id)` pins
         the long-term references every client holds, so clients sharing a stream each recover
-        on their own (NVENC).
+        on their own (NVENC, VA-API's H.264 and H.265 on radeonsi and its VP8, libvpx, SVT-AV1
+        at a constant rate, and OpenH264).
 *   **Self-description:** `stream_info()` reports the capture path, the encoder, the GPU, and why a
     faster path was declined, and `stream_stats()` the encode's counters, so a caller shows its
     user what a session runs on instead of pointing them at a log.

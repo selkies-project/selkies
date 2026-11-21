@@ -54,8 +54,13 @@ Selkies' own desktop shell, over HTTPS behind a login whose password you set
   when no address is named, that Selkies, its window manager, and the desktop all
   join, and a system bus of the session's own (`DBUS_SYSTEM_BUS_ADDRESS`).
 - **Audio**: PipeWire, else PulseAudio, of the session's own; PulseAudio loads
-  only its socket, not the host's or the user's `default.pa`. Under `--host`, the
-  sound server the environment names or runs comes first.
+  only its socket, not the host's or the user's `default.pa`. ALSA's PulseAudio
+  plugin, the host's where it has one and else the bundle's, becomes the default
+  device of the session's ALSA applications, which would otherwise find no sound
+  card (`ALSA_CONFIG_PATH`, read after the host's and the user's ALSA
+  configuration); a PipeWire session keeps PipeWire's own ALSA plugin where the
+  host has it. Under `--host`, the sound server the environment names or runs
+  comes first, and ALSA keeps the host's configuration.
 - **GPU**: what `selkies gpu-probe` finds decides the session's GL: GLX goes to
   the vendor library that renders on the X server's render node, Mesa reaches a
   GPU it has no driver for through Zink where the Vulkan driver can present

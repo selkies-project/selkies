@@ -1259,6 +1259,9 @@ impl TegraEncoder {
         frame_number: u64,
         force_idr: bool,
     ) -> Result<(), String> {
+        if force_idr && let Some(references) = &mut self.references {
+            references.owe_key(crate::report::KeyFrameCause::Requested);
+        }
         let references = self
             .references
             .as_ref()

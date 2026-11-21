@@ -330,9 +330,14 @@ fn send_parameters(transceiver: &Transceiver, cname: &str) -> SendParameters {
     }
 }
 
-fn receive_parameters(transceiver: &Transceiver) -> selkies_rtc::rtp::ReceiveParameters {
+/// An uplink receiver's parameters: `codecs` are the formats the transceiver receives
+/// (`Session::receive_codecs`), the encodings what the peer described.
+fn receive_parameters(
+    transceiver: &Transceiver,
+    codecs: &[Codec],
+) -> selkies_rtc::rtp::ReceiveParameters {
     selkies_rtc::rtp::ReceiveParameters {
-        codecs: transceiver.codecs.iter().map(codec_parameters).collect(),
+        codecs: codecs.iter().map(codec_parameters).collect(),
         header_extensions: header_extensions(transceiver),
         encodings: transceiver
             .remote_encodings
@@ -344,6 +349,30 @@ fn receive_parameters(transceiver: &Transceiver) -> selkies_rtc::rtp::ReceivePar
             .collect(),
         mux_id: transceiver.mid.clone(),
     }
+}
+
+/// Start an uplink's receiver on `codecs`, the formats its transceiver receives
+/// (`Session::receive_codecs`), and route the peer's SSRCs and payload types for it there. The receiver's RTCP goes out under the transceiver's own
+/// SSRC: a receiver without one sends no NACK, PLI or receiver report, so a lost camera packet
+/// would never be asked for again, and a decoder that lost its reference would never get the
+/// key frame it asks for.
+fn start_uplink(
+    router: &mut RtpRouter<Track>,
+    receiver: &mut RtpReceiver,
+    track: Track,
+    transceiver: &Transceiver,
+    codecs: &[Codec],
+) {
+    let parameters = receive_parameters(transceiver, codecs);
+    receiver.start(&parameters);
+    receiver.set_rtcp_ssrc(transceiver.ssrc);
+    let ssrcs: Vec<u32> = parameters
+        .encodings
+        .iter()
+        .flat_map(|e| std::iter::once(e.ssrc).chain(e.rtx_ssrc))
+        .collect();
+    let payload_types: Vec<u8> = parameters.codecs.iter().map(|c| c.payload_type).collect();
+    router.register_receiver(track, &ssrcs, &payload_types);
 }
 
 /// The keys the router sorts a bundled peer's streams under.
@@ -443,6 +472,9 @@ struct Media {
     webcam: Option<RtpReceiver>,
     router: RtpRouter<Track>,
     twcc_rx: TwccReceiver,
+    /// Formats an uplink receives that the page's answer does not list, by payload type and
+    /// MIME type, each logged once as it first arrives.
+    unlisted: Vec<(Track, u8, String)>,
     sctp_out: mpsc::UnboundedSender<Bytes>,
     sctp: Option<SctpTransport>,
     /// The inbound SCTP packets of a negotiated association DTLS has yet to carry.
@@ -557,6 +589,7 @@ impl Peer {
             webcam: webcam_index.map(|_| RtpReceiver::new("video")),
             router: RtpRouter::new(),
             twcc_rx: TwccReceiver::new(),
+            unlisted: Vec::new(),
             sctp_out,
             sctp: None,
             sctp_negotiated: None,
@@ -1090,20 +1123,18 @@ impl Media {
             if transceiver.codecs.is_empty() {
                 continue;
             }
-            let parameters = receive_parameters(transceiver);
+            let codecs = self.session.receive_codecs(index);
+            self.unlisted.retain(|(t, _, _)| *t != track);
+            for codec in self.session.unanswered_codecs(index) {
+                self.unlisted
+                    .push((track, codec.payload_type, codec.mime_type));
+            }
             let receiver = match track {
                 Track::Microphone => self.microphone.as_mut(),
                 _ => self.webcam.as_mut(),
             };
             let Some(receiver) = receiver else { continue };
-            receiver.start(&parameters);
-            let ssrcs: Vec<u32> = parameters
-                .encodings
-                .iter()
-                .flat_map(|e| std::iter::once(e.ssrc).chain(e.rtx_ssrc))
-                .collect();
-            let payload_types: Vec<u8> = parameters.codecs.iter().map(|c| c.payload_type).collect();
-            self.router.register_receiver(track, &ssrcs, &payload_types);
+            start_uplink(&mut self.router, receiver, track, transceiver, &codecs);
         }
 
         let Some(ice) = negotiated.ice.clone() else {
@@ -1312,9 +1343,21 @@ impl Media {
             _ => return,
         };
         let Some(receiver) = receiver else { return };
+        if let Some(at) = self
+            .unlisted
+            .iter()
+            .position(|(t, pt, _)| *t == track && *pt == packet.payload_type)
+        {
+            let (_, pt, mime) = self.unlisted.swap_remove(at);
+            let name = match uplink {
+                Uplink::Microphone => "microphone",
+                Uplink::Webcam => "webcam",
+            };
+            info!(target: "webrtc", "Peer {}: the page sends its {name} as {mime} under payload type {pt}, which its answer does not list; it is received as offered.", self.peer_id);
+        }
         let waited = arrived.elapsed().as_secs_f64();
         let arrival_ms = ((now - waited) * 1000.0) as i64;
-        if let Some(frame) = receiver.handle_rtp(packet, arrival_ms, now, &mut self.twcc_rx) {
+        for frame in receiver.handle_rtp(packet, arrival_ms, now, &mut self.twcc_rx) {
             self.events.uplink_frame(&self.peer_id, uplink, frame);
         }
         self.flush_receiver_rtcp();
@@ -1453,7 +1496,10 @@ async fn recv_audio(feed: &mut Option<RelayTrack<AudioSample>>) -> AudioSample {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use selkies_rtc::rtp::Payload;
     use selkies_rtc::rtp::packet::{ABS_SEND_TIME_URI, MID_URI};
+    use selkies_rtc::rtp::rtcp::{RTCP_PSFB_PLI, RTCP_RTPFB_NACK};
+    use selkies_rtc::sdp::offer::RemoteEncoding;
 
     #[test]
     fn audio_moves_once_a_standing_queue_drains_and_not_more_often_than_the_interval() {
@@ -1528,6 +1574,60 @@ mod tests {
             )
             .is_none(),
             "a truncated packet is routed nowhere"
+        );
+    }
+
+    #[test]
+    fn an_uplink_receiver_sends_its_rtcp_under_its_transceivers_ssrc() {
+        let mut session = Session::new(false, 2);
+        let index = session.add_transceiver(MediaKind::Video, Direction::RecvOnly);
+        let h264 = session
+            .table(MediaKind::Video)
+            .into_iter()
+            .find(|c| c.mime_type.eq_ignore_ascii_case("video/H264"))
+            .expect("H.264 is in the table");
+        let mut transceiver = session.transceivers[index].clone();
+        transceiver.codecs = vec![h264.clone()];
+        transceiver.remote_encodings = vec![RemoteEncoding {
+            ssrc: 0x2222,
+            payload_type: h264.payload_type,
+            rtx_ssrc: None,
+        }];
+        let (mut router, mut receiver) = (RtpRouter::new(), RtpReceiver::new("video"));
+        start_uplink(
+            &mut router,
+            &mut receiver,
+            Track::Webcam,
+            &transceiver,
+            &transceiver.codecs,
+        );
+        let mut twcc = TwccReceiver::new();
+        for seq in [1u16, 2, 4] {
+            let mut packet = RtpPacket::new(h264.payload_type, seq, 3000 * u32::from(seq), 0x2222);
+            packet.payload = Payload::one(Bytes::from_static(&[0x41, 0x9a]));
+            assert_eq!(router.route_rtp(&packet), Some(Track::Webcam));
+            receiver.handle_rtp(packet, 0, 0.0, &mut twcc);
+        }
+        receiver.request_keyframe();
+        let sent: Vec<RtcpPacket> = receiver
+            .take_rtcp()
+            .flat_map(|c| RtcpPacket::parse(&c).expect("RTCP that parses"))
+            .collect();
+        let ours = transceiver.ssrc;
+        assert!(
+            sent.iter().any(|p| matches!(p, RtcpPacket::Rtpfb(fb)
+                if fb.fmt == RTCP_RTPFB_NACK && fb.ssrc == ours && fb.media_ssrc == 0x2222
+                    && fb.lost == vec![3])),
+            "the lost packet is asked for again: {sent:?}"
+        );
+        assert!(
+            sent.iter().any(|p| matches!(p, RtcpPacket::Psfb(fb)
+                if fb.fmt == RTCP_PSFB_PLI && fb.ssrc == ours && fb.media_ssrc == 0x2222)),
+            "the key frame a decoder asks for is asked of the page: {sent:?}"
+        );
+        assert!(
+            receiver.rtcp_report(1.0).is_some(),
+            "and receiver reports go out"
         );
     }
 }

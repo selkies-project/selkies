@@ -424,8 +424,11 @@ pub struct Registry {
     pub watches: HashMap<DisplayId, Arc<StreamWatch>>,
     pub framed: HashSet<DisplayId>,
     pub last_lost_frame: HashMap<DisplayId, f64>,
-    /// When the invalidation line was last logged, and how many it stands for since.
-    pub invalidation_log: HashMap<DisplayId, (f64, u64)>,
+    /// The oldest `LOST_FRAME` the display's floor held back from each page for each display.
+    pub lost_kept: HashMap<(ClientId, DisplayId), u16>,
+    /// When the invalidation line was last logged per display and cause (`withheld` by a
+    /// relay, else lost by a client), and how many it stands for since.
+    pub invalidation_log: HashMap<(DisplayId, bool), (f64, u64)>,
     /// The audio each controller beside the owner asked for; `session_audio` is the owner's.
     pub beside_audio: HashMap<ClientId, bool>,
     pub session_audio: Option<bool>,

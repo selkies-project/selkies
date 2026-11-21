@@ -4045,6 +4045,9 @@ impl NvencEncoder {
         self.current_buffer_idx = (self.current_buffer_idx + 1) % self.bitstream_buffers.len();
 
         let asked_idr = force_idr;
+        if asked_idr && let Some(references) = &mut self.references {
+            references.owe_key(crate::report::KeyFrameCause::Requested);
+        }
         let mut force_idr =
             force_idr || self.references.as_ref().is_some_and(|r| !r.has_reference());
         let mut forgot = None;
