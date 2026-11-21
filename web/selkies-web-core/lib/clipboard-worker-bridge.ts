@@ -14,6 +14,7 @@
  * @module
  */
 import ClipboardWorker from '../clipboard-worker.ts?worker&inline';
+import { createClipboardCodec, type WorkerRequest } from './clipboard-codec.ts';
 import { readDecoded, readDigest, readEncoded, sized, type ClipboardDigest, type DecodedClipboard, type EncodedClipboard, type WorkerReply, type WorkerResult } from './clipboard-replies.ts';
 
 export type { ClipboardDigest, DecodedClipboard, EncodedClipboard, WorkerResult } from './clipboard-replies.ts';
@@ -22,7 +23,12 @@ export type { ClipboardDigest, DecodedClipboard, EncodedClipboard, WorkerResult 
  * Request/response bridge to the clipboard worker.
  *
  * The worker is created lazily on the first request and every call resolves
- * with `{ result, mimeType, byteLength }` from the worker's reply.
+ * with `{ result, mimeType, byteLength }` from the worker's reply. Where the
+ * worker cannot run (`new ClipboardWorker()` throws, or its `onerror` fires, as
+ * under `Content-Security-Policy: worker-src 'none'`), the bridge swaps in the
+ * same codec on the main thread and replays what the worker never answered.
+ * Until the worker has answered once, requests go to it without a transfer
+ * list, so their buffers stay usable for that replay.
  */
 /** A request to the worker, less the id the bridge gives it. */
 interface BridgeRequest {
@@ -46,37 +52,90 @@ export class ClipboardWorkerBridge {
     worker!: Worker | null;
     callbacks!: Map<number, { resolve: (value: WorkerResult) => void; reject: (reason: Error) => void }>;
     msgId!: number;
+    /** Whether the worker has answered, proving its script loaded. */
+    workerReady!: boolean;
+    /** The main-thread codec, once the worker proved unusable. */
+    inProcess!: ((req: WorkerRequest) => void) | null;
+    /** Requests posted to a worker that has not answered yet, for replay. */
+    pendingRequests!: Map<number, WorkerRequest>;
+    /** Multipart downloads begun on a worker that has not answered yet, for replay. */
+    pendingStreams!: Map<number, { mimeType: string; chunks: string[]; ended: boolean }>;
     constructor() {
         this.worker = null;
         this.callbacks = new Map();
         this.msgId = 0;
+        this.workerReady = false;
+        this.inProcess = null;
+        this.pendingRequests = new Map();
+        this.pendingStreams = new Map();
     }
 
-    /** Creates the worker when it does not exist yet. */
+    /** Creates the worker when there is neither it nor the main-thread codec yet. */
     init(): void {
-        if (!this.worker) {
+        if (this.worker || this.inProcess) return;
+        try {
             this.worker = new ClipboardWorker();
-            this.worker.onmessage = (e: MessageEvent<WorkerReply>): void => {
-                const { id, success, result, error, mimeType, byteLength, hash } = e.data;
-                const resolveReject = this.callbacks.get(id);
-                if (resolveReject) {
-                    this.callbacks.delete(id);
-                    if (success) {
-                        resolveReject.resolve({ result, mimeType, byteLength, hash });
-                    } else {
-                        resolveReject.reject(new Error(error));
-                    }
-                }
-            };
-            console.log("Clipboard Web Worker initialized.");
+        } catch {
+            this.fallBackToMainThread();
+            return;
+        }
+        this.worker.onmessage = (e: MessageEvent<WorkerReply>): void => {
+            this.workerReady = true;
+            this.onReply(e.data);
+        };
+        this.worker.onerror = (): void => {
+            this.fallBackToMainThread();
+        };
+        console.log("Clipboard Web Worker initialized.");
+    }
+
+    /**
+     * Settles the request a reply answers, whether it came from the worker or
+     * the main-thread codec.
+     * @param data The reply.
+     */
+    private onReply(data: WorkerReply): void {
+        const { id, success, result, error, mimeType, byteLength, hash } = data;
+        this.pendingRequests.delete(id);
+        this.pendingStreams.delete(id);
+        const resolveReject = this.callbacks.get(id);
+        if (!resolveReject) return;
+        this.callbacks.delete(id);
+        if (success) resolveReject.resolve({ result, mimeType, byteLength, hash });
+        else resolveReject.reject(new Error(error));
+    }
+
+    /** Drops the worker for the main-thread codec and replays what the worker never answered. */
+    private fallBackToMainThread(): void {
+        if (this.worker) {
+            try { this.worker.terminate(); } catch { /* gone */ }
+            this.worker = null;
+        }
+        this.workerReady = false;
+        console.warn("Clipboard Web Worker unavailable; running the clipboard codec on the main thread.");
+        this.inProcess ??= createClipboardCodec((reply) => this.onReply(reply));
+        const codec = this.inProcess;
+        const requests = [...this.pendingRequests.values()];
+        const streams = [...this.pendingStreams.entries()];
+        this.pendingRequests.clear();
+        this.pendingStreams.clear();
+        for (const req of requests) codec(req);
+        for (const [id, s] of streams) {
+            codec({ id, action: 'DECODE_BEGIN', mimeType: s.mimeType });
+            for (const chunk of s.chunks) codec({ id, action: 'DECODE_CHUNK', payload: chunk });
+            if (s.ended) codec({ id, action: 'DECODE_END' });
         }
     }
 
     /** Stops the worker and rejects every pending request with an `AbortError`. */
     terminate(): void {
-        if (!this.worker) return;
-        this.worker.terminate();
+        if (!this.worker && !this.inProcess) return;
+        if (this.worker) this.worker.terminate();
         this.worker = null;
+        this.inProcess = null;
+        this.pendingRequests.clear();
+        this.pendingStreams.clear();
+        this.workerReady = false;
         const pendingCallbacks = Array.from(this.callbacks.values());
         this.callbacks.clear();
         for (const { reject } of pendingCallbacks) {
@@ -97,8 +156,17 @@ export class ClipboardWorkerBridge {
         this.init();
         return new Promise((resolve: (value: WorkerResult) => void, reject: (reason: Error) => void): void => {
             const id = ++this.msgId;
+            const req: WorkerRequest = { id, ...message };
             this.callbacks.set(id, { resolve, reject });
-            this.worker!.postMessage({ id, ...message }, transfer);
+            if (this.inProcess) {
+                this.inProcess(req);
+            } else if (this.workerReady) {
+                this.worker?.postMessage(req, transfer);
+            } else {
+                // No transfer: a buffer detached now could not be replayed if the worker never loads.
+                this.pendingRequests.set(id, req);
+                this.worker?.postMessage(req);
+            }
         });
     }
 
@@ -165,23 +233,38 @@ export class ClipboardWorkerBridge {
     decodeStream(mimeType: string): ClipboardDecodeStream {
         this.init();
         const id = ++this.msgId;
-        this.worker!.postMessage({ id, action: 'DECODE_BEGIN', mimeType });
+        if (this.inProcess) {
+            this.inProcess({ id, action: 'DECODE_BEGIN', mimeType });
+        } else if (this.worker) {
+            if (!this.workerReady) this.pendingStreams.set(id, { mimeType, chunks: [], ended: false });
+            this.worker.postMessage({ id, action: 'DECODE_BEGIN', mimeType });
+        }
         return {
             push: (base64String: string): void => {
-                if (this.worker) {
+                if (this.inProcess) {
+                    this.inProcess({ id, action: 'DECODE_CHUNK', payload: base64String });
+                } else if (this.worker) {
+                    this.pendingStreams.get(id)?.chunks.push(base64String);
                     this.worker.postMessage({ id, action: 'DECODE_CHUNK', payload: base64String });
                 }
             },
             finish: (): Promise<DecodedClipboard> => new Promise((resolve: (value: WorkerResult) => void, reject: (reason: Error) => void): void => {
-                if (!this.worker) {
+                if (this.inProcess) {
+                    this.callbacks.set(id, { resolve, reject });
+                    this.inProcess({ id, action: 'DECODE_END' });
+                } else if (this.worker) {
+                    const ps = this.pendingStreams.get(id);
+                    if (ps) ps.ended = true;
+                    this.callbacks.set(id, { resolve, reject });
+                    this.worker.postMessage({ id, action: 'DECODE_END' });
+                } else {
                     reject(new Error('Worker Terminated'));
-                    return;
                 }
-                this.callbacks.set(id, { resolve, reject });
-                this.worker.postMessage({ id, action: 'DECODE_END' });
             }).then(readDecoded),
             abort: (): void => {
-                if (this.worker) this.worker.postMessage({ id, action: 'DECODE_ABORT' });
+                this.pendingStreams.delete(id);
+                if (this.inProcess) this.inProcess({ id, action: 'DECODE_ABORT' });
+                else if (this.worker) this.worker.postMessage({ id, action: 'DECODE_ABORT' });
             },
         };
     }
