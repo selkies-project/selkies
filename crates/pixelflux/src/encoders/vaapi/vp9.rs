@@ -6,7 +6,8 @@
 
 //! The VP9 arm: the sequence and picture parameters; the driver writes the uncompressed
 //! header. The eight buffer slots hold the last eight frames by timestamp, a frame refreshes
-//! its own and predicts from the slot of the newest frame the client still has, and every
+//! its own and predicts from the slot of the newest frame the client still has as LAST, and
+//! from the newest frame before that one as GOLDEN where there is one (`Frame::golden`), and every
 //! frame is coded in the error-resilient mode, since a decoder otherwise takes the previous
 //! frame's motion vectors and probability contexts whatever the reference says.
 
@@ -15,6 +16,9 @@ use va_sys::*;
 use super::super::reference::REFERENCE_FRAMES;
 use super::{Buffers, Frame, Negotiated};
 
+/// The bits of `ref_frame_ctrl_l0` that ask the encoder to search LAST and GOLDEN.
+const SEARCH_LAST: u32 = 1;
+const SEARCH_GOLDEN: u32 = 2;
 const LOOP_FILTER_LEVEL: u8 = 16;
 const SHARPNESS: u8 = 4;
 /// The widest tile the codec allows, which sets the fewest tile columns a picture needs.
@@ -86,10 +90,15 @@ impl Arm {
                     .reference
                     .ok_or("a predicted VP9 picture without a reference")?;
                 let slot = u32::from(slot_of(ref_pts));
-                r.set_ref_frame_ctrl_l0(1);
+                let golden = frame.golden().map(|(pts, _)| u32::from(slot_of(pts)));
+                r.set_ref_frame_ctrl_l0(if golden.is_some() {
+                    SEARCH_LAST | SEARCH_GOLDEN
+                } else {
+                    SEARCH_LAST
+                });
                 r.set_ref_last_idx(slot);
                 r.set_ref_last_sign_bias(1);
-                r.set_ref_gf_idx(slot);
+                r.set_ref_gf_idx(golden.unwrap_or(slot));
                 r.set_ref_arf_idx(slot);
                 pic.refresh_frame_flags = 1 << slot_of(frame.pts);
             }

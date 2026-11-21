@@ -920,7 +920,8 @@ fn hevc_lists_the_kept_frames_in_its_reference_picture_set() {
 }
 
 /// VP9 refreshes the slot of each frame's timestamp and predicts from the slot of the newest
-/// surviving frame, every frame error-resilient.
+/// surviving frame, and from the frame before it as GOLDEN where there is one, every frame
+/// error-resilient.
 #[test]
 fn vp9_addresses_its_slots_by_timestamp() {
     mock::reset(Driver::generous());
@@ -939,6 +940,9 @@ fn vp9_addresses_its_slots_by_timestamp() {
             if t > 0 {
                 assert_eq!(unsafe { pic.ref_flags.bits.ref_last_idx() }, t as u32 - 1);
                 assert_ne!(pic.reference_frames[t as usize - 1], VA_INVALID_SURFACE);
+                let (search, golden) = if t > 1 { (3, t - 2) } else { (1, t - 1) };
+                assert_eq!(unsafe { pic.ref_flags.bits.ref_frame_ctrl_l0() }, search);
+                assert_eq!(unsafe { pic.ref_flags.bits.ref_gf_idx() }, golden as u32);
             }
         });
     }
@@ -949,6 +953,8 @@ fn vp9_addresses_its_slots_by_timestamp() {
         let pic: VAEncPictureParameterBufferVP9 =
             d.last_param(VAEncPictureParameterBufferType).unwrap();
         assert_eq!(unsafe { pic.ref_flags.bits.ref_last_idx() }, 4);
+        assert_eq!(unsafe { pic.ref_flags.bits.ref_gf_idx() }, 3);
+        assert_eq!(unsafe { pic.ref_flags.bits.ref_frame_ctrl_l0() }, 3);
         assert_eq!(pic.refresh_frame_flags, 1 << 0, "timestamp 8 takes slot 0");
         assert_eq!(
             pic.luma_ac_qindex,

@@ -9,7 +9,7 @@
 //! as the picture width needs, and the eight buffer slots addressed by timestamp: every frame
 //! refreshes its own slot and names the slot of the newest frame the client still has as every
 //! reference but GOLDEN, and loads its probability contexts from it; GOLDEN names the newest
-//! frame before that one (`golden`), which the encoder searches second. The
+//! frame before that one (`Frame::golden`), which the encoder searches second. The
 //! frame header is written with the bit positions of the quantizer, loop filter, and CDEF
 //! fields, which a constant-rate driver rewrites in place and a constant-quantizer session
 //! fills itself, and with OBU sizes of the fixed width it asks for.
@@ -99,24 +99,6 @@ impl Filters {
 /// The AV1 reference names a frame header's `ref_frame_idx` is indexed by, from `LAST_FRAME`.
 const LAST_FRAME: usize = 1;
 const GOLDEN_FRAME: usize = 4;
-
-/// The frame a predicted picture also searches as `GOLDEN_FRAME`: the newest the decoder holds
-/// from before the one it predicts from, since its key frame and not lost, which every client
-/// that decoded the reference decoded too, since the window forgets every frame after a loss.
-/// Intel's encoder (Arc A750) searching the reference alone coded a 1080p desktop scrolling
-/// under a still panel at 31.4 kB a frame, every other frame two to three times the size of the
-/// one before; searching the frame before it as well, 12.2 kB a frame at 0.8 dB more, as FFmpeg's
-/// AV1 encoder over the same driver does (11.1 kB). `None` for a key frame and a frame with no
-/// such frame to search.
-fn golden(frame: &Frame) -> Option<u64> {
-    let (reference, _) = frame.reference.filter(|_| !frame.key)?;
-    frame
-        .held
-        .iter()
-        .rev()
-        .find(|&&(pts, _, lost)| !lost && pts >= frame.key_pts && pts < reference)
-        .map(|&(pts, _, _)| pts)
-}
 
 /// How many bits `value` needs, at least one.
 fn bit_width(value: u32) -> u32 {
@@ -385,7 +367,7 @@ impl Arm {
             (false, None) => return Err("a predicted AV1 picture without a reference".into()),
         };
         let t = self.tiles;
-        let golden_slot = golden(frame).map(slot_of);
+        let golden_slot = frame.golden().map(|(pts, _)| slot_of(pts));
         let mut ref_frame_idx = [reference_slot.unwrap_or(0); 7];
         if let Some(golden) = golden_slot {
             ref_frame_idx[GOLDEN_FRAME - LAST_FRAME] = golden;
