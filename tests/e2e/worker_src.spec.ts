@@ -5,15 +5,23 @@
  */
 
 /**
- * The dashboard keeps streaming under a page policy of `worker-src 'none'`.
+ * The dashboard keeps streaming under a page policy of `worker-src 'none'`,
+ * and a page whose policy allows workers keeps every worker path it has even
+ * when its workers fail on their own.
  *
  * Chromium, Firefox, and WebKit reach the server through a loopback proxy
  * (`workerPolicyProxy`) rather than a Playwright route, since a page served
  * from a fulfilled route has no address space and its workers' WebSockets fail
  * the local network access checks. `control` passes every response as the
  * server sent it, `restricted` appends `worker-src 'none'` as one more policy,
- * so every policy is enforced at once. Each holds, on the first load and after
- * a reload, the document's policies, a fresh socket the server counts, a
+ * so every policy is enforced at once, and `faulted` passes the responses as
+ * `control` does but fires every worker's `error` event before the worker
+ * reports, as a worker whose own script throws does. `restricted` reads the
+ * session socket on the page after a `worker-src` violation, the others in
+ * its worker with no violation and no fallback logged; `restricted` starts
+ * audio on, which its page keeps off, having no decoder for it. Each holds, on the
+ * first load and after a reload, the document's policies, a fresh socket the
+ * server counts, the thread the socket is read on, a
  * software stream, the picture painted once the client sized the root, a key
  * and the pointer reaching X, and the clipboard both ways (rich markup + plain
  * text on Chromium where the engine reads on focus, plain paste and the
@@ -37,6 +45,13 @@ import { within } from '../lib/stream.ts';
 import { workerPolicyProxy, type WorkerPolicyProxy } from '../lib/worker-policy.ts';
 
 const RESTRICTION = "worker-src 'none'";
+/** What the client logs when audio packets reach a page with no decoder to take them. */
+const AUDIO_UNDECODED = /AudioDecoderWorker not ready|Cannot initialize decoder audio/;
+/** What the client logs when it moves a worker's job onto the page. */
+const FALLBACK = /Content-Security-Policy (refuses|refused)|socket worker unavailable/;
+/** The page policies the cases run under. */
+const MODES = ['control', 'faulted', 'restricted'] as const;
+type Mode = typeof MODES[number];
 const CSP = 'content-security-policy';
 const LARGE = 192 * 1024;
 const VIOLATION = 'csp-violation ';
@@ -64,10 +79,32 @@ const CLIP_TAP_JS = `(() => {
   }
 })()`;
 
+/**
+ * Fires every worker's `error` event before it reports, as a worker whose own
+ * script throws does, with no policy violation, counting each in `__faults`.
+ */
+const FAULT_JS = `(() => {
+  window.__faults = 0;
+  const Native = window.Worker;
+  window.Worker = class extends Native {
+    constructor(...args) {
+      super(...args);
+      let reported = false;
+      this.addEventListener('message', () => { reported = true; });
+      setTimeout(() => {
+        if (reported) return;
+        window.__faults++;
+        this.dispatchEvent(new ErrorEvent('error', { message: 'Uncaught Error: injected fault' }));
+      }, 0);
+    }
+  };
+})()`;
+
 declare global {
     interface Window {
         __clipMsgs?: { text?: string }[];
         __clipWrites?: string[];
+        __faults?: number;
     }
 }
 
@@ -240,8 +277,38 @@ async function round({ engine, host, page, picture, res, owners }: Session, { n,
     }
 }
 
-/** Opens a browser context and page for `engine`, using the persistent profile for Firefox. */
-async function openEngine(engine: Engine, url: string): Promise<[() => Promise<void>, Page]> {
+/** One load's console and what the case expects of it. */
+interface Load {
+    n: number;
+    mode: Mode;
+    lines: string[];
+}
+
+/**
+ * Checks which thread the session socket is read on and what the load logged:
+ * the page after a `worker-src` violation under `restricted`, its worker with
+ * neither a violation nor a fallback otherwise, no audio sent to a page with
+ * no decoder for it, and `faulted` having fired at least one worker's `error`
+ * event so the case is not vacuous.
+ */
+async function sessionPath(page: Page, res: Checks, { n, mode, lines }: Load): Promise<void> {
+    const restrict = mode === 'restricted';
+    const onPage = await within(page.evaluate(() => Reflect.get(window, 'selkiesTransport') instanceof WebSocket));
+    res.check(`load ${n}: the session socket is read ${restrict ? 'on the page' : 'in its worker'}`, onPage === restrict, { onPage });
+    const violations = lines.filter((l) => l.includes(VIOLATION)).length;
+    const fallbacks = lines.filter((l) => FALLBACK.test(l));
+    res.check(`load ${n}: ${restrict ? 'a worker-src violation is reported and the client logs its fallback' : 'no violation is reported and no fallback logged'}`,
+        restrict ? violations >= 1 && fallbacks.length >= 1 : violations === 0 && fallbacks.length === 0, { violations, fallbacks: fallbacks.slice(0, 3) });
+    const undecoded = lines.filter((l) => AUDIO_UNDECODED.test(l)).length;
+    res.check(`load ${n}: no audio packet reaches the page with no decoder to take it`, undecoded === 0, { undecoded });
+    if (mode === 'faulted') {
+        const faults = await within(page.evaluate(() => window.__faults ?? 0));
+        res.check(`load ${n}: the workers' error events fired before they reported`, faults >= 1, { faults });
+    }
+}
+
+/** Opens a browser context and page for `engine`, using the persistent profile for Firefox, its workers faulted where `fault` says. */
+async function openEngine(engine: Engine, url: string, fault: boolean): Promise<[() => Promise<void>, Page]> {
     const viewport = { width: 1440, height: 900 };
     let browser: Browser | null = null;
     let ctx: BrowserContext;
@@ -255,6 +322,7 @@ async function openEngine(engine: Engine, url: string): Promise<[() => Promise<v
     if (perms.length) await ctx.grantPermissions(perms, { origin: url }).catch(() => undefined);
     await ctx.addInitScript({ content: "window.__SELKIES_STREAMING_MODE__ = 'websockets'; try { localStorage.clear(); sessionStorage.clear(); } catch (e) {}" });
     await ctx.addInitScript({ content: CLIP_TAP_JS });
+    if (fault) await ctx.addInitScript({ content: FAULT_JS });
     await ctx.addInitScript((prefix: string) => {
         document.addEventListener('securitypolicyviolation', (e) => {
             console.warn(prefix + JSON.stringify({ directive: e.effectiveDirective, blocked: e.blockedURI, disposition: e.disposition, source: e.sourceFile }));
@@ -266,8 +334,8 @@ async function openEngine(engine: Engine, url: string): Promise<[() => Promise<v
     return [close, page];
 }
 
-for (const restrict of [false, true]) {
-    const modeName = restrict ? 'restricted' : 'control';
+for (const modeName of MODES) {
+    const restrict = modeName === 'restricted';
     for (const engine of ENGINES) {
         const name = engine === 'chromium' ? modeName : `${modeName}-${engine}`;
         test(name, async () => {
@@ -283,12 +351,13 @@ for (const restrict of [false, true]) {
             try {
                 const upstream = await host.start({
                     label: name, mode: 'websockets',
-                    env: { SELKIES_WEB_ROOT: DASHBOARD_DIST, SELKIES_USE_CPU: 'true', SELKIES_AUDIO_ON_START: 'false' },
+                    // Audio starts on under the restricting policy, whose page has no decoder for it.
+                    env: { SELKIES_WEB_ROOT: DASHBOARD_DIST, SELKIES_USE_CPU: 'true', SELKIES_AUDIO_ON_START: restrict ? 'true' : 'false' },
                 });
                 proxy = await workerPolicyProxy(upstream.url, restrict);
                 const { url, responses } = proxy;
                 const picture = new Picture(host, false);
-                const [closeBrowser, page] = await openEngine(engine, url);
+                const [closeBrowser, page] = await openEngine(engine, url, modeName === 'faulted');
                 const owners: Held[] = [];
                 try {
                     page.on('console', (m) => { consoleLines.push(`${m.type()}: ${m.text()}`); });
@@ -300,7 +369,7 @@ for (const restrict of [false, true]) {
                         reads.push(r.headerValue(CSP).then((v) => { entry.policy = v; }, (e: unknown) => { entry.policy = `unread: ${String(e)}`; }));
                     });
                     for (const n of [1, 2]) {
-                        const [at, sent, mark] = [seen.length, responses.length, await host.mark()];
+                        const [at, sent, mark, logged] = [seen.length, responses.length, await host.mark(), consoleLines.length];
                         if (n === 1) await page.goto(`${url}/`, { waitUntil: 'load', timeout: 30_000 });
                         else await page.reload({ waitUntil: 'load', timeout: 30_000 });
                         await Promise.all(reads);
@@ -323,6 +392,7 @@ for (const restrict of [false, true]) {
                         await picture.clear();
                         await picture.paint();
                         await round({ engine, host, page, picture, res, owners }, { n, nonce: `${name}-round${n}`, pace });
+                        await sessionPath(page, res, { n, mode: modeName, lines: consoleLines.slice(logged) });
                         for (let owner = owners.pop(); owner; owner = owners.pop()) await owner.release();
                     }
                     res.check('no uncaught page errors', pageErrors.length === 0, pageErrors.slice(0, 3));

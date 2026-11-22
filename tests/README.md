@@ -39,15 +39,6 @@ selector being one of a spec's tests. A spec's servers are started by
 standard streams, so they run in the sandbox the Rust suites' do and leave
 their logs the same way. A spec that prints no check fails.
 
-The `worker_src` suite compares the client under the server's existing
-response headers with the same session under an added
-`Content-Security-Policy: worker-src 'none'`, on CPU X11 over WebSockets in
-Chromium, Firefox, and WebKit. Each case checks the known decoded picture,
-input, the clipboard both ways, and a reload, with the console and the CSP
-evidence recorded. It shows the client's compatibility with a `worker-src` of
-`'none'` independently of any gateway: it does not exercise jailoc's TLS,
-login, revocation, or ICE path.
-
 The suites that need only the server, a socket, and the display are Rust test
 targets of `crates/selkies-suites`, on the harness that crate's library is.
 Every test there is `#[ignore]`d with what it needs, so `cargo test --workspace`

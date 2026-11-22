@@ -5,34 +5,82 @@
  */
 
 /**
- * Base64 codec for clipboard payloads as a dispatcher that answers through a
- * callback, so one implementation runs in the clipboard worker and, where a
- * Content-Security-Policy refuses workers, on the main thread.
+ * Base64 codec for clipboard payloads, as a dispatcher that answers through a
+ * callback: the clipboard worker (`clipboard-worker.ts`) runs it off the main
+ * thread, and the bridge runs the same dispatcher on the page where the page's
+ * policy refuses workers (`workersBlocked`).
  *
- * A request is `{id, action, payload, mimeType}`, a reply `{id, success, result,
- * mimeType, byteLength, hash}` or `{id, success: false, error}`. A multipart
- * download is `DECODE_BEGIN`, one `DECODE_CHUNK` per message, and `DECODE_END`,
- * which alone answers, so the payload is never joined into one base64 string.
- * Replies carrying bytes carry `hash`, their djb2 digest, computed where the
- * bytes are already walked.
+ * `lib/clipboard-worker-bridge.ts` sends `{id, action, payload, mimeType}`
+ * and receives `{id, success, result, mimeType, byteLength}` or
+ * `{id, success: false, error}`. `ENCODE_BINARY_TO_B64` takes an
+ * ArrayBuffer, `ENCODE_TEXT_TO_B64` a string, both answering with the base64
+ * text; `DECODE_FROM_B64` takes base64 and answers with a string for
+ * `text/plain`, else with a transferred ArrayBuffer. `byteLength` is the
+ * decoded size, which the bridge reports and compares against limits.
+ *
+ * A multipart download arrives as `DECODE_BEGIN`, one `DECODE_CHUNK` per
+ * message, and `DECODE_END`, which alone answers; `DECODE_ABORT` drops an
+ * unfinished one. Only that keeps the payload off the main thread entirely:
+ * joining the chunks there first builds the whole base64 string, and then
+ * copies it again into the message that carries it here.
+ *
+ * Every reply carrying bytes also carries `hash`, the change-detection digest
+ * of those bytes, computed here because this is where they are already being
+ * walked; the main thread would otherwise run the same per-byte loop over a
+ * payload of any size. `HASH_BYTES` covers the one caller holding bytes that
+ * did not come through a codec, and `REENCODE_PNG` normalizes an image to PNG
+ * on an OffscreenCanvas rather than on the page's own.
  * @module
  */
-import { errorMessage } from './narrow.ts';
 import type { WorkerReply } from './clipboard-replies.ts';
+import { errorMessage } from './narrow.ts';
 
-/** Bytes per `String.fromCharCode` call, keeping its argument list bounded. */
+/** Bytes per `String.fromCharCode.apply` call, keeping its argument list bounded. */
 const CHUNK_SIZE = 0x8000;
 
 /** Seed of the djb2 digest the clipboard compares payloads by. */
 const HASH_SEED = 5381;
 
-/** One bridge request handed to the codec. */
+/** One bridge request to the codec. */
 export interface WorkerRequest {
     id: number;
     action: string;
     payload?: ArrayBuffer | string | Blob;
     mimeType?: string;
     hash?: number;
+}
+
+/**
+ * A request's payload as the text its action takes.
+ * @param request The request.
+ * @returns The payload.
+ * @throws Error where the payload is no text, which the dispatcher replies with.
+ */
+function textOf(request: WorkerRequest): string {
+    if (typeof request.payload !== 'string') throw new Error(`${request.action} takes text`);
+    return request.payload;
+}
+
+/**
+ * A request's payload as the bytes its action takes.
+ * @param request The request.
+ * @returns The payload.
+ * @throws Error where the payload is no ArrayBuffer.
+ */
+function bufferOf(request: WorkerRequest): ArrayBuffer {
+    if (!(request.payload instanceof ArrayBuffer)) throw new Error(`${request.action} takes an ArrayBuffer`);
+    return request.payload;
+}
+
+/**
+ * A request's payload as the image its action takes.
+ * @param request The request.
+ * @returns The payload.
+ * @throws Error where the payload is no Blob.
+ */
+function blobOf(request: WorkerRequest): Blob {
+    if (!(request.payload instanceof Blob)) throw new Error(`${request.action} takes a Blob`);
+    return request.payload;
 }
 
 /** A multipart download in progress: decoded parts, the undecodable tail, and the running digest. */
@@ -44,60 +92,82 @@ interface DecodeStream {
     hash: number;
 }
 
-/** Sends one reply, handing over the buffers listed with it. */
-type Reply = (msg: WorkerReply, transfer?: Transferable[]) => void;
-
-/** A request's payload as text; throws where it is none, which the dispatcher replies with. */
-function textOf(request: WorkerRequest): string {
-    if (typeof request.payload !== 'string') throw new Error(`${request.action} takes text`);
-    return request.payload;
+/** The decoded text and its byte size. */
+interface DecodedText {
+    text: string;
+    byteLength: number;
 }
 
-/** A request's payload as bytes; throws where it is no ArrayBuffer. */
-function bufferOf(request: WorkerRequest): ArrayBuffer {
-    if (!(request.payload instanceof ArrayBuffer)) throw new Error(`${request.action} takes an ArrayBuffer`);
-    return request.payload;
-}
-
-/** A request's payload as an image; throws where it is no Blob. */
-function blobOf(request: WorkerRequest): Blob {
-    if (!(request.payload instanceof Blob)) throw new Error(`${request.action} takes a Blob`);
-    return request.payload;
-}
-
-/** djb2 over `bytes`, continuing from the digest `h` so one digest can span several chunks. */
+/**
+ * djb2 over `bytes`, continuing from `h` so a digest can span several chunks.
+ * @param h The running digest.
+ * @param bytes The bytes to fold in.
+ * @returns The digest continued over `bytes`.
+ */
 function hashBytes(h: number, bytes: Uint8Array): number {
     for (let i = 0; i < bytes.length; i++) h = ((h << 5) + h + bytes[i]) | 0;
     return h;
 }
 
-/** Base64 of `bytes`, built in bounded `String.fromCharCode` argument lists. */
-function bytesToBase64(bytes: Uint8Array): string {
-    let binString = '';
+/**
+ * @param text The text to encode.
+ * @returns Base64 of the UTF-8 encoding of `text`.
+ */
+function stringToBase64(text: string): string {
+    const bytes = new TextEncoder().encode(text);
+    let binString = "";
     for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
-        binString += String.fromCharCode(...bytes.subarray(i, i + CHUNK_SIZE));
+        const chunk = bytes.subarray(i, i + CHUNK_SIZE);
+        binString += String.fromCharCode(...chunk);
     }
     return btoa(binString);
 }
 
-/** The bytes `base64` decodes to. */
-function base64ToBytes(base64: string): Uint8Array<ArrayBuffer> {
+/**
+ * @param base64 The base64 text to decode.
+ * @returns The decoded UTF-8 text and its byte size.
+ */
+function base64ToString(base64: string): DecodedText {
     const binString = atob(base64);
-    const bytes = new Uint8Array(binString.length);
-    for (let i = 0; i < binString.length; i++) bytes[i] = binString.charCodeAt(i);
-    return bytes;
-}
-
-/** Appends decoded bytes to `stream`, continuing its digest. */
-function appendBytes(stream: DecodeStream, bytes: Uint8Array): void {
-    stream.parts.push(bytes);
-    stream.bytes += bytes.length;
-    stream.hash = hashBytes(stream.hash, bytes);
+    const len = binString.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+        bytes[i] = binString.charCodeAt(i);
+    }
+    return { text: new TextDecoder().decode(bytes), byteLength: len };
 }
 
 /**
- * Decodes as much of `text` as forms whole base64 quartets onto `stream`,
- * keeping the rest for the next chunk: a sender may split its base64 anywhere.
+ * @param base64 The base64 text to decode.
+ * @returns The decoded bytes.
+ */
+function base64ToBytes(base64: string): Uint8Array<ArrayBuffer> {
+    const binString = atob(base64);
+    const len = binString.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+        bytes[i] = binString.charCodeAt(i);
+    }
+    return bytes;
+}
+
+/**
+ * @param bytes The bytes to encode.
+ * @returns The base64 of `bytes`.
+ */
+function bytesToBase64(bytes: Uint8Array): string {
+    let binString = "";
+    for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+        const chunk = bytes.subarray(i, i + CHUNK_SIZE);
+        binString += String.fromCharCode(...chunk);
+    }
+    return btoa(binString);
+}
+
+/**
+ * Decodes as much of `text` as forms whole base64 quartets, appending the
+ * bytes to `stream` and keeping the rest for the next chunk. A sender is free
+ * to split its base64 anywhere, so a chunk boundary need not fall on one.
  * @param stream The transfer to append to.
  * @param text The next base64 chunk.
  */
@@ -105,13 +175,25 @@ function feedStream(stream: DecodeStream, text: string): void {
     const pending = stream.remainder + text;
     const whole = pending.length - (pending.length % 4);
     stream.remainder = pending.slice(whole);
-    if (whole) appendBytes(stream, base64ToBytes(pending.slice(0, whole)));
+    if (!whole) return;
+    const bytes = base64ToBytes(pending.slice(0, whole));
+    stream.parts.push(bytes);
+    stream.bytes += bytes.length;
+    stream.hash = hashBytes(stream.hash, bytes);
 }
 
-/** The stream's bytes as one buffer, remainder included. */
+/**
+ * @param stream The transfer to finish.
+ * @returns The stream's bytes as one buffer, remainder included.
+ */
 function drainStream(stream: DecodeStream): Uint8Array<ArrayBuffer> {
-    if (stream.remainder) appendBytes(stream, base64ToBytes(stream.remainder));
-    stream.remainder = '';
+    if (stream.remainder) {
+        const tail = base64ToBytes(stream.remainder);
+        stream.parts.push(tail);
+        stream.bytes += tail.length;
+        stream.hash = hashBytes(stream.hash, tail);
+        stream.remainder = '';
+    }
     const all = new Uint8Array(stream.bytes);
     let at = 0;
     for (const part of stream.parts) {
@@ -122,34 +204,26 @@ function drainStream(stream: DecodeStream): Uint8Array<ArrayBuffer> {
     return all;
 }
 
-/** The image as PNG, drawn on an OffscreenCanvas where there is one, else on a page canvas; throws where none can. */
-async function drawPng(bmp: ImageBitmap): Promise<Blob> {
-    if (typeof OffscreenCanvas !== 'undefined') {
-        const canvas = new OffscreenCanvas(bmp.width, bmp.height);
-        const ctx = canvas.getContext('2d');
-        if (!ctx) throw new Error('no 2d context');
-        ctx.drawImage(bmp, 0, 0);
-        return await canvas.convertToBlob({ type: 'image/png' });
-    }
-    if (typeof document === 'undefined') throw new Error('no canvas available');
-    const canvas = document.createElement('canvas');
-    canvas.width = bmp.width;
-    canvas.height = bmp.height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('no 2d context');
-    ctx.drawImage(bmp, 0, 0);
-    return await new Promise<Blob>((resolve, reject) => {
-        canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('PNG encode failed'))), 'image/png');
-    });
-}
+/** Sends one reply, handing over the buffers listed with it. */
+type Reply = (msg: WorkerReply, transfer?: Transferable[]) => void;
 
-/** Normalizes the image in `blob` to PNG and answers request `id` through `reply`. */
+/**
+ * Normalizes an image to PNG on an OffscreenCanvas, which is the same decode
+ * and encode the page would otherwise run on its own canvas and block on for
+ * as long as the image is large.
+ * @param id Request id to answer.
+ * @param blob The image.
+ * @param reply Takes the answer.
+ */
 async function reencodeToPng(id: number, blob: Blob, reply: Reply): Promise<void> {
     let bmp: ImageBitmap | null = null;
     try {
         bmp = await createImageBitmap(blob);
-        const png = await drawPng(bmp);
-        reply({ id, success: true, result: png, mimeType: 'image/png', byteLength: png.size });
+        const canvas = new OffscreenCanvas(bmp.width, bmp.height);
+        canvas.getContext('2d')!.drawImage(bmp, 0, 0);
+        const png = await canvas.convertToBlob({ type: 'image/png' });
+        reply({ id, success: true, result: png, mimeType: 'image/png',
+                           byteLength: png!.size });
     } catch (err) {
         reply({ id, success: false, error: errorMessage(err) });
     } finally {
@@ -158,35 +232,32 @@ async function reencodeToPng(id: number, blob: Blob, reply: Reply): Promise<void
 }
 
 /**
- * Creates a codec whose multipart downloads in progress are its own.
- * @param reply Receives every answer, with the buffers it hands over.
- * @returns The dispatcher for one request; failures are answered, never thrown.
+ * Creates a codec, the multipart downloads it has in progress its own.
+ * @param reply Takes every answer, with the buffers it hands over.
+ * @returns The dispatcher of one request, which answers a failure rather than
+ *     throwing it.
  */
 export function createClipboardCodec(reply: Reply): (data: WorkerRequest) => void {
+    /** Multipart downloads in progress, by request id. */
     const streams = new Map<number, DecodeStream>();
-
-    /** Answers with decoded bytes: text for `text/plain`, else the buffer, transferred. */
-    const replyBytes = (id: number, bytes: Uint8Array<ArrayBuffer>, mimeType: string | undefined, hash: number | undefined): void => {
-        const digest = hash === undefined ? {} : { hash };
-        const { byteLength } = bytes;
-        if (mimeType === 'text/plain') {
-            reply({ id, success: true, mimeType, result: new TextDecoder().decode(bytes), byteLength, ...digest });
-        } else {
-            reply({ id, success: true, mimeType, result: bytes.buffer, byteLength, ...digest }, [bytes.buffer]);
-        }
-    };
-
     return (data: WorkerRequest): void => {
         const { id, action, mimeType } = data;
+
         try {
             if (action === 'DECODE_BEGIN') {
                 streams.set(id, { mimeType, parts: [], remainder: '', bytes: 0, hash: HASH_SEED });
-            } else if (action === 'DECODE_CHUNK') {
+                return;
+            }
+            if (action === 'DECODE_CHUNK') {
                 const stream = streams.get(id);
                 if (stream) feedStream(stream, textOf(data));
-            } else if (action === 'DECODE_ABORT') {
+                return;
+            }
+            if (action === 'DECODE_ABORT') {
                 streams.delete(id);
-            } else if (action === 'DECODE_END') {
+                return;
+            }
+            if (action === 'DECODE_END') {
                 const stream = streams.get(id);
                 streams.delete(id);
                 if (!stream) {
@@ -194,21 +265,52 @@ export function createClipboardCodec(reply: Reply): (data: WorkerRequest) => voi
                     return;
                 }
                 const bytes = drainStream(stream);
-                replyBytes(id, bytes, stream.mimeType, stream.hash);
-            } else if (action === 'HASH_BYTES') {
+                if (stream.mimeType === 'text/plain') {
+                    reply({ id, success: true, mimeType: stream.mimeType,
+                                       result: new TextDecoder().decode(bytes),
+                                       byteLength: bytes.byteLength, hash: stream.hash });
+                } else {
+                    reply(
+                        { id, success: true, mimeType: stream.mimeType,
+                          result: bytes.buffer, byteLength: bytes.byteLength,
+                          hash: stream.hash },
+                        [bytes.buffer]);
+                }
+                return;
+            }
+            if (action === 'HASH_BYTES') {
                 const bytes = new Uint8Array(bufferOf(data));
-                reply({ id, success: true, byteLength: bytes.byteLength, hash: hashBytes(HASH_SEED, bytes) });
-            } else if (action === 'REENCODE_PNG') {
+                reply({ id, success: true, byteLength: bytes.byteLength,
+                                   hash: hashBytes(HASH_SEED, bytes) });
+                return;
+            }
+            if (action === 'REENCODE_PNG') {
                 void reencodeToPng(id, blobOf(data), reply);
-            } else if (action === 'ENCODE_BINARY_TO_B64') {
+                return;
+            }
+            if (action === 'ENCODE_BINARY_TO_B64') {
                 const bytes = new Uint8Array(bufferOf(data));
-                reply({ id, success: true, result: bytesToBase64(bytes), byteLength: bytes.byteLength,
-                        hash: hashBytes(data.hash === undefined ? HASH_SEED : data.hash, bytes) });
-            } else if (action === 'ENCODE_TEXT_TO_B64') {
-                reply({ id, success: true, result: bytesToBase64(new TextEncoder().encode(textOf(data))) });
-            } else if (action === 'DECODE_FROM_B64') {
-                const bytes = base64ToBytes(textOf(data));
-                replyBytes(id, bytes, mimeType, mimeType === 'text/plain' ? undefined : hashBytes(HASH_SEED, bytes));
+                const base64 = bytesToBase64(bytes);
+                reply({ id, success: true, result: base64,
+                                   byteLength: bytes.byteLength,
+                                   hash: hashBytes(data.hash === undefined ? HASH_SEED : data.hash, bytes) });
+            }
+            else if (action === 'ENCODE_TEXT_TO_B64') {
+                const base64 = stringToBase64(textOf(data));
+                reply({ id, success: true, result: base64 });
+            }
+            else if (action === 'DECODE_FROM_B64') {
+                if (mimeType === 'text/plain') {
+                    const { text, byteLength } = base64ToString(textOf(data));
+                    reply({ id, success: true, result: text, mimeType, byteLength });
+                } else {
+                    const bytes = base64ToBytes(textOf(data));
+                    reply(
+                        { id, success: true, result: bytes.buffer, mimeType,
+                          byteLength: bytes.byteLength, hash: hashBytes(HASH_SEED, bytes) },
+                        [bytes.buffer]
+                    );
+                }
             } else {
                 reply({ id, success: false, error: `Unknown action: ${action}` });
             }
