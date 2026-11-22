@@ -209,24 +209,26 @@ test('transfer_saturation', async () => {
     try {
         const dl: Transfer = () => timedCurl([`${BASE_URL}/api/files/blob.bin`]);
 
-        let [[mbps, dt], fps] = await scenario(res, host, 'download-cc', 6000, 0, 0, dl);
+        // What a download has of the link is to be its own, not what a stream stalled beside
+        // it leaves: each case tells how often the gate let frames go (`let go`).
+        let [[mbps, dt], fps, , letGo] = await scenario(res, host, 'download-cc', 6000, 0, 0, dl);
         let [med, stall] = fpsHealth(fps);
         res.check('download-cc: download completes through the shared link', mbps > 1.0, `${mbps.toFixed(2)} Mbit/s in ${dt.toFixed(0)}s`);
         res.check('download-cc: stream keeps flowing beside the download', med >= 30 && stall <= 0.25,
-            `median fps=${med} stall_frac=${stall.toFixed(2)} samples=${show(fps.slice(0, 12))}`);
+            `median fps=${med} stall_frac=${stall.toFixed(2)} let go=${letGo} samples=${show(fps.slice(0, 12))}`);
 
-        [[mbps, dt], fps] = await scenario(res, host, 'download-fat', 6000, 0, 0, dl, 1024 * 1024);
+        [[mbps, dt], fps, , letGo] = await scenario(res, host, 'download-fat', 6000, 0, 0, dl, 1024 * 1024);
         [med, stall] = fpsHealth(fps);
         res.check("download-fat: the download takes the link's spare capacity behind a fat buffer", mbps >= 2.0,
             `${mbps.toFixed(2)} Mbit/s in ${dt.toFixed(0)}s`);
         res.check('download-fat: stream keeps flowing beside it', med >= 30 && stall <= 0.25,
-            `median fps=${med} stall_frac=${stall.toFixed(2)} samples=${show(fps.slice(0, 12))}`);
+            `median fps=${med} stall_frac=${stall.toFixed(2)} let go=${letGo} samples=${show(fps.slice(0, 12))}`);
 
-        [[mbps], fps] = await scenario(res, host, 'download-static', 6000, 0, 3, dl);
+        [[mbps], fps, , letGo] = await scenario(res, host, 'download-static', 6000, 0, 3, dl);
         [med, stall] = fpsHealth(fps);
         res.check('download-static: static cap is honored', mbps >= 2.0 && mbps <= 3.8, `${mbps.toFixed(2)} Mbit/s`);
         res.check('download-static: stream stays clean under the cap', med >= 45 && stall <= 0.10,
-            `median fps=${med} stall_frac=${stall.toFixed(2)}`);
+            `median fps=${med} stall_frac=${stall.toFixed(2)} let go=${letGo}`);
 
         const up: Transfer = (root) => timedCurl(['-X', 'POST', '-H', 'X-Upload-Path: sat-upload.bin',
             '--data-binary', `@${join(root, 'blob.bin')}`, `${BASE_URL}/api/upload`]);
