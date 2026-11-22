@@ -246,6 +246,7 @@ async fn run_socket(
                     continue;
                 }
                 _ = beat.tick() => {
+                    client.keep_transfer_floor();
                     let at = now();
                     if ping_out.is_some_and(|sent| at - sent >= HEARTBEAT_ANSWER_S && last_heard < sent) {
                         client.set_closed(Some(1006));

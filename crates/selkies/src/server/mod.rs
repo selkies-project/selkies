@@ -392,6 +392,7 @@ pub async fn run() -> Result<(), String> {
     }));
     let rtc_sessions = Arc::new(crate::webrtc::wiring::RtcSessions::default());
     rtc_sessions.bind(rtc_service.clone());
+    rtc_sessions.keep_floors();
     let state = state.with_turn(rtc_service.clone());
 
     let hooks = Hooks {

@@ -849,6 +849,12 @@ impl Client {
         true
     }
 
+    /// Keep the transfers' clock on this socket to the path's own floor while no transfer
+    /// pings it (`UplinkClock::keep_floor`), on the reader's beat.
+    pub fn keep_transfer_floor(&self) {
+        self.uplink_clock().keep_floor();
+    }
+
     /// The ping clock a file transfer's uplink gauge reads over this socket.
     pub fn uplink_clock(&self) -> Arc<UplinkClock> {
         self.transfer_clock
