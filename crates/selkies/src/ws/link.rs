@@ -1233,6 +1233,12 @@ pub trait GateEffects {
     fn waiting_frames(&self) -> usize {
         0
     }
+    /// Frames the page's relay left out of its paced path over the last two checks, for
+    /// want of room (`ws::relay`): stream standing behind the path to the steer, as what
+    /// waits is, and nothing the gate could let go.
+    fn left_out_frames(&self) -> usize {
+        0
+    }
     /// How long the page's last ack was held on its way back, past the least any took, in
     /// seconds, where its stamps tell (`ws::flight`): an upload filling its uplink.
     fn held_back(&self) -> f64 {
@@ -1349,8 +1355,10 @@ impl DisplayLink {
             Some(at) => self.sent_timestamps.iter().filter(|e| e.1 > at).count() as f64,
         } + effects.waiting_frames() as f64;
         // What waits with the relay is the stream's queue to the steer as well, once it has
-        // stood through two checks.
-        self.waiting_ms = effects.waiting_frames() as f64 / client_fps.max(1.0) * 1000.0;
+        // stood through two checks, and so is what the relay left out for want of room.
+        self.waiting_ms = (effects.waiting_frames() + effects.left_out_frames()) as f64
+            / client_fps.max(1.0)
+            * 1000.0;
         self.waiting_stood_ms = waited_ms.min(self.waiting_ms);
         let allowed_desync_frames = input.allowed_desync_ms / 1000.0 * client_fps;
         let floor_ms = self.rtt_floor_ms.unwrap_or(0.0);
@@ -1530,6 +1538,7 @@ mod tests {
         idrs: usize,
         now: f64,
         waiting: usize,
+        left_out: usize,
         held_back: f64,
     }
 
@@ -1576,6 +1585,9 @@ mod tests {
         }
         fn waiting_frames(&self) -> usize {
             self.waiting
+        }
+        fn left_out_frames(&self) -> usize {
+            self.left_out
         }
         fn held_back(&self) -> f64 {
             self.held_back
@@ -1814,6 +1826,47 @@ mod tests {
             stood.push((link.waiting_stood_ms / 1000.0 * FPS).round() as usize);
         }
         assert_eq!(stood, vec![0, 0, 6, 3, 0]);
+    }
+
+    /// What the relay left out of a paced path for want of room stands behind it as what
+    /// waits does, to the steer; the gate has nothing of it to let go, and stays open over a
+    /// run of any length.
+    #[test]
+    fn what_the_relay_left_out_is_the_steers_queue_and_none_of_the_gates() {
+        let mut link = DisplayLink::new();
+        link.acknowledged_frame_id = 100;
+        link.last_sent_frame_id = 100;
+        link.has_sent_any_frame = true;
+        link.rtt_floor_ms = Some(FLOOR_MS);
+        let mut fake = Fake {
+            now: 1000.0,
+            ..Default::default()
+        };
+        let input = TickInput {
+            capturing: true,
+            configured_fps: FPS,
+            steered: true,
+            interval_s: INTERVAL,
+            allowed_desync_ms: BACKPRESSURE_ALLOWED_DESYNC_MS,
+            primary: false,
+        };
+        let mut stood = Vec::new();
+        for (n, (waiting, left_out)) in [(0usize, 0usize), (1, 5), (0, 60), (1, 4), (0, 0)]
+            .into_iter()
+            .enumerate()
+        {
+            let clock = 1000.0 + (n + 1) as f64 * INTERVAL;
+            fake.now = clock;
+            fake.waiting = waiting;
+            fake.left_out = left_out;
+            link.acked_at = clock;
+            fake.heard_at = Some(clock);
+            link.backpressure_tick("primary", input, clock, &mut fake);
+            stood.push((link.waiting_stood_ms / 1000.0 * FPS).round() as usize);
+            assert!(link.backpressure_enabled, "check {n}");
+        }
+        assert_eq!(stood, vec![0, 0, 6, 5, 0]);
+        assert_eq!(link.gate_counts.triggered, 0);
     }
 
     #[test]

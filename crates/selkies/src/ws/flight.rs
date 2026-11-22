@@ -591,7 +591,6 @@ impl Flight {
             self.unpace(now);
             return true;
         }
-        let floor = self.floor.unwrap_or(0.0);
         // The oldest frame the page had not counted when its last stamp left has been on
         // its way out for at least that long.
         let late = mark - oldest > self.late_line();
@@ -608,20 +607,42 @@ impl Flight {
         if !self.paced {
             return true;
         }
-        // What is in flight includes a round trip's worth that has arrived and whose word
-        // is on its way back, and what arrived since the last stamp left; past that the
-        // bound may stand queued, or on a long path as much again as the round trip,
-        // without which the rate read off a window this small would never grow back to
-        // what the path carries.
-        let in_flight = (self.written - self.delivered) as f64;
-        let since = (now - self.stamped_at).clamp(0.0, FLIGHT_STAMP_S);
-        let fits = self.rate(now).is_some_and(|rate| {
-            in_flight <= rate * (floor + bound.max(floor) + self.held_back(now) + since)
-        });
+        let fits = self.fits(now, 0);
         if fits && !late && !more {
             self.unpace(now);
         }
         fits
+    }
+
+    /// Whether what is in flight on a paced path at `now`, and `more` bytes with it, is no
+    /// more than the path holds on time. What is in flight includes a round trip's worth
+    /// that has arrived and whose word is on its way back, and what arrived since the last
+    /// stamp left; past that the bound may stand queued, or on a long path as much again as
+    /// the round trip, without which the rate read off a window this small would never grow
+    /// back to what the path carries.
+    fn fits(&self, now: f64, more: usize) -> bool {
+        let floor = self.floor.unwrap_or(0.0);
+        let in_flight = (self.written - self.delivered) as f64 + more as f64;
+        let since = (now - self.stamped_at).clamp(0.0, FLIGHT_STAMP_S);
+        self.rate(now).is_some_and(|rate| {
+            in_flight <= rate * (floor + self.bound.max(floor) + self.held_back(now) + since)
+        })
+    }
+
+    /// Whether a paced path has room at `now` for a bulk frame of `len` bytes, asked by a
+    /// sender that leaves out what there is no room for (`ws::relay`) and hands over the
+    /// newest frame when there is, so none ages in the writer's hands: what `clear` would
+    /// answer, with the frame itself counted in what must fit. A frame the writer already
+    /// holds goes behind what fits, whatever its size; one that is yet to be handed over,
+    /// a key frame as often as not where the encoder predicts no further back, goes when
+    /// the path holds it on time too.
+    pub fn would_clear(&self, now: f64, len: usize) -> bool {
+        !self.trusted
+            || !self.paced
+            || self.mark(now).is_none()
+            || self.delivered >= self.bulk_written
+            || self.out.is_empty()
+            || self.fits(now, len)
     }
 
     /// What a round trip may run past the floor and the bound on this path without being
@@ -1192,6 +1213,76 @@ mod tests {
         }
         assert!(paced == 0.0 && longest < 0.002, "{paced} {longest}");
         assert!((flight.back - 12.0).abs() < 0.1, "{}", flight.back);
+    }
+
+    #[test]
+    fn a_stream_that_cannot_shrink_is_sent_at_the_rate_its_path_takes_each_frame_new() {
+        // An encoder at its coarsest still makes 12.5 KiB of each frame, 60 a second, where
+        // the steer asked for a fifth of that: a path narrowed to 187.5 kB a second takes
+        // about fourteen of them. Their sender (`ws::relay`) hands the writer a frame only
+        // as it would go at once and leaves out what comes meanwhile, telling the writer
+        // that frames wait for as long as it does. The path is paced through the stretch and
+        // never holds more than the bound and a frame, the frames that go are as many as it
+        // takes, none waits, and once it is wide again all of them go, unpaced.
+        const FRAME: usize = 12_800;
+        const TOLD: f64 = 0.25;
+        let mut flight = Flight::default();
+        let mut path = Path::new(2_500_000.0, 0.02);
+        let (mut due, mut now) = (10.0, 10.0);
+        let mut left_out = f64::NEG_INFINITY;
+        let (mut sent, mut gone, mut paced) = ([0u32; 3], [0u32; 3], [0.0f64; 3]);
+        let mut worst = 0.0f64;
+        while now < 22.0 {
+            let phase = if now < 12.0 {
+                0
+            } else if now < 17.0 {
+                1
+            } else {
+                2
+            };
+            path.rate = if phase == 1 { 187_500.0 } else { 2_500_000.0 };
+            path.deliver(&mut flight, now);
+            if now >= due {
+                due += 1.0 / 60.0;
+                let more = now - left_out <= TOLD;
+                if flight.paced() && !flight.would_clear(now, FRAME) {
+                    left_out = now;
+                    gone[phase] += 1;
+                } else if flight.clear(now, FLIGHT_LATE_S, more) {
+                    path.write(&mut flight, FRAME, now, true);
+                    sent[phase] += 1;
+                } else {
+                    // The frame the pacing began on is the one the writer holds: left out
+                    // here, where the writer would write it once it is clear.
+                    left_out = now;
+                    gone[phase] += 1;
+                }
+                if now > 13.0 && now < 17.0 {
+                    worst = worst.max(path.free_at - now);
+                }
+            }
+            if flight.paced() {
+                paced[phase] += 0.001;
+            }
+            now += 0.001;
+        }
+        assert!(gone[0] == 0 && paced[0] == 0.0, "{gone:?} {paced:?}");
+        assert!(
+            paced[1] > 4.5,
+            "paced through the narrow stretch: {paced:?}"
+        );
+        assert!(
+            (60..=75).contains(&sent[1]),
+            "about 14 frames a second of the 60: {sent:?}"
+        );
+        assert!(
+            worst < FLIGHT_LATE_S + 1.5 * FRAME as f64 / 187_500.0,
+            "the path holds the bound and a frame at the most: {worst}"
+        );
+        assert!(
+            paced[2] < 0.5 && gone[2] < 20 && sent[2] > 280,
+            "and wide again it takes them all: {paced:?} {gone:?} {sent:?}"
+        );
     }
 
     #[test]

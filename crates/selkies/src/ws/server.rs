@@ -3492,12 +3492,17 @@ impl WsService {
             }
             _ => 0,
         };
+        // What the relay left out of a paced path over the last two checks.
+        let left_out = relay.as_ref().map_or(0, |relay| {
+            relay.left_out_frames(2.0 * self.timings.backpressure_check_s)
+        });
         let mut effects = CheckEffects {
             display: display_id,
             capture: capture.clone(),
             relay,
             client: client.clone(),
             waiting,
+            left_out,
             held_back: client.as_ref().map_or(0.0, |c| c.held_back()),
             metrics: self.deps.metrics.clone(),
         };
@@ -4895,6 +4900,7 @@ struct CheckEffects<'a> {
     /// interval, and how long the way back holds the page's acks, both read before the link
     /// is locked.
     waiting: usize,
+    left_out: usize,
     held_back: f64,
     metrics: Option<Arc<dyn crate::ws::host::Metrics>>,
 }
@@ -4952,6 +4958,10 @@ impl GateEffects for CheckEffects<'_> {
 
     fn waiting_frames(&self) -> usize {
         self.waiting
+    }
+
+    fn left_out_frames(&self) -> usize {
+        self.left_out
     }
 
     fn held_back(&self) -> f64 {

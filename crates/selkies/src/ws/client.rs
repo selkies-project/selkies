@@ -637,6 +637,15 @@ impl Client {
         self.flight.lock().paced_within(now(), span)
     }
 
+    /// What the sender of this socket's video asks before it hands a frame of `len` bytes
+    /// over: whether the writer paced the path within `span` seconds, and whether the path
+    /// has room for the frame now (`Flight::would_clear`).
+    pub fn bulk_pacing(&self, span: f64, len: usize) -> (bool, bool) {
+        let flight = self.flight.lock();
+        let at = now();
+        (flight.paced_within(at, span), flight.would_clear(at, len))
+    }
+
     /// Wait for a queued frame while the peer keeps taking bytes.
     async fn watch_send(
         &self,
