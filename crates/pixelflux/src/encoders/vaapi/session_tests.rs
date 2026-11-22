@@ -919,6 +919,47 @@ fn hevc_lists_the_kept_frames_in_its_reference_picture_set() {
     });
 }
 
+/// Every HEVC slice filters across its edges, in the driver's slice parameters and in its
+/// packed header alike, where `slice_loop_filter_across_slices_enabled_flag` is the last bit
+/// before the stop bit: iHD filters across them in its reconstruction whatever a slice says,
+/// so a header that turns it off leaves every decoder a picture apart from the encoder's.
+#[test]
+fn hevc_slices_filter_across_their_edges_in_header_and_parameters() {
+    mock::reset(Driver::generous());
+    let mut enc = session(Codec::H265, false);
+    for t in 0..3u64 {
+        encode(&mut enc, t, t == 0);
+        mock::with(|d| {
+            for buffer in d.last_buffers(VAEncSliceParameterBufferType) {
+                let slice: VAEncSliceParameterBufferHEVC =
+                    unsafe { ptr::read_unaligned(buffer.as_ptr() as *const _) };
+                assert_eq!(
+                    unsafe {
+                        slice
+                            .slice_fields
+                            .bits
+                            .slice_loop_filter_across_slices_enabled_flag()
+                    },
+                    1,
+                    "frame {t}: the slice parameters"
+                );
+            }
+            let headers: Vec<Vec<u8>> = d
+                .last_packed()
+                .into_iter()
+                .filter(|p| p.0 == VAEncPackedHeaderSlice)
+                .map(|p| nal(&p.1, if t == 0 { 19 } else { 1 }, true))
+                .collect();
+            assert!(!headers.is_empty(), "frame {t}: no packed slice header");
+            for rbsp in headers {
+                let stop = rbsp.len() * 8 - 1 - rbsp.last().unwrap().trailing_zeros() as usize;
+                let flag = (rbsp[(stop - 1) / 8] >> (7 - (stop - 1) % 8)) & 1;
+                assert_eq!(flag, 1, "frame {t}: the slice header");
+            }
+        });
+    }
+}
+
 /// VP9 refreshes the slot of each frame's timestamp and predicts from the slot of the newest
 /// surviving frame, and from the frame before it as GOLDEN where there is one, every frame
 /// error-resilient.

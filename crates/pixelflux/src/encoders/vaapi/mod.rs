@@ -3444,6 +3444,77 @@ mod tests {
         ))
     }
 
+    /// On a VA-API device: every codec it encodes decodes, frame for frame, to the picture the
+    /// encoder kept as its reference, over two seconds of `moving_picture` at a constant rate
+    /// with the one reference a WebSockets page streams with, since every frame after one the
+    /// decoder rebuilds otherwise predicts from the difference until a key frame. Every codec
+    /// the device opens has its reconstruction read and compared.
+    #[test]
+    #[ignore]
+    fn vaapi_reconstruction_matches_the_decoder() {
+        use crate::webcam::decode::{Decoder as _, VideoDecoder};
+        let (w, h) = (1280usize, 720usize);
+        let mut opened = 0;
+        for codec in [Codec::H264, Codec::H265, Codec::Vp8, Codec::Vp9, Codec::Av1] {
+            let settings = CaptureSettings {
+                width: w as i32,
+                height: h as i32,
+                codec,
+                target_fps: 60.0,
+                video_cbr_mode: true,
+                video_bitrate_kbps: 8000,
+                video_reference_frames: 1,
+                omit_stripe_headers: true,
+                ..Default::default()
+            };
+            let mut enc = match VaapiEncoder::new(&settings, codec, Input::Host { rgba: false }) {
+                Ok(enc) => enc,
+                Err(e) => {
+                    println!("{codec:?}: {e}");
+                    continue;
+                }
+            };
+            opened += 1;
+            let mut dec = VideoDecoder::new(codec).expect("decoder");
+            let (mut compared, mut apart, mut worst) = (0usize, 0usize, 0u8);
+            for t in 0..120usize {
+                let out = enc
+                    .encode_host(&moving_picture(t), w * 4, false, t as u64, 25, t == 0)
+                    .expect("encode");
+                assert!(dec.decode(&out).expect("decode"), "{codec:?}: frame {t}");
+                let frame = dec.frame().expect("frame");
+                let recon = enc
+                    .surfaces_of
+                    .get(&(t as u64))
+                    .copied()
+                    .unwrap_or_else(|| panic!("{codec:?}: frame {t} kept no reconstruction"));
+                let Some((VA_FOURCC_NV12, _, rows)) = enc.luma_rows(recon) else {
+                    panic!("{codec:?}: frame {t}'s reconstruction reads back as no NV12 luma");
+                };
+                for (row, y) in rows.chunks(w).zip((0..h).step_by(PSNR_ROW_STEP)) {
+                    for (x, &kept) in row.iter().enumerate() {
+                        let shown = frame.y[y * frame.y_stride + x];
+                        compared += 1;
+                        if shown != kept {
+                            apart += 1;
+                            worst = worst.max(shown.abs_diff(kept));
+                        }
+                    }
+                }
+            }
+            println!(
+                "{codec:?} on {}: {apart} of {compared} sampled pixels apart, at most {worst} levels",
+                enc.vendor()
+            );
+            assert!(compared > 0, "{codec:?}: nothing compared");
+            assert_eq!(
+                apart, 0,
+                "{codec:?}: the decoder's pictures left the encoder's"
+            );
+        }
+        assert!(opened > 0, "no codec opened on this device");
+    }
+
     /// On a VA-API device (`cargo test vaapi_ -- --ignored --nocapture`): a loss reported every
     /// thirteen frames, four frames deep, is predicted past from the frame before it: a decoder
     /// that never saw the lost frames shows every later picture as one that saw them all does.
