@@ -324,6 +324,41 @@ impl SessionDirectory for ActiveSessions {
     }
 }
 
+/// The apps runner's host: the input stack of the transport serving now, which the one queue the
+/// transports share reports through and starts its jobs in the session environment of.
+pub struct ActiveApps {
+    /// Which transport serves now.
+    pub modes: Arc<ModeSupervisor>,
+    /// The WebSockets transport's input stack, weak since it holds the runner this is the host of.
+    pub websockets: std::sync::Weak<Dispatcher>,
+    /// The WebRTC transport's input stack, likewise.
+    pub webrtc: std::sync::Weak<Dispatcher>,
+}
+
+impl ActiveApps {
+    /// The input stack of the transport serving now: WebRTC's in that mode, else WebSockets',
+    /// which also answers between services, when none serves.
+    fn current(&self) -> Option<Arc<Dispatcher>> {
+        match crate::http::Supervisor::current_mode(&*self.modes).as_deref() {
+            Some("webrtc") => self.webrtc.upgrade(),
+            _ => self.websockets.upgrade(),
+        }
+    }
+}
+
+#[async_trait]
+impl crate::session_screens::JobHost for ActiveApps {
+    async fn job_env(&self) -> Option<std::collections::HashMap<String, String>> {
+        crate::session_screens::JobHost::job_env(&*self.current()?).await
+    }
+
+    fn broadcast(&self, action: &str) {
+        if let Some(dispatcher) = self.current() {
+            crate::session_screens::JobHost::broadcast(&*dispatcher, action);
+        }
+    }
+}
+
 /// Recordings provision the sink they capture.
 pub struct SinkProvisioner;
 
@@ -393,6 +428,33 @@ impl host::Metrics for ServerMetrics {
 
     fn set_latency(&self, ms: f64) {
         self.0.set_latency(ms);
+    }
+
+    fn count_keyframe_request(&self, display: &str, cause: host::KeyFrameCause) {
+        self.0.count_websockets_event(
+            crate::stats::metrics::WsCounter::KeyframeRequests,
+            display,
+            cause.label(),
+            1,
+        );
+    }
+
+    fn count_gate_events(&self, display: &str, event: &'static str, count: u32) {
+        self.0.count_websockets_event(
+            crate::stats::metrics::WsCounter::GateEvents,
+            display,
+            event,
+            count,
+        );
+    }
+
+    fn count_relay_run(&self, display: &str, event: crate::ws::relay::RunEvent) {
+        self.0.count_websockets_event(
+            crate::stats::metrics::WsCounter::RelayRuns,
+            display,
+            event.label(),
+            1,
+        );
     }
 }
 

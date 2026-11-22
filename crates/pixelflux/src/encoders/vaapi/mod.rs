@@ -223,6 +223,20 @@ enum ConstantRate {
 /// Seconds of the target iHD's AV1 rate control is given as a buffer (`ConstantRate`).
 const IHD_AV1_BUFFER_S: f64 = 0.1;
 
+/// The buffer, and the fullness it starts at, in seconds of the new target, that a target
+/// changed within a sequence brings an unbounded session's rate control
+/// (`ConstantRate::Unbounded`, `rate_control_at`). iHD's H.264 and HEVC rate control bounds
+/// nothing past such a change: it codes the next frame at any size, banks what a still screen's
+/// frames leave of the target, and spends the bank on the first frame that moves. At 2560x1280
+/// and 12 Mbit/s, Arc's HEVC coded a cleanup frame of 723 kB on a change of 8 kbit/s and the
+/// first moving frame after a still screen at 795 kB, 32 budgets; under this buffer they came
+/// to 262 and 10 kB, the still screen to the same picture within 0.5 dB and motion after it
+/// within 0.5 dB. The sequence's own key frame starts unbounded, which a buffer from there
+/// starves.
+const RESET_BUFFER_S: f64 = 1.0;
+/// The fullness, in seconds of the new target, the buffer `RESET_BUFFER_S` starts at.
+const RESET_FULLNESS_S: f64 = 0.05;
+
 /// The rows a reconstruction is compared with its source on (`VaapiEncoder::last_psnr`): one
 /// in this many.
 const PSNR_ROW_STEP: usize = 8;
@@ -892,6 +906,29 @@ pub(super) struct Frame<'a> {
     pub slots: SlotPlan,
     /// The surface each VP8 buffer holds, LAST, GOLDEN, ALTREF.
     pub slot_surfaces: [VASurfaceID; 3],
+}
+
+impl Frame<'_> {
+    /// The frame a predicted picture searches after its reference, as AV1's and VP9's GOLDEN:
+    /// the newest the decoder holds from before the one it predicts from, since its key frame
+    /// and not lost, which every client that decoded the reference decoded too, since the window
+    /// forgets every frame after a loss. A window that keeps anchors or reads acknowledgments
+    /// holds frames some client may lack, so a session that keeps either must not name this one.
+    /// Intel's motion search (Arc A750) against the reference alone codes a desktop scrolling
+    /// under a still panel poorly, every other frame two to three times the size of the one
+    /// before; searching the frame before as well took a 1080p scroll from 31.4 to 12.2 kB a
+    /// frame at 0.8 dB more on AV1, as FFmpeg's AV1 encoder over the same driver codes it
+    /// (11.1 kB), and from 47.6 to 24.7 kB at 0.5 dB more on VP9 (Alder Lake-N, whose search
+    /// copes with the panel, 18.8 to 17.7), at the same encode time. `None` for a key frame and
+    /// a frame with no such frame to search.
+    pub fn golden(&self) -> Option<(u64, VASurfaceID)> {
+        let (reference, _) = self.reference.filter(|_| !self.key)?;
+        self.held
+            .iter()
+            .rev()
+            .find(|&&(pts, _, lost)| !lost && pts >= self.key_pts && pts < reference)
+            .map(|&(pts, surface, _)| (pts, surface))
+    }
 }
 
 /// The codec arm of a session.
@@ -2123,8 +2160,9 @@ impl VaapiEncoder {
     /// The rate control of a sequence: the target, buffer, and frame rate a constant-rate
     /// session holds, with no filler data up to the target and each frame capped at the buffer
     /// where the driver takes a cap and codes under one (`ConstantRate`), and the frame rate
-    /// and quality level of any.
-    fn rate_control_at(&self, out: &mut Buffers, bps: u32) {
+    /// and quality level of any. A target changed within the sequence (`changed`) gives an
+    /// unbounded session the buffer `RESET_BUFFER_S` from `RESET_FULLNESS_S`.
+    fn rate_control_at(&self, out: &mut Buffers, bps: u32, changed: bool) {
         if self.rate.cbr {
             // The session's buffer spans the same time at a cleanup frame's rate.
             let vbv = (u64::from(self.rate.vbv()) * u64::from(bps)
@@ -2156,15 +2194,19 @@ impl VaapiEncoder {
                 rc.rc_flags.bits.set_disable_bit_stuffing(1);
             }
             out.push_misc(VAEncMiscParameterTypeRateControl, &rc);
+            let seconds = |s: f64| (f64::from(bps) * s) as u32;
             let buffer = match bound {
-                ConstantRate::Buffer => Some(vbv),
-                ConstantRate::Seconds(s) => Some((f64::from(bps) * s) as u32),
+                ConstantRate::Buffer => Some((vbv, vbv)),
+                ConstantRate::Seconds(s) => Some((seconds(s), seconds(s))),
+                ConstantRate::Unbounded if changed => {
+                    Some((seconds(RESET_BUFFER_S), seconds(RESET_FULLNESS_S)))
+                }
                 ConstantRate::Unbounded => None,
             };
-            if let Some(bits) = buffer {
+            if let Some((size, fullness)) = buffer {
                 let hrd = VAEncMiscParameterHRD {
-                    initial_buffer_fullness: bits,
-                    buffer_size: bits,
+                    initial_buffer_fullness: fullness,
+                    buffer_size: size,
                     va_reserved: [0; 4],
                 };
                 out.push_misc(VAEncMiscParameterTypeHRD, &hrd);
@@ -2336,7 +2378,8 @@ impl VaapiEncoder {
     }
 
     /// A VA surface over a dmabuf: through the PRIME 2 descriptor, which carries the format
-    /// modifier, else the older external-buffer one.
+    /// modifier, else the older external-buffer one where it reads the buffer as laid out
+    /// (`legacy_descriptor_reads`).
     fn import_dmabuf(&mut self, dmabuf: &Dmabuf) -> Result<VASurfaceID, String> {
         let api = self.device.api;
         let display = self.device.display;
@@ -2377,7 +2420,7 @@ impl VaapiEncoder {
         };
         let planes: Vec<(u32, u32)> = dmabuf.strides().zip(dmabuf.offsets()).collect();
         let modifier = u64::from(dmabuf.format().modifier);
-        if modifier == 0
+        if modifier == DRM_FORMAT_MOD_LINEAR
             && !self.negotiated.fullcolor
             && self.device.rounds_linear_pitch()
             && !planes[0].0.is_multiple_of(64)
@@ -2395,7 +2438,8 @@ impl VaapiEncoder {
         attribs[1].type_ = VASurfaceAttribExternalBufferDescriptor;
         attribs[1].flags = VA_SURFACE_ATTRIB_SETTABLE;
         attribs[1].value.type_ = VAGenericValueTypePointer;
-        if modifier != 0x00ff_ffff_ffff_ffff {
+        let mut prime2 = None;
+        if modifier != DRM_FORMAT_MOD_INVALID {
             let mut desc: VADRMPRIMESurfaceDescriptor = unsafe { std::mem::zeroed() };
             desc.fourcc = fourcc;
             desc.width = width;
@@ -2431,6 +2475,15 @@ impl VaapiEncoder {
             if status == VA_STATUS_SUCCESS as VAStatus {
                 return Ok(surface);
             }
+            prime2 = Some(status);
+        }
+        if let Some(status) = prime2
+            && !legacy_descriptor_reads(modifier, prime2)
+        {
+            return Err(format!(
+                "this VA-API driver does not import a dmabuf of modifier {modifier:#x}: {}",
+                error_text(&api, status)
+            ));
         }
         // The older descriptor carries one object.
         if objects.len() != 1 {
@@ -2551,6 +2604,16 @@ impl VaapiEncoder {
             Some(References::Slots(s)) => s.has_reference(),
             None => !self.fresh,
         };
+        let owed = if self.sequence_start {
+            Some(crate::report::KeyFrameCause::Reconfigure)
+        } else {
+            force_idr.then_some(crate::report::KeyFrameCause::Requested)
+        };
+        match (&mut self.references, owed) {
+            (Some(References::Window(w)), Some(cause)) => w.owe_key(cause),
+            (Some(References::Slots(s)), Some(cause)) => s.owe_key(cause),
+            _ => {}
+        }
         let mut key = force_idr || self.sequence_start || !has_reference;
         let (mut anchor, mut shared) = (None, false);
         if let Some(References::Window(w)) = &mut self.references
@@ -2674,11 +2737,11 @@ impl VaapiEncoder {
         if key {
             self.arm.sequence(&self.negotiated, &mut out);
             self.declared_level = self.arm.level();
-            self.rate_control_at(&mut out, bps);
+            self.rate_control_at(&mut out, bps, false);
             self.sent_bps = bps;
         } else if self.rate.cbr && bps != self.sent_bps {
             // radeonsi's VCE takes a new target with a picture, no new sequence.
-            self.rate_control_at(&mut out, bps);
+            self.rate_control_at(&mut out, bps, true);
             self.sent_bps = bps;
         }
         self.arm.picture(&self.negotiated, &frame, &mut out)?;
@@ -2975,6 +3038,26 @@ fn image_format(device: &Device, fourcc: u32) -> Option<VAImageFormat> {
         .copied()
 }
 
+/// The DRM format modifier of a buffer laid out as its allocator chose, unnamed.
+const DRM_FORMAT_MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
+
+/// The DRM format modifier of rows packed one after another.
+const DRM_FORMAT_MOD_LINEAR: u64 = 0;
+
+/// Whether the external-buffer descriptor reads a dmabuf of `modifier` as it is laid out, once
+/// the PRIME 2 descriptor answered `prime2` (None where it was not tried).
+///
+/// That descriptor carries no modifier: the driver takes the layout from what the kernel says of
+/// the object, which is nothing for a buffer in a discrete GPU's local memory and never a
+/// compression. A buffer whose modifier is unnamed or linear reads as laid out there, as does any
+/// on a driver that does not know the PRIME 2 memory type at all. A buffer of another modifier
+/// the driver refused through PRIME 2 does not: iHD refuses Arc's compressed Tile 4 layouts, and
+/// read as linear they encode as noise.
+fn legacy_descriptor_reads(modifier: u64, prime2: Option<VAStatus>) -> bool {
+    matches!(modifier, DRM_FORMAT_MOD_INVALID | DRM_FORMAT_MOD_LINEAR)
+        || prime2 == Some(VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE as VAStatus)
+}
+
 /// The dma-buf object `fd` names, as its device and inode: two fds of one buffer give the same.
 fn object_identity(fd: i32) -> Option<(u64, u64)> {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
@@ -2993,6 +3076,19 @@ mod tests {
         assert!(refines(700_000, 8.0, 1920, 1080));
         assert!(!refines(2_000_000, 60.0, 1920, 1080));
         assert!(!refines(500_000, 8.0, 1920, 1080));
+    }
+
+    /// A compressed Tile 4 buffer PRIME 2 refused is not read again without its layout; an
+    /// unnamed or linear one is, and any on a driver without the PRIME 2 memory type.
+    #[test]
+    fn a_refused_tiled_dmabuf_is_not_imported_without_its_modifier() {
+        let dg2_rc_ccs_cc = 0x0100_0000_0000_000c;
+        let refused = Some(VA_STATUS_ERROR_INVALID_SURFACE as VAStatus);
+        let unknown = Some(VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE as VAStatus);
+        assert!(!legacy_descriptor_reads(dg2_rc_ccs_cc, refused));
+        assert!(legacy_descriptor_reads(DRM_FORMAT_MOD_LINEAR, refused));
+        assert!(legacy_descriptor_reads(DRM_FORMAT_MOD_INVALID, None));
+        assert!(legacy_descriptor_reads(dg2_rc_ccs_cc, unknown));
     }
 
     /// Intel's low-power H.264 encoder is named no more regions than its three native zones at a
@@ -3365,6 +3461,77 @@ mod tests {
             worst,
             enc.device.keeps_anchors(),
         ))
+    }
+
+    /// On a VA-API device: every codec it encodes decodes, frame for frame, to the picture the
+    /// encoder kept as its reference, over two seconds of `moving_picture` at a constant rate
+    /// with the one reference a WebSockets page streams with, since every frame after one the
+    /// decoder rebuilds otherwise predicts from the difference until a key frame. Every codec
+    /// the device opens has its reconstruction read and compared.
+    #[test]
+    #[ignore]
+    fn vaapi_reconstruction_matches_the_decoder() {
+        use crate::webcam::decode::{Decoder as _, VideoDecoder};
+        let (w, h) = (1280usize, 720usize);
+        let mut opened = 0;
+        for codec in [Codec::H264, Codec::H265, Codec::Vp8, Codec::Vp9, Codec::Av1] {
+            let settings = CaptureSettings {
+                width: w as i32,
+                height: h as i32,
+                codec,
+                target_fps: 60.0,
+                video_cbr_mode: true,
+                video_bitrate_kbps: 8000,
+                video_reference_frames: 1,
+                omit_stripe_headers: true,
+                ..Default::default()
+            };
+            let mut enc = match VaapiEncoder::new(&settings, codec, Input::Host { rgba: false }) {
+                Ok(enc) => enc,
+                Err(e) => {
+                    println!("{codec:?}: {e}");
+                    continue;
+                }
+            };
+            opened += 1;
+            let mut dec = VideoDecoder::new(codec).expect("decoder");
+            let (mut compared, mut apart, mut worst) = (0usize, 0usize, 0u8);
+            for t in 0..120usize {
+                let out = enc
+                    .encode_host(&moving_picture(t), w * 4, false, t as u64, 25, t == 0)
+                    .expect("encode");
+                assert!(dec.decode(&out).expect("decode"), "{codec:?}: frame {t}");
+                let frame = dec.frame().expect("frame");
+                let recon = enc
+                    .surfaces_of
+                    .get(&(t as u64))
+                    .copied()
+                    .unwrap_or_else(|| panic!("{codec:?}: frame {t} kept no reconstruction"));
+                let Some((VA_FOURCC_NV12, _, rows)) = enc.luma_rows(recon) else {
+                    panic!("{codec:?}: frame {t}'s reconstruction reads back as no NV12 luma");
+                };
+                for (row, y) in rows.chunks(w).zip((0..h).step_by(PSNR_ROW_STEP)) {
+                    for (x, &kept) in row.iter().enumerate() {
+                        let shown = frame.y[y * frame.y_stride + x];
+                        compared += 1;
+                        if shown != kept {
+                            apart += 1;
+                            worst = worst.max(shown.abs_diff(kept));
+                        }
+                    }
+                }
+            }
+            println!(
+                "{codec:?} on {}: {apart} of {compared} sampled pixels apart, at most {worst} levels",
+                enc.vendor()
+            );
+            assert!(compared > 0, "{codec:?}: nothing compared");
+            assert_eq!(
+                apart, 0,
+                "{codec:?}: the decoder's pictures left the encoder's"
+            );
+        }
+        assert!(opened > 0, "no codec opened on this device");
     }
 
     /// On a VA-API device (`cargo test vaapi_ -- --ignored --nocapture`): a loss reported every

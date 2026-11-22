@@ -759,6 +759,26 @@ impl RtcSessions {
             }));
         let _ = self.service.set(service);
     }
+
+    /// Keep each signaling socket's clock to its path's floor while no transfer pings it
+    /// (`UplinkClock::keep_floor`), from a task that ends with the directory. Called on the
+    /// runtime.
+    pub fn keep_floors(self: &Arc<Self>) {
+        use crate::files::SessionDirectory;
+        let sessions = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut beat = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                beat.tick().await;
+                let Some(sessions) = sessions.upgrade() else {
+                    break;
+                };
+                for session in sessions.uplink_sessions() {
+                    session.clock.keep_floor();
+                }
+            }
+        });
+    }
 }
 
 impl crate::files::SessionDirectory for RtcSessions {

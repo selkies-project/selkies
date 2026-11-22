@@ -354,10 +354,58 @@ pub trait Supervisor: Send + Sync {
     fn pending_print_documents(&self) -> Vec<(String, u64)>;
 }
 
+/// Why the plane asked a display's encoder for a key frame: the `cause` label of the
+/// `websockets_keyframe_requests` metric.
+///
+/// A request is counted once it passed the floors that thin repeated ones, so the count is
+/// of requests that reached the encoder; an encoder codes one key frame for the requests
+/// that arrive between two frames, and none where it already codes one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum KeyFrameCause {
+    /// A page's `REQUEST_KEYFRAME`.
+    Client,
+    /// A page starting, resuming, or rejoining the stream decodes from one.
+    Page,
+    /// The backpressure gate lifted where the relay could not resume the page past the
+    /// frames it dropped.
+    GateLift,
+    /// The gate reopened on a stalled or desynced page to probe it.
+    Reprobe,
+    /// A relay dropped what only a key frame recovers: its byte budget, a run past its
+    /// recovery window, or a delta of a row waiting for one.
+    Relay,
+    /// The fan-out fell behind the capture, and every relay lost frames.
+    FanoutLag,
+    /// The capture restarted on new stream settings.
+    Restart,
+}
+
+impl KeyFrameCause {
+    /// The metric label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Client => "client",
+            Self::Page => "page",
+            Self::GateLift => "gate_lift",
+            Self::Reprobe => "reprobe",
+            Self::Relay => "relay",
+            Self::FanoutLag => "fanout_lag",
+            Self::Restart => "restart",
+        }
+    }
+}
+
 /// The Prometheus gauges fed server-side ([`crate::stats::metrics::Metrics`]).
 pub trait Metrics: Send + Sync {
     fn set_fps(&self, fps: f64);
     fn set_latency(&self, ms: f64);
+    /// Count a key frame request that reached `display`'s encoder.
+    fn count_keyframe_request(&self, display: &str, cause: KeyFrameCause);
+    /// Add `count` to `display`'s backpressure gate `event`, a field of
+    /// [`crate::ws::link::GateCounts`].
+    fn count_gate_events(&self, display: &str, event: &'static str, count: u32);
+    /// Count one relay run `event` of a page of `display`.
+    fn count_relay_run(&self, display: &str, event: crate::ws::relay::RunEvent);
 }
 
 /// Everything the data plane is wired with, apart from the input stack, which holds the

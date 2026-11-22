@@ -14,7 +14,8 @@
 # (infra/packaging/rust.sh), the X servers and their static dependencies
 # (xservers.sh), CUPS (cups.sh), the codecs (infra/packaging/codecs.sh),
 # libxkbcommon (infra/packaging/xkbcommon.sh), PipeWire's headers (pipewire.sh),
-# dbus-daemon (dbus.sh), and, on glibc, NVIDIA's X11 EGL platform (egl-x11.sh).
+# dbus-daemon (dbus.sh), the ALSA PulseAudio plugin (alsa-pulse.sh), and, on
+# glibc, NVIDIA's X11 EGL platform (egl-x11.sh).
 # infra/bundle/build-in-image.sh, run in it, then compiles only the server, the
 # shell, and the interposers, and finds each of these where it left it, once the
 # key the image records matches its tree's; run in a bare builder image, or in
@@ -50,13 +51,16 @@ RUN PATH="/opt/python/cp312-cp312/bin:${PATH}" \
 
 # The libraries the interposers and the server build against without linking
 # anything of the build image's: libxkbcommon, PipeWire's headers, and NVIDIA's
-# X11 EGL platform, which only glibc's bundle carries; and the session's bus
+# X11 EGL platform, which only glibc's bundle carries; the session's bus; and
+# the ALSA plugin that bridges ALSA applications to the session's sound server
 FROM tools AS libraries
 COPY infra/packaging/xkbcommon.sh /toolchain/infra/packaging/
 RUN PATH="/opt/python/cp312-cp312/bin:${PATH}" BUILD=/tmp sh -c '. /toolchain/infra/packaging/xkbcommon.sh'
-COPY infra/bundle/pipewire.sh infra/bundle/egl-x11.sh infra/bundle/dbus.sh /toolchain/infra/bundle/
+COPY infra/bundle/pipewire.sh infra/bundle/egl-x11.sh infra/bundle/dbus.sh infra/bundle/alsa-pulse.sh \
+    /toolchain/infra/bundle/
 RUN sh /toolchain/infra/bundle/dbus.sh "${SELKIES_TOOLCHAIN}/dbus" \
     && sh /toolchain/infra/bundle/pipewire.sh "${SELKIES_TOOLCHAIN}/pipewire" \
+    && sh /toolchain/infra/bundle/alsa-pulse.sh "${SELKIES_TOOLCHAIN}/alsa-pulse" \
     && if ! ldd --version 2>&1 | grep -qi musl; then \
         sh /toolchain/infra/bundle/egl-x11.sh "${SELKIES_TOOLCHAIN}/egl-x11"; \
     fi

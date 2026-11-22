@@ -24,7 +24,7 @@ use selkies_suites::x11::Damage;
 use selkies_suites::{Checks, Client, Server, server, tail};
 use serde_json::json;
 
-const TOLD: &str = "the encoder predicts past it";
+const TOLD: &str = "the encoder stops predicting from it";
 /// The wire ids VP9 and H.265 frames carry in the high nibble of their type byte.
 const VP9: u8 = 3;
 const H265: u8 = 5;

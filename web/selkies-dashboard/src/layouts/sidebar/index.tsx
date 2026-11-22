@@ -6,13 +6,16 @@
 
 /**
  * The default layout: the classic drawer on the left edge, opened by the
- * handle there or by Ctrl+Shift+M. Its header carries the wordmark and the
- * appearance controls (the theme pill, the layout toggle, the translucency
- * knob); the mode buttons under it (fullscreen, gaming mode, and a touch
- * client's keyboard and trackpad) change how the session is shown and taken,
- * above a row of tiles that toggles the streams and in a shape of their own; a
+ * handle there or by Ctrl+Shift+M. Its header carries the wordmark and one
+ * menu button, so a long title keeps the row: the menu holds what changes how
+ * the session is shown and taken (fullscreen, gaming mode, and a touch
+ * client's keyboard button and trackpad switches), and under them the
+ * appearance controls (the layout toggle, the translucency knob, the theme
+ * pill) in the row the toolbar's menu ends with; a row of tiles under the
+ * header toggles the streams; a
  * touch client gets the soft keys under the tiles; every panel is a section
- * below, each folding on its own, and the footer carries the citation. The sections hold the
+ * below, each folding on its own, but one that is only a dialog (the apps),
+ * whose row opens it, and the footer carries the citation. The sections hold the
  * same panels the toolbar carries, drawn in this layout's own skin
  * (`sidebar.css`), and the stats section's switch lays the strip over the
  * stream. Entering fullscreen or gaming mode folds the drawer, and the
@@ -24,8 +27,9 @@
  * @module
  */
 import * as React from "react";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { ArrowUpRight, ChevronDown, ChevronUp, Menu as MenuIcon } from "lucide-react";
 import { SelkiesLogo } from "@/components/logo";
+import { Menu, MenuCheckboxItem, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "@/components/ui/menu";
 import { LayoutToggle, ThemePill, TranslucencyToggle } from "@/panels/appearance";
 import { fractionOf, place, useViewport } from "@/panels/anchor";
 import { PANELS, shownCards, usePanelContext, type PanelSpec } from "@/panels/catalog";
@@ -51,13 +55,40 @@ function Tile({ active, label, onClick, children }: { active: boolean; label: st
   );
 }
 
-/** One mode button: an action's icon, its name the label and `title` saying more where given. */
-function ModeButton({ action }: { action: Action }) {
+/**
+ * The header's menu: the actions that take the session full screen, a touch
+ * client's input switches, and the appearance controls. Each item keeps its
+ * action's class, which the suites find it by; the popup is portaled, so it
+ * carries the drawer's skin itself.
+ */
+function HeaderMenu({ actions, toggles }: { actions: Action[]; toggles: Action[] }) {
+  const label = t("topMenu.menu");
   return (
-    <button type="button" className={`mode-button ${action.className}`} aria-pressed={!!action.active} aria-label={action.label}
-      title={action.title} onClick={action.run}>
-      <action.icon />
-    </button>
+    <Menu>
+      <MenuTrigger className="header-action-button sidebar-menu-button" aria-label={label} title={label}>
+        <MenuIcon />
+      </MenuTrigger>
+      <MenuPopup align="end" className="sidebar-skin sidebar-menu-popup">
+        {actions.map((action) => (
+          <MenuItem key={action.className} className={action.className} title={action.title} onClick={action.run}>
+            <action.icon />{action.label}
+          </MenuItem>
+        ))}
+        {toggles.length > 0 && <MenuSeparator />}
+        {toggles.map((action) => (
+          <MenuCheckboxItem key={action.className} variant="switch" className={action.className} title={action.title}
+            checked={!!action.active} onCheckedChange={() => action.run()} closeOnClick>
+            <span className="flex min-w-0 items-center gap-2"><action.icon className="size-4" />{action.label}</span>
+          </MenuCheckboxItem>
+        ))}
+        {(actions.length > 0 || toggles.length > 0) && <MenuSeparator />}
+        <div className="sidebar-menu-appearance">
+          <LayoutToggle />
+          <TranslucencyToggle />
+          <ThemePill />
+        </div>
+      </MenuPopup>
+    </Menu>
   );
 }
 
@@ -79,6 +110,18 @@ function Section({ id, title, open, onToggle, children }: SectionProps) {
         {open ? <ChevronUp /> : <ChevronDown />}
       </button>
       {open && <div className="sidebar-section-content" id={id}>{children}</div>}
+    </div>
+  );
+}
+
+/** A panel that is only a dialog: a row like a section's header that opens it, its arrow saying it leads away. */
+function DialogRow({ title, hint, onOpen }: { title: string; hint: string; onOpen: () => void }) {
+  return (
+    <div className="sidebar-section">
+      <button type="button" className="sidebar-section-link" aria-haspopup="dialog" title={hint} onClick={onOpen}>
+        <h3>{title}</h3>
+        <ArrowUpRight />
+      </button>
     </div>
   );
 }
@@ -136,9 +179,10 @@ export default function SidebarLayout() {
   };
 
   const actions = useActions();
-  // Fullscreen and gaming mode, then the touch client's own; the touch gamepad's switch is in the gamepads section.
-  const modes = [actions.fullscreen, actions.gamingMode, actions.keyboardButton, actions.trackpad]
-    .filter((action): action is Action => action !== null);
+  // The touch gamepad's switch is in the gamepads section.
+  const present = (list: (Action | null)[]) => list.filter((action): action is Action => action !== null);
+  const modes = present([actions.fullscreen, actions.gamingMode]);
+  const touchModes = present([actions.keyboardButton, actions.trackpad]);
   const handleLabel = t(shown ? "topMenu.hideToolbar" : "topMenu.showToolbar");
 
   return (
@@ -156,17 +200,9 @@ export default function SidebarLayout() {
             <h2>{d.uiTitle}</h2>
           </a>
           <div className="header-controls">
-            <ThemePill />
-            <LayoutToggle className="header-action-button" />
-            <TranslucencyToggle className="header-action-button sidebar-translucency" />
+            <HeaderMenu actions={modes} toggles={touchModes} />
           </div>
         </header>
-
-        {modes.length > 0 && (
-          <div className="sidebar-mode-actions">
-            {modes.map((action) => <ModeButton key={action.className} action={action} />)}
-          </div>
-        )}
 
         {actions.streams.length > 0 && (
           <div className="sidebar-action-buttons">
@@ -182,11 +218,17 @@ export default function SidebarLayout() {
           <SoftKeys showTrackpad={false} showKeyboardButton={false} palette="below" />
         </div>
 
-        {PANELS.filter((panel) => panel.shown(ctx, "section")).map((panel) => (
-          <Section key={panel.id} id={panel.contentId} title={t(panel.title)} open={!!sections[panel.id]} onToggle={() => toggleSection(panel.id)}>
-            {sectionBody(panel)}
-          </Section>
-        ))}
+        {PANELS.filter((panel) => panel.shown(ctx, "section")).map((panel) => {
+          const { dialog } = panel;
+          if (dialog && !panel.Body) {
+            return <DialogRow key={panel.id} title={t(panel.title)} hint={t(panel.dialogHint ?? panel.title)} onOpen={() => d.openDialog(dialog)} />;
+          }
+          return (
+            <Section key={panel.id} id={panel.contentId} title={t(panel.title)} open={!!sections[panel.id]} onToggle={() => toggleSection(panel.id)}>
+              {sectionBody(panel)}
+            </Section>
+          );
+        })}
 
         {actions.cite && (
           <footer className="sidebar-footer">

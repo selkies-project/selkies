@@ -159,6 +159,9 @@ pub(crate) struct State {
     pub link_allowances: HashMap<String, LinkAllowance>,
     /// Each display's `PathProbe`, and the peers its padding goes to, by peer id.
     pub path_probes: HashMap<String, PathProbe>,
+    /// The capped CRF displays whose peak a cut has shown its path since content last filled
+    /// it: not padded again until content does (`DisplayLink::probe_path` over WebSockets).
+    pub peak_settled: HashSet<String>,
     /// The capture rate congestion control shed to by display (`shed_step`), and the bridge's
     /// counts it read.
     pub shed_fps: HashMap<String, f64>,
@@ -258,6 +261,7 @@ impl WebRtcService {
                 rate_holds: HashMap::new(),
                 link_allowances: HashMap::new(),
                 path_probes: HashMap::new(),
+                peak_settled: HashSet::new(),
                 shed_fps: HashMap::new(),
                 budget_counts: HashMap::new(),
                 audio_sent: HashMap::new(),

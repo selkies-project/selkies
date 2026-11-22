@@ -7,13 +7,15 @@ Selkies has two authentication modes. Without a master token it is in **legacy m
 
 ## Master Token and Session Tokens
 
-The master token is the administrative credential. It is never sent to clients and authenticates two control-plane requests as an `Authorization: Bearer <master token>` header:
+The master token is the administrative credential. It is never sent to clients and authenticates the control-plane requests below as an `Authorization: Bearer <master token>` header:
 
 - `POST /api/tokens` replaces the session token table. The body is a JSON object keyed by token; each entry carries the client's `role` (`controller` or `viewer`), its gamepad `slot` (`1`-`4`, a list of them such as `[3, 4]` for one client with several controllers, whose pads take them in the browser's order, or `null`), and optionally `mk_control: true` to hand keyboard and mouse authority to that one token (everyone else becomes read-only until the next table drops it). A viewer holding it becomes a read-write collaborator only while `--enable-collab` is on, which is the switch that keeps a deployment view-only whatever the table says; `cmd` and every settings-mutating message stay controller-only either way. No client streams until the first table arrives (the WebSocket transport holds the handshake, WebRTC refuses it). A new table is reconciled against the connected clients at once: a token that disappeared is disconnected, a changed role reconnects the client, a slot change is pushed live, and the input verdict is re-announced on both transports.
 - `--tokens-file` (`SELKIES_TOKENS_FILE`) names a file holding the same table, provisioned at start and again whenever the file changes, so a restart needs no `POST`. Root or the server's user must own it and no one else may write to it, or it is refused; a symlink is followed, as a Kubernetes secret mount is one. A `POST` still replaces the table until the file next changes, and a file that is no table leaves the table as it was.
 - `POST /api/switch` changes the streaming transport (when dual mode is enabled). A controller-role session token is enough — a controller already drives the desktop — and the master token is the operator's way in where a deployment hands out tokens it does not want switching the transport under everyone else. Viewer tokens are refused.
 
-Both control-plane requests also accept the master token in a `Selkies-Authorization: Bearer <master token>` header, tried after `Authorization`. A request carries a single `Authorization` header, so a caller behind a reverse proxy that demands HTTP Basic authentication must spend it on the Basic credentials; the named header lets both travel together:
+- `POST /api/session` switches the session between the desktop and the application alone under `--wm`. The master token switches wherever `--desktop` is not locked, whatever `--session-switch` says, so an orchestrator can bring the desktop up and down while the menus offer no switch; a controller token switches only where the menus offer it. Viewer tokens are refused.
+
+The control-plane requests also accept the master token in a `Selkies-Authorization: Bearer <master token>` header, tried after `Authorization`. A request carries a single `Authorization` header, so a caller behind a reverse proxy that demands HTTP Basic authentication must spend it on the Basic credentials; the named header lets both travel together:
 
 ```console
 curl -u proxyuser:proxypass \
@@ -37,6 +39,7 @@ The static web client (`/`, its scripts and assets) is served without credential
 | `/api/webrtc/signaling` (WebRTC signaling) | `client_token` in the HELLO message; the in-process server peer presents the master token |
 | `/api/tokens` | master token only (`Authorization` Bearer, or the `Selkies-Authorization` fallback) |
 | `/api/switch` | session or master token (either header); viewer tokens are refused (403) |
+| `/api/session` | session or master token (either header); a `POST` is refused to viewer tokens (403), and to controller tokens where `--session-switch` is off |
 | `/api/upload` | session or master token; viewer tokens are refused (403) |
 | `/api/files/...` (listing and downloads) | session or master token; viewer tokens are refused (403) |
 | `/api/file-manager/browse` and `/api/file-manager/zip` (the Wish file manager's listing and folder archives) | session or master token; viewer tokens are refused (403), and an archive to another site's page as well |

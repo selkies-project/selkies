@@ -36,7 +36,7 @@
 //! view-only credentials. A chunked transfer is tracked by its destination, so a slice for a
 //! path whose staging file another slice is still writing is refused rather than interleaved.
 
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -55,6 +55,7 @@ use tokio::io::AsyncWriteExt;
 use super::confine::WalkError;
 use super::pacing::{TRANSFER_MIN_GAUGED_BYTES, monotonic, pace_gauged};
 use super::{ChunkState, FilesState, RequestAuth, json_error, strerror};
+use crate::http::listen::ConnInfo;
 
 /// Idle chunked transfers older than this are reaped; generous relative to one 64 MiB slice,
 /// so only a transfer whose client is truly gone expires.
@@ -133,6 +134,10 @@ fn in_flight() -> Response {
 /// The handler (module docs).
 pub async fn handle_upload(State(state): State<Arc<FilesState>>, request: Request) -> Response {
     let auth = RequestAuth::of(request.extensions());
+    let socket = request
+        .extensions()
+        .get::<ConnInfo>()
+        .and_then(|conn| conn.fd);
     let headers = request.headers().clone();
     let rel = headers
         .get("x-upload-path")
@@ -253,17 +258,18 @@ pub async fn handle_upload(State(state): State<Arc<FilesState>>, request: Reques
 
     let Some(upload_id) = upload_id else {
         let staging = staging_leaf_name();
-        let written =
-            match stream_upload_body(&state, &auth, declared, body, &staging, &parent_fd, false)
-                .await
-            {
-                Ok(written) => written,
-                Err(e) => {
-                    let (fd, leaf) = (parent_fd.clone(), staging.clone());
-                    let _ = tokio::task::spawn_blocking(move || remove_quietly(&fd, &leaf)).await;
-                    return failed(&state, &rel, &e, StatusCode::BAD_REQUEST);
-                }
-            };
+        let written = match stream_upload_body(
+            &state, &auth, socket, declared, body, &staging, &parent_fd, false,
+        )
+        .await
+        {
+            Ok(written) => written,
+            Err(e) => {
+                let (fd, leaf) = (parent_fd.clone(), staging.clone());
+                let _ = tokio::task::spawn_blocking(move || remove_quietly(&fd, &leaf)).await;
+                return failed(&state, &rel, &e, StatusCode::BAD_REQUEST);
+            }
+        };
         let (fd, staging_leaf, dest_leaf) = (parent_fd.clone(), staging.clone(), leaf.clone());
         if let Ok(Err(e)) =
             tokio::task::spawn_blocking(move || finalize_upload(&fd, &staging_leaf, &dest_leaf))
@@ -344,6 +350,7 @@ pub async fn handle_upload(State(state): State<Arc<FilesState>>, request: Reques
     let written = match stream_upload_body(
         &state,
         &auth,
+        socket,
         declared,
         body,
         &part_leaf,
@@ -439,7 +446,10 @@ fn expire_stale_chunked_uploads(state: &FilesState) {
 /// and the client's uplink is freed for the input and feedback traffic the stream depends on.
 /// The operator's static cap is the shared `transfer_cap` bucket; congestion control is
 /// `upload_pacer` fed one gauge verdict per chunk, so the transfer takes whatever the uplink
-/// has spare and backs off the moment the session's own delay inflates. A transfer below
+/// has spare and backs off the moment the session's own delay inflates. That buffer is the
+/// request's `socket`'s, where the connection is TCP, and a gauged upload holds it to the
+/// window its allowance warrants (`UplinkGauge::windowed`): left to the kernel it is
+/// megabytes, all of them the sender's to fill the client's first hop with. A transfer below
 /// `TRANSFER_MIN_GAUGED_BYTES` skips the gauge, as does one with no gauge-able session socket;
 /// a gauge whose sockets all vanish mid-transfer stops pacing, since the session it protected
 /// is gone. The chunks arrive as the HTTP stack delivers them, often hundreds of KiB at once,
@@ -447,9 +457,11 @@ fn expire_stale_chunked_uploads(state: &FilesState) {
 ///
 /// Returns the byte count written, or the failure's message; the caller owns removal of the
 /// target file.
+#[allow(clippy::too_many_arguments)]
 async fn stream_upload_body(
     state: &Arc<FilesState>,
     auth: &RequestAuth,
+    socket: Option<RawFd>,
     declared: Option<u64>,
     body: Body,
     leaf: &str,
@@ -461,7 +473,9 @@ async fn stream_upload_body(
         .active()
         .then(|| state.transfer_cap.clone());
     let mut gauge = if declared.is_some_and(|d| d >= TRANSFER_MIN_GAUGED_BYTES) {
-        state.session_gauge(auth)
+        state
+            .session_gauge(auth)
+            .map(|gauge| gauge.for_upload().windowed(socket))
     } else {
         None
     };
@@ -487,25 +501,35 @@ async fn stream_upload_body(
     let mut file = tokio::fs::File::from_std(std_file);
     let mut written = 0u64;
     let mut stream = body.into_data_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| e.to_string())?;
-        if chunk.is_empty() {
-            continue;
+    let streamed = async {
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| e.to_string())?;
+            if chunk.is_empty() {
+                continue;
+            }
+            if declared.is_some_and(|d| written + chunk.len() as u64 > d) {
+                return Err("body exceeds declared Content-Length".to_string());
+            }
+            if let Some(cap) = &cap {
+                cap.pace(chunk.len()).await;
+            }
+            if let Some(g) = &mut gauge
+                && !pace_gauged(&state.upload_pacer, g, chunk.len()).await
+            {
+                gauge = None;
+            }
+            file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+            written += chunk.len() as u64;
         }
-        if declared.is_some_and(|d| written + chunk.len() as u64 > d) {
-            return Err("body exceeds declared Content-Length".into());
-        }
-        if let Some(cap) = &cap {
-            cap.pace(chunk.len()).await;
-        }
-        if let Some(g) = &mut gauge
-            && !pace_gauged(&state.upload_pacer, g, chunk.len()).await
-        {
-            gauge = None;
-        }
-        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
-        written += chunk.len() as u64;
+        Ok(())
     }
+    .await;
+    // The connection outlives an upload that failed as it does one that finished, and takes
+    // its window back either way.
+    if let Some(gauge) = &mut gauge {
+        gauge.release_window();
+    }
+    streamed?;
     file.flush().await.map_err(|e| e.to_string())?;
     Ok(written)
 }

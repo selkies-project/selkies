@@ -337,6 +337,21 @@ impl Job {
     }
 }
 
+/// Where a job is, for a reader outside the panel ([`JobBoard::status`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct JobStatus {
+    pub op: JobOp,
+    pub state: JobState,
+    /// The step proot-apps last named.
+    pub phase: Option<String>,
+    /// A download's percentage.
+    pub progress: Option<f32>,
+    /// The exit status once it ran to an end.
+    pub code: Option<i32>,
+    /// The last lines it printed, the one being written last.
+    pub lines: Vec<String>,
+}
+
 /// How a job ended, for the log.
 #[derive(Debug)]
 pub struct Ended {
@@ -375,12 +390,14 @@ pub enum Refused {
     Busy,
     /// [`PENDING_KEPT`] jobs are already queued or running.
     Full,
+    /// No session is there to run it in yet.
+    NoSession,
 }
 
 impl JobBoard {
-    /// Queue `op` on `app`: the `apps_job` action announcing it, and whether the caller has to
-    /// start a task to run the queue, which happens exactly when none is running it.
-    pub fn enqueue(&self, op: JobOp, app: &str) -> Result<(String, bool), Refused> {
+    /// Queue `op` on `app`: the job's id, the `apps_job` action announcing it, and whether the
+    /// caller has to start a task to run the queue, which happens exactly when none is running it.
+    pub fn enqueue(&self, op: JobOp, app: &str) -> Result<(u64, String, bool), Refused> {
         if !valid_app_name(app) {
             return Err(Refused::BadName);
         }
@@ -398,7 +415,29 @@ impl JobBoard {
         board.jobs.push(job);
         let start = !board.driving;
         board.driving = true;
-        Ok((action, start))
+        Ok((board.next_id, action, start))
+    }
+
+    /// Where the latest job kept for `app` is, with the last `lines` lines it printed; `None`
+    /// where none is kept, none having been asked for or a page having cleared it.
+    pub fn status(&self, app: &str, lines: usize) -> Option<JobStatus> {
+        let board = self.inner.lock();
+        let job = board.jobs.iter().rev().find(|j| j.app == app)?;
+        let current = job.console.current();
+        let committed = lines.saturating_sub(usize::from(!current.is_empty()));
+        let skip = job.console.lines.len().saturating_sub(committed);
+        let mut printed: Vec<String> = job.console.lines.iter().skip(skip).cloned().collect();
+        if !current.is_empty() && lines > 0 {
+            printed.push(current.to_string());
+        }
+        Some(JobStatus {
+            op: job.op,
+            state: job.state,
+            phase: job.phase.clone(),
+            progress: job.progress,
+            code: job.code,
+            lines: printed,
+        })
     }
 
     /// Start the next queued job: its id, operation, application, and announcing action; `None`
@@ -636,11 +675,11 @@ mod tests {
     #[test]
     fn jobs_run_in_order_one_per_application_and_end_as_they_exited() {
         let board = JobBoard::default();
-        let (_, start) = board.enqueue(JobOp::Install, "firefox").expect("queued");
+        let (_, _, start) = board.enqueue(JobOp::Install, "firefox").expect("queued");
         assert!(start, "the first job starts the queue");
         assert_eq!(board.enqueue(JobOp::Remove, "firefox"), Err(Refused::Busy));
         assert_eq!(board.enqueue(JobOp::Install, "all"), Err(Refused::BadName));
-        let (_, start) = board.enqueue(JobOp::Install, "gimp").expect("queued");
+        let (_, _, start) = board.enqueue(JobOp::Install, "gimp").expect("queued");
         assert!(!start, "a queue already running takes it");
 
         let (id, op, app, _) = board.start_next().expect("first");
@@ -658,8 +697,18 @@ mod tests {
         let ended = board.finish(id, Some(1)).expect("ended");
         assert_eq!(ended.state, JobState::Failed);
         assert_eq!(ended.reason, "error: no manifest");
+        let status = board.status("gimp", 5).expect("kept");
+        assert_eq!(
+            (status.op, status.state, status.code, status.lines),
+            (
+                JobOp::Install,
+                JobState::Failed,
+                Some(1),
+                vec!["error: no manifest".to_string()]
+            )
+        );
         assert!(board.start_next().is_none(), "an empty queue is released");
-        let (_, start) = board.enqueue(JobOp::Remove, "firefox").expect("queued");
+        let (_, _, start) = board.enqueue(JobOp::Remove, "firefox").expect("queued");
         assert!(start, "and the next job starts it again");
 
         assert_eq!(board.snapshot().len(), 3);
@@ -667,6 +716,26 @@ mod tests {
         assert_eq!(board.snapshot().len(), 2);
         assert!(board.clear(None), "every finished job");
         assert_eq!(board.snapshot().len(), 1, "a queued job is not cleared");
+        assert_eq!(
+            board.status("gimp", 5),
+            None,
+            "a cleared job is no longer kept"
+        );
+        let queued = board.status("firefox", 5).expect("the removal queued last");
+        assert_eq!((queued.op, queued.state), (JobOp::Remove, JobState::Queued));
+    }
+
+    #[test]
+    fn a_status_holds_as_many_lines_as_asked_the_one_being_written_among_them() {
+        let board = JobBoard::default();
+        board.enqueue(JobOp::Install, "gimp").expect("queued");
+        let (id, ..) = board.start_next().expect("started");
+        board.feed(id, "a\nb\nc\npartial");
+        let status = board.status("gimp", 3).expect("kept");
+        assert_eq!(status.state, JobState::Running);
+        assert_eq!(status.lines, ["b", "c", "partial"]);
+        assert!(board.status("gimp", 0).expect("kept").lines.is_empty());
+        assert_eq!(board.status("firefox", 3), None, "no job was asked for it");
     }
 
     #[test]

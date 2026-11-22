@@ -1,7 +1,9 @@
 # Builds Selkies for Anthropic's OSS Scanner (github.com/anthropics/oss-scanner) the way CI's unit tier does: the
 # server's crates with the toolchain and libraries they build with and every crate they depend on (pixelflux and
 # pcmflux among them), the LD_PRELOAD interposers and test tools with debug info, and the web
-# client's npm dependencies and bundle. The scan runs offline, so everything a test needs is fetched here.
+# client's npm dependencies and bundle. The scan runs offline, so everything a test needs is fetched here. The
+# tests are compiled and not run, since compiling them and writing the image's layers take most of the 45 minutes the
+# scanner's build has; the scan runs them itself (the end of this file says how).
 FROM node:26-trixie
 ENV DEBIAN_FRONTEND=noninteractive \
     CARGO_HOME=/opt/cargo \
@@ -9,13 +11,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/opt/cargo/bin:$PATH
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates build-essential dbus gcc-multilib git jq libxkbcommon0 pkg-config python3 python3-dev python3-packaging \
-      pulseaudio pulseaudio-utils shellcheck xkb-data xvfb \
+      openssl pulseaudio pulseaudio-utils shellcheck xkb-data xvfb \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m tester
 
 # scanner contract: the checkout lives inside the image, at /src; the tests build into it as the unprivileged user
 COPY --chown=tester:tester . /src
 WORKDIR /src
+# Debug info in full for Selkies' crates and as line tables for its dependencies, which keeps the image a size the
+# build can write in time (cargo-config.toml says which crates are which)
+RUN install -D -m 0644 .oss-scanner/cargo-config.toml /opt/cargo/config.toml
 
 # Owned by that user in the layer that writes them, since cargo locks its home even offline. Kvazaar, the
 # non-GPL HEVC encoder's library, is built at the release the wheel recipe pins, as CI does: the codec bindings
@@ -35,18 +40,13 @@ RUN runuser -u tester -- cargo test --offline --locked --workspace --no-run \
     && runuser -u tester -- cargo test --offline --locked -p pcmflux --lib --features python --no-run \
     && runuser -u tester -- scripts/ci/test-vendored.sh --offline --no-run
 
-# As an unprivileged user, since the suites check that permission errors are handled. The sound server the audio
-# tests drive is the one CI's suites stream from.
-RUN runuser -u tester -- sh -c 'scripts/ci/test-stack.sh > /dev/null \
-      && PULSE_SERVER="unix:$(pactl info | sed -n "s/^Server String: //p")" \
-         cargo test --offline --locked --workspace' || echo "WARNING: the server's unit tests reported failures"; \
-    runuser -u tester -- cargo test --offline --locked -p pixelflux --lib --features python \
-      || echo "WARNING: pixelflux Python tests reported failures"; \
-    runuser -u tester -- cargo test --offline --locked -p pixelflux --lib --no-default-features --features openh264 \
-      || echo "WARNING: pixelflux OpenH264 tests reported failures"; \
-    runuser -u tester -- cargo test --offline --locked -p pcmflux --lib --features python \
-      || echo "WARNING: pcmflux Python tests reported failures"; \
-    runuser -u tester -- scripts/ci/test-vendored.sh --offline \
-      || echo "WARNING: the vendored rtc crates' tests reported failures"; \
-    runuser -u tester -- env E2E_WORKDIR=/tmp/selkies-unit \
-      cargo --offline xtask suites --tier unit || echo "WARNING: the unit tier reported failures"
+# How the tests run in the image, offline and as the unprivileged user, since the suites check that permission errors
+# are handled; the audio tests drive the sound server CI's suites stream from:
+#   runuser -u tester -- sh -c 'scripts/ci/test-stack.sh > /dev/null \
+#     && PULSE_SERVER="unix:$(pactl info | sed -n "s/^Server String: //p")" cargo test --offline --locked --workspace \
+#     --no-fail-fast'
+#   runuser -u tester -- cargo test --offline --locked -p pixelflux --lib --features python
+#   runuser -u tester -- cargo test --offline --locked -p pixelflux --lib --no-default-features --features openh264
+#   runuser -u tester -- cargo test --offline --locked -p pcmflux --lib --features python
+#   runuser -u tester -- scripts/ci/test-vendored.sh --offline
+#   runuser -u tester -- env E2E_WORKDIR=/tmp/selkies-unit cargo --offline xtask suites --tier unit

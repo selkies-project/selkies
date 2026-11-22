@@ -30,6 +30,7 @@
 
 pub mod audio;
 pub mod client;
+pub mod flight;
 pub mod handler;
 pub mod host;
 pub mod link;

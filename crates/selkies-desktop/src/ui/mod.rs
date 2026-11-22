@@ -12,6 +12,7 @@ pub mod panel;
 pub mod popups;
 pub mod preview;
 pub mod settings;
+pub mod tray_menu;
 
 use tiny_skia::{Color, Path, PathBuilder};
 
@@ -46,9 +47,9 @@ pub const SCROLL_STEP: f64 = 48.0;
 pub const DOUBLE_CLICK_MS: u32 = 400;
 /// Milliseconds the pointer rests before a tooltip shows.
 pub const TOOLTIP_DELAY_MS: u64 = 600;
-/// The period between the frames of anything that moves: the bar attaching and the
-/// notification cards. A frame is drawn no sooner than this after the last, whatever woke the
-/// main loop.
+/// The period between the frames of anything that moves: the bar attaching, the
+/// notification cards, and the desktop's backgrounds under a dragged box or icon. A frame is
+/// drawn no sooner than this after the last, whatever woke the main loop.
 pub const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 /// Narrowest a file manager window may be made.
 pub const WINDOW_MIN_WIDTH: i32 = 480;
@@ -138,7 +139,19 @@ pub fn theme() -> Theme {
 /// # Arguments
 /// * `opacity` - Opacity from 0 to 100.
 pub fn panel_bg(opacity: i32) -> Color {
-    with_alpha(theme().panel, (opacity.clamp(0, 100) * 255 / 100) as u8)
+    with_alpha(theme().panel, percent_alpha(opacity))
+}
+/// The start menu's background at the bar's opacity in percent, so the menu's paints follow the
+/// bar's while its text and icons stay opaque.
+///
+/// # Arguments
+/// * `opacity` - Opacity from 0 to 100.
+pub fn menu_bg(opacity: i32) -> Color {
+    with_alpha(theme().popup, percent_alpha(opacity))
+}
+/// An opacity in percent as an alpha from 0 to 255.
+fn percent_alpha(opacity: i32) -> u8 {
+    (opacity.clamp(0, 100) * 255 / 100) as u8
 }
 /// Popup background.
 pub fn popup_bg() -> Color {
@@ -294,8 +307,18 @@ impl Scrollbar {
 /// * `canvas` - The target.
 /// * `rect` - The popup's rectangle.
 pub fn draw_popup_frame(canvas: &mut Canvas<'_>, rect: Rect) {
+    draw_popup_frame_in(canvas, rect, popup_bg());
+}
+
+/// Draws a popup's rounded background in a color of its own, with its border.
+///
+/// # Arguments
+/// * `canvas` - The target.
+/// * `rect` - The popup's rectangle.
+/// * `bg` - The background.
+pub fn draw_popup_frame_in(canvas: &mut Canvas<'_>, rect: Rect, bg: Color) {
     let radius = popup_radius();
-    fill_surface(canvas, rect, radius, popup_bg());
+    fill_surface(canvas, rect, radius, bg);
     canvas.stroke_rounded(rect, radius, 1.0, popup_border());
 }
 

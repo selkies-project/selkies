@@ -613,6 +613,9 @@ impl SvtAv1Encoder {
         self.planes
             .convert(pixels, stride, rgba, false, false, self.threads as usize)?;
         let pts = self.next_pts;
+        if force_idr && let Some(references) = &mut self.references {
+            references.owe_key(crate::report::KeyFrameCause::Requested);
+        }
         let mut key = force_idr || self.fresh;
         let mut plan = SlotPlan::KEY;
         if let Some(references) = &self.references {

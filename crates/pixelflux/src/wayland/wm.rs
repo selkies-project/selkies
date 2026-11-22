@@ -968,6 +968,16 @@ pub fn activate_desktop(state: &mut AppState, index: u32) {
     }
 }
 
+/// The server asked for the session's desktop or its application alone; false where no policy
+/// is installed to hear it.
+pub fn desktop_mode(state: &mut AppState, on: bool) -> bool {
+    if !active(state) {
+        return false;
+    }
+    dispatch(state, Event::DesktopMode(on));
+    true
+}
+
 /// The modifiers the seat's keyboard holds.
 fn modifiers(state: &AppState) -> Modifiers {
     let mods: Option<ModifiersState> = state.seat.get_keyboard().map(|k| k.modifier_state());
@@ -997,6 +1007,31 @@ pub fn judged_location(state: &AppState, seat: Point<f64, Logical>) -> Point<f64
         .filter(|wm| wm.pointer_taken)
         .and_then(|wm| wm.taken_at)
         .unwrap_or(seat)
+}
+
+/// Whether the topmost window on an output, override-redirect windows aside, is one the policy
+/// shows fullscreen. Such a window lies over the top layer (a desktop's panel), so the frame
+/// draws the top layer under it and the pointer's hit test reaches it only after the windows;
+/// both read this one answer, so a click lands on what the frame shows there. A top layer
+/// surface holding the keyboard exclusively (the shell's open menu or launcher) keeps the top
+/// layer over the window, since it was opened to be used and holds the keys until it closes.
+pub fn fullscreen_on_top(
+    space: &smithay::desktop::Space<Window>,
+    wm: Option<&WmState>,
+    output: &smithay::output::Output,
+) -> bool {
+    use smithay::wayland::shell::wlr_layer::KeyboardInteractivity;
+    let menu_open = layer_map_for_output(output).layers().any(|layer| {
+        layer.layer() == Layer::Top
+            && layer.cached_state().keyboard_interactivity == KeyboardInteractivity::Exclusive
+    });
+    !menu_open
+        && space
+            .elements_for_output(output)
+            .rfind(|window| !crate::wayland::frontend::is_override_redirect(window))
+            .and_then(|window| window_meta(window).map(|m| m.id))
+            .and_then(|id| wm.and_then(|wm| wm.states.get(&id)))
+            .is_some_and(|states| states.fullscreen)
 }
 
 /// What the compositor's hit test found, for the policy. A popup, a Wayland one or an X11

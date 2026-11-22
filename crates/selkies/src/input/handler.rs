@@ -324,13 +324,14 @@ pub struct Dispatcher {
     pub(crate) queue_notify: Notify,
     wl_keymap_owner_lock: tokio::sync::Mutex<()>,
     wl_typer_lock: tokio::sync::Mutex<()>,
-    apps: AppsRunner,
+    apps: Arc<AppsRunner>,
     me: Weak<Dispatcher>,
 }
 
 impl Dispatcher {
     /// A handler for one transport service. `seat` is the Wayland compositor (None on X11);
-    /// `devices` the published input devices, if any. The clipboard, which needs this handler
+    /// `devices` the published input devices, if any; `apps` the apps runner the server's
+    /// transports share. The clipboard, which needs this handler
     /// as its `clipboard::Session`, comes after (`set_clipboard`).
     pub fn new(
         cfg: InputConfig,
@@ -339,6 +340,7 @@ impl Dispatcher {
         pointer_sink: Arc<dyn PointerSink>,
         seat: Option<Arc<dyn WaylandSeat>>,
         devices: Option<Arc<dyn VirtualDeviceSink>>,
+        apps: Arc<AppsRunner>,
     ) -> Arc<Self> {
         let state = State::new(&cfg);
         if cfg.is_wayland && seat.is_none() {
@@ -356,7 +358,7 @@ impl Dispatcher {
             queue_notify: Notify::new(),
             wl_keymap_owner_lock: tokio::sync::Mutex::new(()),
             wl_typer_lock: tokio::sync::Mutex::new(()),
-            apps: AppsRunner::default(),
+            apps,
             me: me.clone(),
         })
     }
@@ -2131,13 +2133,8 @@ impl Dispatcher {
                     warn!(target: "input", "Rejecting an unknown apps request");
                     return;
                 };
-                match self.apps.jobs.enqueue(job_op, app) {
-                    Ok((action, start)) => {
-                        self.send_command_status(&action, None);
-                        if start && let Some(me) = self.me.upgrade() {
-                            tokio::spawn(async move { me.apps.drive(&*me).await });
-                        }
-                    }
+                match self.apps.queue(job_op, app) {
+                    Ok(_) => {}
                     Err(Refused::BadName) => {
                         warn!(target: "input", "Rejecting an app {op} for an invalid name");
                     }
@@ -2146,6 +2143,9 @@ impl Dispatcher {
                     }
                     Err(Refused::Full) => {
                         warn!(target: "input", "App {op} {app} not queued: the apps queue is full");
+                    }
+                    Err(Refused::NoSession) => {
+                        warn!(target: "input", "App {op} {app} not queued: no session runs jobs yet");
                     }
                 }
             }

@@ -524,10 +524,18 @@ pub struct CaptureSettings {
     /// When true, encoders emit the raw payload without the per-stripe header byte block;
     /// stripe metadata is then carried only on the frame attributes.
     pub omit_stripe_headers: bool,
-    /// The consumer acknowledges the frames every client holds (`acknowledge_reference`), so an
-    /// anchor predicts from a frame every client was sent, and where a session keeps two
-    /// long-term references (H.265, and AV1, which keeps one otherwise) the newest every client
-    /// holds stays pinned beside the one the schedule marks. H.264 keeps one.
+    /// The consumer acknowledges, from the first frame on, the frames every client holds or was
+    /// sent (`acknowledge_reference`); the selkies server sets this on every capture. Read when
+    /// an NVENC or VA-API session opens: an anchor then predicts from a frame every client was
+    /// sent, and where a session keeps two the newest every client holds stays pinned beside the
+    /// one the schedule marks. Where its device and buffer admit anchors (`nvenc::anchor_count`),
+    /// NVENC keeps two for H.265, two for AV1 only when this is set (one otherwise), and one for
+    /// H.264; VA-API H.264 and H.265 keep them on radeonsi only (`keeps_anchors`), one and two.
+    /// Every session also acts on each acknowledgement it is handed, set or not; of those that
+    /// never read this, libvpx, VA-API VP8, and SVT-AV1 at a constant rate pin the anchor buffer
+    /// holding the newest frame every client holds (`ReferenceSlots::acknowledge`), and OpenH264
+    /// (builds without the `gpl` feature) confirms the long-term reference it marked. x264 keeps
+    /// none.
     pub acknowledge_references: bool,
     /// The most frames an H.264 or H.265 stream keeps for reference (its decoded picture
     /// buffer), 0 for as many as the level admits up to `REFERENCE_FRAMES`: a decoder that holds
@@ -811,6 +819,12 @@ pub enum ThreadCommand {
     WindowRequest {
         id: wm::WindowId,
         request: wm::Request,
+        reply: std::sync::mpsc::Sender<bool>,
+    },
+    /// Hand the installed window policy the server's ask for the session's desktop or its
+    /// application alone; reply whether a policy took it.
+    DesktopMode {
+        on: bool,
         reply: std::sync::mpsc::Sender<bool>,
     },
     SetCursorCallback(Option<Arc<dyn crate::sink::CursorSink>>),
@@ -2635,13 +2649,7 @@ where
     // layer, as Xwayland compositors stack them, since they place themselves; under a fullscreen
     // window they keep their place in the stacking, so a tray's strip stays under the game with
     // the panel it sits on.
-    let fullscreen_on_top = scene
-        .space
-        .elements_for_output(scene.output)
-        .rfind(|window| !wayland::frontend::is_override_redirect(window))
-        .and_then(|window| wayland::frontend::window_meta(window).map(|m| m.id))
-        .and_then(|id| scene.wm.and_then(|wm| wm.states.get(&id)))
-        .is_some_and(|states| states.fullscreen);
+    let fullscreen_on_top = wayland::wm::fullscreen_on_top(scene.space, scene.wm, scene.output);
     {
         let layer_map = layer_map_for_output(scene.output);
         push_layer_elements(renderer, &mut elements, &layer_map, Layer::Overlay, scale);
@@ -3728,10 +3736,14 @@ fn start_capture_on_display(
         needs_full_render: true,
         pace: FramePace::windowed(),
         change_pending: false,
+        pending_commits: Vec::new(),
         last_change: None,
         merge_hold: None,
+        host_merged: None,
         callbacks_at: None,
-        callbacks_owed: false,
+        owed_callbacks: Vec::new(),
+        commit_rhythm: Vec::new(),
+        source: None,
     };
 
     {
@@ -4646,24 +4658,69 @@ fn render_pass(state: &mut AppState, trigger: TickTrigger) -> bool {
     any_pool_busy
 }
 
+/// Whether the change `cap` waits on is held for the next one (`WlCapture::holds_change`). A
+/// host's frame held so is taken at once as the display's content without a frame: the host
+/// copies into two buffers, one of them the content on screen, and a frame left waiting in the
+/// queue would leave it nowhere to copy the next frame the hold waits for. The next frame
+/// rendered publishes it (`WlCapture::host_merged`).
+fn merge_held_host_frame(
+    host: Option<&wayland::host::HostSession>,
+    id: u32,
+    cap: &mut wayland::frontend::WlCapture,
+    now: Instant,
+) -> bool {
+    let period = capture_period(cap);
+    let holding = cap.merge_hold.is_some();
+    if !cap.holds_change(period, now) {
+        return false;
+    }
+    if !holding
+        && let Some(host) = host
+        && host.has_output_for(id)
+        && let Some(frame) = host.try_take_frame(id)
+    {
+        // A frame of another size is retained unpublished, as the render path keeps it.
+        if (frame.width, frame.height) == (cap.settings.width, cap.settings.height) {
+            let merged = cap
+                .host_merged
+                .get_or_insert_with(|| (Vec::new(), frame.stamp_ns));
+            merged.0.extend(frame.damage.iter().copied());
+            merged.1 = frame.stamp_ns;
+        }
+        retain_host_frame(host, Some(cap), id, frame);
+    }
+    true
+}
+
 /// Render each capture a change waits on (`WlCapture::change_pending`: a client's commit,
 /// input, a host frame) once its period is open: a change takes its period's frame as it
 /// lands, the X11 captures' schedule, rather than waiting for the frame timer. A capture whose
 /// period a frame already took keeps waiting, and the timer wakes as the next one opens; one
 /// the pacing holds for a source's next frame waits for the next change
-/// (`WlCapture::holds_change`).
+/// (`WlCapture::holds_change`). While a client draws at the cadence, its commit renders as it
+/// lands and every other change waits for its next frame instead (`WlCapture::follows_source`).
 fn serve_changes(state: &mut AppState) {
     let now = Instant::now();
+    let host = state.host.as_ref();
     let open: Vec<u32> = state
         .output_nodes
         .iter_mut()
         .filter_map(|n| {
             let cap = n.capture.as_mut()?;
             let period = capture_period(cap);
-            (cap.change_pending
-                && cap.pace.due(TickTrigger::Damage, period, now)
-                && !cap.holds_change(period, now))
-            .then_some(n.id)
+            if !cap.change_pending {
+                return None;
+            }
+            if let Some(go) = cap.follows_source(TickTrigger::Damage, period, now) {
+                return go.then_some(n.id);
+            }
+            if !cap.pace.due(TickTrigger::Damage, period, now) {
+                return None;
+            }
+            if !merge_held_host_frame(host, n.id, cap, now) {
+                return Some(n.id);
+            }
+            None
         })
         .collect();
     if open.is_empty() {
@@ -4680,6 +4737,7 @@ fn serve_changes(state: &mut AppState) {
 /// client drawing on frame callbacks takes its clock from them, which the boundaries keep even.
 /// The frame timer wakes at every boundary while a display captures, and calls this each time.
 fn answer_frame_callbacks(state: &mut AppState) {
+    use smithay::reexports::wayland_server::Resource;
     let now = Instant::now();
     let time = state.clock.now();
     for i in 0..state.output_nodes.len() {
@@ -4701,16 +4759,27 @@ fn answer_frame_callbacks(state: &mut AppState) {
             continue;
         }
         // A client whose last commit is not rendered yet is answered once it is: asked to draw
-        // again meanwhile, it would draw frames a busy capture never shows.
-        let owed = cap.change_pending;
+        // again meanwhile, it would draw frames a busy capture never shows. The others keep
+        // the boundary as their vblank.
         let output = node.output.clone();
-        if !owed && drives_screen(&state.output_nodes, node) {
+        let mut owed = Vec::new();
+        if drives_screen(&state.output_nodes, node) {
             for window in state.space.elements_for_output(&output) {
+                if let Some(surface) = window.wl_surface()
+                    && cap.pending_commits.contains(&surface.id())
+                {
+                    owed.push(surface.id());
+                    continue;
+                }
                 window.send_frame(&output, time, Some(Duration::ZERO), |_, _| {
                     Some(output.clone())
                 });
             }
             for layer in layer_map_for_output(&output).layers() {
+                if cap.pending_commits.contains(&layer.wl_surface().id()) {
+                    owed.push(layer.wl_surface().id());
+                    continue;
+                }
                 layer.send_frame(&output, time, Some(Duration::ZERO), |_, _| {
                     Some(output.clone())
                 });
@@ -4718,7 +4787,7 @@ fn answer_frame_callbacks(state: &mut AppState) {
         }
         if let Some(cap) = state.output_nodes[i].capture.as_mut() {
             cap.callbacks_at = Some(opened);
-            cap.callbacks_owed = owed;
+            cap.owed_callbacks = owed;
         }
     }
 }
@@ -4790,12 +4859,19 @@ fn render_node_tick(
         return false;
     }
 
-    // Per-display frame pacing under the one shared timer, and under input.
-    if let Some(cap) = node.capture.as_ref()
+    // Per-display frame pacing under the one shared timer, and under input, unless a client
+    // drawing at the cadence paces the display (`WlCapture::follows_source`).
+    if let Some(cap) = node.capture.as_mut()
         && !take_screenshot
-        && !cap.pace.due(trigger, capture_period(cap), Instant::now())
     {
-        return false;
+        let (period, now) = (capture_period(cap), Instant::now());
+        let due = match cap.follows_source(trigger, period, now) {
+            Some(go) => go,
+            None => cap.pace.due(trigger, period, now),
+        };
+        if !due {
+            return false;
+        }
     }
 
     let output = node.output.clone();
@@ -4951,18 +5027,21 @@ fn render_node_tick(
 
     // Host-capture mode: the host compositor already blitted this display's frame
     // into one of our buffers (screencopy); adopt it in place of compositing. Its tick
-    // is recorded below, once it is known a frame will be published.
+    // is recorded below, once it is known a frame will be published. A composite's timer
+    // tick is recorded here; any other once the render says whether it drew anything.
     let host_mode = state
         .host
         .as_ref()
         .map(|h| h.has_output_for(node.id))
         .unwrap_or(false);
+    let tick_at = Instant::now();
     if !host_mode && let Some(cap) = node.capture.as_mut() {
-        let period = capture_period(cap);
-        let paced = FramePace::input_paced(state.input_interval, period);
-        cap.pace.ticked(trigger, period, Instant::now(), paced);
-        cap.change_pending = false;
-        cap.merge_hold = None;
+        if trigger == TickTrigger::Timer {
+            let period = capture_period(cap);
+            let paced = FramePace::input_paced(state.input_interval, period);
+            cap.pace.ticked(trigger, period, tick_at, paced);
+        }
+        cap.changes_rendered();
     }
 
     // The cursor is composited only on the output the pointer is on, at that output's
@@ -5048,6 +5127,12 @@ fn render_node_tick(
         };
         let have_new = new_frame.is_some();
         new_stamp = new_frame.as_ref().map(|f| f.stamp_ns);
+        // A host frame taken while a hold waited for the next (`serve_changes`) is content not yet
+        // published, as a fresh frame's is.
+        let merged = node
+            .capture
+            .as_ref()
+            .is_some_and(|c| c.host_merged.is_some());
         // The host's cursor where this display paints it into the frames itself (a session that
         // streams it as metadata while the consumer wants it painted): a move or a new sprite
         // is published like a new frame, over the retained content, with its own damage.
@@ -5091,6 +5176,7 @@ fn render_node_tick(
             }
         }
         if !have_new
+            && !merged
             && !cursor_moved
             && !want_idr_for_host
             && !take_screenshot
@@ -5119,9 +5205,17 @@ fn render_node_tick(
             && let Some(period) = period
         {
             cap.pace.ticked(trigger, period, now, false);
-            cap.change_pending = false;
-            cap.merge_hold = None;
+            cap.changes_rendered();
         }
+        let (merged_damage, merged_stamp) =
+            match node.capture.as_mut().and_then(|c| c.host_merged.take()) {
+                Some((damage, stamp)) => (damage, Some(stamp)),
+                None => (Vec::new(), None),
+            };
+        if new_stamp.is_none() {
+            new_stamp = merged_stamp;
+        }
+        let fresh = have_new || merged;
         if let Some(f) = new_frame {
             retain_host_frame(&host, node.capture.as_mut(), host_idx, f);
         }
@@ -5140,9 +5234,9 @@ fn render_node_tick(
                 return RETAINED_NONE;
             }
             damage_rects = if have_new {
-                f.damage.clone()
+                f.damage.iter().chain(&merged_damage).copied().collect()
             } else {
-                Vec::new()
+                merged_damage.clone()
             };
             if let Some(cpu) = f.cpu.as_ref() {
                 if gpu_encoder {
@@ -5193,7 +5287,7 @@ fn render_node_tick(
             RETAINED_OK
         });
         // A fresh blit may still be in flight on the GPU when the compositor announces it.
-        if have_new && let Some(src) = source_dmabuf.as_ref() {
+        if fresh && let Some(src) = source_dmabuf.as_ref() {
             wayland::host::wait_gpu_done(src);
         }
         // GPU path: composite the watermark and the host's cursor, and serve screenshot
@@ -5206,7 +5300,7 @@ fn render_node_tick(
                 screenshot_format = computer_use::ScreenshotPixelFormat::Rgbx;
             }
             if let Some(renderer) = state.gles_renderer.as_mut() {
-                if wm_active && !wm_animated && have_new {
+                if wm_active && !wm_animated && fresh {
                     let mut target = src.clone();
                     match draw_host_watermark(
                         renderer,
@@ -5755,17 +5849,34 @@ fn render_node_tick(
         // A zero-copy target took the frame, so the output's own one missed it.
         node.target_seeded = gpu_slot.is_none();
     }
+    if !host_mode
+        && trigger != TickTrigger::Timer
+        && let Some(cap) = node.capture.as_mut()
+    {
+        let drew = render_success && (!damage_rects.is_empty() || want_idr_for_host);
+        cap.pace
+            .record_tick(trigger, capture_period(cap), tick_at, drew);
+    }
     // A captured display answers its clients' frame callbacks on its window boundaries
-    // (`answer_frame_callbacks`), or at the render a boundary waited for; host capture and an
-    // uncaptured output as they render.
-    let answer_now = node.capture.as_ref().is_none_or(|c| c.callbacks_owed) || host_mode;
+    // (`answer_frame_callbacks`), or at the render a boundary waited for for the clients it
+    // skipped; host capture and an uncaptured output as they render.
+    let answer_all = node.capture.is_none() || host_mode;
+    let answer_now =
+        |surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface| {
+            use smithay::reexports::wayland_server::Resource;
+            answer_all
+                || node
+                    .capture
+                    .as_ref()
+                    .is_some_and(|c| c.owed_callbacks.contains(&surface.id()))
+        };
     if render_success && drives_screen {
         let time = state.clock.now();
         // The composited frame is what the capture consumes, so this render is also the
         // presentation moment for wp_presentation feedback.
         let mut feedback = OutputPresentationFeedback::new(&output);
         for window in state.space.elements_for_output(&output) {
-            if answer_now {
+            if answer_all || window.wl_surface().is_some_and(|s| answer_now(&s)) {
                 window.send_frame(&output, time, Some(Duration::ZERO), |_, _| {
                     Some(output.clone())
                 });
@@ -5781,7 +5892,7 @@ fn render_node_tick(
         // that never arrives leaves a client which draws on frame callbacks showing
         // whatever it painted first, for as long as the session lasts.
         for layer in layer_map_for_output(&output).layers() {
-            if answer_now {
+            if answer_now(layer.wl_surface()) {
                 layer.send_frame(&output, time, Some(Duration::ZERO), |_, _| {
                     Some(output.clone())
                 });
@@ -5792,8 +5903,8 @@ fn render_node_tick(
                 |_, _| wp_presentation_feedback::Kind::empty(),
             );
         }
-        if answer_now && let Some(cap) = node.capture.as_mut() {
-            cap.callbacks_owed = false;
+        if let Some(cap) = node.capture.as_mut() {
+            cap.owed_callbacks.clear();
         }
         send_cursor_frame(state, &output, time);
         let refresh = match node.capture.as_ref() {
@@ -7408,6 +7519,9 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 let known = wayland::wm::rect_of(state, id).is_some();
                 let _ = reply.send(known && wayland::wm::request(state, id, request));
             }
+            ThreadCommand::DesktopMode { on, reply } => {
+                let _ = reply.send(wayland::wm::desktop_mode(state, on));
+            }
             ThreadCommand::ListWindows { reply } => {
                 use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
                 let mut list = Vec::new();
@@ -8227,6 +8341,19 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
             }
             state.space.refresh();
             render_display(state, id, TickTrigger::HostFrame);
+            // One its window could not take and that the pacing holds for the next is taken as
+            // content as it lands, so the host copies its next frame in time for the next window.
+            let now = Instant::now();
+            let host = state.host.as_ref();
+            if let Some(cap) = state
+                .output_nodes
+                .iter_mut()
+                .find(|n| n.id == id)
+                .and_then(|n| n.capture.as_mut())
+                && cap.change_pending
+            {
+                merge_held_host_frame(host, id, cap, now);
+            }
         })
         .unwrap();
 
@@ -8789,6 +8916,21 @@ impl Compositor {
             reply: reply_tx,
         })
         .map_err(|e| Error::Compositor(format!("Failed to send a window request: {e}")))?;
+        Ok(reply_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or(false))
+    }
+
+    /// Ask the installed window policy for the session's desktop or its application alone
+    /// ([`wm::Event::DesktopMode`]). False with no policy installed or where the compositor
+    /// does not answer; the policy decides what becomes of the ask.
+    pub fn desktop_mode(&self, on: bool) -> Result<bool, Error> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        self.send(ThreadCommand::DesktopMode {
+            on,
+            reply: reply_tx,
+        })
+        .map_err(|e| Error::Compositor(format!("Failed to send a desktop mode request: {e}")))?;
         Ok(reply_rx
             .recv_timeout(Duration::from_secs(2))
             .unwrap_or(false))
@@ -9458,6 +9600,12 @@ pub fn window_request(id: wm::WindowId, request: wm::Request) -> bool {
     running_compositor().is_some_and(|be| be.window_request(id, request).unwrap_or(false))
 }
 
+/// Ask the window policy installed on the running compositor for the session's desktop or its
+/// application alone; false where no compositor runs or none has a policy.
+pub fn desktop_mode(on: bool) -> bool {
+    running_compositor().is_some_and(|be| be.desktop_mode(on).unwrap_or(false))
+}
+
 /// The variable naming the Xwayland a caller ships, found ahead of the host's
 /// ([`wayland::xwm::XWAYLAND_VAR`]).
 pub const XWAYLAND_VAR: &str = wayland::xwm::XWAYLAND_VAR;
@@ -9829,7 +9977,9 @@ impl ScreenCapture {
     /// and from capture to the end of the encode (`pipeline_ns`). A caller differences two
     /// reads; a restart begins again from zero. Beside them, the extremes since the previous
     /// read, which each read starts again: `pipeline_min_ns` and `pipeline_max_ns`, zero where
-    /// no frame was timed, and `frame_max_bytes`, the largest frame.
+    /// no frame was timed, and `frame_max_bytes`, the largest frame. The recovery counters are
+    /// cumulative too: the key frames a tracked session coded by cause (`key_frames`) and the
+    /// losses it was told of by answer (`invalidations`), as `report` counts them.
     pub fn stream_stats(&self) -> Option<StreamStats> {
         let report = self.report()?;
         let totals = report.totals();

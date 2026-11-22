@@ -46,7 +46,7 @@ import { test } from '@playwright/test';
 import { launchBrowser } from '../lib/browsers.ts';
 import { Checks, finishAll } from '../lib/checks.ts';
 import {
-    barCloseMenus, barClosePanel, barShow, barTool, closeDialogs, EDGE_FAN, EDGE_MORE, edgeCloseFan, edgeFanPage, edgeOpenFan, isEdge, openBarSettingsTab, sidebarClose, sidebarOpen, sidebarSection, waitChunk,
+    barCloseMenus, barClosePanel, barShow, barTool, closeDialogs, EDGE_FAN, EDGE_MORE, edgeCloseFan, edgeFanPage, edgeOpenFan, isEdge, openBarSettingsTab, SIDEBAR_APPS, sidebarClose, sidebarOpen, sidebarSection, waitChunk,
 } from '../lib/dashboard.ts';
 import { DASHBOARD_DIST, sleep, suiteOf } from '../lib/env.ts';
 import { Host } from '../lib/host.ts';
@@ -249,6 +249,7 @@ async function sidebarViews(page: Page, tag: string, w: Walk): Promise<void> {
     await audit(page, `${tag} sidebar shut`, w);
     await sidebarOpen(page);
     await audit(page, `${tag} sidebar`, w);
+    await dialogView(page, page.locator(SIDEBAR_APPS), tag, 'apps', w);
     const headers = page.locator('.sidebar-section-header');
     // Their own text: a header renders it upper-cased.
     const names: string[] = [];
@@ -259,7 +260,6 @@ async function sidebarViews(page: Page, tag: string, w: Walk): Promise<void> {
         if (await content.count()) await content.scrollIntoViewIfNeeded();
         await audit(page, `${tag} ${name}`, w);
         await dialogView(page, page.locator('#files-content button:has-text("Download Files")'), tag, 'files', w);
-        await dialogView(page, page.locator('#apps-content button'), tag, 'apps', w);
         const toggle = page.locator('#statsStripToggle');
         if ((await toggle.count()) && (await toggle.first().isVisible())) {
             await toggle.click();

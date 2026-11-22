@@ -255,6 +255,20 @@ pub static DEFINITIONS: &[SettingDef] = &[
         client_excluded: true,
     },
     SettingDef {
+        name: "apps_catalog",
+        kind: Kind::Str,
+        default: "https://raw.githubusercontent.com/linuxserver/proot-apps/master/metadata/metadata.yml",
+        help: "The proot-apps catalog the apps panel lists and Pelorus searches, a metadata.yml in the format of the proot-apps repository's own, with its icons in the img directory beside it: an https URL, which the page and the server read from there (an http one only where the page is served over http too, since a browser refuses it on an https page), or the path of a file on the server (a file:// URL as well), which the server serves to the page under /api/apps/. The default is the linuxserver proot-apps catalog. A local repository (--apps-repo-folder) takes precedence, since the runner then installs only what that folder holds.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
         name: "webrtc_pacer",
         kind: Kind::Bool,
         default: "True",
@@ -440,7 +454,7 @@ pub static DEFINITIONS: &[SettingDef] = &[
         name: "keyframe_interval",
         kind: Kind::Float,
         default: "0.0",
-        help: "Seconds between scheduled video recovery keyframes (any video codec). 0 (default) keeps the GOP infinite: keyframes are sent only on demand (client join/reset, keyframe requests), which keeps bitrate and quality steady.",
+        help: "Seconds between scheduled video recovery keyframes (any video codec). 0 (default) keeps the GOP infinite: keyframes are sent only on demand (client join/reset, keyframe requests), which keeps bitrate and quality steady. The Tegra encoder and a stateful V4L2 encoder take 0 as 10 seconds, and space keyframes at most 600 frames apart.",
         env_vars: &[],
         allowed: &[],
         value_range: None,
@@ -1647,7 +1661,7 @@ pub static DEFINITIONS: &[SettingDef] = &[
         name: "session_switch",
         kind: Kind::Bool,
         default: "True",
-        help: "Offer the switch between the desktop and the application alone in the window manager's root menu and window menu, where the shell is installed and --desktop is not locked: the shell starts or stops, the application keeps running, and the choice is kept for the next session.",
+        help: "Offer the switch between the desktop and the application alone in the window manager's root menu and window menu, where the shell is installed and --desktop is not locked: the shell starts or stops, the application keeps running, and the choice is kept for the next session. The master token switches through /api/session whatever this says.",
         env_vars: &[],
         allowed: &[],
         value_range: None,
@@ -2445,7 +2459,7 @@ pub static DEFINITIONS: &[SettingDef] = &[
         name: "congestion_control",
         kind: Kind::Bool,
         default: "True",
-        help: "Adapt a display's video rate to what its path carries, a CBR display's below the bitrate the client chose: over WebRTC from the transport-wide-cc receiver feedback (loss, and one-way delay standing past the path's own), over WebSockets from the queue a display's frame round trip shows past the path's own and its jitter. A stall, the path holding the stream a second or more and then delivering it at once, cuts the rate only until round trips are back at the path's own, which return it to the rate before the stall. A still screen whose rate was cut is padded up to that rate, so the path is tested and the rate climbs back without the screen moving; a probe that meets a queue waits 15 s before the next, longer each time one does. A page keeps the rate its display held for 10 s, and a restarted server starts that page's stream there, for a day or until the user sets a bitrate. In CRF rate-control mode the same steer sets the encoder's peak, where CBR's is its target, under the video_bitrate range's high end, which the chosen bitrate does not move: the stream opens capped at the page's remembered rate, else 4000 kbps, and climbs as CBR does until the path queues, while the CRF picks the picture wherever the path carries it; a still CRF screen is never padded. Software H.264 (x264), VP8 and VP9 (libvpx), AV1 (SVT-AV1), and NVENC take the peak and code as an uncapped CRF until the CRF's own output overflows it, then hold to it, x264 and SVT-AV1 by raising their quality index and libvpx and NVENC by switching to their constant rate at the peak, never finer than the CRF, until the content fits under it again, when the blocks they coded under it are coded again at the CRF, a share a frame within the peak; x265, VA-API, OpenH264, and kvazaar have no capped CRF, so their CRF displays run unsteered at their CRF, as do the V4L2 M2M and Tegra encoders, which have no CRF and run at the chosen bitrate. False holds the chosen bitrate whatever the path carries, so a path slower than it lags or drops frames, and leaves a CRF stream uncapped.",
+        help: "Adapt a display's video rate to what its path carries, a CBR display's below the bitrate the client chose: over WebRTC from the transport-wide-cc receiver feedback (loss, and one-way delay standing past the path's own), over WebSockets from the queue a display's frame round trip shows past the path's own and its jitter. A stall, the path holding the stream a second or more and then delivering it at once, cuts the rate only until round trips are back at the path's own, which return it to the rate before the stall. A still screen whose rate was cut is padded up to that rate, so the path is tested and the rate climbs back without the screen moving; a probe that meets a queue waits 15 s before the next, longer each time one does. A page keeps the rate its display held for 10 s, and a restarted server starts that page's stream there, for a day or until the user sets a bitrate. In CRF rate-control mode the same steer sets the encoder's peak, where CBR's is its target, which the chosen bitrate does not move: the stream opens capped at the page's remembered rate, else 4000 kbps, and a still CRF screen is padded as a cut CBR one is, so its path is read before the next change of the screen is coded under the peak, as far as the rate at which the largest frame the stream has sent of late (key frames aside) would leave on every frame, within the video_bitrate range's high end: a display whose changes outgrow that takes a few of them to reach the peak they need. A peak a queue has shown its path is padded again only once content has filled it, and a page keeps only such a peak for its next stream; the CRF picks the picture wherever the path carries it. Software H.264 (x264), VP8 and VP9 (libvpx), AV1 (SVT-AV1), and NVENC take the peak and code as an uncapped CRF until the CRF's own output overflows it, then hold to it, x264 and SVT-AV1 by raising their quality index and libvpx and NVENC by switching to their constant rate at the peak, never finer than the CRF, until the content fits under it again, when the blocks they coded under it are coded again at the CRF, a share a frame within the peak; x265, VA-API, OpenH264, and kvazaar have no capped CRF, so their CRF displays run unsteered at their CRF, as do the V4L2 M2M and Tegra encoders, which have no CRF and run at the chosen bitrate. False holds the chosen bitrate whatever the path carries, so a path slower than it lags or drops frames, and leaves a CRF stream uncapped.",
         env_vars: &[],
         allowed: &[],
         value_range: None,
@@ -2807,6 +2821,10 @@ impl Settings {
 
     pub fn apps_repo_folder(&self) -> &str {
         self.str_value("apps_repo_folder")
+    }
+
+    pub fn apps_catalog(&self) -> &str {
+        self.str_value("apps_catalog")
     }
 
     pub fn webrtc_pacer(&self) -> BoolSetting {

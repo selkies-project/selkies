@@ -1408,6 +1408,10 @@ impl H264EncoderWrapper {
         let key_budget =
             self.is_cbr && force_idr && self.held_qp.is_some() && self.open_for_held_key();
         self.last_capped = self.peak_bound();
+        if force_idr {
+            self.references
+                .owe_key(crate::report::KeyFrameCause::Requested);
+        }
         let key = force_idr || !self.references.has_reference();
         let aimed = (key && self.held_qp.is_none())
             .then(|| self.aim_key())
@@ -5658,6 +5662,8 @@ mod qp_bound_sweep {
         use crate::encoders::codec::{FRAME_KEY, h264_frame_type};
         use crate::encoders::sps::h264_max_num_ref_frames;
         let (u, v) = (vec![128u8; W * H / 4], vec![128u8; W * H / 4]);
+        let report = crate::report::StreamReport::new("x11");
+        let _scope = crate::report::enter(&report);
         let mut enc = H264EncoderWrapper::with_depth(
             W as i32, H as i32, 20, false, 8, 60.0, 1, false, 0, 0, 0, 0, 1,
         )
@@ -5695,6 +5701,39 @@ mod qp_bound_sweep {
             &mut out
         ));
         assert_eq!(h264_frame_type(&out), FRAME_KEY, "nothing older is held");
+        let mut out = Vec::new();
+        assert!(enc.encode_with_headers(
+            &text_luma(5),
+            &u,
+            &v,
+            W as i32,
+            (W / 2) as i32,
+            (W / 2) as i32,
+            5,
+            true,
+            true,
+            &mut out
+        ));
+        assert_eq!(h264_frame_type(&out), FRAME_KEY);
+        let totals = report.totals();
+        assert_eq!(
+            totals.key_frames,
+            crate::report::KeyFrameCounts {
+                reconfigure: 1,
+                loss_out_of_window: 1,
+                requested: 1,
+                ..Default::default()
+            },
+            "the first frame starts the window, the loss of the one frame held costs the next, \
+             and a forced one is the caller's"
+        );
+        assert_eq!(
+            totals.invalidations,
+            crate::report::InvalidationCounts {
+                key_frame: 1,
+                ..Default::default()
+            }
+        );
     }
 
     /// A reference depth changed live (`LiveTunables::video_reference_frames`) reopens the

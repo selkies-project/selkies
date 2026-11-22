@@ -1,0 +1,32 @@
+# Cargo's configuration in the OSS Scanner's image (CARGO_HOME, so every build in the image takes it): the
+# crates.io and git dependencies keep line tables only, file and line in a backtrace without a debugger's
+# variables, and Selkies' own crates full debug info. The crates outside the workspace that Selkies keeps
+# (the vendored rtc crates and pixelflux's bindings) are named back to full debug info. With full debug info
+# in every crate, each test binary carries all of it, and the image takes longer to write than the
+# scanner's build has.
+[profile.dev.package."*"]
+debug = "line-tables-only"
+
+[profile.dev.package.rtc-dtls]
+debug = true
+
+[profile.dev.package.rtc-ice]
+debug = true
+
+[profile.dev.package.rtc-sctp]
+debug = true
+
+[profile.dev.package.rtc-srtp]
+debug = true
+
+[profile.dev.package.rtc-turn]
+debug = true
+
+[profile.dev.package.codec-sys]
+debug = true
+
+[profile.dev.package.nvcodec-sys]
+debug = true
+
+[profile.dev.package.va-sys]
+debug = true

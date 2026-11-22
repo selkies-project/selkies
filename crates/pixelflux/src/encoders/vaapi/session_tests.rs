@@ -919,8 +919,50 @@ fn hevc_lists_the_kept_frames_in_its_reference_picture_set() {
     });
 }
 
+/// Every HEVC slice filters across its edges, in the driver's slice parameters and in its
+/// packed header alike, where `slice_loop_filter_across_slices_enabled_flag` is the last bit
+/// before the stop bit: iHD filters across them in its reconstruction whatever a slice says,
+/// so a header that turns it off leaves every decoder a picture apart from the encoder's.
+#[test]
+fn hevc_slices_filter_across_their_edges_in_header_and_parameters() {
+    mock::reset(Driver::generous());
+    let mut enc = session(Codec::H265, false);
+    for t in 0..3u64 {
+        encode(&mut enc, t, t == 0);
+        mock::with(|d| {
+            for buffer in d.last_buffers(VAEncSliceParameterBufferType) {
+                let slice: VAEncSliceParameterBufferHEVC =
+                    unsafe { ptr::read_unaligned(buffer.as_ptr() as *const _) };
+                assert_eq!(
+                    unsafe {
+                        slice
+                            .slice_fields
+                            .bits
+                            .slice_loop_filter_across_slices_enabled_flag()
+                    },
+                    1,
+                    "frame {t}: the slice parameters"
+                );
+            }
+            let headers: Vec<Vec<u8>> = d
+                .last_packed()
+                .into_iter()
+                .filter(|p| p.0 == VAEncPackedHeaderSlice)
+                .map(|p| nal(&p.1, if t == 0 { 19 } else { 1 }, true))
+                .collect();
+            assert!(!headers.is_empty(), "frame {t}: no packed slice header");
+            for rbsp in headers {
+                let stop = rbsp.len() * 8 - 1 - rbsp.last().unwrap().trailing_zeros() as usize;
+                let flag = (rbsp[(stop - 1) / 8] >> (7 - (stop - 1) % 8)) & 1;
+                assert_eq!(flag, 1, "frame {t}: the slice header");
+            }
+        });
+    }
+}
+
 /// VP9 refreshes the slot of each frame's timestamp and predicts from the slot of the newest
-/// surviving frame, every frame error-resilient.
+/// surviving frame, and from the frame before it as GOLDEN where there is one, every frame
+/// error-resilient.
 #[test]
 fn vp9_addresses_its_slots_by_timestamp() {
     mock::reset(Driver::generous());
@@ -939,6 +981,9 @@ fn vp9_addresses_its_slots_by_timestamp() {
             if t > 0 {
                 assert_eq!(unsafe { pic.ref_flags.bits.ref_last_idx() }, t as u32 - 1);
                 assert_ne!(pic.reference_frames[t as usize - 1], VA_INVALID_SURFACE);
+                let (search, golden) = if t > 1 { (3, t - 2) } else { (1, t - 1) };
+                assert_eq!(unsafe { pic.ref_flags.bits.ref_frame_ctrl_l0() }, search);
+                assert_eq!(unsafe { pic.ref_flags.bits.ref_gf_idx() }, golden as u32);
             }
         });
     }
@@ -949,6 +994,8 @@ fn vp9_addresses_its_slots_by_timestamp() {
         let pic: VAEncPictureParameterBufferVP9 =
             d.last_param(VAEncPictureParameterBufferType).unwrap();
         assert_eq!(unsafe { pic.ref_flags.bits.ref_last_idx() }, 4);
+        assert_eq!(unsafe { pic.ref_flags.bits.ref_gf_idx() }, 3);
+        assert_eq!(unsafe { pic.ref_flags.bits.ref_frame_ctrl_l0() }, 3);
         assert_eq!(pic.refresh_frame_flags, 1 << 0, "timestamp 8 takes slot 0");
         assert_eq!(
             pic.luma_ac_qindex,
@@ -1033,8 +1080,26 @@ fn vp8_follows_the_slot_plan() {
     });
 }
 
-/// AV1 names the slot of the frame it predicts from as every reference and as the source of
-/// its probability contexts, in the picture parameters and in the frame header it packs.
+/// The frame after an AV1 key frame holds nothing older than its reference, so it names the key
+/// frame's slot as every reference and searches it alone.
+#[test]
+fn av1_after_a_key_frame_searches_its_reference_alone() {
+    mock::reset(Driver::generous());
+    let mut enc = session(Codec::Av1, true);
+    encode(&mut enc, 0, true);
+    encode(&mut enc, 1, false);
+    mock::with(|d| {
+        let pic: VAEncPictureParameterBufferAV1 =
+            d.last_param(VAEncPictureParameterBufferType).unwrap();
+        assert_eq!(pic.ref_frame_idx, [0; 7]);
+        assert_eq!(unsafe { pic.ref_frame_ctrl_l0.fields.search_idx0() }, 1);
+        assert_eq!(unsafe { pic.ref_frame_ctrl_l0.fields.search_idx1() }, 0);
+    });
+}
+
+/// AV1 names the slot of the frame it predicts from as every reference but GOLDEN, and as the
+/// source of its probability contexts, and the newest frame before it as GOLDEN, which it searches
+/// second, in the picture parameters and in the frame header it packs.
 #[test]
 fn av1_names_its_reference_slot_in_the_frame_header() {
     mock::reset(Driver::generous());
@@ -1053,7 +1118,9 @@ fn av1_names_its_reference_slot_in_the_frame_header() {
     mock::with(|d| {
         let pic: VAEncPictureParameterBufferAV1 =
             d.last_param(VAEncPictureParameterBufferType).unwrap();
-        assert_eq!(pic.ref_frame_idx, [4; 7]);
+        assert_eq!(pic.ref_frame_idx, [4, 4, 4, 3, 4, 4, 4]);
+        assert_eq!(unsafe { pic.ref_frame_ctrl_l0.fields.search_idx0() }, 1);
+        assert_eq!(unsafe { pic.ref_frame_ctrl_l0.fields.search_idx1() }, 4);
         assert_eq!(pic.primary_ref_frame, 0);
         assert_eq!(pic.refresh_frame_flags, 1 << 0);
         assert_eq!(pic.order_hint, 8);
@@ -1083,8 +1150,8 @@ fn av1_names_its_reference_slot_in_the_frame_header() {
         assert_eq!(r.u(3), 0, "primary_ref_frame");
         assert_eq!(r.u(8), 1, "refresh_frame_flags");
         assert_eq!(r.u(1), 0, "frame_refs_short_signaling");
-        for i in 0..7 {
-            assert_eq!(r.u(3), 4, "ref_frame_idx[{i}]");
+        for (i, slot) in [4, 4, 4, 3, 4, 4, 4].into_iter().enumerate() {
+            assert_eq!(r.u(3), slot, "ref_frame_idx[{i}]");
         }
         assert_eq!(r.u(1), 1, "render_and_frame_size_different");
         assert_eq!(r.u(16), (W - 1) as u32, "render_width_minus_1");

@@ -509,8 +509,41 @@ impl RtpReceiver {
 
     /// Handle one parsed RTP packet: `arrival_ms` is its arrival on this host's clock in
     /// milliseconds, `now` the layer's monotonic seconds, `twcc` the transport's receive
-    /// state. Returns the frame it completed, if any.
+    /// state. Returns the frames it completed, oldest first. On a video track a packet that
+    /// fills a hole, or a hole given up on, completes every frame queued behind it at once; one
+    /// left queued would keep the buffer that deep for good where a frame is one packet, since
+    /// each packet that arrives lets one frame out. An audio track lets one frame out a packet
+    /// as before: it asks for no retransmission, so its buffer gives a hole up only once full,
+    /// and draining it then would turn each lost packet into a stall of most of the buffer.
     pub fn handle_rtp(
+        &mut self,
+        packet: RtpPacket,
+        arrival_ms: i64,
+        now: f64,
+        twcc: &mut TwccReceiver,
+    ) -> Vec<ReceivedFrame> {
+        let Some(first) = self.receive(packet, arrival_ms, now, twcc) else {
+            return Vec::new();
+        };
+        let (codec, ssrc) = (first.codec, first.ssrc);
+        let mut frames = vec![first];
+        if self.is_audio {
+            return frames;
+        }
+        while let Some(frame) = self.jitter.remove_frame() {
+            frames.push(ReceivedFrame {
+                codec,
+                timestamp: self.mapper.map(frame.timestamp),
+                rtp_timestamp: frame.timestamp,
+                data: frame.data,
+                ssrc,
+            });
+        }
+        frames
+    }
+
+    /// `handle_rtp` up to the first frame the packet completed.
+    fn receive(
         &mut self,
         packet: RtpPacket,
         arrival_ms: i64,
@@ -868,7 +901,7 @@ mod tests {
         let mut r = receiver("video/VP8", 96, 90000, "video");
         let mut twcc = TwccReceiver::new();
         let p = |seq, ts| packet(96, seq, ts, Bytes::from_static(&[0x90, 1, 2]));
-        assert!(r.handle_rtp(p(100, 0), 0, 0.0, &mut twcc).is_none());
+        assert!(r.handle_rtp(p(100, 0), 0, 0.0, &mut twcc).is_empty());
         assert_eq!(r.take_rtcp().count(), 0);
         r.handle_rtp(p(103, 3000), 0, 0.0, &mut twcc);
         let rtcp: Vec<Vec<u8>> = r.take_rtcp().collect();
@@ -905,6 +938,39 @@ mod tests {
             "the repair stream numbers its own"
         );
         assert_eq!(r.take_rtcp().count(), 0);
+    }
+
+    #[test]
+    fn a_filled_hole_lets_every_frame_queued_behind_it_out_at_once() {
+        // One packet a frame, as a camera sends at a low rate.
+        let mut r = receiver("video/VP8", 96, 90000, "video");
+        let mut twcc = TwccReceiver::new();
+        let p = |seq: u16| {
+            packet(
+                96,
+                seq,
+                3000 * u32::from(seq),
+                Bytes::from_static(&[0x90, 1, 2]),
+            )
+        };
+        let early: usize = (0..10u16)
+            .filter(|seq| *seq != 3)
+            .map(|seq| r.handle_rtp(p(seq), 0, 0.0, &mut twcc).len())
+            .sum();
+        assert_eq!(
+            early, 2,
+            "frames 0 and 1; those behind the hole wait for it"
+        );
+        let stamps: Vec<u32> = r
+            .handle_rtp(p(3), 0, 0.0, &mut twcc)
+            .iter()
+            .map(|f| f.rtp_timestamp)
+            .collect();
+        assert_eq!(
+            stamps,
+            (2..9u32).map(|frame| 3000 * frame).collect::<Vec<_>>(),
+            "frames 2 to 8 at once, frame 9 waiting for the next frame's packet"
+        );
     }
 
     #[test]

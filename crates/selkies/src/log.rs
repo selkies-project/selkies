@@ -25,6 +25,8 @@
 //! Third-party crates (smithay, the `rtc_*` stacks) log under their module paths, which is how
 //! they are told apart: they stay at WARNING in every mode, and those warnings are paced by the
 //! same filter, since `rtc_dtls` warns per unknown extension in every handshake with Chromium.
+//! smithay's warnings and errors are logged as DEBUG instead: they report what the session's
+//! applications send the compositor, which an operator cannot act on.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -69,6 +71,11 @@ fn is_own(target: &str) -> bool {
         || target == "selkies"
         || target.starts_with("selkies::")
         || target.starts_with("selkies_rtc")
+}
+
+/// Whether a record's target is smithay's, whose warnings and errors are logged as DEBUG.
+fn is_smithay(target: &str) -> bool {
+    target == "smithay" || target.starts_with("smithay::")
 }
 
 /// Message texts the pacing remembers before it starts over.
@@ -129,6 +136,9 @@ impl Log for Logger {
     fn enabled(&self, metadata: &Metadata) -> bool {
         let target = metadata.target();
         let level = metadata.level();
+        if is_smithay(target) {
+            return level <= Level::Warn && self.debug.load(Ordering::Relaxed);
+        }
         if !is_own(target) {
             return level <= Level::Warn;
         }
@@ -161,6 +171,7 @@ impl Log for Logger {
             }
         }
         let level = match record.level() {
+            _ if is_smithay(target) => "DEBUG",
             Level::Error => "ERROR",
             Level::Warn => "WARNING",
             Level::Info => "INFO",
@@ -215,6 +226,15 @@ mod tests {
             assert!(!enabled(&l, "rtc_dtls::handshake", Level::Debug));
             assert!(enabled(&l, "rtc_dtls::handshake", Level::Warn));
         }
+    }
+
+    #[test]
+    fn smithay_warnings_and_errors_reach_the_log_only_in_debug_mode() {
+        let xdg = "smithay::wayland::shell::xdg";
+        assert!(!enabled(&logger(false), xdg, Level::Error));
+        assert!(!enabled(&logger(false), xdg, Level::Warn));
+        assert!(enabled(&logger(true), xdg, Level::Error));
+        assert!(!enabled(&logger(true), xdg, Level::Info));
     }
 
     #[test]

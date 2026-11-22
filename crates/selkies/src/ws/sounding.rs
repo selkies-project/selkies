@@ -16,7 +16,8 @@
 //! 680 ms of picture age on a light screen over 10 Mbit/s, each probe).
 //!
 //! So the probe's rate climbs apart from the target ([`DisplayLink::sound_rate`]): the padding
-//! fills the path to it, `PROBE_STEP` a second, over whatever the stream sends under it,
+//! fills the path to it, `PROBE_STEP` a second (`START_STEP` until the path has queued anything
+//! the stream sent), over whatever the stream sends under it,
 //! while the steer reads the stream alone. Each ack while the relay pads is weighed as it
 //! comes ([`DisplayLink::sound_note`]), a frame's or a pad pong's, each kind against its own
 //! baseline: the first acks that stand `QUEUE_MS` over it and rise, clear of that kind's own
@@ -38,7 +39,11 @@
 //! (`CongestionSteer::cap_probing`): the detector stays armed, and a queue it reads with no
 //! padding to steer has nothing to hold. The tick backs the target off to `HEADROOM` of what
 //! the first acks showed, the path is read through the drain, busy until its queue is gone,
-//! and the landing follows on that longer reading.
+//! and the landing follows on that longer reading. Neither waits for the steer's tick
+//! (`Sounding::land_due`, `WsService::land_sounding`): content over the path's rate queues
+//! by its whole overshoot until the target is cut, half a second of it where a tick was
+//! waited for (a probe that found a link grown from 4 to 10 Mbit/s reached 15 and aged the
+//! picture 480 ms).
 
 use std::collections::VecDeque;
 
@@ -95,6 +100,14 @@ pub const CAP_UNREAD: f64 = 0.9;
 pub const TOP: f64 = 1.3;
 /// Content at this share of the probe's rate leaves the padding nothing to add.
 pub const CONTENT_SHARE: f64 = 0.9;
+/// How fast a probe's rate climbs, a second, on a path that has queued nothing the stream
+/// sent yet: the start of a session, where every step under what the path carries holds a
+/// capped CRF display's peak, and with it each change and its cleanup, under the picture its
+/// rate factor asks for. A path that queues ends the climb at its detector as at
+/// `PROBE_STEP` (the hold keeps the queue at `HOLD_QUEUE_MS` whatever the rate that crossed
+/// it), and every probe after its first queue climbs at `PROBE_STEP`.
+pub const START_STEP: f64 = 4.0;
+
 /// How long the detector stays armed after the last padded tick, and after a tick on which
 /// content probed past the cap.
 pub const ARMED_S: f64 = 3.0;
@@ -186,6 +199,10 @@ pub struct Sounding {
     pub rate_kbps: Option<f64>,
     /// The queue threshold the running sounding fired on.
     pub over_ms: f64,
+    /// Whether the steer is to land now and not at its next tick: a queue under content grows
+    /// by the stream's whole overshoot until the target is cut, and a provisional target is a
+    /// worse picture than the path carries for as long as it stands.
+    pub land_due: bool,
 }
 
 impl DisplayLink {
@@ -206,9 +223,10 @@ impl DisplayLink {
 
     /// The padding for the next tick, in bits per second. A probe starts as [`PathProbe`]
     /// starts one, at the target `rate` (kbps); from there its rate climbs `PROBE_STEP` a
-    /// second on clean ticks, whatever the stream sends under it, until the detector fires,
-    /// a tick reads a queue, the steer holds, the target reaches the ceiling, or the rate
-    /// stands `TOP` over the ceiling unqueued.
+    /// second on clean ticks (`START_STEP` on a path that has queued nothing yet) whose newest
+    /// ack came back clear of a queue, whatever the stream sends under it, until the detector
+    /// fires, a tick reads a queue, the steer holds, the target reaches the ceiling, or the rate
+    /// stands `TOP` over the ceiling on such a tick.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn sound_rate(
         &mut self,
@@ -220,6 +238,12 @@ impl DisplayLink {
         span: f64,
         now: f64,
     ) -> f64 {
+        let step = if self.link_steer.as_ref().is_some_and(|s| s.met_queue) {
+            CongestionSteer::PROBE_STEP
+        } else {
+            START_STEP
+        };
+        let answered = self.sound_answered(span, now);
         let probe = self.link_probe.get_or_insert_with(PathProbe::default);
         let Some(running) = self.sounding.rate_kbps else {
             let bps = probe.rate_bps(rate, ceiling, content_bps, queue_s, held, now);
@@ -230,8 +254,15 @@ impl DisplayLink {
         };
         probe.padding = false;
         let queued = queue_s.is_none_or(|q| q > 0.0);
-        let next = (running.max(rate) * CongestionSteer::PROBE_STEP.powf(span.clamp(0.0, 2.0)))
-            .min(TOP * ceiling);
+        // The rate climbs, and the path is taken to carry the ceiling, only from a tick whose
+        // newest ack came back clear of a queue (`sound_answered`): padding written behind a
+        // backlog says nothing of the path until it comes back, and the rate holds meanwhile.
+        let carried = answered;
+        let next = if carried {
+            (running.max(rate) * step.powf(span.clamp(0.0, 2.0))).min(TOP * ceiling)
+        } else {
+            running.max(rate)
+        };
         let content = content_bps.unwrap_or(f64::INFINITY);
         if queued || held || content >= CONTENT_SHARE * next * 1_000.0 || rate >= ceiling {
             if queued {
@@ -240,7 +271,7 @@ impl DisplayLink {
             self.sounding.rate_kbps = None;
             return 0.0;
         }
-        if running >= TOP * ceiling {
+        if carried && running >= TOP * ceiling {
             self.sounding.rate_kbps = None;
             probe.ended(now);
             self.sounding.phase = SoundPhase::Carried;
@@ -249,6 +280,26 @@ impl DisplayLink {
         probe.padding = true;
         self.sounding.rate_kbps = Some(next);
         next * 1_000.0 - content
+    }
+
+    /// Whether the newest ack (a frame's or a pad pong's) that arrived over the last `span`
+    /// seconds came back within `LINK_QUEUE_MS`, beyond half the path's jitter, of the round
+    /// trip floor: the threshold the steer reads a queue by. A pong's round trip spans what
+    /// was written ahead of its ping, so one behind a backlog stands over the floor by it
+    /// however steady the pongs before it, which the detector's baseline of pongs alone cannot
+    /// tell from a path's own.
+    fn sound_answered(&self, span: f64, now: f64) -> bool {
+        let Some(floor) = self.rtt_floor_ms else {
+            return false;
+        };
+        let allowed = LINK_QUEUE_MS + self.link_jitter_ms.unwrap_or(0.0) / 2.0;
+        self.sounding
+            .trail
+            .iter()
+            .rev()
+            .take_while(|a| a.arrive >= now - span)
+            .max_by(|a, b| a.arrive.total_cmp(&b.arrive))
+            .is_some_and(|newest| newest.rtt_ms - floor <= allowed)
     }
 
     /// Fold one ack into the trail: while the relay pads, or the detector is armed, the first
@@ -301,6 +352,12 @@ impl DisplayLink {
                     hold.rate = (read * lean - hold.content_bps).clamp(0.0, hold.relay_bps);
                 }
                 self.sounding.phase = SoundPhase::Hold(hold);
+                // Content had the padding's place when the detector fired: this ack is the
+                // one the landing judges that queue by.
+                if hold.pad_bps <= 0.0 && pong == hold.start.pong {
+                    self.sounding.land_due = true;
+                    return;
+                }
                 // A queue the padding's rate does not answer for is content filling the path:
                 // the hold has nothing to steer, and ends on what it has read.
                 let unsteered = pong == hold.start.pong
@@ -308,6 +365,7 @@ impl DisplayLink {
                     && ack.queue_ms > UNSTEERED * self.sound_hold_queue_ms();
                 if now - hold.since >= HOLD_S || unsteered {
                     self.sound_finish(now, unsteered);
+                    self.sounding.land_due = unsteered;
                 }
             }
             // The queue an early hold left drains under the provisional target: the path is
@@ -324,6 +382,7 @@ impl DisplayLink {
                     early_bps,
                 };
                 self.sounding.after = now;
+                self.sounding.land_due = true;
             }
             _ => {}
         }
@@ -484,6 +543,7 @@ impl DisplayLink {
         lo_kbps: f64,
         encoder: Option<&dyn SteerTarget>,
     ) -> Option<SteerOutcome> {
+        self.sounding.land_due = false;
         if let SoundPhase::Hold(hold) = self.sounding.phase {
             if hold.pad_bps <= 0.0 {
                 // Content had the padding's place when the detector fired: nothing to hold,
@@ -524,6 +584,11 @@ impl DisplayLink {
         }
         let current = self.video_bitrate_kbps(target_kbps);
         let steer = self.link_steer.get_or_insert_with(CongestionSteer::default);
+        let carried = matches!(self.sounding.phase, SoundPhase::Carried);
+        let landing = matches!(
+            self.sounding.phase,
+            SoundPhase::Read { .. } | SoundPhase::Drained { .. }
+        );
         let (rate, pad_bps, why) = match self.sounding.phase {
             SoundPhase::Idle => return None,
             SoundPhase::Hold(hold) => (current, hold.pad_bps, ""),
@@ -580,7 +645,12 @@ impl DisplayLink {
             }
             SoundPhase::Carried => {
                 self.sounding.phase = SoundPhase::Idle;
-                steer.land(target_kbps, target_kbps, now);
+                // A peak's ceiling rises with its frames: its steer is left free to follow a
+                // change's own delivery up to the next one, where a landing would hold the
+                // peak at this ceiling until a probe had climbed to that.
+                if !self.capped {
+                    steer.land(target_kbps, target_kbps, now);
+                }
                 (
                     target_kbps,
                     0.0,
@@ -588,9 +658,16 @@ impl DisplayLink {
                 )
             }
         };
+        if landing {
+            self.peak_settled = true;
+        }
         if matches!(self.sounding.phase, SoundPhase::Idle) {
             if let Some(probe) = self.link_probe.as_mut() {
-                probe.ended(now);
+                if carried {
+                    probe.carried(now);
+                } else {
+                    probe.ended(now);
+                }
             }
             self.sounding.armed_until = 0.0;
         }
@@ -600,16 +677,26 @@ impl DisplayLink {
         self.link_padding = pad_bps;
         self.link_kbps = Some(rate);
         let mut outcome = SteerOutcome {
-            cc_rate: self.link_hold.note(rate, now),
+            cc_rate: self.keep_rate(rate, now),
             applied_kbps: None,
             pad_bps: Some(pad_bps),
         };
-        if rate != current.round()
+        // Compared in whole kbps: a capped CRF display's ceiling carries a fraction, and a
+        // landing on it is no change. A cut is news, a rise the steer's routine, as its own ticks
+        // log them.
+        if rate.round() != current.round()
             && let Some(encoder) = encoder
         {
-            info!(target: "ws", "Congestion control[{display_id}]: video bitrate {current:.0} -> {rate:.0} kbps ({why})");
-            if encoder.update_video_bitrate(rate as i64).is_ok() {
-                outcome.applied_kbps = Some(rate as i64);
+            let line = format!(
+                "Congestion control[{display_id}]: video bitrate {current:.0} -> {rate:.0} kbps ({why})"
+            );
+            if rate < current {
+                info!(target: "ws", "{line}");
+            } else {
+                debug!(target: "ws", "{line}");
+            }
+            if encoder.update_video_bitrate(rate.round() as i64).is_ok() {
+                outcome.applied_kbps = Some(rate.round() as i64);
             }
         }
         Some(outcome)
@@ -641,6 +728,39 @@ mod tests {
             link.sound_note(10.0 + queue, *bytes, now);
         }
         now
+    }
+
+    /// One probe tick at `now`: the pad pongs of the half second before it, `late_ms` over a
+    /// 10 ms floor, at the rate the last tick asked for (`asked_bps`, over `content_bps`), then
+    /// the tick itself; the padding it asks for.
+    #[allow(clippy::too_many_arguments)]
+    fn delivered_tick(
+        link: &mut DisplayLink,
+        now: f64,
+        rate_kbps: f64,
+        ceiling_kbps: f64,
+        content_bps: f64,
+        late_ms: f64,
+        bytes: &mut u64,
+        asked_bps: &mut f64,
+    ) -> f64 {
+        link.rtt_floor_ms.get_or_insert(10.0);
+        let sent = *asked_bps + content_bps;
+        for i in 1..=10 {
+            *bytes += (sent * 0.05 / 8.0) as u64;
+            link.sounding.ack_is_frame = false;
+            link.sound_note(10.0 + late_ms, *bytes, now - 0.5 + f64::from(i) * 0.05);
+        }
+        *asked_bps = link.sound_rate(
+            rate_kbps,
+            ceiling_kbps,
+            Some(content_bps),
+            Some(0.0),
+            false,
+            0.5,
+            now,
+        );
+        *asked_bps
     }
 
     /// Acks on a flat path, then a queue building over a 10 Mbit/s path: a hold.
@@ -792,6 +912,66 @@ mod tests {
     }
 
     #[test]
+    fn a_queue_under_content_asks_for_its_landing_at_once() {
+        // Armed, no padding: content probing past the cap.
+        let mut link = padded(0.0);
+        link.link_kbps = Some(13_000.0);
+        link.sounding.armed_until = NOW + 10.0;
+        let mut bytes = 0;
+        let now = held(&mut link, &mut bytes);
+        assert!(matches!(link.sounding.phase, SoundPhase::Hold(_)));
+        assert!(
+            !link.sounding.land_due,
+            "the firing ack alone judges nothing"
+        );
+        let now = acks(&mut link, now, &mut bytes, &[60.0], 10_000_000.0);
+        assert!(link.sounding.land_due, "the next ack does");
+        link.sound_land("primary", now, 30_000.0, 100.0, None)
+            .expect("the provisional landing");
+        assert!(!link.sounding.land_due);
+        let cut = link.link_kbps.expect("cut");
+        assert!(cut < 13_000.0 * CongestionSteer::HEADROOM + 1.0, "{cut}");
+        assert!(matches!(link.sounding.phase, SoundPhase::Drain { .. }));
+        // The drain's end asks for the landing too.
+        let now = acks(
+            &mut link,
+            now,
+            &mut bytes,
+            &[90.0, 70.0, 50.0, 30.0, 20.0, 5.0],
+            10_000_000.0,
+        );
+        assert!(link.sounding.land_due);
+        link.sound_land("primary", now, 30_000.0, 100.0, None)
+            .expect("the landing");
+        let landed = link.link_kbps.expect("landed");
+        assert!((9_000.0..=9_800.0).contains(&landed), "{landed}");
+
+        // A queue that is gone by the next ack was not the path's: no cut.
+        let mut link = padded(0.0);
+        link.link_kbps = Some(13_000.0);
+        link.sounding.armed_until = NOW + 10.0;
+        let now = held(&mut link, &mut bytes);
+        let now = acks(&mut link, now, &mut bytes, &[2.0], 13_000_000.0);
+        assert!(link.sounding.land_due);
+        assert!(
+            link.sound_land("primary", now, 30_000.0, 100.0, None)
+                .is_none()
+        );
+        assert_eq!(link.link_kbps, Some(13_000.0));
+        assert!(matches!(link.sounding.phase, SoundPhase::Idle));
+
+        // A padded hold lands on the steer's tick, as it reads the path for its whole span.
+        let mut link = padded(13_000_000.0);
+        let now = held(&mut link, &mut bytes);
+        acks(&mut link, now, &mut bytes, &[40.0; 17], 10_000_000.0);
+        assert!(matches!(
+            link.sounding.phase,
+            SoundPhase::Read { early: false, .. }
+        ));
+        assert!(!link.sounding.land_due);
+    }
+
+    #[test]
     fn a_reading_lands_the_target_under_it_and_caps_the_climb() {
         let mut link = padded(13_000_000.0);
         link.link_kbps = Some(4000.0);
@@ -856,12 +1036,18 @@ mod tests {
     fn the_probes_rate_climbs_apart_from_the_target_to_past_the_ceiling() {
         let mut link = DisplayLink::new();
         let mut now = NOW;
-        let bps = link.sound_rate(4000.0, 6000.0, Some(200_000.0), Some(0.0), false, 0.5, now);
+        let (mut bytes, mut asked) = (0, 0.0);
+        let mut tick = |link: &mut DisplayLink, now: f64| {
+            delivered_tick(
+                link, now, 4000.0, 6000.0, 200_000.0, 0.0, &mut bytes, &mut asked,
+            )
+        };
+        let bps = tick(&mut link, now);
         assert_eq!(bps, 3_800_000.0, "a probe starts at the target");
         let mut last = bps;
         loop {
             now += 0.5;
-            let bps = link.sound_rate(4000.0, 6000.0, Some(200_000.0), Some(0.0), false, 0.5, now);
+            let bps = tick(&mut link, now);
             if bps <= 0.0 {
                 break;
             }
@@ -874,29 +1060,164 @@ mod tests {
             .expect("the landing");
         assert_eq!(link.link_kbps, Some(6000.0), "the path carries the ceiling");
 
-        // Content that takes the padding's place ends the probe; a queue on a tick too.
+        // Content that takes the padding's place ends the probe; a queue on a tick too. The
+        // probe's next rate on a path that has queued nothing is twice the target, half a
+        // second on.
         let mut link = DisplayLink::new();
-        link.sound_rate(
+        let (mut bytes, mut asked) = (0, 0.0);
+        delivered_tick(
+            &mut link, NOW, 4000.0, 30_000.0, 200_000.0, 0.0, &mut bytes, &mut asked,
+        );
+        let bps = delivered_tick(
+            &mut link,
+            NOW + 0.5,
             4000.0,
             30_000.0,
-            Some(200_000.0),
-            Some(0.0),
-            false,
-            0.5,
-            NOW,
+            7_300_000.0,
+            0.0,
+            &mut bytes,
+            &mut asked,
         );
-        assert_eq!(
-            link.sound_rate(
-                4000.0,
-                30_000.0,
-                Some(4_300_000.0),
-                Some(0.0),
-                false,
-                0.5,
-                NOW + 0.5
-            ),
-            0.0
-        );
+        assert_eq!(bps, 0.0);
         assert_eq!(link.sounding.rate_kbps, None);
+    }
+
+    /// A probe on a path that has queued nothing the stream sent climbs `START_STEP` a second,
+    /// so a session's first one reaches a wide path's rate in seconds; once a queue has shown
+    /// the path, every probe climbs `PROBE_STEP`.
+    #[test]
+    fn a_probe_climbs_fast_until_the_path_first_queues() {
+        let climb = |met_queue: bool| {
+            let mut link = DisplayLink::new();
+            let mut steer = CongestionSteer::default();
+            steer.met_queue = met_queue;
+            link.link_steer = Some(steer);
+            let (mut bytes, mut asked) = (0, 0.0);
+            delivered_tick(
+                &mut link,
+                NOW,
+                4000.0,
+                1_000_000.0,
+                0.0,
+                0.0,
+                &mut bytes,
+                &mut asked,
+            );
+            delivered_tick(
+                &mut link,
+                NOW + 0.5,
+                4000.0,
+                1_000_000.0,
+                0.0,
+                0.0,
+                &mut bytes,
+                &mut asked,
+            )
+        };
+        assert!((climb(false) - 4_000_000.0 * START_STEP.sqrt()).abs() < 1.0);
+        assert!((climb(true) - 4_000_000.0 * CongestionSteer::PROBE_STEP.sqrt()).abs() < 1.0);
+    }
+
+    /// The probe's rate climbs only from a tick whose newest ack came back clear of a queue,
+    /// so padding written behind a backlog (whose pongs all stand over the floor by it, and
+    /// alike) is never taken for a path that carries the ceiling, nor is a tick that brought
+    /// back nothing: the rate holds until the acks clear or a tick reads the queue.
+    #[test]
+    fn a_probe_climbs_only_on_acks_clear_of_a_queue() {
+        let mut link = DisplayLink::new();
+        let (mut bytes, mut asked) = (0, 0.0);
+        let mut now = NOW;
+        let mut tick = |link: &mut DisplayLink, now: f64, late_ms: f64| {
+            delivered_tick(
+                link,
+                now,
+                4000.0,
+                1_000_000.0,
+                0.0,
+                late_ms,
+                &mut bytes,
+                &mut asked,
+            )
+        };
+        assert_eq!(tick(&mut link, now, 0.0), 4_000_000.0);
+        for _ in 0..40 {
+            now += 0.5;
+            assert_eq!(
+                tick(&mut link, now, 600.0),
+                4_000_000.0,
+                "the rate holds behind a backlog"
+            );
+        }
+        assert!(matches!(link.sounding.phase, SoundPhase::Idle));
+        now += 0.5;
+        assert_eq!(
+            link.sound_rate(4000.0, 1_000_000.0, Some(0.0), Some(0.0), false, 0.5, now),
+            4_000_000.0,
+            "and through a tick that brought back nothing"
+        );
+        now += 0.5;
+        let bps = tick(&mut link, now, 0.0);
+        assert!(
+            bps > 4_000_000.0,
+            "and climbs once its acks are clear again: {bps}"
+        );
+    }
+
+    /// The encoder a landing retargets: every rate it is given.
+    struct Encoder(std::cell::RefCell<Vec<i64>>);
+
+    impl SteerTarget for Encoder {
+        fn update_video_bitrate(&self, kbps: i64) -> Result<(), String> {
+            self.0.borrow_mut().push(kbps);
+            Ok(())
+        }
+        fn update_link_rate(&self, _kbps: i64) {}
+    }
+
+    /// Climbs `link`'s probe under `ceiling` until the path has carried the padding.
+    fn carried(link: &mut DisplayLink, ceiling: f64) -> f64 {
+        let mut now = NOW;
+        let (mut bytes, mut asked) = (0, 0.0);
+        while delivered_tick(
+            link, now, 4000.0, ceiling, 200_000.0, 0.0, &mut bytes, &mut asked,
+        ) > 0.0
+        {
+            now += 0.5;
+        }
+        assert!(matches!(link.sounding.phase, SoundPhase::Carried));
+        now
+    }
+
+    #[test]
+    fn a_capped_display_landing_on_its_own_ceiling_retargets_nothing() {
+        // A capped CRF display's ceiling follows its largest frames and carries a fraction.
+        let ceiling = 124_185.4;
+        let encoder = Encoder(Default::default());
+        // At the ceiling already, as the path last carried it or as the encoder started.
+        for held in [Some(ceiling), None] {
+            let mut link = DisplayLink::new();
+            link.capped = true;
+            link.link_kbps = held;
+            let now = carried(&mut link, ceiling);
+            let outcome = link
+                .sound_land("primary", now, ceiling, 100.0, Some(&encoder))
+                .expect("the landing");
+            assert_eq!(
+                outcome.applied_kbps, None,
+                "held at {held:?}: no change to apply"
+            );
+        }
+        assert!(encoder.0.borrow().is_empty(), "{:?}", encoder.0.borrow());
+
+        // Landing above the rate the path was held to retargets the encoder, in whole kbps.
+        let mut link = DisplayLink::new();
+        link.capped = true;
+        link.link_kbps = Some(100_000.0);
+        let now = carried(&mut link, ceiling);
+        let outcome = link
+            .sound_land("primary", now, ceiling, 100.0, Some(&encoder))
+            .expect("the landing");
+        assert_eq!(outcome.applied_kbps, Some(124_185));
+        assert_eq!(*encoder.0.borrow(), vec![124_185]);
     }
 }

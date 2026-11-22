@@ -321,7 +321,7 @@ key() {
 
 case "${1:-}" in
     release) [ "$#" -eq 5 ] || usage; shift; release "$@" ;;
-    file) [ "$#" -ge 5 ] && [ $(($# % 2)) -eq 1 ] || usage; shift; files "$@" ;;
+    file) [ "$#" -ge 5 ] || usage; [ $(($# % 2)) -eq 1 ] || usage; shift; files "$@" ;;
     key) [ "$#" -eq 4 ] || usage; shift; key "$@" ;;
     *) usage ;;
 esac

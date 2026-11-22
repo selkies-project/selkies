@@ -144,6 +144,75 @@ struct Queue {
     capacity: usize,
 }
 
+/// What [`Queue::pop_within`] found.
+enum Popped {
+    /// The oldest frame of the uplink.
+    Job(Job),
+    /// Nothing arrived within the wait.
+    Idle,
+    /// The camera stopped.
+    Closed,
+}
+
+/// How often the readers of a camera whose uplink has stopped are handed a frame anyway. A reader
+/// must not starve: Chromium's V4L2 capture restarts its stream after a second without a frame and
+/// ends the track after ten, so an application that held the camera across a page's reconnect
+/// would show black until it opened the device again.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_millis(500);
+/// How long the last picture of a stopped uplink is repeated before its readers are handed black:
+/// a short stall (a key frame on its way) keeps the picture, and a camera turned off or a page gone
+/// does not leave its last picture on screen.
+const KEEPALIVE_HOLD: Duration = Duration::from_secs(5);
+
+/// What a stalled camera's readers are handed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Repeat {
+    /// The last picture again.
+    Held,
+    /// Black, or the last picture on a device with no black frame (MJPEG without its encoder).
+    Black,
+}
+
+/// When a camera whose uplink has stopped hands its readers a frame, and which.
+struct Keepalive {
+    /// The last frame due or published, the uplink's or a repeat: the interval runs from it.
+    last_publish: Instant,
+    /// The last frame of the uplink published, `None` before the first: the hold runs from it.
+    fresh_at: Option<Instant>,
+}
+
+impl Keepalive {
+    fn new(now: Instant) -> Self {
+        Keepalive {
+            last_publish: now,
+            fresh_at: None,
+        }
+    }
+
+    /// A frame of the uplink was published.
+    fn fresh(&mut self, now: Instant) {
+        self.last_publish = now;
+        self.fresh_at = Some(now);
+    }
+
+    /// How long the decoder thread may wait for a frame before one is due.
+    fn wait(&self, now: Instant) -> Duration {
+        KEEPALIVE_INTERVAL.saturating_sub(now.saturating_duration_since(self.last_publish))
+    }
+
+    /// The frame due now, if any, which counts as published.
+    fn due(&mut self, now: Instant) -> Option<Repeat> {
+        if now.saturating_duration_since(self.last_publish) < KEEPALIVE_INTERVAL {
+            return None;
+        }
+        self.last_publish = now;
+        Some(match self.fresh_at {
+            Some(at) if now.saturating_duration_since(at) < KEEPALIVE_HOLD => Repeat::Held,
+            _ => Repeat::Black,
+        })
+    }
+}
+
 impl Queue {
     fn new(capacity: usize) -> Self {
         Queue {
@@ -170,16 +239,26 @@ impl Queue {
         evicted
     }
 
-    fn pop(&self) -> Option<Job> {
+    /// The oldest job, waiting at most `wait` for one to arrive.
+    fn pop_within(&self, wait: Duration) -> Popped {
+        let deadline = Instant::now() + wait;
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             if let Some(j) = st.jobs.pop_front() {
-                return Some(j);
+                return Popped::Job(j);
             }
             if st.closed {
-                return None;
+                return Popped::Closed;
             }
-            st = self.cv.wait(st).unwrap_or_else(|e| e.into_inner());
+            let now = Instant::now();
+            if now >= deadline {
+                return Popped::Idle;
+            }
+            st = self
+                .cv
+                .wait_timeout(st, deadline - now)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
         }
     }
 
@@ -356,9 +435,25 @@ fn fan_out(
     }
 }
 
+/// Whether anything may be reading the camera: an interposer client, a linked PipeWire consumer,
+/// or a kernel device, whose openers only a walk of `/proc` finds, so its write is kept.
+fn has_reader(
+    server: &Server,
+    v4l2out: Option<&V4l2Output>,
+    pipewire: Option<&PipeWireSink>,
+) -> bool {
+    server.client_count() > 0
+        || v4l2out.is_some()
+        || pipewire.is_some_and(PipeWireSink::is_streaming)
+}
+
 /// Decoder thread body: decode, fit, publish, wake clients. A dropped or undecodable inter-coded
 /// frame parks the stream until the next keyframe and asks the client for one, so a consumer never
-/// sees the smear of predictions built on a missing reference.
+/// sees the smear of predictions built on a missing reference. While no frame comes out (a stall, a
+/// key frame awaited, a page reconnecting, a camera turned off) the readers are handed the last
+/// picture again and then black ([`Keepalive`]), so none of them gives the device up. A repeat is
+/// due only once the queue is empty, so it never delays a frame waiting behind it, and is skipped
+/// while nothing reads the camera ([`has_reader`]).
 fn worker(cfg: WorkerConfig) {
     let WorkerConfig {
         queue,
@@ -406,13 +501,47 @@ fn worker(cfg: WorkerConfig) {
     // A loopback device created with `exclusive_caps` announces capture only once its producer
     // has written a frame: until then no application finds it, and a camera started on demand
     // waits for an application to open it.
+    let black = black_frame(&dev, &mut normalizer, jpeg_out.as_mut(), fmt.sizeimage);
     if let Some(out) = v4l2out.as_mut()
-        && let Some(frame) = black_frame(&dev, &mut normalizer, jpeg_out.as_mut(), fmt.sizeimage)
+        && let Some(frame) = black.as_deref()
     {
-        out.write_frame(&frame);
+        out.write_frame(frame);
     }
 
-    while let Some(job) = queue.pop() {
+    let mut keepalive = Keepalive::new(Instant::now());
+    loop {
+        let job = match queue.pop_within(keepalive.wait(Instant::now())) {
+            Popped::Job(job) => job,
+            Popped::Idle => {
+                if let Some(repeat) = keepalive.due(Instant::now())
+                    && has_reader(&server, v4l2out.as_ref(), pipewire.as_ref())
+                {
+                    let ts = monotonic_ns();
+                    let published = match (repeat, black.as_deref()) {
+                        (Repeat::Black, Some(frame)) => ring.publish(ts, |slot| {
+                            slot.get_mut(..frame.len()).map_or(0, |s| {
+                                s.copy_from_slice(frame);
+                                frame.len()
+                            })
+                        }),
+                        _ => ring.republish(ts),
+                    };
+                    if published {
+                        fan_out(
+                            &ring,
+                            &server,
+                            &mut v4l2out,
+                            &device_path,
+                            &mut pipewire,
+                            ts,
+                            &stats,
+                        );
+                    }
+                }
+                continue;
+            }
+            Popped::Closed => break,
+        };
         if mjpeg_device && job.codec == Codec::Jpeg && job.orientation.is_upright() {
             // The device speaks the uplink's own format: an upright frame of the device's
             // size is published as received, undecoded; any other goes through decode and fit.
@@ -429,6 +558,7 @@ fn worker(cfg: WorkerConfig) {
                         slot[..n].copy_from_slice(&job.data);
                         n
                     }) {
+                        keepalive.fresh(Instant::now());
                         stats.passthrough.fetch_add(1, Ordering::Relaxed);
                         stats.published.fetch_add(1, Ordering::Relaxed);
                         fan_out(
@@ -493,6 +623,7 @@ fn worker(cfg: WorkerConfig) {
                         None => normalizer.write_frame(&view, &dev, slot),
                     });
                     if published {
+                        keepalive.fresh(Instant::now());
                         stats.published.fetch_add(1, Ordering::Relaxed);
                         fan_out(
                             &ring,
@@ -942,10 +1073,61 @@ mod tests {
             })
             .unwrap();
         assert_eq!(evicted.data, vec![1]);
-        assert_eq!(q.pop().unwrap().data, vec![2]);
-        assert_eq!(q.pop().unwrap().data, vec![3]);
+        let data = |p: Popped| match p {
+            Popped::Job(j) => j.data,
+            _ => panic!("no job"),
+        };
+        assert_eq!(data(q.pop_within(Duration::ZERO)), vec![2]);
+        assert_eq!(data(q.pop_within(Duration::ZERO)), vec![3]);
         q.close();
-        assert!(q.pop().is_none());
+        assert!(matches!(q.pop_within(Duration::ZERO), Popped::Closed));
+    }
+
+    /// An empty queue hands the decoder thread back after the wait, so a frame can be due.
+    #[test]
+    fn an_empty_queue_returns_after_the_wait() {
+        let q = Queue::new(2);
+        let start = Instant::now();
+        assert!(matches!(
+            q.pop_within(Duration::from_millis(50)),
+            Popped::Idle
+        ));
+        assert!(start.elapsed() >= Duration::from_millis(50));
+    }
+
+    /// A camera whose uplink stops hands its readers a frame every interval, never a second
+    /// apart (Chromium's capture gives a device up after ten seconds without one): the last
+    /// picture while the stop is shorter than the hold, black after it and before any picture.
+    #[test]
+    fn a_stalled_camera_repeats_its_picture_then_black() {
+        assert!(KEEPALIVE_INTERVAL < Duration::from_secs(1));
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        let mut k = Keepalive::new(t0);
+        let mut due = Vec::new();
+        for step in 1..=80u64 {
+            let now = t0 + ms(step * 100);
+            if step == 6 {
+                k.fresh(now);
+                continue;
+            }
+            assert!(k.wait(now) <= KEEPALIVE_INTERVAL);
+            if let Some(repeat) = k.due(now) {
+                due.push((step * 100, repeat));
+            }
+        }
+        assert_eq!(due[0], (500, Repeat::Black));
+        assert_eq!(due[1], (1100, Repeat::Held));
+        assert!(due[1..].windows(2).all(|w| w[1].0 - w[0].0 == 500));
+        let held_until = ms(600) + KEEPALIVE_HOLD;
+        assert!(due[1..].iter().all(|&(t, r)| {
+            r == if ms(t) < held_until {
+                Repeat::Held
+            } else {
+                Repeat::Black
+            }
+        }));
+        assert_eq!(due.last().map(|d| d.1), Some(Repeat::Black));
     }
 
     #[test]

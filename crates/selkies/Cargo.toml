@@ -32,6 +32,7 @@ selkies-draw = { path = "../selkies-draw" }
 log = { version = "0.4", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde-saphyr = { version = "2.1.1", default-features = false, features = ["deserialize"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 futures = "0.3"

@@ -203,6 +203,7 @@ const SECTIONS: &[Section] = &[
             "printing_enabled",
             "print_spool_path",
             "apps_repo_folder",
+            "apps_catalog",
         ],
     },
     Section {

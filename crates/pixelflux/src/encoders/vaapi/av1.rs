@@ -7,8 +7,9 @@
 //! The AV1 arm: the sequence and picture parameters, the packed sequence header and frame
 //! header OBUs, and the tile group behind them. Main profile, one tile group of as many tiles
 //! as the picture width needs, and the eight buffer slots addressed by timestamp: every frame
-//! refreshes its own slot and names the slot of the newest frame the client still has as all
-//! seven of its references, which is also where its probability contexts load from. The
+//! refreshes its own slot and names the slot of the newest frame the client still has as every
+//! reference but GOLDEN, and loads its probability contexts from it; GOLDEN names the newest
+//! frame before that one (`Frame::golden`), which the encoder searches second. The
 //! frame header is written with the bit positions of the quantizer, loop filter, and CDEF
 //! fields, which a constant-rate driver rewrites in place and a constant-quantizer session
 //! fills itself, and with OBU sizes of the fixed width it asks for.
@@ -57,6 +58,15 @@ pub(super) struct Arm {
     qindex_offset: u32,
 }
 
+/// The finest quantizer a constant-quantizer frame filters with CDEF at. Finer, Intel's encoder
+/// (Arc A750) recodes a still screen under CDEF on every frame and the picture decays: a 1080p
+/// desktop of text and patterned tiles held still under Turbo at quantizer 80 cost 18 kB a frame
+/// and fell from 40.4 to 39.7 dB in two seconds, against 0.4 kB a frame rising to 41.7 without
+/// it, and still 6 kB a frame against 0.7 at 136; its scroll came to 40.5 dB on 40.7 kB a frame
+/// against 41.5 on 29.6. From 160 the still screen costs 1 to 3 kB a frame and CDEF lifts a
+/// scroll's SSIM (0.954 against 0.940 at 163).
+const CDEF_MIN_QINDEX: u32 = 160;
+
 /// The in-loop filters of a frame: the deblocking level of every plane and edge, and the one
 /// CDEF strength (primary in the high four bits, secondary in the low two) with its damping.
 /// A constant-rate driver chooses its own and rewrites the header; a constant-quantizer
@@ -71,15 +81,24 @@ struct Filters {
 impl Filters {
     /// The filters of a constant-quantizer frame at `qindex`, measured on Intel Arc on a
     /// text desktop and a gradient wallpaper: deblocking rises with the quantizer, CDEF holds
-    /// primary 8 and secondary 2, and its damping widens as the steps coarsen.
+    /// primary 8 and secondary 2 from `CDEF_MIN_QINDEX` up, and its damping widens as the
+    /// steps coarsen.
     fn at(qindex: u32) -> Self {
         Self {
             level: (qindex / 8).min(63) as u8,
-            cdef_strength: (8 << 2) | 2,
+            cdef_strength: if qindex >= CDEF_MIN_QINDEX {
+                (8 << 2) | 2
+            } else {
+                0
+            },
             cdef_damping_minus_3: (qindex >> 6).min(3) as u8,
         }
     }
 }
+
+/// The AV1 reference names a frame header's `ref_frame_idx` is indexed by, from `LAST_FRAME`.
+const LAST_FRAME: usize = 1;
+const GOLDEN_FRAME: usize = 4;
 
 /// How many bits `value` needs, at least one.
 fn bit_width(value: u32) -> u32 {
@@ -348,6 +367,11 @@ impl Arm {
             (false, None) => return Err("a predicted AV1 picture without a reference".into()),
         };
         let t = self.tiles;
+        let golden_slot = frame.golden().map(|(pts, _)| slot_of(pts));
+        let mut ref_frame_idx = [reference_slot.unwrap_or(0); 7];
+        if let Some(golden) = golden_slot {
+            ref_frame_idx[GOLDEN_FRAME - LAST_FRAME] = golden;
+        }
 
         let render_size = |w: &mut BitWriter| {
             w.flag(true);
@@ -368,8 +392,8 @@ impl Arm {
             w.u(3, 0);
             w.u(8, 1 << slot);
             w.flag(false);
-            for _ in 0..7 {
-                w.u(3, u64::from(reference_slot.unwrap()));
+            for slot in ref_frame_idx {
+                w.u(3, u64::from(slot));
             }
             render_size(&mut w);
             w.flag(false);
@@ -453,7 +477,7 @@ impl Arm {
                 pic.reference_frames[slot_of(pts) as usize] = surface;
             }
         }
-        pic.ref_frame_idx = [reference_slot.unwrap_or(0); 7];
+        pic.ref_frame_idx = ref_frame_idx;
         pic.primary_ref_frame = if frame.key { 7 } else { 0 };
         pic.order_hint = order_hint as u8;
         pic.refresh_frame_flags = if frame.key { 0xff } else { 1 << slot };
@@ -461,6 +485,11 @@ impl Arm {
             pic.ref_frame_ctrl_l0
                 .fields
                 .set_search_idx0(if frame.key { 0 } else { 1 });
+            if golden_slot.is_some() {
+                pic.ref_frame_ctrl_l0
+                    .fields
+                    .set_search_idx1(GOLDEN_FRAME as u32);
+            }
             let f = &mut pic.picture_flags.bits;
             f.set_frame_type(if frame.key { 0 } else { 1 });
             f.set_error_resilient_mode(u32::from(frame.key));

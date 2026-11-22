@@ -10,8 +10,8 @@
 //! Computer Use routes take their own token and nothing else, and are 404 where none is
 //! configured ([`computer_use`]), and that token records through `/api/recording` as the
 //! master token does; a cross-site WebSocket upgrade is refused by Origin; the liveness routes pass without
-//! credentials; the token endpoint and the control endpoints (the mode switch, a session
-//! disconnect, a recording start or stop) take the Bearer master token, in `Authorization`
+//! credentials; the token endpoint and the control endpoints (the mode switch, the session's
+//! desktop or application mode, a session disconnect, a recording start or stop) take the Bearer master token, in `Authorization`
 //! first and in [`MASTER_TOKEN_HEADER`] second for a caller whose `Authorization` a Basic login
 //! in front already owns; a control request not so authenticated is held to the Origin rule a
 //! browser's cached Basic credentials would otherwise ride past; in secure mode every other API
@@ -553,6 +553,7 @@ fn authorize(state: &AppState, request: &Request) -> Verdict {
     }
 
     let is_control_path = is_route("/api/switch")
+        || is_route("/api/session")
         || ((method == Method::POST || method == Method::DELETE)
             && (is_route("/api/recording")
                 || route.is_some_and(|r| r.starts_with("/api/sessions/"))));

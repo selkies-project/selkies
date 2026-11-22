@@ -16,6 +16,7 @@
 import type { Page } from '@playwright/test';
 
 import { fields } from '../../../web/selkies-web-core/lib/narrow.ts';
+import { sidebarMenuItem } from '../../lib/dashboard.ts';
 import { sleep } from '../../lib/env.ts';
 import { openSidebar, reveal, type Cell } from '../lib.ts';
 
@@ -107,8 +108,8 @@ export async function run(cell: Cell): Promise<void> {
         // The dashboard's own button, the way most users enter it: the click on it must leave the
         // keyboard to the stream, or not one key reaches the game.
         await openSidebar(page);
-        const button = page.locator('.gaming-mode-button').first();
-        if (await button.count()) {
+        const button = await sidebarMenuItem(page, '.gaming-mode-button');
+        if (button) {
             await button.click({ timeout: 5000 });
             await sleep(1500);
             g = await state(page);

@@ -7,15 +7,22 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 
 // The database is curated continuously, so a build takes its branch's newest
-// commit rather than a pinned one, and checks the file it downloads against
-// the copy GitHub's API serves for that commit: the two come over separate
-// requests to separate hosts and must agree, compared by SHA-256.
+// commit rather than a pinned one, and checks the file it downloads against a
+// second copy of it at that commit: the two come over separate requests to
+// separate hosts and must agree, compared by SHA-256. The second copy is the
+// one GitHub's API serves. Where the API refuses, as it does an address that
+// has spent the 60 requests an hour it allows without a token, the commit is
+// the one git's own HTTP protocol advertises for the branch and the copy the
+// one in that commit's tarball, which the hourly limit does not cover.
 const DB_REPO = 'mdqinc/SDL_GameControllerDB';
 const DB_BRANCH = 'master';
 const DB_FILE = 'gamecontrollerdb.txt';
 const API = 'https://api.github.com';
+const GIT = 'https://github.com';
+const CODELOAD = 'https://codeload.github.com';
 const OUTPUT_DIR = 'dist/jsdb';
 // A fetch that fails is tried again this many times in all, this far apart.
 const FETCH_ATTEMPTS = 3;
@@ -136,6 +143,35 @@ async function shaOf(response: Response): Promise<string | undefined> {
   return typeof answer.sha === 'string' ? answer.sha : undefined;
 }
 
+// The branch's newest commit as git's HTTP ref advertisement names it.
+async function advertisedCommit(): Promise<string> {
+  const refs = await (await fetchOk(`${GIT}/${DB_REPO}.git/info/refs?service=git-upload-pack`)).text();
+  const commit = new RegExp(`([0-9a-f]{40}) refs/heads/${DB_BRANCH}[\\n\\0]`).exec(refs)?.[1];
+  if (!commit) throw new Error(`${GIT}/${DB_REPO} advertises no ${DB_BRANCH} branch`);
+  return commit;
+}
+
+// The file as the commit's tarball holds it, under the archive's one top-level
+// folder: tar entries are a 512-byte header (name, octal size, type, and a
+// ustar name prefix) and the content padded to 512 bytes.
+async function archivedCopy(commit: string): Promise<Buffer> {
+  const url = `${CODELOAD}/${DB_REPO}/tar.gz/${commit}`;
+  const tar = zlib.gunzipSync(Buffer.from(await (await fetchOk(url)).arrayBuffer()));
+  const field = (from: number, length: number) => tar.toString('latin1', from, from + length).split('\0')[0];
+  for (let at = 0; at + 512 <= tar.length && tar[at] !== 0; ) {
+    const size = parseInt(field(at + 124, 12).trim(), 8);
+    if (!Number.isSafeInteger(size)) break;
+    const prefix = field(at + 345, 155);
+    const name = (prefix ? `${prefix}/` : '') + field(at, 100);
+    const regular = tar[at + 156] === 0x30 || tar[at + 156] === 0;
+    if (regular && name.split('/').slice(1).join('/') === DB_FILE) {
+      return tar.subarray(at + 512, at + 512 + size);
+    }
+    at += 512 + Math.ceil(size / 512) * 512;
+  }
+  throw new Error(`${url} holds no ${DB_FILE}`);
+}
+
 async function main() {
   const token = githubToken();
   const headers = { Accept: 'application/vnd.github+json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
@@ -143,11 +179,21 @@ async function main() {
   let commit: string | undefined;
   let body: Buffer;
   let reference: Buffer;
+  let referenceName: string;
   for (let attempt = 1; ; attempt++) {
     try {
-      commit = await shaOf(await fetchOk(`${API}/repos/${DB_REPO}/commits/${DB_BRANCH}`, headers));
-      reference = Buffer.from(await (await fetchOk(`${API}/repos/${DB_REPO}/contents/${DB_FILE}?ref=${commit}`,
-        { ...headers, Accept: 'application/vnd.github.raw+json' })).arrayBuffer());
+      try {
+        commit = await shaOf(await fetchOk(`${API}/repos/${DB_REPO}/commits/${DB_BRANCH}`, headers));
+        reference = Buffer.from(await (await fetchOk(`${API}/repos/${DB_REPO}/contents/${DB_FILE}?ref=${commit}`,
+          { ...headers, Accept: 'application/vnd.github.raw+json' })).arrayBuffer());
+        referenceName = "GitHub's API copy";
+      } catch (error) {
+        console.warn(`GitHub's API did not serve the controller DB (${String(error)}); taking the branch from git ` +
+          "and the second copy from the commit's tarball.");
+        commit = await advertisedCommit();
+        reference = await archivedCopy(commit);
+        referenceName = "the commit's tarball copy";
+      }
       const url = `https://raw.githubusercontent.com/${DB_REPO}/${commit}/${DB_FILE}`;
       console.log(`Fetching controller DB from ${url}...`);
       body = Buffer.from(await (await fetchOk(url)).arrayBuffer());
@@ -165,12 +211,12 @@ async function main() {
   const digest = sha256(body);
   const expected = sha256(reference);
   if (!/^[0-9a-f]{40}$/.test(String(commit)) || body.length === 0 || digest !== expected) {
-    console.error(`Controller DB at ${commit} hashes to ${digest}, not the ${expected} of GitHub's API copy; refusing it.`);
+    console.error(`Controller DB at ${commit} hashes to ${digest}, not the ${expected} of ${referenceName}; refusing it.`);
     process.exitCode = 1;
     return;
   }
   const fileContent = body.toString('utf8');
-  console.log(`Fetched controller DB at ${commit} (sha256 ${digest}).`);
+  console.log(`Fetched controller DB at ${commit} (sha256 ${digest}, the same as ${referenceName}).`);
   
   console.log('Starting conversion...');
 

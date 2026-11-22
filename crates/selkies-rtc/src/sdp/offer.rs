@@ -30,6 +30,7 @@ use super::codecs::{
     self, HeaderExtension, MediaKind, filter_preferred_codecs, find_common_codecs,
     find_common_header_extensions, receive_only_payload_types, with_payload_types,
 };
+use super::h264::is_codec_compatible;
 use super::{
     Codec, Direction, DtlsFingerprint, DtlsParameters, DtlsRole, Group, IceCandidate,
     IceParameters, MediaDescription, SctpCapabilities, SdpError, SdpType, SessionDescription,
@@ -304,6 +305,36 @@ impl Session {
         self.pending_remote
             .as_ref()
             .or(self.current_remote.as_ref())
+    }
+
+    /// The formats the transceiver at `index` receives: those this side's own description named
+    /// for its section, under the payload types it gave them. The peer sends under those numbers
+    /// (RFC 3264, 6.1: an answerer uses the offer's, even where its answer lists others), and a
+    /// browser can send a format of the offer its answer left out: a Chrome page answered a
+    /// microphone offered RED and Opus with Opus alone and sent RED. The negotiated codecs where
+    /// this side has not described the section.
+    pub fn receive_codecs(&self, index: usize) -> Vec<Codec> {
+        let transceiver = &self.transceivers[index];
+        self.local_description()
+            .and_then(|d| {
+                d.media
+                    .iter()
+                    .find(|m| m.mid.is_some() && m.mid == transceiver.mid)
+            })
+            .map(|m| m.codecs.clone())
+            .filter(|codecs| !codecs.is_empty())
+            .unwrap_or_else(|| transceiver.codecs.clone())
+    }
+
+    /// The formats of `receive_codecs` the peer's description left out: those none of the
+    /// negotiated codecs is the same codec as. One it lists under another payload type than this
+    /// side's is not left out: the peer sends it under this side's number, as RFC 3264 has it.
+    pub fn unanswered_codecs(&self, index: usize) -> Vec<Codec> {
+        let negotiated = &self.transceivers[index].codecs;
+        self.receive_codecs(index)
+            .into_iter()
+            .filter(|codec| !negotiated.iter().any(|c| is_codec_compatible(c, codec)))
+            .collect()
     }
 
     fn allocate_mid(&self, mids: &mut HashSet<String>) -> String {

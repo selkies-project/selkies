@@ -165,8 +165,9 @@ desktop session's own compositor and sound server share the host.
 
 `.oss-scanner/` serves Anthropic's OSS Scanner. `threat_model.md` states what Selkies does, its principals from any
 peer up to the master token, its entry points, the components that matter most, how to exercise them, and how
-severity is rated; `Dockerfile` builds the tree and runs the unit tier offline, as an unprivileged user, the way CI
-does. The threat model is the rule the code is held to, not a description of it: where the code lets a principal
+severity is rated; `Dockerfile` builds the tree and compiles its tests the way CI's unit tier does, for the scan to
+run them offline as an unprivileged user. The threat model is the rule the code is held to, not a description of
+it: where the code lets a principal
 reach what the model keeps from it, the code is the defect even when `docs/` and a test agree with it, and the fix
 corrects all three. Anyone, an agent included, may change the rule to harden it (a principal reaching less, a
 boundary it did not state yet); loosening it is a maintainer's call. Keep the model current in the commit that moves
@@ -320,7 +321,10 @@ Each is documented in full where named; read that before changing the subsystem.
 - Bulk traffic sharing the session connection is paced by an end-to-end gauge, never by the local send
   queue alone: a proxy or a receive window in front absorbs writes, so that queue reads empty on the very
   transfer burying the stream (`crates/selkies/src/files/pacing.rs`, `UplinkGauge`; the WebSockets server's
-  `bulk_window`; WebRTC instead rides SCTP's own congestion control, which no such hop can hide).
+  `bulk_window`; WebRTC instead rides SCTP's own congestion control, which no such hop can hide). An upload's
+  sender is held by its socket's receive window, sized to the allowance, never by paused reads alone: the
+  kernel's own window is megabytes, all of them the client's first hop's to hold (`UplinkGauge::windowed`,
+  which takes the request to have its connection to itself, as HTTP/1.1 gives it).
 - A modifier's role comes from the keysym the client resolved for it, never from the engine's flags:
   browsers name the same physical key differently (macOS Option is `AltGraph` to Gecko, `Alt` to Blink, a
   Meta key to WebKit). That decides both text-versus-shortcut and when a held modifier is stale
@@ -383,7 +387,9 @@ Each is documented in full where named; read that before changing the subsystem.
   encoder takes its own depth (`deepen_references`: x264 reopens in place on the key frame the joining page starts
   from, a hardware session restarts its capture) and keeps it until its capture next starts, or x264's next resize,
   so a page beside the owner that its link leaves frames is predicted past, as NVENC and the encoders that keep a
-  buffer of their own (libvpx, SVT-AV1, VA-API's VP8, VP9, and AV1) predict past it.
+  buffer of their own (libvpx, SVT-AV1 at a constant rate from 4.2, VA-API's VP8 and VP9, and its AV1 where the
+  driver takes the session's picture headers) predict past it; where the session names no reference, the relay
+  skips such a page ahead to the next key frame instead (`crates/selkies/src/ws/relay.rs` module docblock).
 - The webcam uplink mirrors the microphone: nothing about a frame is decoded or copied in the server
   (`web/selkies-web-core/lib/webcam-capture.ts` header, `crates/selkies/src/webcam` module docblock,
   `addons/v4l2-interposer/v4l2_interposer.c` header for the interposer's locking rules).

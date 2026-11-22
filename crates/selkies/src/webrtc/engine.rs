@@ -630,6 +630,15 @@ impl RtcEngine {
             .map(|g| (g.video_bridge.over_budget(), g.video_bridge.passed()))
     }
 
+    /// The bytes of the largest video frame a display's capture has handed its bridge, or None
+    /// without a bridge.
+    pub fn video_largest_frame(&self, display_id: &str) -> Option<usize> {
+        self.displays
+            .lock()
+            .get(display_id)
+            .map(|g| g.video_bridge.largest())
+    }
+
     /// Recent use of a display's frame budget as a share of its buffered window.
     pub fn video_budget_fill(&self, display_id: &str) -> Option<f64> {
         self.displays

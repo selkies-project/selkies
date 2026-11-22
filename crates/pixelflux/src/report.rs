@@ -19,6 +19,13 @@
 //! extremes of a window (the fastest and slowest frame from capture to the end of its encode,
 //! and the largest frame) are kept the same way and swapped back on each read, so a reader
 //! that asks once a second learns that second's.
+//!
+//! The recovery counters are tallied where the decision is made, as the description is: the
+//! reference models every tracked session keeps (`encoders::reference`) count each reported
+//! loss by how it was answered ([`invalidation`]) and each key frame the session coded by why
+//! ([`key_frame`]), on the encode thread the capture binds its report to. A session without a
+//! reference model (OpenH264's own, x265, kvazaar, V4L2) counts neither, and a striped session
+//! counts once per stripe, each stripe being a session of its own.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -64,6 +71,59 @@ pub struct StreamTotals {
     pub bytes: u64,
     pub encode_ns: u64,
     pub pipeline_ns: u64,
+    pub key_frames: KeyFrameCounts,
+    pub invalidations: InvalidationCounts,
+}
+
+/// Why a tracked session coded a key frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyFrameCause {
+    /// The caller forced it: a consumer's request, a loss report the session or its device
+    /// refused, the configured interval, or a cleanup's key frame.
+    Requested,
+    /// A reported loss left no frame the client still holds among the session's references:
+    /// it was older than every one, or every one predicted through it.
+    LossOutOfWindow,
+    /// A loss left out the frame where H.264's `frame_num` wraps, which no decoder can be
+    /// predicted past.
+    FrameNumWrap,
+    /// The key frame starts the session's references, whatever else asked for it: the first
+    /// after an open or a reopen (a recovery, an x264 depth change, an SVT-AV1 before 2.0
+    /// serving a request), after a reset (a resize, a rate change that raised the level,
+    /// slices it could not rewrite to the set they went out under), or a new VA-API sequence.
+    Reconfigure,
+    /// None of these: the encoder or its device chose it.
+    DeviceChosen,
+}
+
+/// How a tracked session answered a reported loss.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvalidationAnswer {
+    /// The next frame predicts from a recent frame the client still holds.
+    Recent,
+    /// The next frame predicts from an anchor, a long-term reference the client still holds.
+    Anchor,
+    /// Nothing the client holds is left to predict from: the next frame is a key frame.
+    KeyFrame,
+}
+
+/// The key frames a capture's tracked sessions coded, by [`KeyFrameCause`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeyFrameCounts {
+    pub requested: u64,
+    pub loss_out_of_window: u64,
+    pub frame_num_wrap: u64,
+    pub reconfigure: u64,
+    pub device_chosen: u64,
+}
+
+/// The losses a capture's tracked sessions were told of, by [`InvalidationAnswer`]; a report
+/// for a frame already left out, from before the last key frame, or never sent is none.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InvalidationCounts {
+    pub recent: u64,
+    pub anchor: u64,
+    pub key_frame: u64,
 }
 
 /// The extremes of the frames delivered since the previous read: the least and the most time
@@ -86,6 +146,10 @@ pub struct StreamReport {
     pipeline_min_ns: AtomicU64,
     pipeline_max_ns: AtomicU64,
     frame_max_bytes: AtomicU64,
+    /// By [`KeyFrameCause`] in declaration order.
+    key_frames: [AtomicU64; 5],
+    /// By [`InvalidationAnswer`] in declaration order.
+    invalidations: [AtomicU64; 3],
 }
 
 impl Default for StreamReport {
@@ -99,6 +163,8 @@ impl Default for StreamReport {
             pipeline_min_ns: AtomicU64::new(u64::MAX),
             pipeline_max_ns: AtomicU64::new(0),
             frame_max_bytes: AtomicU64::new(0),
+            key_frames: Default::default(),
+            invalidations: Default::default(),
         }
     }
 }
@@ -115,11 +181,27 @@ impl StreamReport {
     }
 
     pub fn totals(&self) -> StreamTotals {
+        let key = |cause: KeyFrameCause| self.key_frames[cause as usize].load(Ordering::Relaxed);
+        let answered = |answer: InvalidationAnswer| {
+            self.invalidations[answer as usize].load(Ordering::Relaxed)
+        };
         StreamTotals {
             frames: self.frames.load(Ordering::Relaxed),
             bytes: self.bytes.load(Ordering::Relaxed),
             encode_ns: self.encode_ns.load(Ordering::Relaxed),
             pipeline_ns: self.pipeline_ns.load(Ordering::Relaxed),
+            key_frames: KeyFrameCounts {
+                requested: key(KeyFrameCause::Requested),
+                loss_out_of_window: key(KeyFrameCause::LossOutOfWindow),
+                frame_num_wrap: key(KeyFrameCause::FrameNumWrap),
+                reconfigure: key(KeyFrameCause::Reconfigure),
+                device_chosen: key(KeyFrameCause::DeviceChosen),
+            },
+            invalidations: InvalidationCounts {
+                recent: answered(InvalidationAnswer::Recent),
+                anchor: answered(InvalidationAnswer::Anchor),
+                key_frame: answered(InvalidationAnswer::KeyFrame),
+            },
         }
     }
 
@@ -184,6 +266,24 @@ fn record(change: impl FnOnce(&mut StreamInfo)) {
             report.update(change);
         }
     });
+}
+
+fn count(counter: impl FnOnce(&StreamReport) -> &AtomicU64) {
+    CURRENT.with(|current| {
+        if let Some(report) = current.borrow().as_ref() {
+            counter(report).fetch_add(1, Ordering::Relaxed);
+        }
+    });
+}
+
+/// A tracked session coded a key frame for `cause`.
+pub fn key_frame(cause: KeyFrameCause) {
+    count(|report| &report.key_frames[cause as usize]);
+}
+
+/// A tracked session answered a reported loss with `answer`.
+pub fn invalidation(answer: InvalidationAnswer) {
+    count(|report| &report.invalidations[answer as usize]);
 }
 
 /// The capture path taken. A zero-copy path needs no reason, so the ones collected from the
@@ -417,6 +517,40 @@ mod tests {
             StreamPeaks {
                 frame_max_bytes: 200,
                 ..StreamPeaks::default()
+            }
+        );
+    }
+
+    /// The recovery counts land in the report bound to the thread, each under its own cause
+    /// or answer, and nowhere without one.
+    #[test]
+    fn recovery_counts_land_in_the_bound_report_by_cause_and_answer() {
+        key_frame(KeyFrameCause::Requested);
+        let report = StreamReport::new("x11");
+        {
+            let _scope = enter(&report);
+            key_frame(KeyFrameCause::Requested);
+            key_frame(KeyFrameCause::FrameNumWrap);
+            key_frame(KeyFrameCause::FrameNumWrap);
+            invalidation(InvalidationAnswer::Anchor);
+            invalidation(InvalidationAnswer::KeyFrame);
+        }
+        invalidation(InvalidationAnswer::Recent);
+        let totals = report.totals();
+        assert_eq!(
+            totals.key_frames,
+            KeyFrameCounts {
+                requested: 1,
+                frame_num_wrap: 2,
+                ..KeyFrameCounts::default()
+            }
+        );
+        assert_eq!(
+            totals.invalidations,
+            InvalidationCounts {
+                anchor: 1,
+                key_frame: 1,
+                ..InvalidationCounts::default()
             }
         );
     }
