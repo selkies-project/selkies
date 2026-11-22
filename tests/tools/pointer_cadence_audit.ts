@@ -78,15 +78,15 @@ const element: StandIn<HTMLElement> = {
     offsetHeight: 720,
     focus() {},
 };
-Object.assign(globalThis, {
-    window: {
-        devicePixelRatio: 1,
-        requestAnimationFrame: (cb: FrameRequestCallback) => { frames.push(cb); return frames.length; },
-        addEventListener() {},
-        removeEventListener() {},
-        location: { origin: 'http://localhost' },
-    } satisfies StandIn<Window>,
-});
+/** The stand-in window, a top-level page's unless a check gives it a parent. */
+const win: StandIn<Window> = {
+    devicePixelRatio: 1,
+    requestAnimationFrame: (cb: FrameRequestCallback) => { frames.push(cb); return frames.length; },
+    addEventListener() {},
+    removeEventListener() {},
+    location: { origin: 'http://localhost' },
+};
+Object.assign(globalThis, { window: win });
 /** The stand-in document, whose pointer lock a check takes and gives up. */
 const page = {
     createElement: () => ({ style: {}, getContext: () => ({}) }) satisfies StandIn<HTMLCanvasElement>,
@@ -288,6 +288,88 @@ function penStroke(input: Input, sent: Sent): { perSecond: number; err: number; 
     check('and draws the line the pen drew, within a pixel', got.err < 1, `strays ${got.err.toFixed(2)} px`);
     check('and each event\'s own position leaves as the event is handled', got.newestAtOnce === 30,
           `${got.newestAtOnce} of 30 events`);
+}
+
+// --- a drag in a frame follows the frame's own coordinates ------------------
+// Chromium gives pointerrawupdate in a frame the top-level page's client
+// coordinates and the right screen ones, while pointermove has the frame's
+// own: here the frame sits 400 px into its parent. Each frame of motion is a
+// raw update, then the pointermove and the mousemove of the same position.
+function frameDrag(offset: number | ((x: number) => number)): { xs: number[]; atOnce: number } {
+    const shift = typeof offset === 'number' ? (): number => offset : offset;
+    Object.defineProperty(win, 'top', { value: {}, configurable: true });
+    const { input, sent } = makeInput();
+    Reflect.deleteProperty(win, 'top');
+    input.buttonMask = 1;
+    advance(100);
+    let atOnce = 0;
+    for (let x = 100; x < 400; x += 10) {
+        advance(16);
+        const before = motion(sent).length;
+        input._handleRawPointerUpdate(move('pointerrawupdate', x + shift(x), { screenX: x + 410, buttons: 1 }));
+        if (motion(sent).length > before) atOnce++;
+        input._checkRawPositions(move('pointermove', x, { screenX: x + 410, buttons: 1 }));
+        input._mouseButtonMovement(move('mousemove', x, { screenX: x + 410, buttons: 1 }));
+    }
+    advance(50);
+    return { xs: motion(sent).map(([, m]) => Number(m.split(',')[1])), atOnce };
+}
+{
+    const shifted = frameDrag(400);
+    check('a drag in a frame whose raw updates misplace it stays where the frame shows it',
+          shifted.xs.length === 30 && shifted.xs.every((x, i) => x === 100 + 10 * i),
+          shifted.xs.join(','));
+    check('and goes out from the frame-aligned events', shifted.atOnce === 0, `${shifted.atOnce} raw sends`);
+    Object.defineProperty(win, 'top', { value: {}, configurable: true });
+    const { input, sent } = makeInput();
+    Reflect.deleteProperty(win, 'top');
+    page.pointerLockElement = element;
+    advance(100);
+    let locked = 0;
+    for (let i = 0; i < 10; i++) {
+        advance(16);
+        const before = motion(sent).length;
+        input._handleRawPointerUpdate(move('pointerrawupdate', 900, { screenX: 510, movementX: 4 }));
+        if (motion(sent).length > before) locked++;
+        input._checkRawPositions(move('pointermove', 100, { screenX: 510, movementX: 4 }));
+        input._mouseButtonMovement(move('mousemove', 100, { screenX: 510, movementX: 4 }));
+    }
+    advance(50);
+    page.pointerLockElement = null;
+    const travel = motion(sent).reduce((sum, [, m]) => sum + Number(m.split(',')[1]), 0);
+    check('under pointer lock a frame takes raw movement at once, each delta once',
+          locked === 10 && travel === 40, `${locked} of 10 raw sends, ${travel} of 40 px`);
+    const moved = frameDrag((x) => (x < 250 ? 0 : 400));
+    const last = moved.xs.at(-1);
+    check('a frame that moves mid-drag corrects the one misplaced raw update in the same frame',
+          moved.xs.filter((x) => x > 400).length === 1 && last === 390, moved.xs.join(','));
+    {
+        Object.defineProperty(win, 'top', { value: {}, configurable: true });
+        const { input, sent } = makeInput();
+        Reflect.deleteProperty(win, 'top');
+        input.buttonMask = 1;
+        advance(100);
+        for (let frame = 0; frame < 10; frame++) {
+            const t0 = now;
+            const samples = [0, 1, 2, 3].map((k) => move('pointermove', 100 + frame * 40 + k * 10,
+                { screenX: 510 + frame * 40 + k * 10, buttons: 1, timeStamp: t0 + k * 4 }));
+            const last = samples[3];
+            last.getCoalescedEvents = () => samples;
+            advance(16);
+            input._handleRawPointerUpdate(move('pointerrawupdate', last.clientX + 400,
+                { screenX: last.screenX, buttons: 1 }));
+            input._checkRawPositions(last);
+            input._mouseButtonMovement(move('mousemove', last.clientX, { screenX: last.screenX, buttons: 1 }));
+        }
+        advance(50);
+        const xs = motion(sent).map(([, m]) => Number(m.split(',')[1]));
+        check('a drag in a frame whose raw updates are misplaced keeps the positions its moves coalesced',
+              xs.length >= 38 && xs.filter((x) => x > 500).length <= 1, xs.join(','));
+    }
+    const placed = frameDrag(0);
+    check('a frame whose raw updates agree with it takes them after the first move',
+          placed.atOnce === 29 && placed.xs.every((x, i) => i === 0 || x > placed.xs[i - 1]),
+          `${placed.atOnce} of 29 raw sends, ${placed.xs.join(',')}`);
 }
 
 // --- a trackpad scroll's notch goes out with the event that completes it --

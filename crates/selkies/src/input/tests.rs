@@ -189,6 +189,7 @@ fn dispatcher(cfg: InputConfig, seat: Option<Arc<dyn WaylandSeat>>) -> (Arc<Disp
         rec.clone(),
         seat,
         None,
+        Arc::new(crate::session_screens::AppsRunner::default()),
     );
     (h, rec)
 }
@@ -1690,6 +1691,7 @@ async fn receive_gates_and_verbs() {
         rec.clone(),
         Some(seat),
         None,
+        Arc::new(crate::session_screens::AppsRunner::default()),
     );
     set_topology(&h, false);
 

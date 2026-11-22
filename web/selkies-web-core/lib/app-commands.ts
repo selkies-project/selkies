@@ -23,14 +23,15 @@
  * since the last update (`append`) and the line being written (`current`).
  *
  * Where the catalog comes from is the server's answer as well (`appsCatalog`):
- * the proot-apps repository on GitHub, or, for a session installing from a
- * proot-apps local repository, that folder's catalog served by the server
- * under `api/apps/`, so the panel lists exactly what the runner can install.
+ * the URL its `apps_catalog` setting names, the proot-apps repository on
+ * GitHub unless the operator named another, or, where that setting names a
+ * file or the session installs from a proot-apps local repository, the catalog
+ * the server serves under `api/apps/`, so the panel lists what the runner can
+ * install.
  * @module
  */
 import { fields } from "./narrow.ts";
 
-const REMOTE_CATALOG_BASE = "https://raw.githubusercontent.com/linuxserver/proot-apps/master/metadata/";
 // Page-relative, like the file browser's `api/files/`, so a subfolder
 // deployment resolves it under its prefix.
 const LOCAL_CATALOG_BASE = "api/apps/";
@@ -53,26 +54,38 @@ export interface AppsCatalog {
 
 /** A server settings payload, as read here. */
 export interface ServerSettings {
-  apps_local_repo?: { value?: boolean } | null;
+  apps_catalog?: { value?: unknown } | null;
 }
 
 /**
  * Where the panel reads its catalog, as the server settings say.
  *
- * A server on a proot-apps local repository publishes `apps_local_repo`, and
- * its catalog is read from the server itself, through the session's own
- * authentication: `tokenize` (the dashboards' `withSessionToken`) is applied
- * to those URLs alone, since the remote catalog is another origin and never
- * sees a session token.
+ * A server publishes `apps_catalog`: the URL of a remote catalog, its icons in
+ * `img/` beside it, or an empty string where it serves the catalog itself,
+ * read through the session's own authentication: `tokenize` (the dashboards'
+ * `withSessionToken`) is applied to those URLs alone, since a remote catalog
+ * is another origin and never sees a session token. A payload without the
+ * entry, before the server's settings arrive, is the server's catalog too,
+ * which answers 404 where it has none, rather than an address it never named.
  * @param serverSettings The last `serverSettings` payload.
  * @param tokenize Adds the session token to a same-origin URL.
  * @returns Where the panel reads its catalog.
  */
 export function appsCatalog(serverSettings: ServerSettings | null | undefined, tokenize?: (url: string) => string): AppsCatalog {
-  const local = serverSettings?.apps_local_repo?.value === true;
-  const base = local ? LOCAL_CATALOG_BASE : REMOTE_CATALOG_BASE;
-  const url = (path: string): string => (local && tokenize ? tokenize(base + path) : base + path);
-  return { metadata: url("metadata.yml"), icon: (name: string) => url(`img/${name}`), local };
+  const published = serverSettings?.apps_catalog?.value;
+  const remote = typeof published === "string" && /^https?:\/\//i.test(published) ? published : "";
+  if (remote) {
+    const icon = (name: string): string => {
+      try {
+        return new URL(`img/${encodeURIComponent(name)}`, remote).href;
+      } catch {
+        return "";
+      }
+    };
+    return { metadata: remote, icon, local: false };
+  }
+  const url = (path: string): string => (tokenize ? tokenize(LOCAL_CATALOG_BASE + path) : LOCAL_CATALOG_BASE + path);
+  return { metadata: url("metadata.yml"), icon: (name: string) => url(`img/${encodeURIComponent(name)}`), local: true };
 }
 
 /** What a job does to its app. */

@@ -46,6 +46,9 @@ const MAX_TOKENS: u32 = 16000;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 const RETRIES: usize = 2;
 
+/// The longest a plain fetch ([`get_text`]) may take.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// The format a provider's API speaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Wire {
@@ -295,6 +298,63 @@ async fn send(
         json!({"error": {"message": text}})
     });
     Ok((status, json))
+}
+
+/// The most redirects a plain fetch ([`get_text`]) follows.
+const FETCH_REDIRECTS: usize = 5;
+
+/// The body of a GET of `url` as text, on the client the model requests go out on, within
+/// [`FETCH_TIMEOUT`] in all. Redirects are followed, up to [`FETCH_REDIRECTS`] and only to
+/// another http or https address, never from https down to http, as a browser fetching the same
+/// address from a page served over https follows them; a final status other than 200, or a body
+/// past `limit` bytes, is the error. The error leaves the address out, since it may carry a
+/// credential in its query, and a caller names what was being read.
+pub(super) async fn get_text(url: &str, limit: usize) -> Result<String, String> {
+    let client = client()?;
+    let answer = async {
+        let mut current = url::Url::parse(url).map_err(|e| format!("not a usable address: {e}"))?;
+        for _ in 0..=FETCH_REDIRECTS {
+            let request = hyper::Request::get(current.as_str())
+                .body(Full::new(Bytes::new()))
+                .map_err(|e| format!("not a usable address: {e}"))?;
+            let response = client.request(request).await.map_err(|e| e.to_string())?;
+            let status = response.status();
+            if status.is_redirection() {
+                let location = response
+                    .headers()
+                    .get(hyper::header::LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .ok_or_else(|| {
+                        format!("it answered with status {} and no address", status.as_u16())
+                    })?;
+                let next = current
+                    .join(location)
+                    .map_err(|e| format!("it redirected to an unusable address: {e}"))?;
+                if !matches!(next.scheme(), "http" | "https") {
+                    return Err(format!("it redirected to a {} address", next.scheme()));
+                }
+                if current.scheme() == "https" && next.scheme() == "http" {
+                    return Err("it redirected from https to plain http".to_string());
+                }
+                current = next;
+                continue;
+            }
+            if status != hyper::StatusCode::OK {
+                return Err(format!("it answered with status {}", status.as_u16()));
+            }
+            let bytes = http_body_util::Limited::new(response.into_body(), limit)
+                .collect()
+                .await
+                .map_err(|e| e.to_string())?
+                .to_bytes();
+            return String::from_utf8(bytes.to_vec())
+                .map_err(|_| "it is not UTF-8 text".to_string());
+        }
+        Err(format!("it redirected more than {FETCH_REDIRECTS} times"))
+    };
+    tokio::time::timeout(FETCH_TIMEOUT, answer)
+        .await
+        .map_err(|_| "it did not answer in time".to_string())?
 }
 
 /// What a provider said was wrong, from the shapes its errors come in.
@@ -817,5 +877,64 @@ mod tests {
                 .is_none()
         );
         assert_eq!(openai_effort("max"), Some("high"));
+    }
+
+    /// A local server answering each path with one response and closing the connection.
+    async fn serve(answers: &'static [(&'static str, &'static str)]) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = vec![0u8; 4096];
+                let read = socket.read(&mut request).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&request[..read]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                let answer = answers.iter().find(|(p, _)| *p == path).map_or(
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n",
+                    |(_, a)| *a,
+                );
+                let _ = socket
+                    .write_all(format!("{answer}Connection: close\r\n\r\n").as_bytes())
+                    .await;
+            }
+        });
+        address
+    }
+
+    /// A fetch follows a redirect as a browser would, and only to another http or https address.
+    #[tokio::test]
+    async fn a_fetch_follows_redirects_to_web_addresses_alone() {
+        let base = serve(&[
+            (
+                "/moved",
+                "HTTP/1.1 302 Found\r\nLocation: /catalog/m.yml\r\nContent-Length: 0\r\n",
+            ),
+            ("/catalog/m.yml", "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n"),
+            (
+                "/elsewhere",
+                "HTTP/1.1 301 Moved\r\nLocation: file:///etc/passwd\r\nContent-Length: 0\r\n",
+            ),
+            (
+                "/loop",
+                "HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\n",
+            ),
+        ])
+        .await;
+        assert_eq!(
+            get_text(&format!("{base}/moved"), 1024).await,
+            Ok(String::new())
+        );
+        let refused = get_text(&format!("{base}/elsewhere"), 1024)
+            .await
+            .unwrap_err();
+        assert!(
+            refused.contains("redirected to a file address"),
+            "{refused}"
+        );
+        let looped = get_text(&format!("{base}/loop"), 1024).await.unwrap_err();
+        assert!(looped.contains("redirected more than 5 times"), "{looped}");
+        let missing = get_text(&format!("{base}/absent"), 1024).await.unwrap_err();
+        assert!(missing.contains("status 404"), "{missing}");
     }
 }

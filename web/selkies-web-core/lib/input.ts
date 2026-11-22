@@ -1774,6 +1774,9 @@ export class Input {
     _moveFlushScheduled!: boolean;
     _lastMotionSend!: number;
     _rawMotionSeen!: boolean;
+    _rawPositions!: boolean | null;
+    _rawAnchorX!: number;
+    _rawAnchorY!: number;
     onmenuhotkey!: (() => void) | null;
     gamingMode!: boolean;
     _fullscreenKeyboardLock!: boolean;
@@ -1932,6 +1935,15 @@ export class Input {
         this._lastMotionSend = -Infinity;
         /** Whether a `pointerrawupdate` has sent motion the next frame-aligned move event also reports. */
         this._rawMotionSeen = false;
+        /**
+         * Whether `pointerrawupdate` positions are taken: always in a top-level
+         * page, and in a frame while the engine shows them right there
+         * (`_checkRawPositions`), null until it has.
+         */
+        this._rawPositions = window.self === window.top ? true : null;
+        /** Where the last raw sample puts the viewport on the screen, for that check. */
+        this._rawAnchorX = NaN;
+        this._rawAnchorY = NaN;
         this.onmenuhotkey = null;
         this.gamingMode = false;
         /** The browser holds the keys for this fullscreen (`_gamingFullscreenOptions`). */
@@ -3466,9 +3478,14 @@ export class Input {
      * only in a secure context, and elsewhere those events carry the motion
      * as before. Its movement already sums what it coalesced, and a held
      * button's coalesced positions go out as well (`_sendCoalescedContact`).
+     * Its position is noted for `_checkRawPositions`, and taken only while
+     * that check holds.
      * @param event
      */
     _handleRawPointerUpdate(event: PointerEvent): void {
+        this._rawAnchorX = event.screenX - event.clientX;
+        this._rawAnchorY = event.screenY - event.clientY;
+        if (this._rawPositions !== true && !this._isStreamLocked()) return;
         if (event.pointerType === 'touch') {
             this._trackpadRawUpdate(event);
             return;
@@ -3477,6 +3494,36 @@ export class Input {
         this._rawMotionSeen = true;
         this._sendCoalescedContact(event);
         this._mouseButtonMovement(event);
+    }
+
+    /**
+     * Holds `pointerrawupdate` positions in a frame to what the engine shows:
+     * Chromium reports their client coordinates there in the top-level page's
+     * viewport and their screen coordinates rightly, while `pointermove`
+     * reports both in the frame's own, so a held drag would leap by the
+     * frame's offset in its parent, and a trackpad finger with it. The two
+     * events therefore disagree on where the viewport sits on the screen
+     * (`screenX - clientX`) by exactly that offset, where an engine reporting
+     * both rightly has them agree to the rounding of its screen coordinates.
+     * Raw positions are taken while the last raw sample agreed with the
+     * latest `pointermove`, re-decided on each, since the frame can move;
+     * otherwise the frame-aligned events carry the motion, the first of them
+     * sent even after a raw update went out, since that update was the one
+     * found misplaced, and a held drag's positions the `pointermove`
+     * coalesced go out from it as they would from the raw update
+     * (`_sendCoalescedContact`). A top-level page
+     * takes them without the check, and so does pointer lock anywhere, which
+     * sends only the raw movement, never misreported.
+     * @param event A `pointermove` on the frame's window.
+     */
+    _checkRawPositions(event: PointerEvent): void {
+        if (!Number.isFinite(this._rawAnchorX)) return;
+        this._rawPositions = Math.abs(event.screenX - event.clientX - this._rawAnchorX) < 1 &&
+            Math.abs(event.screenY - event.clientY - this._rawAnchorY) < 1;
+        if (this._rawPositions || this._isStreamLocked()) return;
+        // The raw update just sent may be the misplaced one: let this frame's mousemove correct it.
+        this._rawMotionSeen = false;
+        if (event.pointerType === 'mouse') this._sendCoalescedContact(event);
     }
 
     /**
@@ -5817,6 +5864,9 @@ export class Input {
         this.listeners_context.push(addListener(this.element, 'mousedown', this._mouseButtonMovement, this));
         if ('onpointerrawupdate' in window) {
             this.listeners_context.push(addListener(window, 'pointerrawupdate', this._handleRawPointerUpdate, this));
+            if (window.self !== window.top) {
+                this.listeners_context.push(addListener(window, 'pointermove', this._checkRawPositions, this));
+            }
         }
         this.listeners_context.push(addListener(window, 'mousemove', this._mouseButtonMovement, this));
         this.listeners_context.push(addListener(window, 'mouseup', this._mouseButtonMovement, this));

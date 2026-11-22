@@ -9,8 +9,9 @@
 //! The set is small on purpose, since every tool is a decision a model has to get right:
 //! `look` reads, the pointer and keyboard tools act on the controls `look` numbered, `window` and
 //! `launch` do through the window manager and the application list what would otherwise take
-//! several clicks on a taskbar or a menu, and `shell` and `screenshot` exist only where the
-//! session allows a shell or the model can see. Looking at a window brings it to the front,
+//! several clicks on a taskbar or a menu, `apps` installs from the session's app catalog where
+//! it has one, and `shell` and `screenshot` exist only where the session allows a shell or the
+//! model can see. Looking at a window brings it to the front,
 //! so a control `look` numbered is one a click reaches, and every action answers with what it
 //! changed among the windows, so a model does not have to look again to learn that a dialog
 //! opened. A model names a control by the reference number `look` gave it and never handles a
@@ -30,6 +31,8 @@ pub struct Capabilities {
     pub vision: bool,
     /// A window manager places the windows, so they can be listed, read, and acted on.
     pub windows: bool,
+    /// Applications install from the session's app catalog (its apps panel).
+    pub apps: bool,
 }
 
 /// One tool: its name, what it does as the model is told, and the schema of its arguments.
@@ -166,6 +169,34 @@ pub fn definitions(capabilities: Capabilities) -> Vec<Definition> {
             }),
         });
     }
+    if capabilities.apps {
+        tools.push(Definition {
+            name: "apps",
+            description: if capabilities.windows {
+                "The session's app catalog, the applications its apps panel installs. `search` with \
+                 words finds the catalog's applications by name or purpose and says which are installed; \
+                 with no words it lists them all by name. `install`, `update`, and `remove` take the name \
+                 `search` gave and start the job, which runs on in the background; `status` with the same \
+                 name says how far it has got (downloading, a percentage, its latest output) and how it \
+                 ended. An installed application starts with `launch`."
+            } else {
+                "The session's app catalog, the applications its apps panel installs. `search` with \
+                 words finds the catalog's applications by name or purpose and says which are installed; \
+                 with no words it lists them all by name. `install`, `update`, and `remove` take the name \
+                 `search` gave and start the job, which runs on in the background; `status` with the same \
+                 name says how far it has got (downloading, a percentage, its latest output) and how it \
+                 ended."
+            },
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["search", "install", "update", "remove", "status"]},
+                    "app": {"type": "string", "description": "For `search`, the words to look for; otherwise the application's name."},
+                },
+                "required": ["action"],
+            }),
+        });
+    }
     if capabilities.shell {
         tools.push(Definition {
             name: "shell",
@@ -260,6 +291,26 @@ pub fn system_prompt(capabilities: Capabilities, date: &str) -> String {
              so plainly if the task cannot be done that way.\n",
         );
     }
+    if capabilities.apps {
+        prompt.push_str(
+            "- An install from `apps` takes a while. After starting one, check it with `status`, `wait` a few \
+             seconds between checks, and tell the user how far it has got as it goes (downloading, the \
+             percentage) until it is installed or fails.",
+        );
+        prompt.push_str(if capabilities.windows {
+            " Then start it with `launch`.\n"
+        } else {
+            "\n"
+        });
+        prompt.push_str(if capabilities.shell {
+            "- When the user asks for an application to be installed, `search` for it with `apps` first, \
+             and install it from there when the catalog lists it. Only when the catalog has no such \
+             application install it another way, with `shell`.\n"
+        } else {
+            "- When the user asks for an application to be installed, `search` for it with `apps` and \
+             install it from there; an application the catalog does not list cannot be installed here.\n"
+        });
+    }
     if capabilities.shell {
         prompt.push_str(
             "- `shell` runs commands as the session's user. Use it where a command is the direct way (files, \
@@ -298,6 +349,7 @@ mod tests {
             shell: true,
             vision: true,
             windows: true,
+            apps: true,
         };
         assert_eq!(
             names(all),
@@ -310,6 +362,7 @@ mod tests {
                 "drag",
                 "window",
                 "launch",
+                "apps",
                 "shell",
                 "screenshot",
                 "wait"
@@ -321,6 +374,7 @@ mod tests {
         };
         assert!(!names(plain).contains(&"shell"));
         assert!(!names(plain).contains(&"screenshot"));
+        assert!(!names(plain).contains(&"apps"));
         let blind = Capabilities {
             vision: true,
             ..Capabilities::default()
@@ -345,6 +399,7 @@ mod tests {
             shell: true,
             vision: true,
             windows: true,
+            apps: true,
         };
         for tool in definitions(all) {
             assert_eq!(tool.parameters["type"], "object", "{}", tool.name);
@@ -368,6 +423,7 @@ mod tests {
                 shell: true,
                 vision: true,
                 windows: true,
+                apps: true,
             },
             "Monday",
         );
@@ -376,5 +432,50 @@ mod tests {
                 && all.contains("`screenshot`")
                 && all.contains("Today is Monday.")
         );
+        assert!(!none.contains("`apps`"));
+    }
+
+    /// An install goes to the app catalog first, and to the shell only for what it lacks.
+    #[test]
+    fn an_install_is_looked_for_in_the_app_catalog_first() {
+        let catalog = |shell| {
+            system_prompt(
+                Capabilities {
+                    shell,
+                    windows: true,
+                    apps: true,
+                    ..Capabilities::default()
+                },
+                "Monday",
+            )
+        };
+        let with_shell = catalog(true);
+        let first = with_shell
+            .find("`search` for it with `apps` first")
+            .expect("the catalog first");
+        let then = with_shell
+            .find("another way, with `shell`")
+            .expect("the shell after");
+        assert!(first < then);
+        assert!(with_shell.contains("check it with `status`"));
+        let headless = system_prompt(
+            Capabilities {
+                apps: true,
+                ..Capabilities::default()
+            },
+            "Monday",
+        );
+        let apps = definitions(Capabilities {
+            apps: true,
+            ..Capabilities::default()
+        });
+        assert!(
+            !headless.contains("`launch`")
+                && !apps
+                    .iter()
+                    .any(|tool| tool.description.contains("`launch`")),
+            "no `launch` is named where the session has none"
+        );
+        assert!(!catalog(false).contains("with `shell`"));
     }
 }

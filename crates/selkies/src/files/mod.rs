@@ -60,7 +60,7 @@ pub use pacing::{
     socket_gauge,
 };
 
-use crate::settings::Settings;
+use crate::settings::{AppsCatalog, Settings};
 
 /// The settings the file routes read, snapshotted at startup.
 #[derive(Clone, Debug, Default)]
@@ -76,8 +76,8 @@ pub struct FilesConfig {
     pub printing_enabled: bool,
     /// `print_spool_path` as configured, empty for the XDG state default.
     pub print_spool_path: String,
-    /// The proot-apps local repository as one absolute path, empty for none.
-    pub apps_repo: String,
+    /// Where the apps catalog is read.
+    pub apps_catalog: AppsCatalog,
     pub wayland: bool,
     pub audio_enabled: bool,
     pub audio_device_name: String,
@@ -96,7 +96,7 @@ impl FilesConfig {
             file_transfer_limit_mbps: s.file_transfer_limit_mbps(),
             printing_enabled: s.printing_enabled().on,
             print_spool_path: s.print_spool_path().to_string(),
-            apps_repo: s.apps_repo_path(),
+            apps_catalog: s.apps_catalog_source(),
             wayland: s.wayland().on,
             audio_enabled: s.audio_enabled().on,
             audio_device_name: s.audio_device_name().to_string(),

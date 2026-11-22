@@ -288,6 +288,7 @@ pub async fn run() -> Result<(), String> {
     gamepads.run_sweeper();
     let devices = Arc::new(stack::PublishedDevices::default());
     let pointer = stack::WsPointerSink(service.clone().into());
+    let apps = Arc::new(crate::session_screens::AppsRunner::default());
     let dispatcher = Dispatcher::new(
         InputConfig::from_settings(),
         Arc::new(wiring::WsInputHost {
@@ -298,6 +299,7 @@ pub async fn run() -> Result<(), String> {
         Arc::new(pointer),
         is_wayland.then(|| screens_backend.clone() as Arc<dyn WaylandSeat>),
         Some(devices.clone()),
+        apps.clone(),
     );
     screens.attach(&dispatcher);
     let clipboard = Clipboard::new(
@@ -312,7 +314,7 @@ pub async fn run() -> Result<(), String> {
     state.tokens.add_reconcile_hook(service.clone());
     late_ws.bind(Arc::new(stack::WsStreaming {
         service: service.clone(),
-        dispatcher,
+        dispatcher: dispatcher.clone(),
         clipboard,
         gamepads: gamepads.clone(),
         devices: devices.clone(),
@@ -361,7 +363,13 @@ pub async fn run() -> Result<(), String> {
         Arc::new(RtcPointerSink(Arc::downgrade(&rtc_service))),
         is_wayland.then(|| screens_backend.clone() as Arc<dyn WaylandSeat>),
         Some(devices.clone()),
+        apps.clone(),
     );
+    apps.set_host(Arc::new(stack::ActiveApps {
+        modes: modes.clone(),
+        websockets: Arc::downgrade(&dispatcher),
+        webrtc: Arc::downgrade(&rtc_dispatcher),
+    }));
     rtc_screens.attach(&rtc_dispatcher);
     let rtc_clipboard = Clipboard::new(
         RtcClipboardHost::new(rtc_service.engine().clone()),
@@ -410,6 +418,7 @@ pub async fn run() -> Result<(), String> {
         crate::webrtc::routes(rtc_service.clone()),
     ];
     if settings().pelorus().on {
+        crate::pelorus::apps::install(apps);
         extra.push(crate::pelorus::routes());
     }
     let router = http::build(state.clone(), extra);
