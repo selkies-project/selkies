@@ -704,6 +704,9 @@ impl Connection {
     /// are taken from the display's registered client alone too: the frames a writer holds
     /// back wait with a relay only that client's gate counts.
     async fn handle_ack(&mut self, message: &str) {
+        let Some(display_id) = self.display_id.clone() else {
+            return;
+        };
         let mut parts = message.split(' ').skip(1);
         let parsed = (|| -> Option<Acked> {
             let id: i64 = parts.next()?.parse().ok()?;
@@ -720,9 +723,6 @@ impl Connection {
         })();
         let Some((frame_id, held_ms, stamp)) = parsed else {
             warn!(target: "ws", "Malformed CLIENT_FRAME_ACK from {}: {message}", self.client.remote);
-            return;
-        };
-        let Some(display_id) = self.display_id.clone() else {
             return;
         };
         let link = {
