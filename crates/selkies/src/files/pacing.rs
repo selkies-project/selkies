@@ -49,7 +49,15 @@
 //! The per-session ping clock lives in an [`UplinkClock`] the transport keeps beside each
 //! session socket for the socket's life, so the separate requests of a chunked transfer's
 //! slices share one floor and a mid-transfer slice never re-baselines against its own
-//! standing queue. Ping payloads are per-session counters; the pong echoes its ping's payload
+//! standing queue.
+//!
+//! An allowance is raised only while the transfers fill four fifths of it
+//! (`TransferPacer::FILLED`). A clear verdict says the path carried what was sent, and of an
+//! allowance several times that it says nothing: doubled on each such verdict it stood at a
+//! gigabit a second before the first congested one, on a 6 Mbit/s uplink, and took half a
+//! minute of cuts to mean anything again.
+//!
+//! Ping payloads are per-session counters; the pong echoes its ping's payload
 //! (RFC 6455), so [`UplinkClock::note_pong`] matches replies to send times and stray pongs
 //! fall through unmatched. A ping failure drops that socket from the gauge; a gauge with no
 //! sockets left reports not alive and the caller stops pacing, since a vanished session leaves
@@ -465,6 +473,13 @@ struct PacerState {
     slow_start: bool,
     hold_until: f64,
     last_inflation_us: Option<u32>,
+    /// Whether the hold in force has brought the allowance down to what the transfers moved.
+    aligned: bool,
+    /// What the transfers have drained in all, when and how much of it they had within the
+    /// last [`TransferPacer::USED_SECONDS`] (oldest first), and the rate that shows.
+    drained: f64,
+    drains: VecDeque<(f64, f64)>,
+    used_bps: Option<f64>,
 }
 
 /// Rate pacing for bulk traffic, one instance per allowance.
@@ -491,6 +506,17 @@ impl TransferPacer {
     pub const RATE_FLOOR: f64 = 48.0 * 1024.0;
     /// The seconds a cut holds growth and further cuts while the queue it cut for drains.
     const HOLD_SECONDS: f64 = 1.5;
+    /// The seconds back the transfers' own rate is read over, and the share of the allowance
+    /// they must have moved in them for a clear verdict to raise it: an allowance the
+    /// transfers leave unfilled was not what the path carried, and a clear verdict says
+    /// nothing of it. The seconds are a verdict's and a quarter more, read up to the verdict
+    /// itself: an allowance just doubled is found nine tenths filled by the next verdict
+    /// where the sender keeps up, so the ramp toward an unknown link is as steep as it was,
+    /// and one the path already holds under is not doubled again. An allowance over the
+    /// path's rate is a queue in the path, the longer the further over: four fifths keeps
+    /// it within a quarter of that rate.
+    const USED_SECONDS: f64 = 0.25;
+    const FILLED: f64 = 0.8;
 
     /// A pacer: `static_bps` caps it (0 for none) and `adaptive` lets verdicts steer it.
     pub fn new(static_bps: u64, adaptive: bool) -> Self {
@@ -511,6 +537,10 @@ impl TransferPacer {
                 slow_start: true,
                 hold_until: 0.0,
                 last_inflation_us: None,
+                aligned: false,
+                drained: 0.0,
+                drains: VecDeque::new(),
+                used_bps: None,
             }),
         }
     }
@@ -621,6 +651,32 @@ impl TransferPacer {
         if self.adaptive && now - s.ts > 10.0 {
             s.slow_start = true;
         }
+        // What the transfers moved up to now, the piece drained here moving after it; a
+        // pause longer than the window is no rate of theirs, and the reading starts over.
+        if now - s.ts > Self::USED_SECONDS {
+            s.drains.clear();
+            s.used_bps = None;
+        }
+        if s.drains
+            .back()
+            .is_none_or(|(at, _)| now - at >= Self::USED_SECONDS / 10.0)
+        {
+            let so_far = s.drained;
+            s.drains.push_back((now, so_far));
+        }
+        while s
+            .drains
+            .get(1)
+            .is_some_and(|(at, _)| now - at >= Self::USED_SECONDS)
+        {
+            s.drains.pop_front();
+        }
+        if let Some(&(at, before)) = s.drains.front()
+            && now - at >= Self::USED_SECONDS / 2.0
+        {
+            s.used_bps = Some((s.drained - before) / (now - at));
+        }
+        s.drained += nbytes as f64;
         let limit = s.rate_bps.min(self.ceiling());
         s.tokens = (limit * 0.5).min(s.tokens + (now - s.ts) * limit);
         s.ts = now;
@@ -657,6 +713,14 @@ impl TransferPacer {
     /// window: ending it on one inside would let an oscillating gauge re-arm the ceiling from
     /// each freshly cut rate, the same ratchet one flap at a time.
     ///
+    /// An allowance its transfers left a fifth or more of unfilled was over what the path
+    /// carried, and a cut takes it down to what they moved where that is the lower, no
+    /// further than a second cut would; the hold after brings it down to that once more. A
+    /// slow start ends a doubling or two past the path's rate, and that excess stands in the
+    /// path for as long as the allowance keeps it: on a round trip of 80 ms the cuts alone
+    /// took six seconds to bring it under 6 Mbit/s from 16.8, with 110 ms of queue standing
+    /// meanwhile.
+    ///
     /// `share_bps` is the least a cut leaves the allowance, where there is one
     /// ([`UplinkGauge::share_bps`]): the allowance as it stands, where that is under it.
     fn gauge_backoff_beside(
@@ -675,18 +739,29 @@ impl TransferPacer {
             let draining =
                 matches!((inflation_us, s.last_inflation_us), (Some(i), Some(l)) if i < l);
             s.last_inflation_us = inflation_us;
-            let mut cut = cut;
+            // What the transfers moved, where they left a fifth of the allowance or more
+            // unfilled: the path did not carry the allowance, and the excess stands in it
+            // as a queue until the allowance comes down.
+            let moved = s.used_bps.filter(|used| *used < Self::FILLED * s.rate_bps);
+            let least = share_bps.map_or(Self::RATE_FLOOR, |share| share.min(s.rate_bps));
+            let mut eased = cut;
             if !s.congested {
                 s.congested = true;
                 s.probe_ceiling = Some(s.rate_bps.max(2.0 * Self::RATE_FLOOR));
             } else if now < s.hold_until {
+                if let Some(moved) = moved.filter(|_| !s.aligned) {
+                    s.rate_bps = moved.max(s.rate_bps * cut).max(Self::RATE_FLOOR).max(least);
+                    s.aligned = true;
+                }
                 return;
             } else if draining {
-                cut = 1.0 - (1.0 - cut) / 4.0;
+                eased = 1.0 - (1.0 - cut) / 4.0;
             }
-            let least = share_bps.map_or(Self::RATE_FLOOR, |share| share.min(s.rate_bps));
-            s.rate_bps = (s.rate_bps * cut).max(Self::RATE_FLOOR).max(least);
+            let to = s.rate_bps * eased;
+            let to = moved.map_or(to, |moved| to.min(moved.max(to * cut)));
+            s.rate_bps = to.max(Self::RATE_FLOOR).max(least);
             s.hold_until = now + Self::HOLD_SECONDS;
+            s.aligned = false;
             return;
         }
         s.last_inflation_us = None;
@@ -700,6 +775,11 @@ impl TransferPacer {
             ceiling = None;
         }
         let bound = ceiling.unwrap_or(s.rate_bps * 4.0).min(self.ceiling());
+        if s.used_bps
+            .is_some_and(|used| used < Self::FILLED * s.rate_bps)
+        {
+            return;
+        }
         s.rate_bps = if s.slow_start {
             (s.rate_bps * 2.0).min(bound)
         } else {
@@ -977,6 +1057,106 @@ mod tests {
             !gauge.alive(),
             "a dead session socket takes the gauge with it"
         );
+    }
+
+    fn set_used(pacer: &TransferPacer, bps: f64) {
+        pacer.inner.lock().used_bps = Some(bps);
+    }
+
+    #[test]
+    fn an_allowance_the_transfers_do_not_fill_is_not_raised() {
+        let pacer = TransferPacer::adaptive();
+        let start = pacer.rate_bps();
+        // The transfers moved a tenth of it, or three quarters: clear verdicts say nothing
+        // of the rest.
+        for moved in [0.1, 0.75] {
+            set_used(&pacer, moved * start);
+            for _ in 0..8 {
+                pacer.gauge_backoff(false, true, 0.65, DEFAULT_STEP, None);
+            }
+            assert_eq!(pacer.rate_bps(), start, "{moved} of it moved");
+        }
+        // Filled, as an allowance just doubled is by the next verdict where the sender keeps
+        // up (nine tenths), it is raised as it was: doubled before the first congestion.
+        set_used(&pacer, 0.9 * start);
+        pacer.gauge_backoff(false, true, 0.65, DEFAULT_STEP, None);
+        assert_eq!(pacer.rate_bps(), 2.0 * start);
+        // Slow start against a path that takes 750 kB/s ends within twice that, where it
+        // ran to a hundred times it.
+        set_used(&pacer, 750_000.0);
+        for _ in 0..12 {
+            pacer.gauge_backoff(false, true, 0.65, DEFAULT_STEP, None);
+        }
+        assert!(pacer.rate_bps() >= 750_000.0, "{}", pacer.rate_bps());
+        assert!(pacer.rate_bps() <= 2.0 * 750_000.0, "{}", pacer.rate_bps());
+        // A filled allowance is cut as it was.
+        let before = pacer.rate_bps();
+        set_used(&pacer, before);
+        pacer.gauge_backoff(true, false, 0.65, DEFAULT_STEP, None);
+        assert!((pacer.rate_bps() - 0.65 * before).abs() < 1.0);
+    }
+
+    #[test]
+    fn a_cut_takes_an_unfilled_allowance_down_to_what_was_moved() {
+        let pacer = TransferPacer::adaptive();
+        let at = |rate: f64| {
+            assert!(
+                (pacer.rate_bps() - rate).abs() < 1.0,
+                "{}",
+                pacer.rate_bps()
+            )
+        };
+        // Slow start left the allowance at 1 MB/s over a path that carried 600 kB/s: the cut
+        // is to what was carried, under the 650 kB/s it would have left.
+        set_rate(&pacer, 1_000_000.0);
+        set_used(&pacer, 600_000.0);
+        pacer.gauge_backoff(true, false, 0.65, DEFAULT_STEP, None);
+        at(600_000.0);
+        // In the hold after, a reading of what stood in the socket having cleared, the path
+        // shows 400 kB/s: the allowance comes down to it once, and no further than a cut.
+        set_used(&pacer, 400_000.0);
+        pacer.gauge_backoff(true, false, 0.65, DEFAULT_STEP, None);
+        at(400_000.0);
+        set_used(&pacer, 100_000.0);
+        pacer.gauge_backoff(true, false, 0.65, DEFAULT_STEP, None);
+        at(400_000.0);
+        // Transfers that moved nothing take the next cut no further than two cuts' worth.
+        release_hold(&pacer);
+        set_used(&pacer, 0.0);
+        pacer.gauge_backoff(true, false, 0.65, DEFAULT_STEP, None);
+        at(400_000.0 * 0.65 * 0.65);
+        // And in the hold after, one cut more at the most.
+        pacer.gauge_backoff(true, false, 0.65, DEFAULT_STEP, None);
+        at(400_000.0 * 0.65 * 0.65 * 0.65);
+        pacer.gauge_backoff(true, false, 0.65, DEFAULT_STEP, None);
+        at(400_000.0 * 0.65 * 0.65 * 0.65);
+    }
+
+    #[tokio::test]
+    async fn the_transfers_own_rate_is_read_from_what_they_drain() {
+        let pacer = TransferPacer::adaptive();
+        assert_eq!(pacer.inner.lock().used_bps, None);
+        pacer.pace(8192).await;
+        assert_eq!(
+            pacer.inner.lock().used_bps,
+            None,
+            "nothing to read a rate over yet"
+        );
+        // Half the window on, what was drained before now is read over the time it took.
+        let half = TransferPacer::USED_SECONDS / 2.0;
+        tokio::time::sleep(Duration::from_secs_f64(half + 0.05)).await;
+        pacer.pace(8192).await;
+        let used = pacer
+            .inner
+            .lock()
+            .used_bps
+            .expect("half the window was read");
+        let most = 8192.0 / half;
+        assert!(used > 0.5 * most && used <= most, "{used} of {most}");
+        // A pause longer than the window is no rate of the transfers', and starts it over.
+        tokio::time::sleep(Duration::from_secs_f64(TransferPacer::USED_SECONDS + 0.05)).await;
+        pacer.pace(8192).await;
+        assert_eq!(pacer.inner.lock().used_bps, None, "the reading starts over");
     }
 
     /// A session socket whose stream has written what the test says.
