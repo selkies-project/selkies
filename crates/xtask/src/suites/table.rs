@@ -128,6 +128,7 @@ pub static SUITES: &[Suite] = &[
     },
     suite("tools/wire_codecs_audit.ts", "unit", 120),
     suite("tools/worker_block_audit.ts", "unit", 120),
+    suite("tools/h264_framing_audit.ts", "unit", 120),
     suite("tools/per_display_settings_audit.ts", "unit", 120),
     suite("tools/stream_density_audit.ts", "unit", 120),
     suite("tools/slider_stops_audit.ts", "unit", 120),
