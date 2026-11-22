@@ -445,6 +445,12 @@ impl Arm {
     /// The picture: its order count since the key frame, the frames the client still has,
     /// newest first, as the driver's reference list and the slice header's reference picture
     /// set, and every slice.
+    ///
+    /// Every slice filters across its edges, in the header and in the driver's parameters
+    /// alike, as the picture parameters allow: iHD deblocks and applies SAO across slice edges
+    /// in its reconstruction whatever a slice says, so a header that turns it off leaves every
+    /// decoder a picture apart from the encoder's from the key frame on, a gap prediction
+    /// compounds until the next key frame.
     pub(super) fn picture(
         &mut self,
         n: &Negotiated,
@@ -590,7 +596,7 @@ impl Arm {
                     w.ue(0);
                 }
                 w.se(slice_qp_delta);
-                w.flag(false);
+                w.flag(true);
                 w.trailing_bits();
                 let header = nal_unit(&[(pic.nal_unit_type << 1), 0x01], w.as_bytes());
                 let bits = 8 * header.len() as u32;
@@ -618,6 +624,7 @@ impl Arm {
                 f.set_slice_temporal_mvp_enabled_flag(u32::from(t.temporal_mvp && !frame.key));
                 f.set_slice_sao_luma_flag(u32::from(t.sao));
                 f.set_slice_sao_chroma_flag(u32::from(t.sao));
+                f.set_slice_loop_filter_across_slices_enabled_flag(1);
                 f.set_collocated_from_l0_flag(1);
             }
             out.push(VAEncSliceParameterBufferType, &slice);

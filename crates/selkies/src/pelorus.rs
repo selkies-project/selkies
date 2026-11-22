@@ -23,6 +23,7 @@
 //! `--pelorus` is on.
 
 mod agent;
+pub mod apps;
 mod configs;
 mod model;
 mod tools;

@@ -300,12 +300,14 @@ const ROLES: &[Role] = &[
         crates: &[
             "serde",
             "serde_json",
+            "serde-saphyr",
             "rmp-serde",
             "base64",
             "percent-encoding",
             "url",
         ],
-        how: "JSON messages, MessagePack to the uinput mouse socket, encodings",
+        how: "JSON messages, the apps catalog's YAML, MessagePack to the uinput mouse socket, \
+              encodings",
         notes: "",
     },
     Role {

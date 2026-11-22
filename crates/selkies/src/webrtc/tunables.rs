@@ -394,7 +394,7 @@ impl WebRtcService {
                     if let Some(told) = allowance.note(None, hi, pace) {
                         pipeline.set_link_rate(told);
                     }
-                    allowance.kbps.unwrap_or(0) as f64
+                    allowance.told_kbps() as f64
                 }
                 None => 0.0,
             }
@@ -755,6 +755,9 @@ impl WebRtcService {
         // The peers a display's padding goes to: its owner where it has one.
         let mut padded: HashMap<String, Vec<(String, Peer)>> = HashMap::new();
         let mut padded_owner: HashMap<String, Vec<(String, Peer)>> = HashMap::new();
+        // The peers that receive a display's video, by the windows their paths reported: past one,
+        // its still-screen cleanup keeps to the constant rate (`LinkAllowance::share`).
+        let mut streaming: HashMap<String, usize> = HashMap::new();
         {
             let live: HashSet<&String> = ticks.iter().map(|(peer_id, ..)| peer_id).collect();
             self.st
@@ -803,6 +806,15 @@ impl WebRtcService {
             let Some(window) = tick.window.clone() else {
                 continue;
             };
+            let video_on = self
+                .engine
+                .peers
+                .lock()
+                .get(&peer_id)
+                .is_some_and(|p| !p.video_paused);
+            if video_on {
+                *streaming.entry(display.clone()).or_default() += 1;
+            }
             let video_goodput = if window.goodput_bps > 0 {
                 (window.goodput_bps as f64 - audio_bps * (1.0 - window.loss_fraction)).max(1.0)
             } else {
@@ -981,9 +993,11 @@ impl WebRtcService {
                     .engine
                     .video_budget_fill(&did)
                     .is_some_and(|fill| fill >= LinkAllowance::SHARE);
+            let shared = streaming.get(&did).copied().unwrap_or(0) >= 2;
             let allowance = {
                 let mut st = self.st.lock();
                 let allowance = st.link_allowances.entry(did.clone()).or_default();
+                let sharing = allowance.share(shared);
                 let sample_in_history =
                     queue_s.is_some_and(|q| q > 0.0) || allowance.kbps.unwrap_or(0) == 0 || filled;
                 let told = if cut {
@@ -1001,9 +1015,9 @@ impl WebRtcService {
                 } else {
                     allowance.note(room, hi, pace)
                 };
-                let kbps = allowance.kbps.unwrap_or(0) as f64;
+                let kbps = allowance.told_kbps() as f64;
                 drop(st);
-                if let Some(told) = told {
+                for told in sharing.into_iter().chain(told) {
                     pipeline.set_link_rate(told);
                 }
                 kbps

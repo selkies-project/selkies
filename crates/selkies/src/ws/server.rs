@@ -3484,13 +3484,30 @@ impl WsService {
             allowed_desync_ms: BACKPRESSURE_ALLOWED_DESYNC_MS,
             primary: display_id == PRIMARY_DISPLAY,
         };
+        let waiting = match (&client, &relay) {
+            (Some(client), Some(relay))
+                if client.paced_within(self.timings.backpressure_check_s) =>
+            {
+                relay.waiting_frames()
+            }
+            _ => 0,
+        };
+        // What the relay left out of a paced path over the last two checks.
+        let left_out = relay.as_ref().map_or(0, |relay| {
+            relay.left_out_frames(2.0 * self.timings.backpressure_check_s)
+        });
         let mut effects = CheckEffects {
             display: display_id,
             capture: capture.clone(),
             relay,
             client: client.clone(),
+            waiting,
+            left_out,
+            paced_bps: client.as_ref().and_then(|c| c.paced_bps()),
+            held_back: client.as_ref().map_or(0.0, |c| c.held_back()),
             metrics: self.deps.metrics.clone(),
         };
+        let shared = self.pages_streaming(display_id) >= 2;
         let outcome = {
             let mut link = link.lock();
             link.loop_late_ms = late_ms;
@@ -3506,6 +3523,14 @@ impl WsService {
             }
             if steered && capturing && link.acknowledged_frame_id != -1 && link.has_sent_any_frame {
                 let target_view = capture.as_ref().map(|c| EncoderTarget(c.clone()));
+                if let Some(view) = &target_view
+                    && let Some(kbps) = link
+                        .link_allowance
+                        .get_or_insert_with(Default::default)
+                        .share(shared)
+                {
+                    view.update_link_rate(kbps);
+                }
                 let target = if capped {
                     link.peak_ceiling(target, configured_fps)
                 } else {
@@ -4881,6 +4906,13 @@ struct CheckEffects<'a> {
     capture: Option<Arc<dyn CaptureHandle>>,
     relay: Option<Arc<VideoRelay>>,
     client: Option<Arc<Client>>,
+    /// Frames the relay holds back from a late path its writer paced within the last check
+    /// interval, and how long the way back holds the page's acks, both read before the link
+    /// is locked.
+    waiting: usize,
+    left_out: usize,
+    paced_bps: Option<f64>,
+    held_back: f64,
     metrics: Option<Arc<dyn crate::ws::host::Metrics>>,
 }
 
@@ -4933,6 +4965,22 @@ impl GateEffects for CheckEffects<'_> {
             metrics.set_fps(client_fps);
             metrics.set_latency(rtt_ms);
         }
+    }
+
+    fn waiting_frames(&self) -> usize {
+        self.waiting
+    }
+
+    fn left_out_frames(&self) -> usize {
+        self.left_out
+    }
+
+    fn paced_bps(&self) -> Option<f64> {
+        self.paced_bps
+    }
+
+    fn held_back(&self) -> f64 {
+        self.held_back
     }
 }
 

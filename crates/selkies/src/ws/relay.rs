@@ -13,7 +13,18 @@
 //! Key frames are exempt from the budget (part of one is useless), so the true bound is the
 //! budget plus one key frame burst. That budget is the only bound on a slow client: a send
 //! waits for as long as its socket keeps draining, and only a socket that stops draining
-//! costs the client its connection (`Client::send_live`).
+//! costs the client its connection (`Client::send_live`). A send also waits while the path
+//! is late and still delivering what it was handed (`Client::send_bulk`, `ws::flight`), so
+//! the frames a narrowed path cannot take wait here, where the owner's gate counts them and
+//! lets them go, and not in the path ahead of everything written after them. Where the
+//! frames name what they predict from (below), they do not wait either: while the owner's
+//! writer paces, a frame goes only as the path has room for it (`Flight::would_clear`), and
+//! what arrives meanwhile is left out as a run the encoder predicts past, so the owner is
+//! sent the frame rate its path carries, each frame the newest there was, whatever its
+//! encoder made of the rate the steer asked for (software H.264 at its coarsest makes a
+//! moving 720p frame of noise 12 KiB, at any target). What is left out stands behind the
+//! path to the steer as what waits does (`left_out_frames`), and keeps the writer pacing
+//! (`Waiting`) until the stream fits.
 //!
 //! Where the encoder names the frame each one predicts from (a whole-frame session; the wire
 //! header's last field), a page that does not own its display is served as a selective
@@ -46,7 +57,7 @@
 //!
 //! The owner's relay also writes the padding its display's path probe asks for
 //! (`set_padding`): `0x07` chunks of `PAD_STEP_S` of the probe's rate, written only while no
-//! frame waits, so a frame waits behind one chunk at most, each counted in what the display
+//! frame waits and the writer paces nothing (`ws::flight`), so a frame waits behind one chunk at most, each counted in what the display
 //! sent (`RelayHost::note_padding`), with a ping behind a chunk every `PAD_PING_S` while no frame
 //! awaits its ack, whose pong acks the bytes sent through it for the steer and for the path's
 //! sounding (`ws::sounding`), which reads a queue building on a still screen from the pongs
@@ -70,7 +81,7 @@ use tokio::sync::Notify;
 
 use crate::core::DisplayId;
 use crate::display::capture::{CommonFrames, FRAME_ANCHOR, FRAME_NUM_WRAP, LOST_FRAME_MEMORY};
-use crate::ws::client::{Client, ClientId, Frame};
+use crate::ws::client::{Client, ClientId, Frame, Waiting};
 use crate::ws::link::{DisplayLink, RTT_SAMPLE_SANE_MAX_MS};
 use crate::ws::now;
 use crate::ws::protocol::{OPCODE_PADDING, OPCODE_VIDEO};
@@ -118,6 +129,14 @@ pub const VIDEO_RELAY_FAR_SECONDS: f64 = 1.0;
 pub const VIDEO_RELAY_ANCHORED_RECOVERY_SECONDS: f64 = 4.0;
 /// An anchor goes to a page without room only while its queue stands under this past the round trip.
 pub const VIDEO_RELAY_ANCHOR_SECONDS: f64 = 0.25;
+/// The display's owner is sent a delta frame while its writer paces its path (`ws::flight`),
+/// or did within this long, only as the path has room for it with none of its frames still
+/// on their way out of this host: a pacing that lets up between two frames is one stretch.
+pub const VIDEO_RELAY_PACED_SECONDS: f64 = 0.1;
+/// How long after one of the owner's frames was left out its writer is told that frames
+/// wait (`Waiting`): what a paced path has no room for is left out, not queued, and the
+/// path is paced until its stream fits it for this long.
+pub const VIDEO_RELAY_LEFT_OUT_SECONDS: f64 = 0.25;
 /// How many of the frames a relay sent it remembers, as far back as a frame may predict from.
 pub const VIDEO_RELAY_SENT_MEMORY: usize = 4096;
 /// How many frames ahead of a possible `frame_num` wrap an open run is reported.
@@ -254,6 +273,9 @@ struct Inner {
     sent: VecDeque<u16>,
     sent_set: HashSet<u16>,
     lost_run: u32,
+    /// When each of the owner's frames was left out for want of room on a paced path, over
+    /// the last second.
+    left_out: VecDeque<f64>,
     lost_since: f64,
     lost_first: Option<u16>,
     lost_told: bool,
@@ -326,6 +348,20 @@ impl Inner {
         false
     }
 
+    /// Note one of the owner's frames left out at `now` for want of room on a paced path.
+    fn left_out(&mut self, now: f64) {
+        self.left_out_since(now, 1.0);
+        self.left_out.push_back(now);
+    }
+
+    /// How many of the owner's frames were left out within `span` seconds before `now`.
+    fn left_out_since(&mut self, now: f64, span: f64) -> usize {
+        while self.left_out.front().is_some_and(|at| now - at > 1.0) {
+            self.left_out.pop_front();
+        }
+        self.left_out.iter().filter(|at| now - **at <= span).count()
+    }
+
     /// The run is over: the encoder predicted past it, or a key frame came. Whether one was
     /// open.
     fn end_lost(&mut self) -> bool {
@@ -372,6 +408,7 @@ impl VideoRelay {
                 sent: VecDeque::new(),
                 sent_set: HashSet::new(),
                 lost_run: 0,
+                left_out: VecDeque::new(),
                 lost_since: 0.0,
                 lost_first: None,
                 lost_told: false,
@@ -673,32 +710,56 @@ impl VideoRelay {
     }
 
     /// Whether a delta frame naming the frame it predicts from goes to this client; `None`
-    /// where only a key frame brings the client back.
+    /// where only a key frame brings the client back. `pacing` is the word of the client's
+    /// writer (`Client::bulk_pacing`), read before this relay's lock was taken.
     fn forward(
         &self,
         inner: &mut Inner,
         frame_id: u16,
         reference: u16,
         anchor: bool,
+        pacing: (bool, bool),
     ) -> Option<bool> {
         let at = now();
         let kept = inner.numbered && inner.since_key.is_multiple_of(FRAME_NUM_WRAP);
+        // The owner's path is steered, and while it is on time every frame goes. While its
+        // writer paces it, a frame goes only as the path has room for it, none still on
+        // its way out of this host: what arrives meanwhile is left out as a run, as for
+        // any page without room, and the frame that goes once there is room is the newest
+        // there is. Queued here instead, each would go out as old as the queue, behind a
+        // path that takes them one at a time.
+        let owner = self.host.owns_display(self.client.id, &self.display_id);
+        let paced = owner && pacing.0;
+        let room = paced.then(|| pacing.1 && self.frames_ahead(inner) == 0);
+        // The frame a `frame_num` wrap falls on goes whatever the room, as to any page.
+        let full = room == Some(false) && !kept;
         if !inner.sent_set.contains(&reference) {
+            if paced {
+                inner.left_out(at);
+            }
             self.lose(inner, frame_id, at);
-            return self.repair(inner);
+            return self.repair(inner, room);
         }
         if inner.lost_first.is_some() {
-            if !anchor || kept || self.anchor_room(inner) {
+            if (!anchor || kept || self.anchor_room(inner)) && !full {
                 inner.end_lost();
                 self.count(RunEvent::PredictedPast);
                 return Some(true);
             }
+            if paced {
+                inner.left_out(at);
+            }
             inner.lost_first = Some(frame_id);
             inner.lost_told = false;
             inner.lose(frame_id, at);
-            return self.repair(inner);
+            return self.repair(inner, room);
         }
-        if self.host.owns_display(self.client.id, &self.display_id) {
+        if full {
+            inner.left_out(at);
+            self.lose(inner, frame_id, at);
+            return self.repair(inner, room);
+        }
+        if owner {
             return Some(true);
         }
         inner.gauged = true;
@@ -707,7 +768,7 @@ impl VideoRelay {
         }
         if !kept && !self.room(inner) {
             self.lose(inner, frame_id, at);
-            return self.repair(inner);
+            return self.repair(inner, None);
         }
         Some(true)
     }
@@ -733,21 +794,30 @@ impl VideoRelay {
     /// A frame of the open run was held back: tell the encoder of the run's first frame once
     /// the client has room for the frame predicting past it, or sooner where waiting would
     /// cost a key frame. `Some(false)` while the run waits; `None` once it has waited out its
-    /// recovery window.
-    fn repair(&self, inner: &mut Inner) -> Option<bool> {
+    /// recovery window. `owner` is whether the display's owner has room on its paced path
+    /// (`forward`), `None` for any other page and for the owner on time: a paced path is
+    /// asked for nothing while it has no room, neither the frame predicting past a run nor
+    /// a key frame, either of which would wait as the frames left out would have, and its
+    /// run's window opens as the encoder is told, as a run the gate opened has its window
+    /// from the lift (`ungate`): it waited for room, not for the encoder.
+    fn repair(&self, inner: &mut Inner, owner: Option<bool>) -> Option<bool> {
+        if owner == Some(false) {
+            return Some(false);
+        }
         let limit = if inner.anchored && !inner.lost_gated {
             VIDEO_RELAY_ANCHORED_RECOVERY_SECONDS
         } else {
             VIDEO_RELAY_LOST_RECOVERY_SECONDS
         };
-        if now() - inner.lost_since > limit {
+        let waited = owner == Some(true) && !inner.lost_told;
+        if now() - inner.lost_since > limit && !waited {
             return None;
         }
         if !inner.lost_told {
             let wrap_lead = (FRAME_NUM_WRAP - inner.since_key % FRAME_NUM_WRAP) % FRAME_NUM_WRAP;
             let due = inner.lost_run >= VIDEO_RELAY_REACH_FRAMES
                 || (inner.numbered && wrap_lead <= VIDEO_RELAY_WRAP_LEAD);
-            if (self.room(inner) || (due && !self.far(inner)))
+            if (owner == Some(true) || self.room(inner) || (due && !self.far(inner)))
                 && let Some(first) = inner.lost_first
             {
                 inner.lost_told = self.host.relay_lost(
@@ -758,6 +828,9 @@ impl VideoRelay {
                 );
                 if inner.lost_told {
                     self.count(RunEvent::Reported);
+                    if waited {
+                        inner.lost_since = now();
+                    }
                 }
             }
         }
@@ -767,6 +840,16 @@ impl VideoRelay {
     /// Accept, drop, or gate one encoded chunk; whether the caller should request a key frame
     /// (data was dropped that only a sync point recovers, within the sync floor). Never awaits.
     pub fn offer(&self, item: RelayItem) -> bool {
+        // Read before this relay's lock is taken, as in `run`.
+        let pacing = self
+            .client
+            .bulk_pacing(VIDEO_RELAY_PACED_SECONDS, item.data.len());
+        self.offer_paced(item, pacing)
+    }
+
+    /// [`Self::offer`] with the word of the client's writer (`Client::bulk_pacing`): whether
+    /// it paces the path, and whether the path has room for this frame now.
+    fn offer_paced(&self, item: RelayItem, pacing: (bool, bool)) -> bool {
         let mut inner = self.inner.lock();
         let size = item.data.len();
         let header = video_header(&item.data);
@@ -801,7 +884,7 @@ impl VideoRelay {
             } else if h.reference != h.frame_id {
                 inner.since_key += 1;
                 inner.anchored = inner.anchored || h.anchor;
-                let forward = self.forward(&mut inner, h.frame_id, h.reference, h.anchor);
+                let forward = self.forward(&mut inner, h.frame_id, h.reference, h.anchor, pacing);
                 deliver = forward == Some(true);
                 if forward.is_none() {
                     inner.live_rows.clear();
@@ -862,7 +945,7 @@ impl VideoRelay {
     /// a ping at once and the page acks a frame on its own tick, so a ping behind an unacked
     /// frame would ack bytes past it first and the acked history would run out of order.
     /// False where the socket died.
-    async fn write_padding(&self, size: usize) -> bool {
+    async fn write_padding(&self, size: usize, waiting: &Waiting) -> bool {
         let Some((link, sent_bytes)) =
             self.host
                 .note_padding(self.client.id, &self.display_id, size)
@@ -872,7 +955,7 @@ impl VideoRelay {
         let what = format!("Padding for '{}'", self.display_id);
         if self
             .client
-            .send_live(Frame::Binary(PADDING.slice(..size)), &what)
+            .send_bulk(Frame::Binary(PADDING.slice(..size)), &what, false, waiting)
             .await
             .is_err()
         {
@@ -880,7 +963,7 @@ impl VideoRelay {
         }
         let at = now();
         // Read before the relay's own lock is taken: a check takes the link's first.
-        let acked = link.lock().unacked_since.is_none();
+        let acked = !link.lock().awaits_ack();
         let due = {
             let mut inner = self.inner.lock();
             let due = acked && at - inner.pad_pinged >= PAD_PING_S;
@@ -907,7 +990,15 @@ impl VideoRelay {
     /// Drain the backlog onto the socket until stopped or the socket dies, padding the stream
     /// (`set_padding`) while it holds no frame.
     async fn run(self: Arc<Self>) {
+        // What the writer asks while it holds a frame of this relay's back from a late path.
+        let waiting: Waiting = {
+            let relay = Arc::downgrade(&self);
+            Arc::new(move || relay.upgrade().is_some_and(|r| r.waits()))
+        };
         loop {
+            // Read before this relay's lock is taken: neither lock is taken under the other,
+            // here or where the writer asks `waiting`.
+            let paced = self.client.paced();
             let (item, pad, wait) = {
                 let mut inner = self.inner.lock();
                 if inner.stopped {
@@ -926,15 +1017,23 @@ impl VideoRelay {
                     }
                     None => {
                         let at = now();
-                        let pad = inner.padding_due(at);
+                        // No padding goes into a path the writer paces: it would stand there
+                        // ahead of the next frame, and such a path is sounded already.
+                        let pad = if paced { None } else { inner.padding_due(at) };
                         let padding = inner.pad_bps > 0.0 && at < inner.pad_until;
-                        let wait = padding.then(|| (inner.pad_next - at).max(0.0));
+                        let wait = padding.then(|| {
+                            if paced {
+                                PAD_STEP_S
+                            } else {
+                                (inner.pad_next - at).max(0.0)
+                            }
+                        });
                         (None, pad, wait)
                     }
                 }
             };
             if let Some(size) = pad {
-                if !self.write_padding(size).await {
+                if !self.write_padding(size, &waiting).await {
                     self.host.socket_died(self.client.id);
                     break;
                 }
@@ -961,7 +1060,7 @@ impl VideoRelay {
             let data = item.data;
             match self
                 .client
-                .send_live_pinged(Frame::Binary(data.clone()), &what, ping_behind)
+                .send_bulk(Frame::Binary(data.clone()), &what, ping_behind, &waiting)
                 .await
             {
                 Ok(()) => {
@@ -1003,8 +1102,36 @@ impl VideoRelay {
             .collect()
     }
 
+    /// The frames waiting to be handed to the socket, a frame's chunks counted once.
+    pub fn waiting_frames(&self) -> usize {
+        let inner = self.inner.lock();
+        let mut frames = 0;
+        let mut last = None;
+        for item in &inner.backlog {
+            if last != Some(item.frame_id) {
+                frames += 1;
+                last = Some(item.frame_id);
+            }
+        }
+        frames
+    }
+
     pub fn backlog_len(&self) -> usize {
         self.inner.lock().backlog.len()
+    }
+
+    /// What the writer is told while it holds a frame of this relay's back from a late path
+    /// (`Waiting`): frames wait here, or one of the owner's was left out for want of room
+    /// within `VIDEO_RELAY_LEFT_OUT_SECONDS`, which is the same stream waiting.
+    fn waits(&self) -> bool {
+        let mut inner = self.inner.lock();
+        !inner.backlog.is_empty() || inner.left_out_since(now(), VIDEO_RELAY_LEFT_OUT_SECONDS) > 0
+    }
+
+    /// The owner's frames left out for want of room on its paced path within `span` seconds:
+    /// stream that stands behind the path as what waits here does, to the display's steer.
+    pub fn left_out_frames(&self, span: f64) -> usize {
+        self.inner.lock().left_out_since(now(), span)
     }
 
     pub fn lost_first(&self) -> Option<u16> {
@@ -1588,7 +1715,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_owner_is_never_thinned() {
+    async fn the_owner_on_time_is_never_thinned() {
         reset_clock();
         let r = rig(true, true, 100_000, None);
         r.relay.offer(key(1));
@@ -1598,6 +1725,177 @@ mod tests {
         }
         assert_eq!(r.ids(), (2..12).collect::<Vec<u16>>());
         assert!(r.server.reports().is_empty());
+        assert_eq!(r.relay.left_out_frames(1.0), 0);
+    }
+
+    /// The writer's word to the relay: it paces, and its path has room for a frame (`ROOMY`)
+    /// or has none (`HELD`).
+    const ROOMY: (bool, bool) = (true, true);
+    const HELD: (bool, bool) = (true, false);
+
+    #[tokio::test]
+    async fn the_owner_behind_a_paced_path_is_sent_a_frame_only_as_there_is_room() {
+        reset_clock();
+        let r = rig(true, true, 100_000, None);
+        let mut asks = vec![r.relay.offer(key(1))];
+        r.hand(1);
+        r.drained();
+        asks.push(r.relay.offer_paced(delta(2, 1), ROOMY));
+        assert_eq!(r.ids(), vec![2], "none ahead and the writer clear: it goes");
+        asks.extend([3, 4].map(|n| r.relay.offer_paced(delta(n, n - 1), ROOMY)));
+        assert_eq!(
+            (r.ids(), r.relay.lost_first()),
+            (vec![2], Some(3)),
+            "with one still on its way out the next is left out, and what predicts from it"
+        );
+        r.hand(1);
+        r.drained();
+        asks.push(r.relay.offer_paced(delta(5, 4), HELD));
+        assert!(
+            r.ids().is_empty() && r.server.reports().is_empty(),
+            "nothing is asked of the encoder while the writer would hold the answer"
+        );
+        asks.push(r.relay.offer_paced(delta(6, 5), ROOMY));
+        assert_eq!(
+            r.server.reports(),
+            vec![(3, true)],
+            "once there is room the run's first frame is reported"
+        );
+        asks.push(r.relay.offer_paced(delta(7, 2), ROOMY));
+        assert_eq!(
+            (r.ids(), r.relay.lost_first()),
+            (vec![7], None),
+            "and the frame predicting from the last one sent goes out"
+        );
+        assert!(!asks.iter().any(|a| *a), "without a key frame asked for");
+        assert_eq!(
+            r.server.runs(),
+            vec![
+                RunEvent::Opened,
+                RunEvent::Reported,
+                RunEvent::PredictedPast
+            ]
+        );
+        assert_eq!(
+            r.relay.left_out_frames(1.0),
+            4,
+            "frames 3 to 6 were left out"
+        );
+        r.hand(1);
+        r.drained();
+        assert!(r.relay.waits(), "which is stream waiting, to the writer");
+        advance(VIDEO_RELAY_LEFT_OUT_SECONDS + 0.01);
+        assert!(!r.relay.waits(), "until none was left out for a while");
+    }
+
+    #[tokio::test]
+    async fn a_frame_predicting_past_a_run_waits_as_any_other_for_the_paced_owners_room() {
+        reset_clock();
+        let r = rig(true, true, 100_000, None);
+        r.relay.offer(key(1));
+        r.hand(1);
+        r.drained();
+        r.relay.offer_paced(delta(2, 1), ROOMY);
+        r.relay.offer_paced(delta(3, 2), ROOMY);
+        r.hand(1);
+        r.drained();
+        r.relay.offer_paced(delta(4, 3), ROOMY);
+        assert_eq!(r.server.reports(), vec![(3, true)]);
+        // The path took nothing more by the time the encoder's answer came.
+        r.relay.offer_paced(delta(5, 2), HELD);
+        assert!(r.ids().is_empty() && r.relay.lost_first() == Some(5));
+        r.relay.offer_paced(delta(6, 5), HELD);
+        assert_eq!(
+            r.server.reports(),
+            vec![(3, true)],
+            "the answer is a run of its own, reported when there is room for the next"
+        );
+        r.relay.offer_paced(delta(7, 6), ROOMY);
+        assert_eq!(r.server.reports(), vec![(3, true), (5, true)]);
+        r.relay.offer_paced(delta(8, 2), ROOMY);
+        assert_eq!(r.ids(), vec![8]);
+    }
+
+    #[tokio::test]
+    async fn a_frame_num_wrap_makes_no_room_on_the_paced_owners_path() {
+        reset_clock();
+        let r = rig(true, true, 100_000, None);
+        r.relay.offer(key(1));
+        r.hand(1);
+        r.drained();
+        r.relay.offer_paced(delta(2, 1), ROOMY);
+        // The run passes the frame a `frame_num` wrap can fall on, which goes to a page
+        // whatever its room where it can go at all: here it predicts from a frame left out.
+        for n in 3..(WRAP as u16 + 4) {
+            r.relay.offer_paced(delta(n, n - 1), HELD);
+        }
+        assert!(
+            r.ids() == vec![2] && r.server.reports().is_empty(),
+            "nothing is asked of the encoder for it: {:?}",
+            r.server.reports()
+        );
+        r.hand(1);
+        r.drained();
+        r.relay
+            .offer_paced(delta(WRAP as u16 + 4, WRAP as u16 + 3), ROOMY);
+        assert_eq!(r.server.reports().len(), 1, "until the path has room");
+    }
+
+    #[tokio::test]
+    async fn a_paced_owners_run_has_its_window_from_when_the_encoder_is_told() {
+        reset_clock();
+        let r = rig(true, true, 100_000, None);
+        r.relay.offer(key(1));
+        r.hand(1);
+        r.drained();
+        r.relay.offer_paced(delta(2, 1), ROOMY);
+        let mut asks = vec![r.relay.offer_paced(delta(3, 2), ROOMY)];
+        advance(VIDEO_RELAY_LOST_RECOVERY_SECONDS + 1.0);
+        asks.push(r.relay.offer_paced(delta(4, 3), HELD));
+        assert!(
+            r.relay.has_live_rows() && r.server.reports().is_empty(),
+            "a run of any age waits on while the path takes nothing"
+        );
+        r.hand(1);
+        r.drained();
+        asks.push(r.relay.offer_paced(delta(5, 4), ROOMY));
+        assert_eq!(
+            r.server.reports(),
+            vec![(3, true)],
+            "and is reported once there is room"
+        );
+        advance(VIDEO_RELAY_LOST_RECOVERY_SECONDS / 2.0);
+        asks.push(r.relay.offer_paced(delta(6, 5), ROOMY));
+        assert!(
+            !asks.iter().any(|a| *a) && r.relay.has_live_rows(),
+            "with a window of its own for the encoder to predict past it"
+        );
+        advance(VIDEO_RELAY_LOST_RECOVERY_SECONDS);
+        assert!(
+            r.relay.offer_paced(delta(7, 6), ROOMY) && !r.relay.has_live_rows(),
+            "past which it costs a key frame"
+        );
+    }
+
+    /// What the owner's gate counts behind a paced path: the frames still with the relay,
+    /// a frame's chunks (its rows) once.
+    #[tokio::test]
+    async fn the_frames_waiting_count_a_frames_chunks_once() {
+        reset_clock();
+        let r = rig(true, true, 100_000, None);
+        assert_eq!(r.relay.waiting_frames(), 0);
+        for row in 0..3 {
+            r.relay.offer(chunk(1, 1, true, 400, row, WIRE_H264, false));
+        }
+        assert_eq!(r.relay.waiting_frames(), 1);
+        for n in 2..5 {
+            for row in 0..3 {
+                r.relay
+                    .offer(chunk(n, n - 1, false, 400, row, WIRE_H264, false));
+            }
+        }
+        assert_eq!(r.relay.backlog_len(), 12);
+        assert_eq!(r.relay.waiting_frames(), 4);
     }
 
     #[tokio::test]

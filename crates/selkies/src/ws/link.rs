@@ -19,7 +19,8 @@
 //! windows from.
 //!
 //! The gate (`backpressure_tick`, every `BACKPRESSURE_CHECK_INTERVAL_S`) counts the frames
-//! sent after the one the client last acked, sized by the client's measured consumption rate,
+//! sent after the one the client last acked, and those its relay holds back from a late path
+//! (`ws::flight`), sized by the client's measured consumption rate,
 //! and shuts when more than `BACKPRESSURE_ALLOWED_DESYNC_MS` of them stand past the path's own
 //! round trip: a lagging client stops receiving delta frames, and the lift resumes it on the
 //! frame predicting past the ones dropped, else on a key frame. Where congestion control
@@ -34,7 +35,9 @@
 //!
 //! The steer (`steer_bitrate_to_link`) reads a queue as the least round trip among a window's
 //! acked frames, each less its own crossing time, standing `LINK_QUEUE_MS` (plus half the
-//! path's jitter) over the floor, or as `LINK_RISE_ACKS` round trips each longer than the last;
+//! path's jitter) over the floor, the stream that stood with the relay behind a paced path
+//! through two checks counted with it, or as `LINK_RISE_ACKS` round trips each longer than
+//! the last;
 //! a queue that outlasts the cuts it answers, sent well under what the path delivered, is a
 //! longer path's or other traffic's and becomes the floor (`settle_path_floor`).
 //!
@@ -153,7 +156,9 @@ pub struct DisplayLink {
     pub sent_timestamps: VecDeque<(u16, f64, u64)>,
     pub last_sent_frame_id: u16,
     pub has_sent_any_frame: bool,
-    /// The first send after the newest ack, cleared by every ack.
+    /// The first send after the newest ack, cleared by every ack, a repeated one too: how
+    /// long the client has said nothing of what it is sent, the stall's clock. Whether a
+    /// frame awaits its ack is `awaits_ack`.
     pub unacked_since: Option<f64>,
     /// The newest id the client acked, -1 before any.
     pub acknowledged_frame_id: i64,
@@ -178,6 +183,13 @@ pub struct DisplayLink {
     pub produced_at: f64,
     queue_over_at: Option<f64>,
     queue_over_since: Option<f64>,
+    /// The stream that waited with the relay behind a paced path at the last check, in ms of
+    /// it, and the least of that over the last two checks: what stood there, not a moment's.
+    waiting_ms: f64,
+    waiting_stood_ms: f64,
+    /// What the writer's gauge read the path delivering at the last check, in bits a second,
+    /// where it paces the path (`GateEffects::paced_bps`).
+    paced_bps: Option<f64>,
     hold_ping: Option<u64>,
     fps_sample: Option<(i64, f64)>,
     measured_client_fps: Option<f64>,
@@ -301,6 +313,20 @@ impl DisplayLink {
     /// longer than that send has been out, moves the gate's reference to that send, is dated,
     /// and yields a round trip less the hold. Whether the ack was a stale earlier frame's.
     pub fn note_ack(&mut self, frame_id: u16, held_ms: f64, now: f64) -> bool {
+        self.note_ack_held_back(frame_id, held_ms, 0.0, now)
+    }
+
+    /// `note_ack` for an ack its way back held `back_ms` past the least it took, by the
+    /// page's own stamps (`ws::flight`): an upload filling its uplink. That comes off the
+    /// round trip as the page's own hold does: it is none of the stream's queue, which is
+    /// what the steer reads round trips for.
+    pub fn note_ack_held_back(
+        &mut self,
+        frame_id: u16,
+        held_ms: f64,
+        back_ms: f64,
+        now: f64,
+    ) -> bool {
         self.acknowledged_frame_id = i64::from(frame_id);
         self.unacked_since = None;
         let Some(index) = self.sent_timestamps.iter().position(|e| e.0 == frame_id) else {
@@ -322,6 +348,14 @@ impl DisplayLink {
         self.acked_sent_at = Some(send_time);
         self.acked_at = now;
         let rtt_sample_ms = rtt_sample_ms.max(0.0);
+        // What the way back held the ack comes off, down to the least round trip known and
+        // no further: a hold read longer than that (a page's clock losing time against this
+        // one) says the path took no less than it ever did, and a round trip of 0 would be
+        // the floor for ten minutes.
+        let least = self
+            .rtt_floor_ms
+            .map_or(rtt_sample_ms, |floor| floor.min(rtt_sample_ms));
+        let rtt_sample_ms = (rtt_sample_ms - back_ms.max(0.0)).max(least);
         self.sounding.ack_held_ms = held_ms.max(0.0);
         self.sounding.ack_is_frame = true;
         if let Some(crossing) = self.key_crossing
@@ -338,6 +372,16 @@ impl DisplayLink {
             self.note_round_trip(rtt_sample_ms, sent_bytes, now);
         }
         false
+    }
+
+    /// Whether a frame sent to the client still awaits its ack: one went out after the
+    /// newest frame it acked. `unacked_since` does not say: any ack clears that, a repeat of
+    /// an older frame's among them, any ack being the client alive.
+    pub fn awaits_ack(&self) -> bool {
+        match self.acked_sent_at {
+            None => !self.sent_timestamps.is_empty(),
+            Some(at) => self.sent_timestamps.iter().any(|e| e.1 > at),
+        }
     }
 
     /// Whether the key frame the client was last sent is still crossing its path, or the
@@ -517,7 +561,7 @@ pub fn path_rate(acks: &VecDeque<(f64, f64, u64)>, floor_ms: f64) -> Option<f64>
     }
     let span = acks[acks.len() - 1].0 - acks[0].0;
     let carried = if span > 0.0 {
-        (acks[acks.len() - 1].2 - acks[0].2) as f64 * 8.0 / span
+        acks[acks.len() - 1].2.saturating_sub(acks[0].2) as f64 * 8.0 / span
     } else {
         0.0
     };
@@ -744,7 +788,7 @@ impl DisplayLink {
             // A screen that sends nothing acks nothing; with nothing in flight its path is
             // idle, which a cut target may pad to test.
             let mut outcome = SteerOutcome::default();
-            if self.link_steer.is_some() && !gated && self.unacked_since.is_none() {
+            if self.link_steer.is_some() && !gated && !self.awaits_ack() {
                 let offered = (last_tick > 0.0)
                     .then(|| sent.saturating_sub(sent_then) as f64 * 8.0 / (now - last_tick));
                 let tick = ProbeTick {
@@ -803,7 +847,7 @@ impl DisplayLink {
             let last = window[window.len() - 1];
             let span = last.0 - first.0;
             let mut delivered = if span > 0.0 {
-                (last.2 - first.2) as f64 * 8.0 / span
+                last.2.saturating_sub(first.2) as f64 * 8.0 / span
             } else {
                 0.0
             };
@@ -811,7 +855,7 @@ impl DisplayLink {
             completed_bps = completed_delivery_bps(&self.link_acks, last_tick);
             let sent_span = span - (last.1 - first.1) / 1000.0;
             if sent_span > 0.0 && span > 0.0 {
-                acked_offered_bps = Some((last.2 - first.2) as f64 * 8.0 / sent_span);
+                acked_offered_bps = Some(last.2.saturating_sub(first.2) as f64 * 8.0 / sent_span);
             }
             let mut jitter_ms = self.link_jitter_ms;
             if jitter_ms.is_none() && stand.len() >= LINK_RISE_ACKS {
@@ -876,7 +920,11 @@ impl DisplayLink {
             let rising = row.len() >= LINK_RISE_ACKS
                 && row.windows(2).all(|w| w[1] > w[0])
                 && row.last().copied().unwrap_or(0.0) - floor_ms > allowed_ms;
-            let standing = least_ms - floor_ms > allowed_ms;
+            // The writer's pacing keeps a late path to its bound and the rest of the stream
+            // with the relay (`ws::flight`): that stands queued as what is in the path does,
+            // and is read with it, or a target a little over the path would go on until the
+            // gate let the frames go.
+            let standing = least_ms - floor_ms + self.waiting_stood_ms > allowed_ms;
             let queued = (standing || rising) && !catching_up;
             if rising && !standing {
                 // A queue that only builds stood over the row's acks, not the window's: what
@@ -910,6 +958,12 @@ impl DisplayLink {
             self.link_delivered_bps = delivered;
             if queued {
                 delivered = delivered.max(previous_bps);
+                // The acked frames of a window that began before the path narrowed tell of
+                // the path as it was, and the tick before of nothing else. The writer's
+                // gauge reads a path it paces a stamp apart: it delivers no more than that.
+                if let Some(paced) = self.paced_bps {
+                    delivered = delivered.min(paced);
+                }
             }
             delivered_bps = delivered;
         }
@@ -1182,6 +1236,28 @@ pub trait GateEffects {
     fn heard_at(&self) -> Option<f64>;
     /// The Prometheus gauges, for the primary.
     fn metrics(&mut self, _client_fps: f64, _rtt_ms: f64) {}
+    /// Frames waiting with the page's relay behind a late path its writer paces
+    /// (`ws::flight`): stream standing queued for the page, as the frames sent and not yet
+    /// acked are.
+    fn waiting_frames(&self) -> usize {
+        0
+    }
+    /// Frames the page's relay left out of its paced path over the last two checks, for
+    /// want of room (`ws::relay`): stream standing behind the path to the steer, as what
+    /// waits is, and nothing the gate could let go.
+    fn left_out_frames(&self) -> usize {
+        0
+    }
+    /// What the writer's gauge reads a path it paces delivering, in bits a second
+    /// (`ws::flight`); `None` on a path that is not paced.
+    fn paced_bps(&self) -> Option<f64> {
+        None
+    }
+    /// How long the page's last ack was held on its way back, past the least any took, in
+    /// seconds, where its stamps tell (`ws::flight`): an upload filling its uplink.
+    fn held_back(&self) -> f64 {
+        0.0
+    }
 }
 
 /// What a check knows about the display beyond its link.
@@ -1246,6 +1322,8 @@ impl DisplayLink {
         now: f64,
         effects: &mut dyn GateEffects,
     ) {
+        let waited_ms = std::mem::take(&mut self.waiting_ms);
+        self.waiting_stood_ms = 0.0;
         if !input.capturing {
             if !self.backpressure_enabled {
                 debug!(target: "ws", "Backpressure LIFTED for '{display_id}' (video pipeline is not active).");
@@ -1289,10 +1367,20 @@ impl DisplayLink {
         let frame_desync = match acked_sent_at {
             None => wrapped as f64,
             Some(at) => self.sent_timestamps.iter().filter(|e| e.1 > at).count() as f64,
-        };
+        } + effects.waiting_frames() as f64;
+        // What waits with the relay is the stream's queue to the steer as well, once it has
+        // stood through two checks, and so is what the relay left out for want of room.
+        self.waiting_ms = (effects.waiting_frames() + effects.left_out_frames()) as f64
+            / client_fps.max(1.0)
+            * 1000.0;
+        self.paced_bps = effects.paced_bps();
+        self.waiting_stood_ms = waited_ms.min(self.waiting_ms);
         let allowed_desync_frames = input.allowed_desync_ms / 1000.0 * client_fps;
         let floor_ms = self.rtt_floor_ms.unwrap_or(0.0);
-        let effective_desync_frames = frame_desync - floor_ms / 1000.0 * client_fps;
+        // The frames sent while the newest ack was on its way are not behind: over the round
+        // trip's least, and over what its way back held it past that, by the page's stamp.
+        let on_its_way = floor_ms / 1000.0 + effects.held_back();
+        let effective_desync_frames = frame_desync - on_its_way * client_fps;
         let unanswered_for = self.unacked_since.map(|s| now - s).unwrap_or(0.0);
         let over = !self.key_frame_pending(now, effects.answered())
             && effective_desync_frames > allowed_desync_frames
@@ -1464,6 +1552,9 @@ mod tests {
         heard_at: Option<f64>,
         idrs: usize,
         now: f64,
+        waiting: usize,
+        left_out: usize,
+        held_back: f64,
     }
 
     impl Fake {
@@ -1506,6 +1597,15 @@ mod tests {
         fn gauge_sample(&mut self) {}
         fn heard_at(&self) -> Option<f64> {
             self.heard_at
+        }
+        fn waiting_frames(&self) -> usize {
+            self.waiting
+        }
+        fn left_out_frames(&self) -> usize {
+            self.left_out
+        }
+        fn held_back(&self) -> f64 {
+            self.held_back
         }
     }
 
@@ -1558,6 +1658,230 @@ mod tests {
             seen.push(link.backpressure_enabled);
         }
         seen
+    }
+
+    /// `gate_states` for a steered display whose path is late and paced: two frames past the
+    /// floor are in flight at every check, acked as they arrive, and the n-th check finds
+    /// `script[n]` ms of stream waiting with the relay.
+    fn gate_states_paced(script: &[f64]) -> Vec<bool> {
+        let mut link = DisplayLink::new();
+        link.acknowledged_frame_id = 100;
+        link.last_sent_frame_id = 100;
+        link.has_sent_any_frame = true;
+        link.rtt_floor_ms = Some(FLOOR_MS);
+        let mut fake = Fake {
+            now: 1000.0,
+            ..Default::default()
+        };
+        let input = TickInput {
+            capturing: true,
+            configured_fps: FPS,
+            steered: true,
+            interval_s: INTERVAL,
+            allowed_desync_ms: BACKPRESSURE_ALLOWED_DESYNC_MS,
+            primary: false,
+        };
+        let mut clock = 1000.0;
+        let mut seen = Vec::new();
+        for ms in script {
+            clock += INTERVAL;
+            fake.now = clock;
+            let in_flight = (FLOOR_MS / 1000.0 * FPS).round() as usize + 2;
+            link.acked_sent_at = Some(clock - 1.0);
+            link.sent_timestamps = (0..in_flight)
+                .map(|i| (101 + i as u16, clock - 0.9 + i as f64 / 1000.0, 20000))
+                .collect();
+            link.last_sent_frame_id = 100 + in_flight as u16;
+            link.acked_at = clock;
+            fake.heard_at = Some(clock);
+            fake.waiting = (ms / 1000.0 * FPS).round() as usize;
+            link.backpressure_tick("primary", input, clock, &mut fake);
+            seen.push(link.backpressure_enabled);
+        }
+        seen
+    }
+
+    /// `gate_states` for a steered display whose acks keep coming, each `back_ms` late on
+    /// its way back by the page's stamps: every check finds `ms` of stream sent past the
+    /// newest acked frame and the floor.
+    fn gate_states_held_back(ms: f64, back_ms: f64, checks: usize) -> Vec<bool> {
+        let mut link = DisplayLink::new();
+        link.acknowledged_frame_id = 100;
+        link.last_sent_frame_id = 100;
+        link.has_sent_any_frame = true;
+        link.rtt_floor_ms = Some(FLOOR_MS);
+        let mut fake = Fake {
+            now: 1000.0,
+            held_back: back_ms / 1000.0,
+            ..Default::default()
+        };
+        let input = TickInput {
+            capturing: true,
+            configured_fps: FPS,
+            steered: true,
+            interval_s: INTERVAL,
+            allowed_desync_ms: BACKPRESSURE_ALLOWED_DESYNC_MS,
+            primary: false,
+        };
+        let mut clock = 1000.0;
+        let mut seen = Vec::new();
+        for _ in 0..checks {
+            clock += INTERVAL;
+            fake.now = clock;
+            let in_flight = ((FLOOR_MS + ms) / 1000.0 * FPS).round() as usize;
+            link.acked_sent_at = Some(clock - 2.0);
+            link.sent_timestamps = (0..in_flight)
+                .map(|i| (101 + i as u16, clock - 1.9 + i as f64 / 1000.0, 20000))
+                .collect();
+            link.last_sent_frame_id = 100 + in_flight as u16;
+            link.acked_at = clock;
+            fake.heard_at = Some(clock);
+            link.backpressure_tick("primary", input, clock, &mut fake);
+            seen.push(link.backpressure_enabled);
+        }
+        seen
+    }
+
+    /// What the way back held an ack is none of its frame's round trip: the steer reads the
+    /// path's, whatever fills the page's uplink.
+    #[test]
+    fn a_round_trip_is_less_what_the_way_back_held_its_ack() {
+        let mut link = DisplayLink::new();
+        link.note_send(1, 1000, 10.0);
+        link.note_ack_held_back(1, 5.0, 0.0, 10.03);
+        assert!(
+            (link.smoothed_rtt - 25.0).abs() < 1e-6,
+            "{}",
+            link.smoothed_rtt
+        );
+        link.note_send(2, 1000, 11.0);
+        link.note_ack_held_back(2, 5.0, 1000.0, 12.03);
+        assert!(
+            (link.smoothed_rtt - 25.0).abs() < 1e-6,
+            "{}",
+            link.smoothed_rtt
+        );
+        assert!(
+            link.rtt_floor_ms
+                .is_some_and(|floor| (floor - 25.0).abs() < 1e-6)
+        );
+        // A hold read longer than the ack took leaves the least round trip where it was,
+        // and one read before any round trip is known takes nothing off.
+        link.note_send(3, 1000, 13.0);
+        link.note_ack_held_back(3, 5.0, 400.0, 13.03);
+        assert!(
+            link.rtt_floor_ms
+                .is_some_and(|floor| (floor - 25.0).abs() < 1e-6)
+        );
+        let mut link = DisplayLink::new();
+        link.note_send(1, 1000, 10.0);
+        link.note_ack_held_back(1, 5.0, 400.0, 10.03);
+        assert!(
+            link.rtt_floor_ms
+                .is_some_and(|floor| (floor - 25.0).abs() < 1e-6)
+        );
+    }
+
+    /// Frames sent while the page's acks are held on their way back (an upload filling its
+    /// uplink) have reached the page as the ones before them did: the gate stays open on
+    /// what it shuts on where the same frames stand in the path, and still shuts on what
+    /// the hold does not explain.
+    #[test]
+    fn the_gate_counts_no_frame_whose_ack_is_only_held_on_its_way_back() {
+        let standing = gate_states_held_back(400.0, 0.0, 4);
+        assert_eq!(&standing[..2], &[true, false], "{standing:?}");
+        let held = gate_states_held_back(400.0, 300.0, 4);
+        assert!(held.iter().all(|o| *o), "{held:?}");
+        let both = gate_states_held_back(700.0, 300.0, 4);
+        assert_eq!(&both[..2], &[true, false], "{both:?}");
+    }
+
+    /// Frames a late path's pacing keeps with the relay stand queued for the page as the ones
+    /// in flight do: the gate shuts on them at the second check and lifts once they are gone.
+    #[test]
+    fn the_gate_counts_the_frames_a_paced_path_keeps_waiting() {
+        let none = gate_states_paced(&[0.0, 0.0, 0.0]);
+        assert!(none.iter().all(|o| *o), "{none:?}");
+        let moment = gate_states_paced(&[0.0, 300.0, 0.0, 0.0]);
+        assert!(moment.iter().all(|o| *o), "{moment:?}");
+        let standing = gate_states_paced(&[0.0, 300.0, 300.0, 300.0, 0.0, 0.0]);
+        assert_eq!(&standing[..3], &[true, true, false], "{standing:?}");
+        assert_eq!(&standing[3..], &[false, true, true], "{standing:?}");
+    }
+
+    /// What waits with the relay behind a paced path is kept for the steer as the least of
+    /// two checks on end: a backlog that stood, not one check's.
+    #[test]
+    fn what_waits_with_the_relay_is_the_steers_once_it_stood_through_two_checks() {
+        let mut link = DisplayLink::new();
+        link.acknowledged_frame_id = 100;
+        link.last_sent_frame_id = 100;
+        link.has_sent_any_frame = true;
+        link.rtt_floor_ms = Some(FLOOR_MS);
+        let mut fake = Fake {
+            now: 1000.0,
+            ..Default::default()
+        };
+        let input = TickInput {
+            capturing: true,
+            configured_fps: FPS,
+            steered: true,
+            interval_s: INTERVAL,
+            allowed_desync_ms: BACKPRESSURE_ALLOWED_DESYNC_MS,
+            primary: false,
+        };
+        let mut stood = Vec::new();
+        for (n, waiting) in [0usize, 6, 9, 3, 0].into_iter().enumerate() {
+            let clock = 1000.0 + (n + 1) as f64 * INTERVAL;
+            fake.now = clock;
+            fake.waiting = waiting;
+            link.acked_at = clock;
+            fake.heard_at = Some(clock);
+            link.backpressure_tick("primary", input, clock, &mut fake);
+            stood.push((link.waiting_stood_ms / 1000.0 * FPS).round() as usize);
+        }
+        assert_eq!(stood, vec![0, 0, 6, 3, 0]);
+    }
+
+    /// What the relay left out of a paced path for want of room stands behind it as what
+    /// waits does, to the steer; the gate has nothing of it to let go, and stays open over a
+    /// run of any length.
+    #[test]
+    fn what_the_relay_left_out_is_the_steers_queue_and_none_of_the_gates() {
+        let mut link = DisplayLink::new();
+        link.acknowledged_frame_id = 100;
+        link.last_sent_frame_id = 100;
+        link.has_sent_any_frame = true;
+        link.rtt_floor_ms = Some(FLOOR_MS);
+        let mut fake = Fake {
+            now: 1000.0,
+            ..Default::default()
+        };
+        let input = TickInput {
+            capturing: true,
+            configured_fps: FPS,
+            steered: true,
+            interval_s: INTERVAL,
+            allowed_desync_ms: BACKPRESSURE_ALLOWED_DESYNC_MS,
+            primary: false,
+        };
+        let mut stood = Vec::new();
+        for (n, (waiting, left_out)) in [(0usize, 0usize), (1, 5), (0, 60), (1, 4), (0, 0)]
+            .into_iter()
+            .enumerate()
+        {
+            let clock = 1000.0 + (n + 1) as f64 * INTERVAL;
+            fake.now = clock;
+            fake.waiting = waiting;
+            fake.left_out = left_out;
+            link.acked_at = clock;
+            fake.heard_at = Some(clock);
+            link.backpressure_tick("primary", input, clock, &mut fake);
+            stood.push((link.waiting_stood_ms / 1000.0 * FPS).round() as usize);
+            assert!(link.backpressure_enabled, "check {n}");
+        }
+        assert_eq!(stood, vec![0, 0, 6, 5, 0]);
+        assert_eq!(link.gate_counts.triggered, 0);
     }
 
     #[test]
@@ -2005,6 +2329,50 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_ack_of_an_older_frame_leaves_the_newer_one_awaiting_its_ack() {
+        // The page repeats its newest id on every tick for a second after each frame, so a
+        // repeat routinely lands while the next frame is still on its way. It says the
+        // client is alive, which is all the stall's clock asks, and nothing of the frame
+        // still out, which the padding's pings and the idle path's probe ask after.
+        let mut link = DisplayLink::new();
+        link.note_send(1, 1000, NOW);
+        assert!(link.awaits_ack(), "sent, and no ack yet");
+        link.note_ack(1, 0.0, NOW + 0.02);
+        assert!(!link.awaits_ack() && link.unacked_since.is_none());
+        link.note_send(2, 1000, NOW + 0.03);
+        assert!(link.awaits_ack() && link.unacked_since.is_some());
+        link.note_ack(1, 30.0, NOW + 0.05);
+        assert!(link.awaits_ack(), "frame 2 is still out");
+        assert!(link.unacked_since.is_none(), "and the client is alive");
+        link.note_ack(2, 0.0, NOW + 0.06);
+        assert!(!link.awaits_ack());
+    }
+
+    #[test]
+    fn a_path_rate_read_off_acks_out_of_order_is_no_rate_of_its_own() {
+        // The newest ack's bytes below the oldest's (a ping's pong taken in ahead of the ack
+        // of a frame sent before it): the span carried nothing, not a wrapped count.
+        let acks: VecDeque<(f64, f64, u64)> = [
+            (NOW, 30.0, 900_000),
+            (NOW + 0.1, 30.0, 1_200_000),
+            (NOW + 0.2, 30.0, 400_000),
+        ]
+        .into();
+        // What is left is the one stretch that crossed: 300 kB in 25 ms past the floor.
+        assert_eq!(path_rate(&acks, 5.0), Some(300_000.0 * 8000.0 / 25.0));
+    }
+
+    #[test]
+    fn a_page_that_repeats_an_old_ack_is_not_a_stalled_client() {
+        // Frames keep going out and the page, which uses none of them, repeats its last ack
+        // every second: it is alive, and its gate is the desync's, never the stall's.
+        let p = play("frozen", 8.0, PathPlan::default());
+        let c = p.link.gate_counts;
+        assert_eq!((c.stalled, c.reprobed_stall), (0, 0), "{c:?}");
+        assert!(c.reprobed_desync >= 2, "{c:?}");
+    }
+
+    #[test]
     fn a_silent_client_is_the_stall_branchs() {
         let p = play("silent", 9.0, PathPlan::default());
         let c = p.link.gate_counts;
@@ -2306,6 +2674,68 @@ mod tests {
             cut < p.current() && p.current() <= 3000.0,
             "its target climbs on the trickle no further than the capacity the path last showed: {cut} {}",
             p.current()
+        );
+    }
+
+    #[test]
+    fn a_still_screen_is_not_padded_while_a_frame_awaits_its_ack() {
+        // The screen goes still with its last frame on its way, and the page repeats the
+        // ack of the frame before it, as it does on every tick for a second: it is alive,
+        // which clears the stall's clock, and the path is not idle, so nothing pads it.
+        let mut p = Probed::new(true);
+        let t = p.cut(3000.0);
+        p.state.note_send(7, 1000, t);
+        p.state.note_ack(7, 0.0, t + 0.01);
+        p.state.note_send(8, 1000, t + 0.02);
+        p.state.note_ack(7, 30.0, t + 0.04);
+        assert!(p.state.unacked_since.is_none() && p.state.awaits_ack());
+        let t = p.run(20.0, t + 0.05, 2.0, Some(0.0), None);
+        assert!(
+            p.pad_bps == 0.0 && p.calls.iter().all(|c| *c == 0.0),
+            "{:?}",
+            p.calls
+        );
+        // Its ack in, the path stands idle and is padded to test it.
+        p.state.note_ack(8, 0.0, t);
+        p.run(20.0, t, 2.0, Some(0.0), None);
+        assert!(p.pad_bps > 0.0, "{:?}", p.calls);
+    }
+
+    #[test]
+    fn stream_that_stands_with_the_relay_behind_a_paced_path_is_a_queue_to_the_steer() {
+        // The round trips stand 30 ms over the floor, under what the steer takes for a
+        // queue: the writer's pacing keeps the path to its bound, and what the stream sends
+        // over that waits with the relay. Read as the queue it is, it cuts the target to
+        // what the path delivers; left unread it would stand until the gate let it go.
+        let mut s = Steer::new();
+        let t = s.flat(20.0, 0.0, 10.0, Some(3000.0));
+        let t = s.flat(50.0, t, 2.0, Some(3000.0));
+        assert!(s.rates().is_empty(), "{:?}", s.rates());
+        s.state.waiting_stood_ms = 100.0;
+        s.flat(50.0, t, 0.5, Some(3000.0));
+        assert!(
+            s.current() < 3000.0 && s.current() > 2000.0,
+            "{:?}",
+            s.rates()
+        );
+    }
+
+    #[test]
+    fn a_path_the_writer_paces_delivers_the_steer_no_more_than_its_gauge_reads() {
+        // The same standing stream, on a path that has just narrowed to half: the frames
+        // acked over the window still tell of 3000, and the cut would be to the headroom
+        // of that, over the path. The writer's gauge reads 1500 a stamp apart, and the cut
+        // is to the headroom of what the path delivers now.
+        let mut s = Steer::new();
+        let t = s.flat(20.0, 0.0, 10.0, Some(3000.0));
+        let t = s.flat(50.0, t, 2.0, Some(3000.0));
+        s.state.waiting_stood_ms = 100.0;
+        s.state.paced_bps = Some(1_500_000.0);
+        s.flat(50.0, t, 0.5, Some(3000.0));
+        assert!(
+            s.current() <= 1500.0 * CongestionSteer::HEADROOM + 1.0 && s.current() >= 700.0,
+            "{:?}",
+            s.rates()
         );
     }
 

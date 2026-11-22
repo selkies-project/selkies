@@ -4,14 +4,16 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! A session on a proot-apps local repository lists that repository.
+//! A session on a proot-apps local repository lists that repository, and one naming a catalog
+//! file lists that file.
 //!
 //! With `PA_REPO_FOLDER` set, proot-apps installs only what that folder holds, so the server
-//! serves the folder's catalog under `/api/apps/` and tells the page to read it there
-//! (`apps_local_repo` in the settings payload) instead of the remote one. The folder reaches the
+//! serves the folder's catalog under `/api/apps/` and tells the page to read it there (an empty
+//! `apps_catalog` in the settings payload) instead of the remote one. The folder reaches the
 //! server through its own setting as well as through the runner's variable, and the server hands
-//! it to the runner either way, so the panel and the runner never read two repositories. Without
-//! a repository nothing is served and the page reads the remote catalog.
+//! it to the runner either way, so the panel and the runner never read two repositories. A
+//! catalog file named by `apps_catalog` is served the same way, with the icons beside it.
+//! Without either nothing is served and the page reads the remote catalog the setting names.
 //!
 //! Driven against a stand-in `selkies-proot` that records the environment its `check` ran in,
 //! and a repository laid out in the work directory.
@@ -83,12 +85,18 @@ async fn get(server: &Server, path: &str) -> (u16, String) {
     }
 }
 
-/// What the connect-time settings payload publishes for `apps_local_repo`.
-async fn local_repo_published(server: &Server) -> Option<Value> {
+/// What the connect-time settings payload publishes for `apps_catalog`: the URL the page reads
+/// the catalog from, empty where the server serves it.
+async fn catalog_published(server: &Server) -> Option<Value> {
     let page = Client::connect(server, "").await;
-    let published = page.published_setting("apps_local_repo").await;
+    let published = page.published_setting("apps_catalog").await;
     page.close().await;
     published
+}
+
+/// The payload's word for a catalog this server serves.
+fn served_here() -> Option<Value> {
+    Some(Value::String(String::new()))
 }
 
 /// The environment the runner's `check` recorded, once it ran: the runner is probed at startup,
@@ -122,7 +130,7 @@ async fn a_repository_named_by_the_selkies_setting_reaches_the_runner_and_is_ser
     );
     checks.check(
         "the page is told the catalog is local",
-        local_repo_published(&server).await == Some(Value::Bool(true)),
+        catalog_published(&server).await == served_here(),
         "",
     );
     let (status, body) = get(&server, "/api/apps/metadata.yml").await;
@@ -171,12 +179,12 @@ async fn proot_apps_own_variable_names_the_repository_as_well() {
     let fixture = Fixture::new("variable");
     let mut checks = Checks::new("apps-local-repo");
     let server = fixture.server("variable", Some("PA_REPO_FOLDER")).await;
-    let published = local_repo_published(&server).await;
+    let published = catalog_published(&server).await;
     let (status, _) = get(&server, "/api/apps/metadata.yml").await;
     checks.check(
         "PA_REPO_FOLDER alone names the repository",
-        published == Some(Value::Bool(true)) && status == 200,
-        format!("apps_local_repo={published:?}, catalog {status}"),
+        published == served_here() && status == 200,
+        format!("apps_catalog={published:?}, catalog {status}"),
     );
     checks.finish(&server.stop().await);
 }
@@ -187,13 +195,57 @@ async fn without_a_repository_the_page_reads_the_remote_catalog() {
     let fixture = Fixture::new("remote");
     let mut checks = Checks::new("apps-local-repo");
     let server = fixture.server("remote", None).await;
-    let published = local_repo_published(&server).await;
+    let published = catalog_published(&server).await;
     checks.check(
         "without a repository the page reads the remote catalog",
-        published == Some(Value::Bool(false)),
-        format!("apps_local_repo={published:?}"),
+        published
+            .as_ref()
+            .and_then(Value::as_str)
+            .is_some_and(|url| {
+                url.starts_with("https://raw.githubusercontent.com/linuxserver/proot-apps/")
+            }),
+        format!("apps_catalog={published:?}"),
     );
     let (status, _) = get(&server, "/api/apps/metadata.yml").await;
     checks.check("and nothing is served here", status == 404, status);
+    checks.finish(&server.stop().await);
+}
+
+#[tokio::test]
+#[ignore = "needs a built selkies server and the X test display (E2E_DISPLAY)"]
+async fn a_catalog_file_is_served_with_the_icons_beside_it() {
+    let fixture = Fixture::new("file");
+    let mut checks = Checks::new("apps-local-repo");
+    let file = fixture.repository.join("metadata/metadata.yml");
+    let server = server::launch("file")
+        .env("PATH", &fixture.path)
+        .env("SELKIES_COMMAND_ENABLED", "true")
+        .env("SELKIES_APPS_CATALOG", &file.display().to_string())
+        .start()
+        .await;
+    let published = catalog_published(&server).await;
+    checks.check(
+        "the page is told the catalog is served here",
+        published == served_here(),
+        format!("apps_catalog={published:?}"),
+    );
+    let (status, body) = get(&server, "/api/apps/metadata.yml").await;
+    checks.check(
+        "the file is the catalog",
+        status == 200 && body == METADATA,
+        format!("{status} {body:.80}"),
+    );
+    let (status, body) = get(&server, "/api/apps/img/localapp.svg").await;
+    checks.check(
+        "its icon is served from beside it",
+        status == 200 && body == ICON,
+        format!("{status} {body:.80}"),
+    );
+    let (status, _) = get(&server, "/api/apps/img/..%2Fmetadata.yml").await;
+    checks.check(
+        "a path in place of an icon name is refused",
+        status == 404,
+        status,
+    );
     checks.finish(&server.stop().await);
 }

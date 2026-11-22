@@ -1938,7 +1938,7 @@ async fn a_job_streams_its_console_and_ends_with_what_is_installed() {
     let dir = Scratch::new("runner");
     let runner = AppsRunner::named(job_runner_script(&dir));
     let host = RecordingHost::default();
-    let (_, start) = runner
+    let (_, _, start) = runner
         .jobs
         .enqueue(JobOp::Install, "firefox")
         .expect("queued");

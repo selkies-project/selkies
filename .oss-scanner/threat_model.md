@@ -114,8 +114,9 @@
 - Under `--pelorus` (`crates/selkies/src/pelorus.rs` and `pelorus/`, the `pelorus` crate's accessibility-bus reader,
   the dashboard's `src/pelorus`): routes under `/pelorus` that every credential short of the controller's is refused
   (the desktop as text, the agent's tools, `api/run`, `api/models`, `api/models/names`, `api/session`). A run hands
-  the model the session user's reach: input through Computer Use, and the `shell` tool where `--command-enabled`
-  allows it, so what the model reads on screen is untrusted input steering the session user's own power; a model
+  the model the session user's reach: input through Computer Use, and the `shell` tool and the `apps` tool where
+  `--command-enabled` allows it (`pelorus/apps.rs`: the apps panel's jobs on the panel's own queue and rules, an
+  install only of a name the catalog lists), so what the model reads on screen is untrusted input steering the session user's own power; a model
   that is talked into acting is the session user acting, never more. A saved configuration's endpoint is an
   address the server fetches for the controller who saved it, which a locked `--pelorus` (`true|locked`) refuses
   along with every change to the model; a stored key, the server's own or one kept from the interface, goes only
@@ -216,7 +217,10 @@
   like `cmd`: `input/handler.rs` `apps_request`, `session_screens/app_jobs.rs`). Those name an operation and an
   application and never a command line: the name is checked against what the runner takes as one application
   (`valid_app_name`, never `all` or an option) and passed to `selkies-proot` as an argument, a launch as well as a
-  job, so no app name reaches a shell; every page of the session is told each job's output.
+  job, so no app name reaches a shell; every page of the session is told each job's output. The catalog they are
+  listed from is the operator's (`--apps-catalog`): a URL the page and, for Pelorus, the server fetch, or a file
+  the server serves under `/api/apps/` behind the session's login, icons only from the `img/` directory beside it
+  (`files/apps.rs` `icon_path`).
 - With authentication turned off (no password, no tokens), any connector controls the desktop by design; operators
   front such deployments with their own proxy.
 - The documented placeholder container password (`mypasswd`), which the base image sets for its operator to

@@ -255,6 +255,20 @@ pub static DEFINITIONS: &[SettingDef] = &[
         client_excluded: true,
     },
     SettingDef {
+        name: "apps_catalog",
+        kind: Kind::Str,
+        default: "https://raw.githubusercontent.com/linuxserver/proot-apps/master/metadata/metadata.yml",
+        help: "The proot-apps catalog the apps panel lists and Pelorus searches, a metadata.yml in the format of the proot-apps repository's own, with its icons in the img directory beside it: an https URL, which the page and the server read from there (an http one only where the page is served over http too, since a browser refuses it on an https page), or the path of a file on the server (a file:// URL as well), which the server serves to the page under /api/apps/. The default is the linuxserver proot-apps catalog. A local repository (--apps-repo-folder) takes precedence, since the runner then installs only what that folder holds.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
         name: "webrtc_pacer",
         kind: Kind::Bool,
         default: "True",
@@ -2807,6 +2821,10 @@ impl Settings {
 
     pub fn apps_repo_folder(&self) -> &str {
         self.str_value("apps_repo_folder")
+    }
+
+    pub fn apps_catalog(&self) -> &str {
+        self.str_value("apps_catalog")
     }
 
     pub fn webrtc_pacer(&self) -> BoolSetting {

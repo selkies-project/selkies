@@ -223,6 +223,20 @@ enum ConstantRate {
 /// Seconds of the target iHD's AV1 rate control is given as a buffer (`ConstantRate`).
 const IHD_AV1_BUFFER_S: f64 = 0.1;
 
+/// The buffer, and the fullness it starts at, in seconds of the new target, that a target
+/// changed within a sequence brings an unbounded session's rate control
+/// (`ConstantRate::Unbounded`, `rate_control_at`). iHD's H.264 and HEVC rate control bounds
+/// nothing past such a change: it codes the next frame at any size, banks what a still screen's
+/// frames leave of the target, and spends the bank on the first frame that moves. At 2560x1280
+/// and 12 Mbit/s, Arc's HEVC coded a cleanup frame of 723 kB on a change of 8 kbit/s and the
+/// first moving frame after a still screen at 795 kB, 32 budgets; under this buffer they came
+/// to 262 and 10 kB, the still screen to the same picture within 0.5 dB and motion after it
+/// within 0.5 dB. The sequence's own key frame starts unbounded, which a buffer from there
+/// starves.
+const RESET_BUFFER_S: f64 = 1.0;
+/// The fullness, in seconds of the new target, the buffer `RESET_BUFFER_S` starts at.
+const RESET_FULLNESS_S: f64 = 0.05;
+
 /// The rows a reconstruction is compared with its source on (`VaapiEncoder::last_psnr`): one
 /// in this many.
 const PSNR_ROW_STEP: usize = 8;
@@ -2146,8 +2160,9 @@ impl VaapiEncoder {
     /// The rate control of a sequence: the target, buffer, and frame rate a constant-rate
     /// session holds, with no filler data up to the target and each frame capped at the buffer
     /// where the driver takes a cap and codes under one (`ConstantRate`), and the frame rate
-    /// and quality level of any.
-    fn rate_control_at(&self, out: &mut Buffers, bps: u32) {
+    /// and quality level of any. A target changed within the sequence (`changed`) gives an
+    /// unbounded session the buffer `RESET_BUFFER_S` from `RESET_FULLNESS_S`.
+    fn rate_control_at(&self, out: &mut Buffers, bps: u32, changed: bool) {
         if self.rate.cbr {
             // The session's buffer spans the same time at a cleanup frame's rate.
             let vbv = (u64::from(self.rate.vbv()) * u64::from(bps)
@@ -2179,15 +2194,19 @@ impl VaapiEncoder {
                 rc.rc_flags.bits.set_disable_bit_stuffing(1);
             }
             out.push_misc(VAEncMiscParameterTypeRateControl, &rc);
+            let seconds = |s: f64| (f64::from(bps) * s) as u32;
             let buffer = match bound {
-                ConstantRate::Buffer => Some(vbv),
-                ConstantRate::Seconds(s) => Some((f64::from(bps) * s) as u32),
+                ConstantRate::Buffer => Some((vbv, vbv)),
+                ConstantRate::Seconds(s) => Some((seconds(s), seconds(s))),
+                ConstantRate::Unbounded if changed => {
+                    Some((seconds(RESET_BUFFER_S), seconds(RESET_FULLNESS_S)))
+                }
                 ConstantRate::Unbounded => None,
             };
-            if let Some(bits) = buffer {
+            if let Some((size, fullness)) = buffer {
                 let hrd = VAEncMiscParameterHRD {
-                    initial_buffer_fullness: bits,
-                    buffer_size: bits,
+                    initial_buffer_fullness: fullness,
+                    buffer_size: size,
                     va_reserved: [0; 4],
                 };
                 out.push_misc(VAEncMiscParameterTypeHRD, &hrd);
@@ -2718,11 +2737,11 @@ impl VaapiEncoder {
         if key {
             self.arm.sequence(&self.negotiated, &mut out);
             self.declared_level = self.arm.level();
-            self.rate_control_at(&mut out, bps);
+            self.rate_control_at(&mut out, bps, false);
             self.sent_bps = bps;
         } else if self.rate.cbr && bps != self.sent_bps {
             // radeonsi's VCE takes a new target with a picture, no new sequence.
-            self.rate_control_at(&mut out, bps);
+            self.rate_control_at(&mut out, bps, true);
             self.sent_bps = bps;
         }
         self.arm.picture(&self.negotiated, &frame, &mut out)?;
@@ -3442,6 +3461,77 @@ mod tests {
             worst,
             enc.device.keeps_anchors(),
         ))
+    }
+
+    /// On a VA-API device: every codec it encodes decodes, frame for frame, to the picture the
+    /// encoder kept as its reference, over two seconds of `moving_picture` at a constant rate
+    /// with the one reference a WebSockets page streams with, since every frame after one the
+    /// decoder rebuilds otherwise predicts from the difference until a key frame. Every codec
+    /// the device opens has its reconstruction read and compared.
+    #[test]
+    #[ignore]
+    fn vaapi_reconstruction_matches_the_decoder() {
+        use crate::webcam::decode::{Decoder as _, VideoDecoder};
+        let (w, h) = (1280usize, 720usize);
+        let mut opened = 0;
+        for codec in [Codec::H264, Codec::H265, Codec::Vp8, Codec::Vp9, Codec::Av1] {
+            let settings = CaptureSettings {
+                width: w as i32,
+                height: h as i32,
+                codec,
+                target_fps: 60.0,
+                video_cbr_mode: true,
+                video_bitrate_kbps: 8000,
+                video_reference_frames: 1,
+                omit_stripe_headers: true,
+                ..Default::default()
+            };
+            let mut enc = match VaapiEncoder::new(&settings, codec, Input::Host { rgba: false }) {
+                Ok(enc) => enc,
+                Err(e) => {
+                    println!("{codec:?}: {e}");
+                    continue;
+                }
+            };
+            opened += 1;
+            let mut dec = VideoDecoder::new(codec).expect("decoder");
+            let (mut compared, mut apart, mut worst) = (0usize, 0usize, 0u8);
+            for t in 0..120usize {
+                let out = enc
+                    .encode_host(&moving_picture(t), w * 4, false, t as u64, 25, t == 0)
+                    .expect("encode");
+                assert!(dec.decode(&out).expect("decode"), "{codec:?}: frame {t}");
+                let frame = dec.frame().expect("frame");
+                let recon = enc
+                    .surfaces_of
+                    .get(&(t as u64))
+                    .copied()
+                    .unwrap_or_else(|| panic!("{codec:?}: frame {t} kept no reconstruction"));
+                let Some((VA_FOURCC_NV12, _, rows)) = enc.luma_rows(recon) else {
+                    panic!("{codec:?}: frame {t}'s reconstruction reads back as no NV12 luma");
+                };
+                for (row, y) in rows.chunks(w).zip((0..h).step_by(PSNR_ROW_STEP)) {
+                    for (x, &kept) in row.iter().enumerate() {
+                        let shown = frame.y[y * frame.y_stride + x];
+                        compared += 1;
+                        if shown != kept {
+                            apart += 1;
+                            worst = worst.max(shown.abs_diff(kept));
+                        }
+                    }
+                }
+            }
+            println!(
+                "{codec:?} on {}: {apart} of {compared} sampled pixels apart, at most {worst} levels",
+                enc.vendor()
+            );
+            assert!(compared > 0, "{codec:?}: nothing compared");
+            assert_eq!(
+                apart, 0,
+                "{codec:?}: the decoder's pictures left the encoder's"
+            );
+        }
+        assert!(opened > 0, "no codec opened on this device");
     }
 
     /// On a VA-API device (`cargo test vaapi_ -- --ignored --nocapture`): a loss reported every

@@ -228,29 +228,39 @@ impl Codec {
         if qp <= 0 { 0 } else { self.quantizer(qp) }
     }
 
-    /// `quantizer` for a hardware session, matched to libx264 the same way. H.264 is measured on
-    /// NVENC (Pascal and Ada) and on AMD's VA-API, which agree within a step, each coding a
-    /// quantizer about three finer than the index to match x264; AMD's VA-API H.265 follows
-    /// the same curve within a step, where NVENC's H.265 is within two steps of the index from
-    /// 22 up and keeps it. Intel's VA-API curves (Arc and Alder Lake-N) are matched on two
-    /// roles: from index 25 up the moving picture, which the hardware already codes at or past
-    /// x264's quality at the shared curve for H.264 and two steps coarser for H.265, and below 25
-    /// the still screen a cleanup at that index leaves, where x264's constant quality keeps
-    /// lowering its quantizer as the residual shrinks and a held quantizer does not: Intel's H.264
-    /// and H.265 there read the finer match of a dense patterned desktop and a dark application,
-    /// down to the floor of 10 Intel's low-power HEVC encoder codes
-    /// (`vaapi::h265::INTEL_LOW_POWER_MIN_QP`). AV1 has a curve per backend: NVENC's is measured
-    /// on Ada, and VA-API's on Intel (Arc) with the in-loop filters its constant-quantizer frames
-    /// carry, the finer match of those two desktops in each role. VA-API's VP9 is matched the same
-    /// way on Intel (Arc and Alder Lake-N), finer than libvpx at the same index on text. VP8 keeps
-    /// the software table. NVENC refuses an AV1 index of zero, so the floor stays one.
+    /// `quantizer` for a hardware session, matched to libx264 the same way on two roles. From index
+    /// 25 up it is the moving picture: H.264 is measured on NVENC (Pascal and Ada) and on AMD's
+    /// VA-API, which agree within a step, each coding a quantizer about three finer than the index
+    /// to match x264, and Intel's VA-API (Arc and Alder Lake-N) codes at or past x264 there too;
+    /// AMD's VA-API H.265 follows the same curve within a step, NVENC's H.265 is within two steps
+    /// of the index from 22 up and keeps it, and Intel's reads two steps coarser. Below index 25 it
+    /// is the still screen a cleanup at that index leaves, where x264's constant quality keeps
+    /// lowering its quantizer as the residual shrinks and a held quantizer does not. Intel's curves
+    /// (Arc and Alder Lake-N) and NVENC's (Ampere) read there the finer match of a dense patterned
+    /// desktop and a dark application, as far as the engine reaches it: Intel's down to QP 10, the
+    /// floor its low-power HEVC encoder codes (`vaapi::h265::INTEL_LOW_POWER_MIN_QP`), NVENC's
+    /// H.264 to QP 9, finer than which a cleanup of the patterned desktop more than triples in
+    /// size, and its H.265 to QP 10 and 11 up to index 16, below which the dark application's x264
+    /// is out of its reach. AMD's VCN 2 (Renoir) settles the dark application under x264's at every
+    /// quantizer its H.264 codes below index 21, down to its floor, QP 7 (`vaapi::h264::MIN_QP`),
+    /// so its H.264 reads the desktop's match, which is Intel's curve. Its H.265 reads QP 15 or
+    /// finer below index 25, and QP 9 to 10 from index 10 to 19, about its finest still picture,
+    /// which reaches x264's on neither desktop below index 18: after a scroll at index 25, a
+    /// cleanup at QP 16 to 21 left the picture about where the scroll had. AV1 has a curve per
+    /// backend: NVENC's is measured on Ada, and VA-API's on Intel (Arc) with the in-loop filters
+    /// its constant-quantizer frames carry, the finer match of those two desktops in each role.
+    /// VA-API's VP9 is matched the same way on Intel (Arc and Alder Lake-N), finer than libvpx at
+    /// the same index on text. VP8 keeps the software table. NVENC refuses an AV1 index of zero, so
+    /// the floor stays one.
     pub fn hardware_quantizer(self, hw: Hardware, crf: i32) -> u32 {
         let crf = crf.clamp(0, 51) as u32;
         match (self, hw) {
-            (Codec::H264, Hardware::VaapiIntel) => interpolate(&H264_INTEL_QP, crf),
-            (Codec::H264, _) | (Codec::H265, Hardware::Vaapi) => {
-                interpolate(&H26X_HARDWARE_QP, crf)
+            (Codec::H264, Hardware::Nvenc) => interpolate(&H264_NVENC_QP, crf),
+            (Codec::H264, Hardware::Vaapi | Hardware::VaapiIntel) => {
+                interpolate(&H264_VAAPI_QP, crf)
             }
+            (Codec::H265, Hardware::Nvenc) => interpolate(&H265_NVENC_QP, crf),
+            (Codec::H265, Hardware::Vaapi) => interpolate(&H265_AMD_QP, crf),
             (Codec::H265, Hardware::VaapiIntel) => interpolate(&H265_INTEL_QP, crf),
             (Codec::Vp9, Hardware::Vaapi | Hardware::VaapiIntel) => {
                 interpolate(&VP9_VAAPI_QINDEX, crf)
@@ -363,12 +373,14 @@ const AV1_QINDEX: [(u32, u32); 10] = [
     (45, 253),
     (51, 255),
 ];
-/// Session quality index → hardware H.264 QP breakpoints, and AMD's VA-API H.265's.
-const H26X_HARDWARE_QP: [(u32, u32); 11] = [
+/// Session quality index → NVENC H.264 QP breakpoints.
+const H264_NVENC_QP: [(u32, u32); 13] = [
     (0, 0),
     (10, 9),
-    (15, 14),
-    (20, 17),
+    (16, 9),
+    (17, 10),
+    (18, 12),
+    (24, 18),
     (25, 22),
     (30, 27),
     (35, 32),
@@ -377,13 +389,40 @@ const H26X_HARDWARE_QP: [(u32, u32); 11] = [
     (50, 47),
     (51, 48),
 ];
-/// Session quality index → Intel VA-API H.264 QP breakpoints.
-const H264_INTEL_QP: [(u32, u32); 12] = [
+/// Session quality index → NVENC H.265 QP breakpoints.
+const H265_NVENC_QP: [(u32, u32); 9] = [
+    (0, 0),
+    (10, 10),
+    (16, 11),
+    (17, 12),
+    (18, 15),
+    (20, 16),
+    (24, 20),
+    (25, 25),
+    (51, 51),
+];
+/// Session quality index → VA-API H.264 QP breakpoints, Intel's and AMD's.
+const H264_VAAPI_QP: [(u32, u32); 12] = [
     (0, 0),
     (10, 9),
     (15, 11),
     (20, 14),
     (24, 17),
+    (25, 22),
+    (30, 27),
+    (35, 32),
+    (40, 37),
+    (45, 43),
+    (50, 47),
+    (51, 48),
+];
+/// Session quality index → AMD VA-API H.265 QP breakpoints.
+const H265_AMD_QP: [(u32, u32); 12] = [
+    (0, 0),
+    (10, 9),
+    (19, 10),
+    (23, 14),
+    (24, 15),
     (25, 22),
     (30, 27),
     (35, 32),
@@ -1125,6 +1164,10 @@ mod tests {
         assert_eq!(Codec::Av1.hardware_quantizer(Hardware::VaapiIntel, 25), 73);
         assert_eq!(Codec::H264.hardware_quantizer(Hardware::VaapiIntel, 18), 13);
         assert_eq!(Codec::H265.hardware_quantizer(Hardware::VaapiIntel, 18), 14);
+        assert_eq!(Codec::H264.hardware_quantizer(Hardware::Nvenc, 18), 12);
+        assert_eq!(Codec::H265.hardware_quantizer(Hardware::Nvenc, 18), 15);
+        assert_eq!(Codec::H264.hardware_quantizer(Hardware::Vaapi, 18), 13);
+        assert_eq!(Codec::H265.hardware_quantizer(Hardware::Vaapi, 18), 10);
         assert_eq!(Codec::Av1.hardware_quantizer(Hardware::Nvenc, 0), 1);
         assert_eq!(Codec::Vp9.quantizer(25), 66);
         assert_eq!(Codec::Vp9.hardware_quantizer(Hardware::Vaapi, 25), 48);
