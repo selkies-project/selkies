@@ -16,6 +16,15 @@
 //! default models a shallow hop, and a fat one (a modem holding seconds of data) is what turns an
 //! upload into input lag. Every second it prints what each direction carried.
 //!
+//! Past the queue each connection's pieces are written by a task of its own (`Out`), and a
+//! connection has no more than `WINDOW` of them on their way through the relay, the queue,
+//! the delay behind it and that task together. A far end that reads slowly, or not at all,
+//! therefore holds its own connection's bytes and stops its own sender, as its receive
+//! window would, and nobody else's: a hop forwards the other flows whatever one receiver
+//! does. Written from the queue's one drainer instead, a server reading an upload at half
+//! the hop's rate held every other connection's bytes for over two seconds at a time, the
+//! page's acks among them.
+//!
 //! `BWRELAY_DELAY_MS` adds a propagation delay behind each direction, one way, and
 //! `BWRELAY_JITTER_MS` up to that much more per piece with the order kept: a path with a
 //! round trip of its own, which a loopback relay otherwise lacks.
@@ -35,7 +44,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpSocket};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 
 const CHUNK: usize = 65_536;
 /// The bucket's grab quantum: one 64 KiB grab at single-digit Mbit/s would hold the link for
@@ -45,6 +54,10 @@ const GRAIN: usize = 8192;
 /// autotuned one (megabytes on loopback), which would hide the standing queue where no
 /// sender-side congestion gauge sees it.
 const RCVBUF: usize = 128 * 1024;
+/// What one connection may have on its way through the relay, as a receive window bounds
+/// what a sender has in flight: enough for the queue and for a delay line's worth of a fast
+/// link, so that only a far end that stops reading is what fills it.
+const WINDOW: usize = 2 * 1024 * 1024;
 
 /// A token bucket in bytes with a quarter-second burst allowance, at the rate its link holds
 /// now. Takes are FIFO (the one drainer of a link takes them in queue order), so concurrent
@@ -101,8 +114,64 @@ impl Bucket {
     }
 }
 
-/// A piece of one connection's bytes queued on a link, with where it goes.
-type Piece = (Arc<Mutex<OwnedWriteHalf>>, Vec<u8>);
+/// One connection's way out of the relay: its pieces, in order, written by a task of its
+/// own, so that a far end slow to read them waits on nobody else's. `room` is how many of
+/// its pieces may be on their way through the relay at once (`WINDOW`), each holding a
+/// permit from its reader to its writer.
+#[derive(Clone)]
+struct Out {
+    pieces: mpsc::UnboundedSender<(Vec<u8>, OwnedSemaphorePermit)>,
+    room: Arc<Semaphore>,
+    shut: Arc<Notify>,
+}
+
+impl Out {
+    fn start(mut writer: OwnedWriteHalf, carried: Arc<AtomicU64>) -> Out {
+        let (pieces, mut queued) = mpsc::unbounded_channel::<(Vec<u8>, OwnedSemaphorePermit)>();
+        let shut = Arc::new(Notify::new());
+        let closing = Arc::clone(&shut);
+        tokio::spawn(async move {
+            loop {
+                let Some((piece, _permit)) = (tokio::select! {
+                    biased;
+                    () = closing.notified() => None,
+                    piece = queued.recv() => piece,
+                }) else {
+                    break;
+                };
+                let written = tokio::select! {
+                    biased;
+                    () = closing.notified() => false,
+                    done = writer.write_all(&piece) => done.is_ok(),
+                };
+                if !written {
+                    break;
+                }
+                carried.fetch_add(piece.len() as u64, Ordering::Relaxed);
+            }
+            let _ = writer.shutdown().await;
+        });
+        Out {
+            pieces,
+            room: Arc::new(Semaphore::new(WINDOW / GRAIN)),
+            shut,
+        }
+    }
+
+    /// Hand a piece to the connection's writer; whether it is still there to take it.
+    fn send(&self, piece: Vec<u8>, permit: OwnedSemaphorePermit) -> bool {
+        self.pieces.send((piece, permit)).is_ok()
+    }
+
+    /// Close the connection's far side now: what is still queued for it goes nowhere, as a
+    /// connection reset on the hop drops what the hop held.
+    fn close(&self) {
+        self.shut.notify_one();
+    }
+}
+
+/// A piece of one connection's bytes queued on a link, with where it goes and its permit.
+type Piece = (Out, Vec<u8>, OwnedSemaphorePermit);
 
 /// A propagation delay behind a direction (`BWRELAY_DELAY_MS` one way, with up to
 /// `BWRELAY_JITTER_MS` more per piece, order kept): pieces leave it that long after entering.
@@ -115,7 +184,7 @@ struct DelayLine {
 }
 
 impl DelayLine {
-    fn from_env(carried: Arc<AtomicU64>) -> Option<DelayLine> {
+    fn from_env() -> Option<DelayLine> {
         let ms = |name: &str| {
             std::env::var(name)
                 .ok()
@@ -128,11 +197,9 @@ impl DelayLine {
         }
         let (queue, mut pieces) = mpsc::unbounded_channel::<(Instant, Piece)>();
         tokio::spawn(async move {
-            while let Some((at, (writer, piece))) = pieces.recv().await {
+            while let Some((at, (out, piece, permit))) = pieces.recv().await {
                 tokio::time::sleep_until(at.into()).await;
-                if writer.lock().await.write_all(&piece).await.is_ok() {
-                    carried.fetch_add(piece.len() as u64, Ordering::Relaxed);
-                }
+                out.send(piece, permit);
             }
         });
         Some(DelayLine {
@@ -170,19 +237,20 @@ struct Link {
 }
 
 impl Link {
-    fn start(rate: Arc<AtomicU64>, depth: usize, carried: Arc<AtomicU64>) -> Link {
+    fn start(rate: Arc<AtomicU64>, depth: usize) -> Link {
         let (queue, mut pieces) = mpsc::channel::<Piece>((depth / GRAIN).max(1));
         let mut bucket = Bucket::new(rate);
-        let delay = DelayLine::from_env(Arc::clone(&carried));
+        let delay = DelayLine::from_env();
         tokio::spawn(async move {
-            while let Some((writer, piece)) = pieces.recv().await {
+            while let Some((out, piece, permit)) = pieces.recv().await {
                 bucket.take(piece.len()).await;
-                if let Some(delay) = &delay {
-                    delay.send((writer, piece));
-                    continue;
-                }
-                if writer.lock().await.write_all(&piece).await.is_ok() {
-                    carried.fetch_add(piece.len() as u64, Ordering::Relaxed);
+                match &delay {
+                    Some(delay) => {
+                        delay.send((out, piece, permit));
+                    }
+                    None => {
+                        out.send(piece, permit);
+                    }
                 }
             }
         });
@@ -190,16 +258,19 @@ impl Link {
     }
 
     /// Move one connection's bytes onto this direction until it ends.
-    async fn carry(&self, mut reader: OwnedReadHalf, writer: Arc<Mutex<OwnedWriteHalf>>) {
+    async fn carry(&self, mut reader: OwnedReadHalf, out: Out) {
         let mut buf = vec![0u8; CHUNK];
-        while let Ok(n) = reader.read(&mut buf).await {
+        'read: while let Ok(n) = reader.read(&mut buf).await {
             if n == 0 {
                 break;
             }
             for piece in buf[..n].chunks(GRAIN) {
+                let Ok(permit) = Arc::clone(&out.room).acquire_owned().await else {
+                    break 'read;
+                };
                 if self
                     .queue
-                    .send((Arc::clone(&writer), piece.to_vec()))
+                    .send((out.clone(), piece.to_vec(), permit))
                     .await
                     .is_err()
                 {
@@ -207,36 +278,30 @@ impl Link {
                 }
             }
         }
-        // The other side is closed as soon as this one ends; whatever is still queued for it
-        // goes nowhere, as a connection reset on the hop drops what the hop held.
-        let _ = writer.lock().await.shutdown().await;
+        // The other side is closed as soon as this one ends.
+        out.close();
     }
 }
 
 /// Copy one direction unshaped until it ends.
-async fn pass(
-    mut reader: OwnedReadHalf,
-    writer: Arc<Mutex<OwnedWriteHalf>>,
-    carried: Arc<AtomicU64>,
-    delay: Option<DelayLine>,
-) {
+async fn pass(mut reader: OwnedReadHalf, out: Out, delay: Option<DelayLine>) {
     let mut buf = vec![0u8; CHUNK];
     while let Ok(n) = reader.read(&mut buf).await {
         if n == 0 {
             break;
         }
-        if let Some(delay) = &delay {
-            if !delay.send((Arc::clone(&writer), buf[..n].to_vec())) {
-                break;
-            }
-            continue;
-        }
-        if writer.lock().await.write_all(&buf[..n]).await.is_err() {
+        let Ok(permit) = Arc::clone(&out.room).acquire_owned().await else {
+            break;
+        };
+        let sent = match &delay {
+            Some(delay) => delay.send((out.clone(), buf[..n].to_vec(), permit)),
+            None => out.send(buf[..n].to_vec(), permit),
+        };
+        if !sent {
             break;
         }
-        carried.fetch_add(n as u64, Ordering::Relaxed);
     }
-    let _ = writer.lock().await.shutdown().await;
+    out.close();
 }
 
 /// Take `down KBIT_S` and `up KBIT_S` lines from stdin until it ends, each setting that
@@ -288,18 +353,8 @@ async fn main() -> Result<(), String> {
     let (down_bytes, up_bytes) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
     let bytes_per_s = |kbit: u64| Arc::new(AtomicU64::new(kbit * 1000 / 8));
     let (down_rate, up_rate) = (bytes_per_s(down_kbit), bytes_per_s(up_kbit));
-    let down = Arc::new(Link::start(
-        Arc::clone(&down_rate),
-        depth,
-        Arc::clone(&down_bytes),
-    ));
-    let up = (up_kbit > 0).then(|| {
-        Arc::new(Link::start(
-            Arc::clone(&up_rate),
-            depth,
-            Arc::clone(&up_bytes),
-        ))
-    });
+    let down = Arc::new(Link::start(Arc::clone(&down_rate), depth));
+    let up = (up_kbit > 0).then(|| Arc::new(Link::start(Arc::clone(&up_rate), depth)));
     tokio::spawn(rates_from_stdin(
         down_rate,
         (up_kbit > 0).then_some(up_rate),
@@ -345,12 +400,13 @@ async fn main() -> Result<(), String> {
     }
 
     let target = u16::try_from(target).map_err(|e| e.to_string())?;
-    let up_delay = DelayLine::from_env(Arc::clone(&up_bytes));
+    let up_delay = DelayLine::from_env();
     loop {
         let Ok((client, _)) = listener.accept().await else {
             continue;
         };
-        let (down, up, up_bytes) = (Arc::clone(&down), up.clone(), Arc::clone(&up_bytes));
+        let (down, up) = (Arc::clone(&down), up.clone());
+        let (down_bytes, up_bytes) = (Arc::clone(&down_bytes), Arc::clone(&up_bytes));
         let up_delay = up_delay.clone();
         tokio::spawn(async move {
             let Ok(socket) = TcpSocket::new_v4() else {
@@ -373,13 +429,13 @@ async fn main() -> Result<(), String> {
             let (client_r, client_w) = client.into_split();
             let (server_r, server_w) = server.into_split();
             let (client_w, server_w) = (
-                Arc::new(Mutex::new(client_w)),
-                Arc::new(Mutex::new(server_w)),
+                Out::start(client_w, down_bytes),
+                Out::start(server_w, up_bytes),
             );
             let upward = async {
                 match &up {
                     Some(link) => link.carry(client_r, server_w).await,
-                    None => pass(client_r, server_w, up_bytes, up_delay).await,
+                    None => pass(client_r, server_w, up_delay).await,
                 }
             };
             tokio::join!(upward, down.carry(server_r, client_w));
@@ -405,5 +461,73 @@ fn recv_buffer(stream: &tokio::net::TcpStream, bytes: usize) -> std::io::Result<
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpStream;
+
+    /// A connected pair over loopback, the far end's receive buffer `rcvbuf` bytes where one
+    /// is named: (the end the relay holds, the far end).
+    async fn pair(rcvbuf: Option<u32>) -> (TcpStream, TcpStream) {
+        let socket = TcpSocket::new_v4().unwrap();
+        if let Some(bytes) = rcvbuf {
+            socket.set_recv_buffer_size(bytes).unwrap();
+        }
+        socket.bind(([127, 0, 0, 1], 0).into()).unwrap();
+        let listener = socket.listen(1).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (near, far) = tokio::join!(TcpStream::connect(addr), listener.accept());
+        (near.unwrap(), far.unwrap().0)
+    }
+
+    /// A bulk sender whose far end reads nothing fills its window and stops; a second
+    /// connection's bytes cross the same shaped direction meanwhile.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_far_end_that_stops_reading_holds_no_other_connections_bytes() {
+        let carried = Arc::new(AtomicU64::new(0));
+        let link = Arc::new(Link::start(Arc::new(AtomicU64::new(750_000)), RCVBUF));
+        let (mut bulk_src, bulk_in) = pair(None).await;
+        let (bulk_out, _bulk_far) = pair(Some(4096)).await;
+        let (mut small_src, small_in) = pair(None).await;
+        let (small_out, mut small_far) = pair(None).await;
+        for (reader, writer) in [(bulk_in, bulk_out), (small_in, small_out)] {
+            let (reader, _) = reader.into_split();
+            let (_, writer) = writer.into_split();
+            let (link, carried) = (Arc::clone(&link), Arc::clone(&carried));
+            tokio::spawn(async move {
+                link.carry(reader, Out::start(writer, carried)).await;
+            });
+        }
+        tokio::spawn(async move {
+            let blob = vec![0u8; CHUNK];
+            while bulk_src.write_all(&blob).await.is_ok() {}
+        });
+        // Long enough for the bulk connection to have filled its window at the hop's rate.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        tokio::spawn(async move {
+            for _ in 0..50 {
+                if small_src.write_all(&[1]).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        let mut got = 0;
+        let mut byte = [0u8; 64];
+        let until = Instant::now() + Duration::from_millis(1500);
+        while let Ok(Ok(n)) = tokio::time::timeout_at(until.into(), small_far.read(&mut byte)).await
+        {
+            if n == 0 {
+                break;
+            }
+            got += n;
+        }
+        assert!(
+            got >= 40,
+            "{got} of 50 bytes crossed beside the stalled connection"
+        );
     }
 }
