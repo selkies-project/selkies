@@ -461,7 +461,7 @@ async fn stream_upload_body(
         .active()
         .then(|| state.transfer_cap.clone());
     let mut gauge = if declared.is_some_and(|d| d >= TRANSFER_MIN_GAUGED_BYTES) {
-        state.session_gauge(auth)
+        state.session_gauge(auth).map(|gauge| gauge.for_upload())
     } else {
         None
     };

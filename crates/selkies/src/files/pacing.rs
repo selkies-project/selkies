@@ -68,6 +68,11 @@
 //! gigabit a second before the first congested one, on a 6 Mbit/s uplink, and took half a
 //! minute of cuts to mean anything again.
 //!
+//! An upload is read against the uplink alone where the session's socket tells that apart
+//! ([`UplinkGauge::for_upload`], [`SessionPing::way_back`]): the round trip of a ping is the
+//! way out's as well, and on a downlink the stream fills its steer keeps a queue standing
+//! there, none of the upload's doing.
+//!
 //! Ping payloads are per-session counters; the pong echoes its ping's payload
 //! (RFC 6455), so [`UplinkClock::note_pong`] matches replies to send times and stray pongs
 //! fall through unmatched. A ping failure drops that socket from the gauge; a gauge with no
@@ -171,6 +176,14 @@ pub trait SessionPing: Send + Sync {
     /// counts them: what a download beside the stream reads the stream's rate by
     /// ([`UplinkGauge::share_bps`]).
     fn stream_bytes(&self) -> Option<u64> {
+        None
+    }
+
+    /// How long the socket's way back holds what its page sends, past the least it took, in
+    /// seconds, where the transport reads that off the page's own stamps: the client's
+    /// uplink alone, which is what an upload shares with the session
+    /// ([`UplinkGauge::for_upload`]). `None` where nothing tells it at present.
+    fn way_back(&self) -> Option<f64> {
         None
     }
 }
@@ -333,6 +346,11 @@ impl UplinkClock {
         !due || self.ping_behind()
     }
 
+    /// How long the socket's way back holds what its page sends ([`SessionPing::way_back`]).
+    pub fn way_back(&self) -> Option<f64> {
+        self.pinger.way_back()
+    }
+
     /// The least round trip the socket's history holds, in seconds, once a ping was answered.
     pub fn floor_s(&self) -> Option<f64> {
         self.state.lock().floor_us.map(|us| f64::from(us) / 1e6)
@@ -378,6 +396,8 @@ pub struct UplinkGauge {
     /// Whether a download's share is yet to be read, its split having been counted for
     /// less than half of [`BESIDE_WINDOW`] ([`UplinkGauge::share_unread`]).
     unread: bool,
+    /// Whether the gauge is an upload's ([`UplinkGauge::for_upload`]).
+    upload: bool,
 }
 
 impl UplinkGauge {
@@ -408,13 +428,29 @@ impl UplinkGauge {
             beside: None,
             moved: 0,
             unread: false,
+            upload: false,
         }
+    }
+
+    /// The gauge of an upload: its bytes cross the client's uplink and nothing else of the
+    /// session's path, so it reads the uplink alone where a gauged socket tells it
+    /// ([`SessionPing::way_back`]). A ping's round trip carries the way out too, where the
+    /// stream's own steer keeps a queue standing on a downlink it fills, and an upload read
+    /// against that queue backs off from an uplink it has to itself. What the way back
+    /// holds is read off the page's clock against this one, and carries how far the two
+    /// have drifted apart since its least was taken. Each reading is the uplink's queue and
+    /// something more, so the queue is no more than the lesser of the two, and that is what
+    /// the verdict is on.
+    #[must_use]
+    pub fn for_upload(mut self) -> Self {
+        self.upload = true;
+        self
     }
 
     /// The gauge of a download: its bytes cross the path the gauged sockets' streams cross,
     /// the same way, and it keeps its share of that path beside them
     /// ([`UplinkGauge::share_bps`]). An upload's bytes go the other way, where the stream
-    /// sends its acks alone, and its gauge yields as it always did.
+    /// sends its acks alone ([`UplinkGauge::for_upload`]).
     #[must_use]
     pub fn beside_stream(mut self) -> Self {
         self.beside = Some(VecDeque::new());
@@ -491,7 +527,9 @@ impl UplinkGauge {
     /// `Some(true)` when any session's round trip stands above its floor by more than
     /// [`UplinkGauge::INFLATION_US`], `Some(false)` when at least one session answered fresh
     /// and none congested, `None` when no fresh pong arrived since the last call (the caller
-    /// holds its rate).
+    /// holds its rate). An upload's gauge takes what a socket's way back holds for that
+    /// excess, where the socket tells it and it is the lesser
+    /// ([`UplinkGauge::for_upload`]).
     pub fn sample(&mut self) -> Option<bool> {
         let now = monotonic();
         if now - self.last_ping >= Self::PING_INTERVAL {
@@ -505,9 +543,13 @@ impl UplinkGauge {
                 continue;
             };
             *last = seq;
-            let congested = rtt > floor.saturating_add(Self::INFLATION_US);
-            inflation = inflation.max(rtt.saturating_sub(floor));
-            verdict = Some(verdict.unwrap_or(false) || congested);
+            let held = if self.upload { clock.way_back() } else { None };
+            let over = held.map_or(rtt.saturating_sub(floor), |held| {
+                let held = (held.max(0.0) * 1e6).min(f64::from(u32::MAX)) as u32;
+                held.min(rtt.saturating_sub(floor))
+            });
+            inflation = inflation.max(over);
+            verdict = Some(verdict.unwrap_or(false) || over > Self::INFLATION_US);
         }
         if verdict.is_some() {
             self.inflation_us = inflation;
@@ -1309,6 +1351,67 @@ mod tests {
         tokio::time::sleep(Duration::from_secs_f64(TransferPacer::USED_SECONDS + 0.05)).await;
         pacer.pace(8192).await;
         assert_eq!(pacer.inner.lock().used_bps, None, "the reading starts over");
+    }
+
+    /// A session socket whose stream tells what its way back holds.
+    struct StampedSocket {
+        pings: Mutex<Vec<Vec<u8>>>,
+        back: Mutex<Option<f64>>,
+    }
+
+    impl SessionPing for StampedSocket {
+        fn ping(&self, payload: &[u8]) -> bool {
+            self.pings.lock().push(payload.to_vec());
+            true
+        }
+
+        fn way_back(&self) -> Option<f64> {
+            *self.back.lock()
+        }
+    }
+
+    #[test]
+    fn an_upload_is_read_against_its_way_back_where_the_socket_tells_it() {
+        let socket = Arc::new(StampedSocket {
+            pings: Mutex::new(Vec::new()),
+            back: Mutex::new(Some(0.0)),
+        });
+        let clock = Arc::new(UplinkClock::new(socket.clone()));
+        // The path's floor, from before the transfers.
+        assert!(clock.keep_floor());
+        let first = socket.pings.lock().last().cloned().expect("a ping");
+        clock.note_pong(&first);
+        // The next pong of each gauge comes back `late` seconds over that floor.
+        let pong = |gauge: &mut UplinkGauge, late: f64| {
+            gauge.last_ping = f64::NEG_INFINITY;
+            // Its ping goes out, and what another gauge's pong left it to read is read.
+            let _ = gauge.sample();
+            let ping = socket.pings.lock().last().cloned().expect("a ping");
+            clock.backdate_pending(&ping, late);
+            clock.note_pong(&ping);
+            gauge.sample()
+        };
+        let mut upload = socket_gauge(clock.clone()).for_upload();
+        let mut download = socket_gauge(clock.clone());
+        // The stream's steer stands 60 ms of queue on the way out, the way back free: that
+        // queue is the download's to read and none of the upload's.
+        assert_eq!(pong(&mut upload, 0.06), Some(false));
+        assert!(upload.inflation_us() < 1_000, "{}", upload.inflation_us());
+        assert_eq!(pong(&mut download, 0.06), Some(true));
+        // The way back holds 40 ms and the round trip is that much longer: the upload's own
+        // queue.
+        *socket.back.lock() = Some(0.04);
+        assert_eq!(pong(&mut upload, 0.045), Some(true));
+        assert_eq!(upload.inflation_us(), 40_000);
+        // The stamps say 60 ms with the round trip at its floor: two clocks that drifted
+        // apart, and no queue.
+        *socket.back.lock() = Some(0.06);
+        assert_eq!(pong(&mut upload, 0.0), Some(false));
+        assert_eq!(pong(&mut download, 0.0), Some(false));
+        // No stamp to say: the round trip, as for a socket that never tells.
+        *socket.back.lock() = None;
+        assert_eq!(pong(&mut upload, 0.06), Some(true));
+        assert_eq!(pong(&mut upload, 0.0), Some(false));
     }
 
     /// A session socket whose stream has written what the test says.

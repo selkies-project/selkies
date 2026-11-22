@@ -550,11 +550,14 @@ impl Flight {
     /// How long the way back holds what the page sends, past the least it took: the least
     /// its last few stamps were held, while one says.
     fn held_back(&self, now: f64) -> f64 {
-        if self.mark(now).is_some() {
-            self.backs.iter().copied().reduce(f64::min).unwrap_or(0.0)
-        } else {
-            0.0
-        }
+        self.way_back_holds(now).unwrap_or(0.0)
+    }
+
+    /// [`Flight::held_back`] for a reader that tells a way back free from one no stamp
+    /// says anything of: `None` once none has come for `FLIGHT_DISTRUST_S`.
+    pub fn way_back_holds(&self, now: f64) -> Option<f64> {
+        self.mark(now)
+            .map(|_| self.backs.iter().copied().reduce(f64::min).unwrap_or(0.0))
     }
 
     /// The path's least round trip is `floor` from `now` on.

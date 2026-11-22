@@ -368,6 +368,12 @@ impl SessionPing for ClientPing {
             .upgrade()
             .map(|client| client.flight.lock().written())
     }
+
+    fn way_back(&self) -> Option<f64> {
+        self.0
+            .upgrade()
+            .and_then(|client| client.flight.lock().way_back_holds(now()))
+    }
 }
 
 impl Client {
