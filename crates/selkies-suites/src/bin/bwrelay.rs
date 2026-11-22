@@ -16,14 +16,19 @@
 //! default models a shallow hop, and a fat one (a modem holding seconds of data) is what turns an
 //! upload into input lag. Every second it prints what each direction carried.
 //!
-//! Past the queue each connection's pieces are written by a task of its own (`Out`), and a
-//! connection has no more than `WINDOW` of them on their way through the relay, the queue,
-//! the delay behind it and that task together. A far end that reads slowly, or not at all,
-//! therefore holds its own connection's bytes and stops its own sender, as its receive
-//! window would, and nobody else's: a hop forwards the other flows whatever one receiver
-//! does. Written from the queue's one drainer instead, a server reading an upload at half
-//! the hop's rate held every other connection's bytes for over two seconds at a time, the
-//! page's acks among them.
+//! Past the queue each connection's pieces are written by a task of its own (`Out`), so a
+//! far end that reads slowly, or not at all, holds its own connection's bytes and nobody
+//! else's: a hop forwards the other flows whatever one receiver does. Written from the
+//! queue's one drainer instead, a server reading an upload at half the hop's rate held every
+//! other connection's bytes for over two seconds at a time, the page's acks among them.
+//!
+//! The relay ends each connection twice, and a sender must not gain a receive window by
+//! that: what a sender may have on its way is what its receiver takes. So a connection's
+//! bytes are admitted to the relay (its queue, the delay behind it, its writer and the
+//! kernel's send queue together) no further than the far end has acknowledged plus the
+//! window it advertises (`Out::admit`, by `TCP_INFO` on the relay's own socket toward it).
+//! A receiver that paces its reads or bounds its window stops its sender through the relay
+//! as it would without it, and one that takes megabytes lets a fat first hop fill with them.
 //!
 //! `BWRELAY_DELAY_MS` adds a propagation delay behind each direction, one way, and
 //! `BWRELAY_JITTER_MS` up to that much more per piece with the order kept: a path with a
@@ -37,6 +42,7 @@
 //! bwrelay LISTEN_PORT TARGET_PORT RATE_KBIT_S [UPLINK_RATE_KBIT_S]
 //! ```
 
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -44,7 +50,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpSocket};
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{Notify, mpsc};
 
 const CHUNK: usize = 65_536;
 /// The bucket's grab quantum: one 64 KiB grab at single-digit Mbit/s would hold the link for
@@ -54,10 +60,17 @@ const GRAIN: usize = 8192;
 /// autotuned one (megabytes on loopback), which would hide the standing queue where no
 /// sender-side congestion gauge sees it.
 const RCVBUF: usize = 128 * 1024;
-/// What one connection may have on its way through the relay, as a receive window bounds
-/// what a sender has in flight: enough for the queue and for a delay line's worth of a fast
-/// link, so that only a far end that stops reading is what fills it.
-const WINDOW: usize = 2 * 1024 * 1024;
+/// The segment size of the paths the relay models: Ethernet's, less the headers. The hop to
+/// the target is a loopback, whose 64 KiB segments give the target's receive window a
+/// megabyte to start with and a megabyte a step to grow by, which nothing the target does
+/// about its window holds; the relay's side of that hop announces this instead.
+const PATH_MSS: libc::c_int = 1460;
+/// How often a connection whose far end's window is full looks at it again.
+const ADMIT_POLL: Duration = Duration::from_millis(1);
+/// Where Linux's `struct tcp_info` holds the bytes the peer acknowledged (a `u64`) and the
+/// window it advertises (a `u32`).
+const TCPI_BYTES_ACKED: usize = 120;
+const TCPI_SND_WND: usize = 228;
 
 /// A token bucket in bytes with a quarter-second burst allowance, at the rate its link holds
 /// now. Takes are FIFO (the one drainer of a link takes them in queue order), so concurrent
@@ -115,30 +128,29 @@ impl Bucket {
 }
 
 /// One connection's way out of the relay: its pieces, in order, written by a task of its
-/// own, so that a far end slow to read them waits on nobody else's. `room` is how many of
-/// its pieces may be on their way through the relay at once (`WINDOW`), each holding a
-/// permit from its reader to its writer.
+/// own, so that a far end slow to read them waits on nobody else's. `far` is the socket
+/// toward that far end, kept for what the far end says of its window, and `admitted` the
+/// bytes taken in for it so far.
 #[derive(Clone)]
 struct Out {
-    pieces: mpsc::UnboundedSender<(Vec<u8>, OwnedSemaphorePermit)>,
-    room: Arc<Semaphore>,
+    pieces: mpsc::UnboundedSender<Vec<u8>>,
+    far: Arc<OwnedFd>,
+    admitted: Arc<AtomicU64>,
     shut: Arc<Notify>,
 }
 
 impl Out {
-    fn start(mut writer: OwnedWriteHalf, carried: Arc<AtomicU64>) -> Out {
-        let (pieces, mut queued) = mpsc::unbounded_channel::<(Vec<u8>, OwnedSemaphorePermit)>();
+    fn start(mut writer: OwnedWriteHalf, carried: Arc<AtomicU64>) -> std::io::Result<Out> {
+        let far = Arc::new(writer.as_ref().as_fd().try_clone_to_owned()?);
+        let (pieces, mut queued) = mpsc::unbounded_channel::<Vec<u8>>();
         let shut = Arc::new(Notify::new());
         let closing = Arc::clone(&shut);
         tokio::spawn(async move {
-            loop {
-                let Some((piece, _permit)) = (tokio::select! {
-                    biased;
-                    () = closing.notified() => None,
-                    piece = queued.recv() => piece,
-                }) else {
-                    break;
-                };
+            while let Some(piece) = tokio::select! {
+                biased;
+                () = closing.notified() => None,
+                piece = queued.recv() => piece,
+            } {
                 let written = tokio::select! {
                     biased;
                     () = closing.notified() => false,
@@ -151,16 +163,40 @@ impl Out {
             }
             let _ = writer.shutdown().await;
         });
-        Out {
+        Ok(Out {
             pieces,
-            room: Arc::new(Semaphore::new(WINDOW / GRAIN)),
+            far,
+            admitted: Arc::new(AtomicU64::new(0)),
             shut,
+        })
+    }
+
+    /// Wait until the far end's window has room for `len` more bytes, and count them in:
+    /// what it has acknowledged and the window it advertises past that are as far as its
+    /// sender may be. A window under one piece takes one once nothing is on its way, as a
+    /// sender's probe would find it; where the kernel says nothing of the socket, nothing
+    /// is held. `false` once the connection's writer is gone.
+    async fn admit(&self, len: usize) -> bool {
+        let len = len as u64;
+        loop {
+            let admitted = self.admitted.load(Ordering::Relaxed);
+            let room = far_window(&self.far).is_none_or(|(acked, window)| {
+                admitted + len <= acked + window || admitted <= acked
+            });
+            if room {
+                self.admitted.fetch_add(len, Ordering::Relaxed);
+                return true;
+            }
+            if self.pieces.is_closed() {
+                return false;
+            }
+            tokio::time::sleep(ADMIT_POLL).await;
         }
     }
 
     /// Hand a piece to the connection's writer; whether it is still there to take it.
-    fn send(&self, piece: Vec<u8>, permit: OwnedSemaphorePermit) -> bool {
-        self.pieces.send((piece, permit)).is_ok()
+    fn send(&self, piece: Vec<u8>) -> bool {
+        self.pieces.send(piece).is_ok()
     }
 
     /// Close the connection's far side now: what is still queued for it goes nowhere, as a
@@ -170,8 +206,35 @@ impl Out {
     }
 }
 
-/// A piece of one connection's bytes queued on a link, with where it goes and its permit.
-type Piece = (Out, Vec<u8>, OwnedSemaphorePermit);
+/// What the far end of `socket` has acknowledged of the bytes written to it and the window
+/// it advertises past them, in bytes; `None` where the kernel does not say.
+fn far_window(socket: &OwnedFd) -> Option<(u64, u64)> {
+    let mut info = [0u8; TCPI_SND_WND + 4];
+    let mut len = libc::socklen_t::try_from(info.len()).ok()?;
+    // SAFETY: getsockopt writes at most `len` bytes into the buffer it is given.
+    let done = unsafe {
+        libc::getsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_INFO,
+            info.as_mut_ptr().cast(),
+            &raw mut len,
+        )
+    };
+    if done != 0 || usize::try_from(len).ok()? < info.len() {
+        return None;
+    }
+    let acked = u64::from_ne_bytes(
+        info[TCPI_BYTES_ACKED..TCPI_BYTES_ACKED + 8]
+            .try_into()
+            .ok()?,
+    );
+    let window = u32::from_ne_bytes(info[TCPI_SND_WND..TCPI_SND_WND + 4].try_into().ok()?);
+    Some((acked, u64::from(window)))
+}
+
+/// A piece of one connection's bytes queued on a link, with where it goes.
+type Piece = (Out, Vec<u8>);
 
 /// A propagation delay behind a direction (`BWRELAY_DELAY_MS` one way, with up to
 /// `BWRELAY_JITTER_MS` more per piece, order kept): pieces leave it that long after entering.
@@ -197,9 +260,9 @@ impl DelayLine {
         }
         let (queue, mut pieces) = mpsc::unbounded_channel::<(Instant, Piece)>();
         tokio::spawn(async move {
-            while let Some((at, (out, piece, permit))) = pieces.recv().await {
+            while let Some((at, (out, piece))) = pieces.recv().await {
                 tokio::time::sleep_until(at.into()).await;
-                out.send(piece, permit);
+                out.send(piece);
             }
         });
         Some(DelayLine {
@@ -242,14 +305,14 @@ impl Link {
         let mut bucket = Bucket::new(rate);
         let delay = DelayLine::from_env();
         tokio::spawn(async move {
-            while let Some((out, piece, permit)) = pieces.recv().await {
+            while let Some((out, piece)) = pieces.recv().await {
                 bucket.take(piece.len()).await;
                 match &delay {
                     Some(delay) => {
-                        delay.send((out, piece, permit));
+                        delay.send((out, piece));
                     }
                     None => {
-                        out.send(piece, permit);
+                        out.send(piece);
                     }
                 }
             }
@@ -265,12 +328,12 @@ impl Link {
                 break;
             }
             for piece in buf[..n].chunks(GRAIN) {
-                let Ok(permit) = Arc::clone(&out.room).acquire_owned().await else {
+                if !out.admit(piece.len()).await {
                     break 'read;
-                };
+                }
                 if self
                     .queue
-                    .send((out.clone(), piece.to_vec(), permit))
+                    .send((out.clone(), piece.to_vec()))
                     .await
                     .is_err()
                 {
@@ -290,12 +353,12 @@ async fn pass(mut reader: OwnedReadHalf, out: Out, delay: Option<DelayLine>) {
         if n == 0 {
             break;
         }
-        let Ok(permit) = Arc::clone(&out.room).acquire_owned().await else {
+        if !out.admit(n).await {
             break;
-        };
+        }
         let sent = match &delay {
-            Some(delay) => delay.send((out.clone(), buf[..n].to_vec(), permit)),
-            None => out.send(buf[..n].to_vec(), permit),
+            Some(delay) => delay.send((out.clone(), buf[..n].to_vec())),
+            None => out.send(buf[..n].to_vec()),
         };
         if !sent {
             break;
@@ -413,6 +476,12 @@ async fn main() -> Result<(), String> {
                 return;
             };
             let _ = socket.set_recv_buffer_size(u32::try_from(depth).unwrap_or(u32::MAX));
+            let _ = set_int(
+                socket.as_raw_fd(),
+                libc::IPPROTO_TCP,
+                libc::TCP_MAXSEG,
+                PATH_MSS,
+            );
             let Ok(server) = socket.connect(([127, 0, 0, 1], target).into()).await else {
                 return;
             };
@@ -428,10 +497,12 @@ async fn main() -> Result<(), String> {
             let _ = server.set_nodelay(true);
             let (client_r, client_w) = client.into_split();
             let (server_r, server_w) = server.into_split();
-            let (client_w, server_w) = (
+            let (Ok(client_w), Ok(server_w)) = (
                 Out::start(client_w, down_bytes),
                 Out::start(server_w, up_bytes),
-            );
+            ) else {
+                return;
+            };
             let upward = async {
                 match &up {
                     Some(link) => link.carry(client_r, server_w).await,
@@ -445,15 +516,24 @@ async fn main() -> Result<(), String> {
 
 /// Set an accepted socket's receive buffer, which tokio leaves to the kernel.
 fn recv_buffer(stream: &tokio::net::TcpStream, bytes: usize) -> std::io::Result<()> {
-    use std::os::fd::AsRawFd;
     let size = libc::c_int::try_from(bytes).unwrap_or(libc::c_int::MAX);
+    set_int(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_RCVBUF, size)
+}
+
+/// Set an int option of a socket.
+fn set_int(
+    socket: std::os::fd::RawFd,
+    level: libc::c_int,
+    option: libc::c_int,
+    value: libc::c_int,
+) -> std::io::Result<()> {
     // SAFETY: a valid socket descriptor and an int option of its size.
     let done = unsafe {
         libc::setsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_RCVBUF,
-            std::ptr::from_ref(&size).cast(),
+            socket,
+            level,
+            option,
+            std::ptr::from_ref(&value).cast(),
             libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>()).unwrap_or(4),
         )
     };
@@ -483,8 +563,8 @@ mod tests {
         (near.unwrap(), far.unwrap().0)
     }
 
-    /// A bulk sender whose far end reads nothing fills its window and stops; a second
-    /// connection's bytes cross the same shaped direction meanwhile.
+    /// A bulk sender whose far end reads nothing is admitted as far as that far end's window
+    /// and stops; a second connection's bytes cross the same shaped direction meanwhile.
     #[tokio::test(flavor = "current_thread")]
     async fn a_far_end_that_stops_reading_holds_no_other_connections_bytes() {
         let carried = Arc::new(AtomicU64::new(0));
@@ -498,15 +578,16 @@ mod tests {
             let (_, writer) = writer.into_split();
             let (link, carried) = (Arc::clone(&link), Arc::clone(&carried));
             tokio::spawn(async move {
-                link.carry(reader, Out::start(writer, carried)).await;
+                let out = Out::start(writer, carried).expect("a socket to duplicate");
+                link.carry(reader, out).await;
             });
         }
         tokio::spawn(async move {
             let blob = vec![0u8; CHUNK];
             while bulk_src.write_all(&blob).await.is_ok() {}
         });
-        // Long enough for the bulk connection to have filled its window at the hop's rate.
-        tokio::time::sleep(Duration::from_secs(4)).await;
+        // Long enough for the bulk connection to have filled its far end's window.
+        tokio::time::sleep(Duration::from_secs(1)).await;
         tokio::spawn(async move {
             for _ in 0..50 {
                 if small_src.write_all(&[1]).await.is_err() {
@@ -529,5 +610,43 @@ mod tests {
             got >= 40,
             "{got} of 50 bytes crossed beside the stalled connection"
         );
+    }
+
+    /// What a sender is admitted is what its far end takes: toward a far end that reads
+    /// nothing, no more than that far end's window is taken in, however much the sender has,
+    /// and more once it reads.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_sender_is_admitted_no_further_than_its_far_ends_window() {
+        let (near, mut far) = pair(Some(16 * 1024)).await;
+        let (_, writer) = near.into_split();
+        let out = Out::start(writer, Arc::new(AtomicU64::new(0))).expect("a socket to duplicate");
+        let admitted = Arc::clone(&out.admitted);
+        let feeder =
+            tokio::spawn(
+                async move { while out.admit(GRAIN).await && out.send(vec![0u8; GRAIN]) {} },
+            );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let stopped = admitted.load(Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            admitted.load(Ordering::Relaxed),
+            stopped,
+            "nothing more is admitted while the far end reads nothing"
+        );
+        assert!(
+            stopped <= 128 * 1024,
+            "{stopped} bytes admitted toward a 16 KiB receive buffer"
+        );
+        let mut sink = vec![0u8; 1 << 16];
+        let mut read = 0;
+        while read < stopped as usize / 2 {
+            read += far.read(&mut sink).await.expect("the far end reads");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            admitted.load(Ordering::Relaxed) > stopped,
+            "a far end that reads again takes more"
+        );
+        feeder.abort();
     }
 }
