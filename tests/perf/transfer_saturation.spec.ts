@@ -155,7 +155,8 @@ async function scenario(res: Checks, host: Host, tag: string, downKbit: number, 
     });
     const relay = spawn(suitesBin('bwrelay'), [String(RELAY_PORT), String(port), String(downKbit), String(upKbit)], {
         env: rcvbuf ? { ...process.env, BWRELAY_RCVBUF: String(rcvbuf) } : process.env,
-        stdio: ['ignore', openSync(join(WORKDIR, 'bwrelay.log'), 'w'), 'inherit'],
+        // One log a case: the figures of each transfer's link are kept, not the last one's.
+        stdio: ['ignore', openSync(join(WORKDIR, `bwrelay-${tag}.log`), 'w'), 'inherit'],
     });
     const churn = damageWindow();
     const fps: (number | null)[] = [];
