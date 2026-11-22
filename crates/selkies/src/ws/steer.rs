@@ -593,10 +593,19 @@ pub struct LinkProbeTick {
 /// [`CongestionSteer::PROBE_STEP`] a second, never past the configured ceiling. A queue, or a
 /// new lower supported reading, snaps it back to the window's minimum. A queue immediately
 /// after a probe starts a quiet period, which doubles while successive probes end in queues.
+///
+/// While the display streams to more pages than the one whose path the allowance reads
+/// ([`LinkAllowance::share`]), the encoder is told 0 and the cleanup keeps to the constant
+/// rate: a shared viewer's path is unknown, and the rate is the bound the controller set for
+/// every page. The allowance goes on reading the path, and the encoder is told it again once
+/// the display streams to one page.
 #[derive(Clone, Debug)]
 pub struct LinkAllowance {
     rates: std::collections::VecDeque<f64>,
     pub kbps: Option<i64>,
+    /// Whether the display streams to more pages than the one whose path is read, which holds
+    /// the encoder at no link rate.
+    shared: bool,
     probe_at: Option<f64>,
     probed: bool,
     quiet_until: f64,
@@ -608,6 +617,7 @@ impl Default for LinkAllowance {
         LinkAllowance {
             rates: std::collections::VecDeque::new(),
             kbps: None,
+            shared: false,
             probe_at: None,
             probed: false,
             quiet_until: 0.0,
@@ -648,7 +658,27 @@ impl LinkAllowance {
             return None;
         }
         self.kbps = Some(kbps);
-        Some(kbps)
+        (!self.shared).then_some(kbps)
+    }
+
+    /// Whether the display streams to more pages than the one whose path the allowance reads;
+    /// the rate for the encoder where that changed: 0 once shared, the allowance once not.
+    pub fn share(&mut self, shared: bool) -> Option<i64> {
+        if shared == self.shared {
+            return None;
+        }
+        self.shared = shared;
+        Some(self.told_kbps())
+    }
+
+    /// The rate the encoder holds the cleanup to: the allowance, or 0 while the display is
+    /// shared.
+    pub fn told_kbps(&self) -> i64 {
+        if self.shared {
+            0
+        } else {
+            self.kbps.unwrap_or(0)
+        }
     }
 
     /// Fold in a tick's reading of the path (`None` where the tick measured none), within
@@ -1813,6 +1843,32 @@ pub(crate) mod tests {
             paced.note(Some(16_000_000.0), 12000.0, Some(1_000_000.0)),
             Some(900)
         );
+    }
+
+    #[test]
+    fn a_shared_display_tells_the_encoder_no_link_rate_until_it_streams_to_one_page_again() {
+        let mut allowance = LinkAllowance::default();
+        assert_eq!(
+            allowance.note(Some(20_000_000.0), 48000.0, None),
+            Some(18000)
+        );
+        assert_eq!(allowance.share(true), Some(0), "a viewer joins");
+        assert_eq!(allowance.share(true), None);
+        assert_eq!(
+            allowance.note(Some(10_000_000.0), 48000.0, None),
+            None,
+            "the path is read, the encoder is told nothing"
+        );
+        assert_eq!(allowance.kbps, Some(9000));
+        assert_eq!(
+            allowance.told_kbps(),
+            0,
+            "a budget sized by it holds to the rate"
+        );
+        assert_eq!(allowance.share(false), Some(9000), "the viewer leaves");
+        assert_eq!(allowance.told_kbps(), 9000);
+        assert_eq!(allowance.share(false), None);
+        assert_eq!(allowance.note(Some(4_000_000.0), 48000.0, None), Some(3600));
     }
 
     fn cleanup_tick(

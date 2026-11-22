@@ -3507,6 +3507,7 @@ impl WsService {
             held_back: client.as_ref().map_or(0.0, |c| c.held_back()),
             metrics: self.deps.metrics.clone(),
         };
+        let shared = self.pages_streaming(display_id) >= 2;
         let outcome = {
             let mut link = link.lock();
             link.loop_late_ms = late_ms;
@@ -3522,6 +3523,14 @@ impl WsService {
             }
             if steered && capturing && link.acknowledged_frame_id != -1 && link.has_sent_any_frame {
                 let target_view = capture.as_ref().map(|c| EncoderTarget(c.clone()));
+                if let Some(view) = &target_view
+                    && let Some(kbps) = link
+                        .link_allowance
+                        .get_or_insert_with(Default::default)
+                        .share(shared)
+                {
+                    view.update_link_rate(kbps);
+                }
                 let target = if capped {
                     link.peak_ceiling(target, configured_fps)
                 } else {
