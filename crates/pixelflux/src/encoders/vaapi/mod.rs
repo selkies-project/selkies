@@ -223,6 +223,20 @@ enum ConstantRate {
 /// Seconds of the target iHD's AV1 rate control is given as a buffer (`ConstantRate`).
 const IHD_AV1_BUFFER_S: f64 = 0.1;
 
+/// The buffer, and the fullness it starts at, in seconds of the new target, that a target
+/// changed within a sequence brings an unbounded session's rate control
+/// (`ConstantRate::Unbounded`, `rate_control_at`). iHD's H.264 and HEVC rate control bounds
+/// nothing past such a change: it codes the next frame at any size, banks what a still screen's
+/// frames leave of the target, and spends the bank on the first frame that moves. At 2560x1280
+/// and 12 Mbit/s, Arc's HEVC coded a cleanup frame of 723 kB on a change of 8 kbit/s and the
+/// first moving frame after a still screen at 795 kB, 32 budgets; under this buffer they came
+/// to 262 and 10 kB, the still screen to the same picture within 0.5 dB and motion after it
+/// within 0.5 dB. The sequence's own key frame starts unbounded, which a buffer from there
+/// starves.
+const RESET_BUFFER_S: f64 = 1.0;
+/// The fullness, in seconds of the new target, the buffer `RESET_BUFFER_S` starts at.
+const RESET_FULLNESS_S: f64 = 0.05;
+
 /// The rows a reconstruction is compared with its source on (`VaapiEncoder::last_psnr`): one
 /// in this many.
 const PSNR_ROW_STEP: usize = 8;
@@ -2146,8 +2160,9 @@ impl VaapiEncoder {
     /// The rate control of a sequence: the target, buffer, and frame rate a constant-rate
     /// session holds, with no filler data up to the target and each frame capped at the buffer
     /// where the driver takes a cap and codes under one (`ConstantRate`), and the frame rate
-    /// and quality level of any.
-    fn rate_control_at(&self, out: &mut Buffers, bps: u32) {
+    /// and quality level of any. A target changed within the sequence (`changed`) gives an
+    /// unbounded session the buffer `RESET_BUFFER_S` from `RESET_FULLNESS_S`.
+    fn rate_control_at(&self, out: &mut Buffers, bps: u32, changed: bool) {
         if self.rate.cbr {
             // The session's buffer spans the same time at a cleanup frame's rate.
             let vbv = (u64::from(self.rate.vbv()) * u64::from(bps)
@@ -2179,15 +2194,19 @@ impl VaapiEncoder {
                 rc.rc_flags.bits.set_disable_bit_stuffing(1);
             }
             out.push_misc(VAEncMiscParameterTypeRateControl, &rc);
+            let seconds = |s: f64| (f64::from(bps) * s) as u32;
             let buffer = match bound {
-                ConstantRate::Buffer => Some(vbv),
-                ConstantRate::Seconds(s) => Some((f64::from(bps) * s) as u32),
+                ConstantRate::Buffer => Some((vbv, vbv)),
+                ConstantRate::Seconds(s) => Some((seconds(s), seconds(s))),
+                ConstantRate::Unbounded if changed => {
+                    Some((seconds(RESET_BUFFER_S), seconds(RESET_FULLNESS_S)))
+                }
                 ConstantRate::Unbounded => None,
             };
-            if let Some(bits) = buffer {
+            if let Some((size, fullness)) = buffer {
                 let hrd = VAEncMiscParameterHRD {
-                    initial_buffer_fullness: bits,
-                    buffer_size: bits,
+                    initial_buffer_fullness: fullness,
+                    buffer_size: size,
                     va_reserved: [0; 4],
                 };
                 out.push_misc(VAEncMiscParameterTypeHRD, &hrd);
@@ -2718,11 +2737,11 @@ impl VaapiEncoder {
         if key {
             self.arm.sequence(&self.negotiated, &mut out);
             self.declared_level = self.arm.level();
-            self.rate_control_at(&mut out, bps);
+            self.rate_control_at(&mut out, bps, false);
             self.sent_bps = bps;
         } else if self.rate.cbr && bps != self.sent_bps {
             // radeonsi's VCE takes a new target with a picture, no new sequence.
-            self.rate_control_at(&mut out, bps);
+            self.rate_control_at(&mut out, bps, true);
             self.sent_bps = bps;
         }
         self.arm.picture(&self.negotiated, &frame, &mut out)?;
