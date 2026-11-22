@@ -168,6 +168,35 @@ export const decoderSupportReady: Promise<Record<string, boolean | null>> = (asy
 })();
 
 /**
+ * Asks this engine's `VideoDecoder` to decode one Annex B key frame, in a
+ * worker or on the page alike: the worker's source is this function's own.
+ * @param data The 16x16 Annex B key frame.
+ * @param timeoutMs How long the flush may take before the answer is `annexb`.
+ * @returns `annexb` where the frame decoded or the decoder never answered,
+ *     `avcc` where it was refused.
+ */
+async function probeH264Framing(data: Uint8Array<ArrayBuffer>, timeoutMs: number): Promise<string> {
+    let outputs = 0;
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let decoder: VideoDecoder | null = null;
+    try {
+        decoder = new VideoDecoder({ output: (frame) => { outputs++; frame.close(); }, error: () => {} });
+        decoder.configure({ codec: "avc1.42000A", codedWidth: 16, codedHeight: 16, optimizeForLatency: true });
+        decoder.decode(new EncodedVideoChunk({ type: "key", timestamp: 0, data }));
+        await Promise.race([
+            decoder.flush(),
+            new Promise<void>((resolve) => { timer = setTimeout(() => { timedOut = true; resolve(); }, timeoutMs); }),
+        ]);
+    } catch (err) {
+        // Refused: the count says so.
+    }
+    clearTimeout(timer);
+    try { if (decoder && decoder.state !== "closed") decoder.close(); } catch (err) { /* closed by its error */ }
+    return outputs > 0 || timedOut ? "annexb" : "avcc";
+}
+
+/**
  * How this engine's `VideoDecoder` takes H.264: `annexb` where a key frame in
  * Annex B form decodes (Chromium, Firefox), `avcc` where it is refused and an
  * `avcC` description with length-prefixed NAL units is needed instead (WebKit).
@@ -179,16 +208,9 @@ let h264FramingAnswer = "annexb";
 const H264_FRAMING_TIMEOUT_MS = 5000;
 export const h264FramingReady: Promise<string> = (async () => {
     if (typeof VideoDecoder === "undefined") return "annexb";
-    const probe = `self.onmessage = async (e) => {
-        let outputs = 0;
-        try {
-            const dec = new VideoDecoder({ output: (f) => { outputs++; f.close(); }, error: () => {} });
-            dec.configure({ codec: 'avc1.42000A', codedWidth: 16, codedHeight: 16, optimizeForLatency: true });
-            dec.decode(new EncodedVideoChunk({ type: 'key', timestamp: 0, data: e.data }));
-            await dec.flush();
-            dec.close();
-        } catch (err) { /* refused: the count says so */ }
-        self.postMessage(outputs > 0 ? 'annexb' : 'avcc');
+    const probe = `const probeH264Framing = ${probeH264Framing.toString()};
+    self.onmessage = async (e) => {
+        self.postMessage(await probeH264Framing(new Uint8Array(e.data), ${H264_FRAMING_TIMEOUT_MS}));
     };`;
     const sample = (): Uint8Array<ArrayBuffer> => Uint8Array.from(atob(H264_ANNEXB_SAMPLE), (c) => c.charCodeAt(0));
     const workerAnswer = await new Promise<string | null>((resolve) => {
@@ -213,24 +235,7 @@ export const h264FramingReady: Promise<string> = (async () => {
             if (url) URL.revokeObjectURL(url);
         }
     });
-    const answer = workerAnswer ?? await (async (): Promise<string> => {
-        let outputs = 0;
-        let timedOut = false;
-        let decoder: VideoDecoder | null = null;
-        try {
-            decoder = new VideoDecoder({ output: (frame) => { outputs++; frame.close(); }, error: () => {} });
-            decoder.configure({ codec: "avc1.42000A", codedWidth: 16, codedHeight: 16, optimizeForLatency: true });
-            decoder.decode(new EncodedVideoChunk({ type: "key", timestamp: 0, data: sample() }));
-            await Promise.race([
-                decoder.flush(),
-                new Promise<void>((resolve) => setTimeout(() => { timedOut = true; resolve(); }, H264_FRAMING_TIMEOUT_MS)),
-            ]);
-        } catch (err) {
-            // Refused: the count says so.
-        }
-        try { if (decoder && decoder.state !== "closed") decoder.close(); } catch (err) { /* closed by its error */ }
-        return outputs > 0 || timedOut ? "annexb" : "avcc";
-    })();
+    const answer = workerAnswer ?? await probeH264Framing(sample(), H264_FRAMING_TIMEOUT_MS);
     h264FramingAnswer = answer;
     return answer;
 })();
