@@ -1817,6 +1817,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_frame_num_wrap_makes_no_room_on_the_paced_owners_path() {
+        reset_clock();
+        let r = rig(true, true, 100_000, None);
+        r.relay.offer(key(1));
+        r.hand(1);
+        r.drained();
+        r.relay.offer_paced(delta(2, 1), ROOMY);
+        // The run passes the frame a `frame_num` wrap can fall on, which goes to a page
+        // whatever its room where it can go at all: here it predicts from a frame left out.
+        for n in 3..(WRAP as u16 + 4) {
+            r.relay.offer_paced(delta(n, n - 1), HELD);
+        }
+        assert!(
+            r.ids() == vec![2] && r.server.reports().is_empty(),
+            "nothing is asked of the encoder for it: {:?}",
+            r.server.reports()
+        );
+        r.hand(1);
+        r.drained();
+        r.relay
+            .offer_paced(delta(WRAP as u16 + 4, WRAP as u16 + 3), ROOMY);
+        assert_eq!(r.server.reports().len(), 1, "until the path has room");
+    }
+
+    #[tokio::test]
     async fn a_paced_owners_run_has_its_window_from_when_the_encoder_is_told() {
         reset_clock();
         let r = rig(true, true, 100_000, None);

@@ -679,6 +679,12 @@ impl Flight {
         self.paced
     }
 
+    /// What a paced path delivers a second at `now`, in bytes, once a stamp has said: all
+    /// the socket's bytes, read off arrivals a stamp apart since the pacing began.
+    pub fn paced_rate(&self, now: f64) -> Option<f64> {
+        self.paced.then(|| self.rate(now)).flatten()
+    }
+
     /// `paced` as of `now`, for who does not ask to send: no longer once no bulk frame is in
     /// flight and none asked to go for `FLIGHT_RATE_WINDOW_S`, or none asked for
     /// `FLIGHT_DISTRUST_S` whatever is in flight, the stream having stopped.

@@ -3503,6 +3503,7 @@ impl WsService {
             client: client.clone(),
             waiting,
             left_out,
+            paced_bps: client.as_ref().and_then(|c| c.paced_bps()),
             held_back: client.as_ref().map_or(0.0, |c| c.held_back()),
             metrics: self.deps.metrics.clone(),
         };
@@ -4901,6 +4902,7 @@ struct CheckEffects<'a> {
     /// is locked.
     waiting: usize,
     left_out: usize,
+    paced_bps: Option<f64>,
     held_back: f64,
     metrics: Option<Arc<dyn crate::ws::host::Metrics>>,
 }
@@ -4962,6 +4964,10 @@ impl GateEffects for CheckEffects<'_> {
 
     fn left_out_frames(&self) -> usize {
         self.left_out
+    }
+
+    fn paced_bps(&self) -> Option<f64> {
+        self.paced_bps
     }
 
     fn held_back(&self) -> f64 {

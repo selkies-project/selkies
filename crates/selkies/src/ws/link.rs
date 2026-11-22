@@ -187,6 +187,9 @@ pub struct DisplayLink {
     /// it, and the least of that over the last two checks: what stood there, not a moment's.
     waiting_ms: f64,
     waiting_stood_ms: f64,
+    /// What the writer's gauge read the path delivering at the last check, in bits a second,
+    /// where it paces the path (`GateEffects::paced_bps`).
+    paced_bps: Option<f64>,
     hold_ping: Option<u64>,
     fps_sample: Option<(i64, f64)>,
     measured_client_fps: Option<f64>,
@@ -955,6 +958,12 @@ impl DisplayLink {
             self.link_delivered_bps = delivered;
             if queued {
                 delivered = delivered.max(previous_bps);
+                // The acked frames of a window that began before the path narrowed tell of
+                // the path as it was, and the tick before of nothing else. The writer's
+                // gauge reads a path it paces a stamp apart: it delivers no more than that.
+                if let Some(paced) = self.paced_bps {
+                    delivered = delivered.min(paced);
+                }
             }
             delivered_bps = delivered;
         }
@@ -1239,6 +1248,11 @@ pub trait GateEffects {
     fn left_out_frames(&self) -> usize {
         0
     }
+    /// What the writer's gauge reads a path it paces delivering, in bits a second
+    /// (`ws::flight`); `None` on a path that is not paced.
+    fn paced_bps(&self) -> Option<f64> {
+        None
+    }
     /// How long the page's last ack was held on its way back, past the least any took, in
     /// seconds, where its stamps tell (`ws::flight`): an upload filling its uplink.
     fn held_back(&self) -> f64 {
@@ -1359,6 +1373,7 @@ impl DisplayLink {
         self.waiting_ms = (effects.waiting_frames() + effects.left_out_frames()) as f64
             / client_fps.max(1.0)
             * 1000.0;
+        self.paced_bps = effects.paced_bps();
         self.waiting_stood_ms = waited_ms.min(self.waiting_ms);
         let allowed_desync_frames = input.allowed_desync_ms / 1000.0 * client_fps;
         let floor_ms = self.rtt_floor_ms.unwrap_or(0.0);
@@ -2700,6 +2715,25 @@ mod tests {
         s.flat(50.0, t, 0.5, Some(3000.0));
         assert!(
             s.current() < 3000.0 && s.current() > 2000.0,
+            "{:?}",
+            s.rates()
+        );
+    }
+
+    #[test]
+    fn a_path_the_writer_paces_delivers_the_steer_no_more_than_its_gauge_reads() {
+        // The same standing stream, on a path that has just narrowed to half: the frames
+        // acked over the window still tell of 3000, and the cut would be to the headroom
+        // of that, over the path. The writer's gauge reads 1500 a stamp apart, and the cut
+        // is to the headroom of what the path delivers now.
+        let mut s = Steer::new();
+        let t = s.flat(20.0, 0.0, 10.0, Some(3000.0));
+        let t = s.flat(50.0, t, 2.0, Some(3000.0));
+        s.state.waiting_stood_ms = 100.0;
+        s.state.paced_bps = Some(1_500_000.0);
+        s.flat(50.0, t, 0.5, Some(3000.0));
+        assert!(
+            s.current() <= 1500.0 * CongestionSteer::HEADROOM + 1.0 && s.current() >= 700.0,
             "{:?}",
             s.rates()
         );

@@ -637,6 +637,12 @@ impl Client {
         self.flight.lock().paced_within(now(), span)
     }
 
+    /// What the writer's gauge reads its paced path delivering, in bits a second
+    /// (`Flight::paced_rate`); `None` on a path that is not paced.
+    pub fn paced_bps(&self) -> Option<f64> {
+        self.flight.lock().paced_rate(now()).map(|rate| rate * 8.0)
+    }
+
     /// What the sender of this socket's video asks before it hands a frame of `len` bytes
     /// over: whether the writer paced the path within `span` seconds, and whether the path
     /// has room for the frame now (`Flight::would_clear`).
