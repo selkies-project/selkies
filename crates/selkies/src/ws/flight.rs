@@ -273,6 +273,12 @@ pub struct Flight {
 }
 
 impl Flight {
+    /// The bytes of the binary messages written so far: what the page's stream has put on
+    /// its socket.
+    pub fn written(&self) -> u64 {
+        self.written
+    }
+
     /// The writer wrote a message at `now`, after a write that `waited` on the socket or
     /// went at once: `len` bytes of a binary one (none of any other, which the page does
     /// not count), a `bulk` frame or not, carrying `frame`.

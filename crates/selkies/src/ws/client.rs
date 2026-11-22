@@ -362,6 +362,12 @@ impl SessionPing for ClientPing {
         };
         client.fire_ahead(Frame::Ping(Bytes::copy_from_slice(payload)))
     }
+
+    fn stream_bytes(&self) -> Option<u64> {
+        self.0
+            .upgrade()
+            .map(|client| client.flight.lock().written())
+    }
 }
 
 impl Client {

@@ -18,7 +18,20 @@
 //! way back, and a round trip inflating past a per-session floor by more than
 //! [`UplinkGauge::INFLATION_US`] is the verdict a delay-based scavenger backs off on (LEDBAT's
 //! discipline: take what the link has spare, yield the moment anything else waits). Browsers
-//! answer pings in the network process, so no page cooperation is needed. The rejected
+//! answer pings in the network process, so no page cooperation is needed.
+//!
+//! A download yields to its own session's stream no further than its share of the path the
+//! two fill ([`UplinkGauge::share_bps`]). The stream's steer finds the path's rate by filling
+//! it: it raises the stream until a queue stands, backs off for the moment that queue takes
+//! to drain, and is back at what it delivered. A scavenger beside it backs off at each of
+//! those queues and the stream delivers the more for it, so the next one finds the scavenger
+//! lower: the stream ends with the path and the download with its floor, on a path the
+//! download was the user's to fill as the stream is. So while the round trip stands no more
+//! than [`BESIDE_INFLATION_US`] over its floor, the queue of a steer at work, a congested
+//! verdict takes a download no lower than [`BESIDE_SHARE`] of an even split of what it and
+//! the stream moved over the last [`BESIDE_WINDOW`]: the steer then meets a path that
+//! delivers the stream its half and settles there. Past that the stream itself is late
+//! (`ws::flight::FLIGHT_LATE_S`), and the download yields as to anything else. The rejected
 //! alternatives: reading flat out to measure the client's rate and then settling on a fixed
 //! share of it filled the very queue it existed to prevent; kernel srtt and the unsent-queue
 //! ioctl on the transfer's own socket time only the first hop, so a relaying middlebox blinds
@@ -60,6 +73,17 @@ pub const TRANSFER_CHUNK_MAX_BYTES: usize = 1 << 20;
 /// Below this a transfer is over before a queue could matter, and gauging it would only make
 /// a small file feel slow.
 pub const TRANSFER_MIN_GAUGED_BYTES: u64 = 4 * 1024 * 1024;
+/// The round trip's excess over its floor up to which a download keeps its share of the path
+/// beside its session's stream: the stream's own late line (`ws::flight::FLIGHT_LATE_S`).
+/// Under it the queue is one a steer raises to read the path by and drains by itself; past
+/// it the stream is late, and the download yields to it as to anything else.
+pub const BESIDE_INFLATION_US: u32 = 100_000;
+/// The share of an even split a download beside its session's stream backs off to at the
+/// least: under the whole of it, so that the backoff leaves the queue room to drain.
+pub const BESIDE_SHARE: f64 = 0.9;
+/// How far back a download reads what it and the stream beside it moved: a few of the
+/// steer's ticks and of its own verdicts, and short of the seconds a backoff's hold lasts.
+pub const BESIDE_WINDOW: f64 = 1.0;
 
 /// Seconds on a monotonic clock whose origin is the first call: the pacers' and the gauge's
 /// shared notion of now, comparable across every instance in the process.
@@ -103,8 +127,9 @@ pub async fn pace_gauged(pacer: &TransferPacer, gauge: &mut UplinkGauge, nbytes:
             return false;
         }
         let piece = rest.min(gauged_chunk_size(pacer));
+        let share = gauge.share_bps(piece);
         pacer
-            .pace_verdict(piece, verdict, Some(gauge.inflation_us()))
+            .pace_verdict_beside(piece, verdict, Some(gauge.inflation_us()), share)
             .await;
         rest -= piece;
     }
@@ -116,6 +141,13 @@ pub trait SessionPing: Send + Sync {
     /// Send a WebSocket ping carrying `payload` behind everything written to the socket so
     /// far; `false` when the socket is gone, which drops it from every gauge.
     fn ping(&self, payload: &[u8]) -> bool;
+
+    /// The bytes of the session's stream written to the socket so far, where the transport
+    /// counts them: what a download beside the stream reads the stream's rate by
+    /// ([`UplinkGauge::share_bps`]).
+    fn stream_bytes(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// The RTT floor of one session: the minimum over a bounded history of minute buckets.
@@ -235,6 +267,12 @@ impl UplinkClock {
         self.state.lock().answered
     }
 
+    /// The bytes of the session's stream written to the socket so far
+    /// ([`SessionPing::stream_bytes`]).
+    pub fn stream_bytes(&self) -> Option<u64> {
+        self.pinger.stream_bytes()
+    }
+
     fn seq(&self) -> u64 {
         self.state.lock().seq
     }
@@ -277,6 +315,11 @@ pub struct UplinkGauge {
     conns: Vec<(Arc<UplinkClock>, u64)>,
     last_ping: f64,
     inflation_us: u32,
+    /// Where the gauge is a download's ([`UplinkGauge::beside_stream`]): when, with what the
+    /// download had moved by then and what the gauged sockets' streams had written.
+    beside: Option<VecDeque<(f64, u64, u64)>>,
+    /// The bytes the transfer has moved under this gauge.
+    moved: u64,
 }
 
 impl UplinkGauge {
@@ -301,7 +344,64 @@ impl UplinkGauge {
                 .collect(),
             last_ping: f64::NEG_INFINITY,
             inflation_us: 0,
+            beside: None,
+            moved: 0,
         }
+    }
+
+    /// The gauge of a download: its bytes cross the path the gauged sockets' streams cross,
+    /// the same way, and it keeps its share of that path beside them
+    /// ([`UplinkGauge::share_bps`]). An upload's bytes go the other way, where the stream
+    /// sends its acks alone, and its gauge yields as it always did.
+    #[must_use]
+    pub fn beside_stream(mut self) -> Self {
+        self.beside = Some(VecDeque::new());
+        self
+    }
+
+    /// Count the `nbytes` a download moves next, and return the least a congested verdict
+    /// backs it off to, in bytes a second: [`BESIDE_SHARE`] of an even split of what it and
+    /// the gauged sockets' streams moved over the last [`BESIDE_WINDOW`]. `None` where the
+    /// gauge is not a download's, where no gauged socket counts a stream, and until half
+    /// that window has been read.
+    pub fn share_bps(&mut self, nbytes: usize) -> Option<f64> {
+        self.share_bps_at(nbytes, monotonic())
+    }
+
+    /// [`UplinkGauge::share_bps`] at `now` on the [`monotonic`] clock.
+    fn share_bps_at(&mut self, nbytes: usize, now: f64) -> Option<f64> {
+        let stream = self
+            .conns
+            .iter()
+            .filter_map(|(clock, _)| clock.stream_bytes())
+            .reduce(|all, one| all + one);
+        // What has moved by now: the piece counted here moves after it.
+        let so_far = self.moved;
+        self.moved += nbytes as u64;
+        let history = self.beside.as_mut()?;
+        let Some(stream) = stream else {
+            history.clear();
+            return None;
+        };
+        if history
+            .back()
+            .is_none_or(|(at, _, _)| now - at >= BESIDE_WINDOW / 10.0)
+        {
+            history.push_back((now, so_far, stream));
+        }
+        while history
+            .get(1)
+            .is_some_and(|(at, _, _)| now - at >= BESIDE_WINDOW)
+        {
+            history.pop_front();
+        }
+        let (at, moved, streamed) = *history.front()?;
+        let span = now - at;
+        if span < BESIDE_WINDOW / 2.0 {
+            return None;
+        }
+        let both = (so_far - moved) + stream.saturating_sub(streamed);
+        Some(BESIDE_SHARE * both as f64 / span / 2.0)
     }
 
     /// Whether any session socket is left to gauge.
@@ -483,6 +583,21 @@ impl TransferPacer {
         congested: Option<bool>,
         inflation_us: Option<u32>,
     ) {
+        self.pace_verdict_beside(nbytes, congested, inflation_us, None)
+            .await;
+    }
+
+    /// [`TransferPacer::pace_verdict`] for a download beside its session's stream: a
+    /// congested verdict backs the allowance off no further than `share_bps`
+    /// ([`UplinkGauge::share_bps`]) while the round trip stands no more than
+    /// [`BESIDE_INFLATION_US`] over its floor.
+    pub async fn pace_verdict_beside(
+        &self,
+        nbytes: usize,
+        congested: Option<bool>,
+        inflation_us: Option<u32>,
+        share_bps: Option<f64>,
+    ) {
         if !self.active() {
             return;
         }
@@ -490,7 +605,9 @@ impl TransferPacer {
             && let Some(congested) = congested
         {
             let step = (8.0 * 1024.0f64).max((self.rate_bps() * 0.03).floor());
-            self.gauge_backoff(congested, !congested, 0.65, step, inflation_us);
+            let share =
+                share_bps.filter(|_| inflation_us.is_some_and(|i| i <= BESIDE_INFLATION_US));
+            self.gauge_backoff_beside(congested, !congested, 0.65, step, inflation_us, share);
         }
         if let Some(wait) = self.bucket(nbytes) {
             tokio::time::sleep(wait).await;
@@ -539,13 +656,17 @@ impl TransferPacer {
     /// that takes many times longer. The epoch closes only on a clear sample past that
     /// window: ending it on one inside would let an oscillating gauge re-arm the ceiling from
     /// each freshly cut rate, the same ratchet one flap at a time.
-    fn gauge_backoff(
+    ///
+    /// `share_bps` is the least a cut leaves the allowance, where there is one
+    /// ([`UplinkGauge::share_bps`]): the allowance as it stands, where that is under it.
+    fn gauge_backoff_beside(
         &self,
         congested: bool,
         clear: bool,
         cut: f64,
         step: f64,
         inflation_us: Option<u32>,
+        share_bps: Option<f64>,
     ) {
         let mut s = self.inner.lock();
         if congested {
@@ -563,7 +684,8 @@ impl TransferPacer {
             } else if draining {
                 cut = 1.0 - (1.0 - cut) / 4.0;
             }
-            s.rate_bps = (s.rate_bps * cut).max(Self::RATE_FLOOR);
+            let least = share_bps.map_or(Self::RATE_FLOOR, |share| share.min(s.rate_bps));
+            s.rate_bps = (s.rate_bps * cut).max(Self::RATE_FLOOR).max(least);
             s.hold_until = now + Self::HOLD_SECONDS;
             return;
         }
@@ -584,6 +706,19 @@ impl TransferPacer {
             (s.rate_bps + step).min(bound)
         };
     }
+
+    /// [`TransferPacer::gauge_backoff_beside`] with no share to keep.
+    #[cfg(test)]
+    fn gauge_backoff(
+        &self,
+        congested: bool,
+        clear: bool,
+        cut: f64,
+        step: f64,
+        inflation_us: Option<u32>,
+    ) {
+        self.gauge_backoff_beside(congested, clear, cut, step, inflation_us, None);
+    }
 }
 
 #[cfg(test)]
@@ -593,7 +728,7 @@ mod tests {
     //! throttle, chunks follow the rate, and the gauge's verdicts come from timing its own pings.
 
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     const DEFAULT_STEP: f64 = 8.0 * 1024.0;
 
@@ -841,6 +976,138 @@ mod tests {
         assert!(
             !gauge.alive(),
             "a dead session socket takes the gauge with it"
+        );
+    }
+
+    /// A session socket whose stream has written what the test says.
+    struct StreamingSocket {
+        written: AtomicU64,
+    }
+
+    impl SessionPing for StreamingSocket {
+        fn ping(&self, _payload: &[u8]) -> bool {
+            true
+        }
+
+        fn stream_bytes(&self) -> Option<u64> {
+            Some(self.written.load(Ordering::Relaxed))
+        }
+    }
+
+    /// A tenth of a second at a time, a download moving 100 kB/s beside a stream writing
+    /// `stream_bps`: the share the gauge reads at the end of `seconds`.
+    fn share_after(
+        gauge: &mut UplinkGauge,
+        socket: &StreamingSocket,
+        stream_bps: u64,
+        seconds: f64,
+    ) -> Option<f64> {
+        let mut share = None;
+        for tick in 0..=(seconds * 10.0).round() as u64 {
+            socket
+                .written
+                .store(tick * stream_bps / 10, Ordering::Relaxed);
+            share = gauge.share_bps_at(10_000, 100.0 + tick as f64 / 10.0);
+        }
+        share
+    }
+
+    #[test]
+    fn a_downloads_share_is_of_what_it_and_the_stream_moved_together() {
+        let socket = Arc::new(StreamingSocket {
+            written: AtomicU64::new(0),
+        });
+        let clock = Arc::new(UplinkClock::new(socket.clone()));
+        let mut gauge = socket_gauge(clock.clone()).beside_stream();
+        assert_eq!(
+            share_after(&mut gauge, &socket, 300_000, 0.4),
+            None,
+            "under half the window says nothing of either rate"
+        );
+        // 100 kB/s beside 300 kB/s: an even split is 200 kB/s each.
+        let mut gauge = socket_gauge(clock.clone()).beside_stream();
+        let share = share_after(&mut gauge, &socket, 300_000, 3.0).expect("a share");
+        let even = 200_000.0 * BESIDE_SHARE;
+        assert!((share - even).abs() < 0.02 * even, "{share} of {even}");
+        // The stream alone moving faster raises it: the split is of the two together.
+        let mut gauge = socket_gauge(clock.clone()).beside_stream();
+        let share = share_after(&mut gauge, &socket, 500_000, 3.0).expect("a share");
+        let even = 300_000.0 * BESIDE_SHARE;
+        assert!((share - even).abs() < 0.02 * even, "{share} of {even}");
+        // An upload's gauge keeps no share: its bytes go the other way.
+        let mut upload = socket_gauge(clock);
+        assert_eq!(share_after(&mut upload, &socket, 300_000, 3.0), None);
+    }
+
+    #[test]
+    fn a_download_beside_no_counted_stream_keeps_no_share() {
+        let socket = Arc::new(FakeSocket {
+            pings: Mutex::new(Vec::new()),
+            fail: AtomicBool::new(false),
+        });
+        let mut gauge = socket_gauge(Arc::new(UplinkClock::new(socket))).beside_stream();
+        for tick in 0..30 {
+            assert_eq!(
+                gauge.share_bps_at(10_000, 100.0 + f64::from(tick) / 10.0),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn a_download_beside_a_stream_backs_off_no_further_than_its_share() {
+        let pacer = TransferPacer::adaptive();
+        let share = Some(340_000.0);
+        // The share stands over what the cut would leave: the cut stops at it.
+        set_rate(&pacer, 400_000.0);
+        pacer.gauge_backoff_beside(true, false, 0.65, DEFAULT_STEP, Some(40_000), share);
+        assert!(
+            (pacer.rate_bps() - 340_000.0).abs() < 1.0,
+            "{}",
+            pacer.rate_bps()
+        );
+        // A download already under its share is cut no lower, and no verdict raises it there.
+        release_hold(&pacer);
+        set_rate(&pacer, 200_000.0);
+        pacer.gauge_backoff_beside(true, false, 0.65, DEFAULT_STEP, Some(40_000), share);
+        assert!(
+            (pacer.rate_bps() - 200_000.0).abs() < 1.0,
+            "{}",
+            pacer.rate_bps()
+        );
+        // One with far more than its share yields as any does.
+        release_hold(&pacer);
+        set_rate(&pacer, 1_000_000.0);
+        pacer.gauge_backoff_beside(true, false, 0.65, DEFAULT_STEP, Some(40_000), share);
+        assert!(
+            (pacer.rate_bps() - 650_000.0).abs() < 1.0,
+            "{}",
+            pacer.rate_bps()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_queue_past_the_streams_late_line_is_yielded_to_in_full() {
+        let share = Some(340_000.0);
+        let pacer = TransferPacer::adaptive();
+        set_rate(&pacer, 400_000.0);
+        pacer
+            .pace_verdict_beside(1024, Some(true), Some(BESIDE_INFLATION_US), share)
+            .await;
+        assert!(
+            (pacer.rate_bps() - 340_000.0).abs() < 1.0,
+            "a queue up to the stream's late line is the steer's to drain: {}",
+            pacer.rate_bps()
+        );
+        let pacer = TransferPacer::adaptive();
+        set_rate(&pacer, 400_000.0);
+        pacer
+            .pace_verdict_beside(1024, Some(true), Some(BESIDE_INFLATION_US + 1), share)
+            .await;
+        assert!(
+            (pacer.rate_bps() - 260_000.0).abs() < 1.0,
+            "past it the stream is late: {}",
+            pacer.rate_bps()
         );
     }
 
