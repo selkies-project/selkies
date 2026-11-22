@@ -26,23 +26,30 @@
 //   download-static  6 Mbit/s downlink, 3 Mbit/s static cap: the cap is
 //                    honored and the stream stays clean.
 //   upload-static    6 Mbit/s uplink, 3 Mbit/s cap: upload reads pace the
-//                    client down to the cap, and the stream, whose acks the
-//                    upload holds up on their way back, loses no frame to the
-//                    gate and none of its rate to the steer for it.
-//   upload-auto      6 Mbit/s uplink behind a fat first-hop buffer, no cap: a
-//                    small request beside the upload crosses near its unloaded
-//                    latency instead of waiting out the buffer, and the
-//                    stream, its acks a second late, is left as it is once
-//                    the first of them has said so.
+//                    client down to the cap, and the stream beside it loses
+//                    no frame to the gate and none of its rate to the steer.
+//   upload-auto      6 Mbit/s uplink behind a fat first-hop buffer, no cap:
+//                    the buffer is never filled, so a small request beside
+//                    the upload crosses near its unloaded latency instead of
+//                    waiting it out, and the stream's acks come back as they
+//                    did: no frame let go, no rate cut.
+//   upload-long      the same for 80 MiB, two minutes: through the pacer's
+//                    rises and backoffs the upload has the link it does not
+//                    share, and the small requests and the stream are as
+//                    beside none.
+//   upload-narrow    6 Mbit/s each way: the stream fills its downlink and its
+//                    steer keeps a queue standing there, which is none of the
+//                    upload's: the upload has its uplink all the same.
 //
-// The spare-capacity contract lives on the download side because only there
-// does the model bound the receiver: the server's writes block at the shaped
-// link. An upload's receiver is the server's own socket, whose buffer loopback
-// autotunes to megabytes and the relay cannot bound, so the sender never
-// slows and the wall time measures the pacer's climb back from a queue it
-// could not touch rather than the link. The same pacer serves both
-// directions, so the download scenarios are the measure of it; upload-auto
-// keeps the latency contract and a completion floor.
+// A receiver holds a sender by its window and by nothing else: what the
+// sender may have on its way is what the receiver has acknowledged plus what
+// it advertises. The relay ends each connection twice, so it admits a
+// connection's bytes no further than its far end's own window, as the path
+// between them would: a server that sizes an upload's window to its allowance
+// bounds what stands in the client's first hop, whatever that hop would hold,
+// and one that advertises megabytes has them fill it. The relay's side of the
+// hop to the server announces an Ethernet segment size, since a loopback's
+// 64 KiB one starts a receive window at a megabyte.
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -59,6 +66,8 @@ import { waitWsVideo } from '../lib/stream.ts';
 
 const RELAY_PORT = Number(process.env.E2E_SATURATION_PORT ?? '18215');
 const BLOB_MB = 8;
+/** The longer upload's blob: two minutes of the 6 Mbit/s uplink. */
+const LONG_MB = 80;
 const BASE_URL = `http://127.0.0.1:${RELAY_PORT}`;
 
 declare global {
@@ -109,15 +118,16 @@ async function smallRequestMs(): Promise<number> {
     }
 }
 
-/** Mbit/s and seconds of one curl transfer of the blob; 0 Mbit/s when curl fails. */
-async function timedCurl(args: string[]): Promise<[number, number]> {
+/** Mbit/s and seconds of one curl transfer of a blob of `megabytes`; 0 Mbit/s when curl fails. */
+async function timedCurl(args: string[], megabytes = BLOB_MB): Promise<[number, number]> {
     const t0 = performance.now();
     const child = spawn('curl', ['-sS', '-o', '/dev/null', ...args], { stdio: 'ignore' });
-    const timer = setTimeout(() => { child.kill('SIGKILL'); }, 180_000);
+    // Ended after three minutes, or where a longer blob is still short of 2 Mbit/s.
+    const timer = setTimeout(() => { child.kill('SIGKILL'); }, Math.max(180_000, megabytes * 4_000));
     const rc = await exited(child);
     clearTimeout(timer);
     const dt = (performance.now() - t0) / 1000;
-    return [rc === 0 ? (BLOB_MB * 8) / dt : 0, dt];
+    return [rc === 0 ? (megabytes * 8) / dt : 0, dt];
 }
 
 function median(values: number[]): number {
@@ -134,6 +144,9 @@ function fpsHealth(samples: (number | null)[]): [number, number] {
     return [mid.length ? median(mid.map((f) => f ?? 0)) : 0, stall];
 }
 
+/** The file a scenario's blob of `megabytes` is kept in. */
+const blobName = (megabytes: number): string => (megabytes === BLOB_MB ? 'blob.bin' : `blob-${megabytes}.bin`);
+
 const show = (samples: (number | null)[]): string => `[${samples.map((f) => (f === null ? 'None' : String(f))).join(', ')}]`;
 
 /**
@@ -141,14 +154,14 @@ const show = (samples: (number | null)[]): string => `[${samples.map((f) => (f =
  * sampling fps and small-request latency once a second, and count the times
  * the gate let frames go and the steer cut the video's rate over the transfer.
  * `rcvbuf` sizes the relay's modeled first-hop queue; the default models a
- * shallow hop.
+ * shallow hop. The transfer's blob is `megabytes` large (`blobName`).
  */
 async function scenario(res: Checks, host: Host, tag: string, downKbit: number, upKbit: number, limitMbps: number,
-    transfer: Transfer, rcvbuf = 0): Promise<[[number, number], (number | null)[], number[], number, number]> {
+    transfer: Transfer, rcvbuf = 0, megabytes = BLOB_MB): Promise<[[number, number], (number | null)[], number[], number, number]> {
     const filesRoot = join(WORKDIR, 'sat-files');
     mkdirSync(filesRoot, { recursive: true });
-    const blob = join(filesRoot, 'blob.bin');
-    if (!existsSync(blob) || statSync(blob).size !== BLOB_MB * 2 ** 20) writeFileSync(blob, randomBytes(BLOB_MB * 2 ** 20));
+    const blob = join(filesRoot, blobName(megabytes));
+    if (!existsSync(blob) || statSync(blob).size !== megabytes * 2 ** 20) writeFileSync(blob, randomBytes(megabytes * 2 ** 20));
     const { port } = await host.start({
         label: tag, mode: 'websockets', wayland: false,
         env: { SELKIES_FILE_TRANSFER_LIMIT_MBPS: String(limitMbps), FILE_MANAGER_PATH: filesRoot },
@@ -241,26 +254,47 @@ test('transfer_saturation', async () => {
         res.check('upload-static: upload reads pace the client to the cap', mbps >= 2.2 && mbps <= 3.8, `${mbps.toFixed(2)} Mbit/s`);
         res.check('upload-static: stream unaffected on the wide downlink', med >= 45 && stall <= 0.10,
             `median fps=${med} stall_frac=${stall.toFixed(2)}`);
-        // The upload holds the page's acks up on their way back, with the stream arriving on
-        // time: nothing of it is to be held, let go by the gate or cut by the steer for that.
+        // The upload shares the page's way back and none of the stream's own path: nothing of
+        // the stream is to be held, let go by the gate or cut by the steer beside it.
         res.check('upload-static: the gate lets no frame go beside the upload', flushes === 0, `${flushes} flushes`);
         res.check('upload-static: the steer cuts nothing beside the upload', capped[4] === 0, `${capped[4]} cuts`);
 
         // A fat first-hop buffer is what turns an upload into session-wide lag:
         // 1 MiB at 6 Mbit/s is well over a second of queue for anything the
-        // client sends behind it.
+        // client sends behind it, the page's acks among it.
         const [[autoMbps, autoDt], , lat, autoFlushes, autoCuts] = await scenario(res, host, 'upload-auto', 50000, 6000, 0, up, 1024 * 1024);
         const clean = lat.filter((v) => !Number.isNaN(v));
         const medianMs = median(clean);
         res.check('upload-auto: the upload completes through the buffered link', autoMbps > 1.0, `${autoMbps.toFixed(2)} Mbit/s in ${autoDt.toFixed(0)}s`);
         res.check('upload-auto: a small request beside it is not stuck behind the queue', medianMs < 250,
-            `median=${Number.isNaN(medianMs) ? 'nan' : medianMs.toFixed(0)}ms samples=${clean.length}`);
-        // The acks arrive a second late here, behind the buffer: that is their way back, and
-        // the stream's own path is as free as before the upload. As the buffer fills none
-        // arrives for that second, and the gate may let frames go once, as for a path gone
-        // silent, before the first one tells how late it is.
-        res.check('upload-auto: the gate lets frames go no more than once beside the upload', autoFlushes <= 1, `${autoFlushes} flushes`);
+            `median=${Number.isNaN(medianMs) ? 'nan' : medianMs.toFixed(0)}ms samples=${clean.length} worst=${Math.max(...clean, 0).toFixed(0)}ms`);
+        // The buffer is not filled, at the upload's start no more than later: the acks come
+        // back as before it, and the gate has no silence to take for a path gone silent.
+        res.check('upload-auto: the gate lets no frame go beside the upload', autoFlushes === 0, `${autoFlushes} flushes`);
         res.check('upload-auto: the steer cuts nothing beside the upload', autoCuts === 0, `${autoCuts} cuts`);
+
+        // Longer than the pacer takes to find the link and back off from it a few times: what
+        // an upload costs the session is read over its course, not its first seconds.
+        const long: Transfer = (root) => timedCurl(['-X', 'POST', '-H', 'X-Upload-Path: sat-upload-long.bin',
+            '--data-binary', `@${join(root, blobName(LONG_MB))}`, `${BASE_URL}/api/upload`], LONG_MB);
+        const [[longMbps, longDt], , longLat, longFlushes, longCuts] = await scenario(res, host, 'upload-long', 50000, 6000, 0, long, 1024 * 1024, LONG_MB);
+        const beside = longLat.filter((v) => !Number.isNaN(v));
+        const stuck = beside.filter((v) => v >= 250).length;
+        res.check('upload-long: the upload has the link it does not share', longMbps >= 4.0, `${longMbps.toFixed(2)} Mbit/s in ${longDt.toFixed(0)}s`);
+        res.check('upload-long: small requests beside it cross as beside none', beside.length > 0 && stuck * 10 <= beside.length,
+            `${stuck} of ${beside.length} at 250 ms or over, median=${median(beside).toFixed(0)}ms worst=${Math.max(...beside, 0).toFixed(0)}ms`);
+        res.check('upload-long: the gate lets no frame go beside the upload', longFlushes === 0, `${longFlushes} flushes`);
+        res.check('upload-long: the steer cuts nothing beside the upload', longCuts === 0, `${longCuts} cuts`);
+
+        // A stream that fills its downlink stands a queue there by its steer's own work,
+        // and a ping's round trip carries it: the upload is read against its own way, the
+        // uplink, which it has to itself here.
+        const [[narrowMbps, narrowDt], narrowFps] = await scenario(res, host, 'upload-narrow', 6000, 6000, 0, up);
+        const [narrowMed, narrowStall] = fpsHealth(narrowFps);
+        res.check('upload-narrow: the upload has its uplink beside a stream that fills its downlink', narrowMbps >= 4.0,
+            `${narrowMbps.toFixed(2)} Mbit/s in ${narrowDt.toFixed(0)}s`);
+        res.check('upload-narrow: stream keeps flowing beside the upload', narrowMed >= 30 && narrowStall <= 0.25,
+            `median fps=${narrowMed} stall_frac=${narrowStall.toFixed(2)}`);
     } finally {
         await host.close();
     }
