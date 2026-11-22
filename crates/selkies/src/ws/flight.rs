@@ -259,6 +259,14 @@ pub struct Flight {
     stamped: bool,
     stamped_at: f64,
     back: f64,
+    /// What tells a way back held for longer than the lags' history from a clock: the least,
+    /// over the same history, a named frame's arrival on the page's clock stood past its
+    /// write on this one (the way out and the two clocks' distance, nothing of the way
+    /// back in it), and the least round trip a named frame ever took on this clock alone,
+    /// its ack's wait for the tick taken off (both ways at their shortest, no clock in it).
+    /// The second less the first is where the lags' least stands with no hold in it.
+    outs: FloorHistory,
+    round: Option<f64>,
     /// What the way back held the last few stamps: the least of it stands on that way
     /// whatever one piece is held more than the next.
     backs: VecDeque<f64>,
@@ -328,6 +336,14 @@ impl Flight {
         } else {
             self.lags.floor().unwrap_or(lag)
         };
+        // An upload that holds the acks for longer than the history remembers leaves it no
+        // lag from before: its least is then the hold's own, and would read the way back
+        // as free. The way out says where the least stands without it, and is taken where
+        // it is the lower of the two: a clock that drifted apart since moves both alike.
+        let least = match (self.round, self.outs.floor()) {
+            (Some(round), Some(out)) => least.min(round - out),
+            _ => least,
+        };
         self.back = (lag - least).max(0.0);
         self.stamped = true;
         self.stamped_at = now;
@@ -365,6 +381,8 @@ impl Flight {
         // remembers. A way back that holds the acks, however long, shows nothing of the
         // kind: what an ack says is as old as the ack.
         if left - held < sent.at - FLIGHT_LATE_S {
+            self.outs = FloorHistory::default();
+            self.round = None;
             self.lags = FloorHistory::default();
             self.lags.observe(lag, now);
             self.back = 0.0;
@@ -372,6 +390,11 @@ impl Flight {
             self.backs.push_back(0.0);
             self.arrivals.clear();
             left = now;
+        }
+        if named {
+            self.outs.observe(stamp - held - sent.at, now);
+            let round = (now - sent.at - held).max(0.0);
+            self.round = Some(self.round.map_or(round, |least| least.min(round)));
         }
         let arrived = (left - held).max(sent.at);
         let round_trip = arrived - sent.at;
@@ -1292,21 +1315,19 @@ mod tests {
     }
 
     #[test]
-    fn a_way_back_held_past_the_stamps_history_costs_one_short_hold() {
-        // The way back is read against the least lag of the history's ten minutes. An upload
-        // that holds the acks for longer outlives it: until then the hold is read to the
-        // millisecond and nothing is paced; as the last lag from before the upload leaves,
-        // the hold reads as the path's own, the frames out look late by it, and video waits
-        // until the pace the path keeps shows a longer way round. That is one hold of under
-        // a fifth of a second, behind a megabyte of buffer or a relay's queue alike, and
-        // nothing is paced after it.
+    fn a_way_back_held_past_the_stamps_history_is_a_way_back_still() {
+        // The lags' least is the least of the history's ten minutes. An upload that holds
+        // the acks for longer outlives it: every lag it remembers is then a held one. The
+        // way out is not held, and with the least round trip the path ever showed it says
+        // where the least stands without the hold: behind a megabyte of buffer or a
+        // relay's queue alike, the hold is read to the millisecond thirteen minutes on,
+        // nothing is paced as the history turns or after, and no frame waits.
         for hold in [1.3f64, 0.143] {
             let mut flight = Flight::default();
             let mut path = Path::new(2_500_000.0, 0.02);
             let (mut due, mut now) = (10.0, 10.0);
             let mut queue: VecDeque<f64> = VecDeque::new();
-            let (mut before, mut turning, mut after) = (0.0f64, 0.0f64, 0.0f64);
-            let mut longest = 0.0f64;
+            let (mut paced, mut longest) = (0.0f64, 0.0f64);
             while now < 790.0 {
                 let filled: f64 = now - 15.0;
                 path.up = 0.01 + filled.clamp(0.0, 1.0) * hold;
@@ -1320,25 +1341,64 @@ mod tests {
                     longest = longest.max(now - queue.pop_front().unwrap());
                 }
                 if flight.paced() {
-                    if now < 599.0 {
-                        before += 0.001;
-                    } else if now < 601.0 {
-                        turning += 0.001;
-                    } else {
-                        after += 0.001;
-                    }
+                    paced += 0.001;
                 }
-                if (598.0..599.0).contains(&now) {
-                    assert!((flight.back - hold).abs() < 0.01, "{hold}: {}", flight.back);
+                if now > 20.0 {
+                    assert!(
+                        (flight.back - hold).abs() < 0.01,
+                        "{hold} at {now}: {}",
+                        flight.back
+                    );
                 }
                 now += 0.001;
             }
-            assert!(before == 0.0 && after == 0.0, "{hold}: {before} {after}");
-            assert!(
-                turning < 0.2 && longest < 0.2,
-                "{hold}: {turning} {longest}"
-            );
+            assert!(paced == 0.0 && longest < 0.002, "{hold}: {paced} {longest}");
         }
+    }
+
+    #[test]
+    fn a_page_clock_that_loses_time_for_half_an_hour_hides_no_more_than_the_history_holds() {
+        // A page whose clock loses 100 parts in a million against this one, on a path that
+        // carries the stream: every lag is longer than the last, the least of the history
+        // is ten minutes old, and each ack reads as held by what the clock lost since, 60
+        // ms and no more however long it goes on. The path then narrows: it is paced, and
+        // holds that much more than the bound at the most.
+        let mut flight = Flight::default();
+        let mut path = Path::new(2_500_000.0, 0.02);
+        path.drift = -100e-6;
+        let (mut waiting, mut due, mut now) = (0usize, 10.0, 10.0);
+        let (mut most, mut paced, mut worst) = (0.0f64, 0.0f64, 0.0f64);
+        while now < 1815.0 {
+            if now >= 1810.0 {
+                path.rate = 187_500.0;
+            }
+            path.deliver(&mut flight, now);
+            if now >= due {
+                waiting += 1;
+                due += 1.0 / 60.0;
+            }
+            while waiting > 0 && flight.clear(now, FLIGHT_LATE_S, waiting > 1) {
+                path.write(&mut flight, 16_384, now, true);
+                waiting -= 1;
+            }
+            if now < 1810.0 {
+                most = most.max(flight.back);
+                assert!(!flight.paced(), "paced at {now}");
+            } else {
+                if flight.paced() {
+                    paced += 0.001;
+                }
+                if now > 1811.0 {
+                    worst = worst.max(path.free_at - now);
+                }
+            }
+            now += 0.001;
+        }
+        assert!((0.05..0.07).contains(&most), "{most}");
+        assert!(
+            paced > 4.0 && worst < FLIGHT_LATE_S + 0.2,
+            "{paced} {worst}"
+        );
     }
 
     #[test]
