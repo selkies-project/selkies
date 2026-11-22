@@ -144,7 +144,16 @@ pub fn resolve_listen_addresses(addr: &str, port: u16) -> Result<Vec<SocketAddr>
     Ok(candidates)
 }
 
-/// One listening socket on `addr`: reusable, IPv6-only where IPv6, non-blocking.
+/// The window clamp a listening socket is opened with, which its connections take their
+/// window scale from: at 16 MiB the scale's step is 512 bytes, under a segment. A socket
+/// whose buffer is made smaller advertises less only by what arrives between two of its
+/// acks less one step of its scale, so where the host's buffer limits put that step at
+/// kilobytes (16 KiB under limits of half a gigabyte) a window once open stays open, and
+/// an upload's cannot follow its allowance down (`files::pacing`).
+const LISTEN_WINDOW_CLAMP: libc::c_int = 16 << 20;
+
+/// One listening socket on `addr`: reusable, IPv6-only where IPv6, non-blocking, its
+/// connections' window scale no coarser than [`LISTEN_WINDOW_CLAMP`] makes it.
 fn bind_one(addr: &SocketAddr) -> Result<OwnedFd, Errno> {
     let family = if addr.is_ipv4() {
         AddressFamily::Inet
@@ -158,6 +167,18 @@ fn bind_one(addr: &SocketAddr) -> Result<OwnedFd, Errno> {
         None,
     )?;
     socket::setsockopt(&fd, sockopt::ReuseAddr, &true)?;
+    // A kernel that refuses the clamp leaves the scale its own.
+    let clamp = LISTEN_WINDOW_CLAMP;
+    // SAFETY: setsockopt reads the int it is given, for the length it is given.
+    unsafe {
+        libc::setsockopt(
+            fd.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_WINDOW_CLAMP,
+            (&raw const clamp).cast(),
+            libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>()).unwrap_or(4),
+        );
+    }
     match addr {
         SocketAddr::V4(v4) => socket::bind(fd.as_raw_fd(), &SockaddrIn::from(*v4))?,
         SocketAddr::V6(v6) => {
@@ -749,6 +770,41 @@ mod tests {
     use super::*;
     use axum::http::{HeaderName, HeaderValue};
     use std::net::TcpListener as StdListener;
+
+    #[test]
+    fn a_listeners_connections_take_a_window_scale_under_a_segment() {
+        let fd = bind_one(&"127.0.0.1:0".parse().expect("an address")).expect("a loopback port");
+        let listener = StdListener::from(fd);
+        let near = std::net::TcpStream::connect(listener.local_addr().expect("its address"))
+            .expect("a connection");
+        let far = loop {
+            match listener.accept() {
+                Ok((far, _)) => break far,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        };
+        // `struct tcp_info` keeps the two scales in its seventh byte, the receive window's
+        // in the high half.
+        let mut info = [0u8; 8];
+        let mut len: libc::socklen_t = 8;
+        // SAFETY: getsockopt writes at most `len` bytes into the buffer it is given.
+        let done = unsafe {
+            libc::getsockopt(
+                far.as_raw_fd(),
+                libc::IPPROTO_TCP,
+                libc::TCP_INFO,
+                info.as_mut_ptr().cast(),
+                &raw mut len,
+            )
+        };
+        assert_eq!(done, 0);
+        let scale = info[6] >> 4;
+        assert!(scale <= 9, "a step of {} bytes", 1u32 << scale);
+        drop(near);
+    }
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();

@@ -2789,6 +2789,45 @@ async fn the_upload_gauge_reads_each_browsers_signaling_socket() {
     rig.service.shutdown().await;
 }
 
+// `keep_floors`: a signaling socket is pinged with no transfer on it, and its pong is the floor
+// a transfer is then read against.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_signaling_sockets_clock_keeps_its_floor_with_no_transfer() {
+    use crate::files::SessionDirectory;
+
+    let rig = Rig::new((1920, 1080), quick());
+    rig.service.begin().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let registry = rig.service.peer_registry().expect("running");
+    let sessions = Arc::new(crate::webrtc::wiring::RtcSessions::default());
+    sessions.bind(rig.service.clone());
+    sessions.keep_floors();
+    let (tx, mut outbox) = signaling_client(&registry, "primary").await;
+    let ping = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match outbox.recv().await {
+                Some(Outbound::Ping(payload)) => break payload,
+                Some(_) => {}
+                None => panic!("the socket ended"),
+            }
+        }
+    })
+    .await
+    .expect("a ping on the directory's own beat");
+    let clock = sessions.uplink_sessions().remove(0).clock;
+    assert_eq!(clock.floor_s(), None, "no floor before a pong");
+    tx.send(Inbound::Pong(ping)).await.unwrap();
+    for _ in 0..100 {
+        if clock.floor_s().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(clock.floor_s().is_some(), "the pong is the socket's floor");
+    rig.service.shutdown().await;
+}
+
 /// The desktop follows the primary display's page alone, through the shared sanitizer, as over
 /// WebSockets.
 #[tokio::test]

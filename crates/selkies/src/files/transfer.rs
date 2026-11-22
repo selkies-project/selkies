@@ -118,7 +118,7 @@ pub async fn serve_paced_download(
         .active()
         .then(|| state.transfer_cap.clone());
     let gauge = if download.size >= TRANSFER_MIN_GAUGED_BYTES {
-        state.session_gauge(auth)
+        state.session_gauge(auth).map(UplinkGauge::beside_stream)
     } else {
         None
     };

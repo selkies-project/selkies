@@ -321,7 +321,10 @@ Each is documented in full where named; read that before changing the subsystem.
 - Bulk traffic sharing the session connection is paced by an end-to-end gauge, never by the local send
   queue alone: a proxy or a receive window in front absorbs writes, so that queue reads empty on the very
   transfer burying the stream (`crates/selkies/src/files/pacing.rs`, `UplinkGauge`; the WebSockets server's
-  `bulk_window`; WebRTC instead rides SCTP's own congestion control, which no such hop can hide).
+  `bulk_window`; WebRTC instead rides SCTP's own congestion control, which no such hop can hide). An upload's
+  sender is held by its socket's receive window, sized to the allowance, never by paused reads alone: the
+  kernel's own window is megabytes, all of them the client's first hop's to hold (`UplinkGauge::windowed`,
+  which takes the request to have its connection to itself, as HTTP/1.1 gives it).
 - A modifier's role comes from the keysym the client resolved for it, never from the engine's flags:
   browsers name the same physical key differently (macOS Option is `AltGraph` to Gecko, `Alt` to Blink, a
   Meta key to WebKit). That decides both text-versus-shortcut and when a held modifier is stale
