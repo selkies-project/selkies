@@ -73,6 +73,11 @@
 //! way out's as well, and on a downlink the stream fills its steer keeps a queue standing
 //! there, none of the upload's doing.
 //!
+//! An upload is held by its socket's window ([`upload_window`], [`UplinkGauge::windowed`]),
+//! not by its reads alone: what a sender may have on its way is what its receiver has
+//! acknowledged and advertises, and a kernel left to itself advertises megabytes, which a
+//! paused read takes megabytes to close and a read at the path's rate never closes at all.
+//!
 //! Ping payloads are per-session counters; the pong echoes its ping's payload
 //! (RFC 6455), so [`UplinkClock::note_pong`] matches replies to send times and stray pongs
 //! fall through unmatched. A ping failure drops that socket from the gauge; a gauge with no
@@ -81,6 +86,7 @@
 
 use std::collections::VecDeque;
 use std::net::IpAddr;
+use std::os::fd::RawFd;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -110,6 +116,192 @@ pub const BESIDE_SHARE: f64 = 0.9;
 /// How far back a download reads what it and the stream beside it moved: a few of the
 /// steer's ticks and of its own verdicts, and short of the seconds a backoff's hold lasts.
 pub const BESIDE_WINDOW: f64 = 1.0;
+
+/// The receive window an upload's socket advertises while the pacer allows `rate_bps`
+/// (bytes a second) over a path whose least round trip is `floor_s`, its segments `mss`
+/// bytes: what the allowance sends in that round trip, which a sender needs on its way to
+/// keep the rate, and in [`TRANSFER_CHUNK_DELAY_BUDGET`] more, the burst a gauged transfer
+/// may put on its path, and never under two segments.
+///
+/// A receiver holds a sender only by its window. Reads paused behind megabytes of receive
+/// buffer close nothing for megabytes, and reads at the path's rate or over leave the whole
+/// buffer advertised, which the sender fills the client's first hop with: a megabyte of
+/// modem buffer at 6 Mbit/s is 1.4 s for everything else the client sends, whatever the
+/// pacer does next. With the window at this, what the upload can stand in that hop is the
+/// chunk budget's worth of its allowance, before the first verdict and whatever the
+/// verdicts say.
+pub fn upload_window(rate_bps: f64, floor_s: f64, mss: u32) -> u32 {
+    let window = rate_bps * (floor_s.max(0.0) + TRANSFER_CHUNK_DELAY_BUDGET);
+    (window.min(f64::from(i32::MAX)) as u32).max(mss.saturating_mul(2))
+}
+
+/// The receive window of an upload's socket, held to its allowance at each piece and given
+/// back as it was when the upload ends ([`UplinkGauge::release_window`]): the connection
+/// outlives the request. Not on drop: a request dropped with its connection has no socket
+/// to give back. The listener speaks HTTP/1.1, so the request has its connection to itself,
+/// and its handler runs in the connection's own task, so the descriptor is the connection's
+/// for as long as the window is.
+///
+/// What holds the window is the receive buffer: a socket advertises no more than its buffer
+/// has free, and a buffer the process sized stays that size (`SO_RCVBUF`). The clamp
+/// (`TCP_WINDOW_CLAMP`) is set beside it, at each piece since the kernel moves it with the
+/// buffer; by itself it holds little: the kernel stops lowering a window at four of the
+/// segments the socket announces and rounds it up to the window scale's step. So the window
+/// is held only where the buffer can be it. A kernel that cannot hand a sized buffer's sizing
+/// back (`SO_BUF_LOCK`, Linux 5.14) would keep the connection's later requests at that
+/// size, and its sockets are left alone ([`Window::of`]); and past what the kernel lets a
+/// process size a buffer to (`net.core.rmem_max`), which a fast path with a long round trip
+/// needs, the socket is the kernel's again, clamp and all, until the allowance fits.
+struct Window {
+    fd: RawFd,
+    mss: u32,
+    /// The clamp and the receive buffer as found.
+    was: (libc::c_int, libc::c_int),
+    /// The window asked for last, 0 before any.
+    set: u32,
+    /// Whether the receive buffer is held to the window, the kernel's sizing of it off.
+    held: bool,
+    /// The most the kernel has shown it sizes a buffer for, once it has refused a window.
+    most: Option<libc::c_int>,
+}
+
+/// `SO_BUF_LOCK` and its receive bit (Linux 5.14): which of a socket's buffers the process
+/// sized, cleared to hand the sizing back to the kernel.
+const SO_BUF_LOCK: libc::c_int = 72;
+const SOCK_RCVBUF_LOCK: libc::c_int = 2;
+/// Where `struct tcp_info` keeps the least round trip the connection has measured, in
+/// microseconds (`tcpi_min_rtt`, Linux 4.6), all ones before any.
+const TCPI_MIN_RTT: usize = 148;
+
+impl Window {
+    /// The socket's window as it stands and its segment size, or `None` where the
+    /// descriptor is no TCP socket or its kernel cannot hand a buffer's sizing back.
+    fn of(fd: RawFd) -> Option<Window> {
+        let clamp = socket_option(fd, libc::IPPROTO_TCP, libc::TCP_WINDOW_CLAMP)?;
+        let mss = socket_option(fd, libc::IPPROTO_TCP, libc::TCP_MAXSEG)?;
+        let buffer = socket_option(fd, libc::SOL_SOCKET, libc::SO_RCVBUF)?;
+        socket_option(fd, libc::SOL_SOCKET, SO_BUF_LOCK)?;
+        Some(Window {
+            fd,
+            mss: u32::try_from(mss).ok()?,
+            was: (clamp, buffer),
+            set: 0,
+            held: false,
+            most: None,
+        })
+    }
+
+    /// The least round trip the socket's own connection has measured, in seconds: its
+    /// handshake's at the least, from before the upload's first byte.
+    fn least_round_trip(&self) -> Option<f64> {
+        let mut info = [0u8; TCPI_MIN_RTT + 4];
+        let mut len = libc::socklen_t::try_from(info.len()).ok()?;
+        // SAFETY: getsockopt writes at most `len` bytes into the buffer it is given.
+        let done = unsafe {
+            libc::getsockopt(
+                self.fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_INFO,
+                info.as_mut_ptr().cast(),
+                &raw mut len,
+            )
+        };
+        if done != 0 || usize::try_from(len).ok()? < info.len() {
+            return None;
+        }
+        let us = u32::from_ne_bytes(info[TCPI_MIN_RTT..].try_into().ok()?);
+        (us != u32::MAX).then(|| f64::from(us) / 1e6)
+    }
+
+    /// Advertise no more than `window` bytes from here on, moved where that differs from
+    /// the window set by an eighth or more.
+    fn hold(&mut self, window: u32) {
+        let window = if self.set > 0 && window.abs_diff(self.set) < self.set / 8 {
+            self.set
+        } else {
+            window
+        };
+        let wanted = libc::c_int::try_from(window).unwrap_or(libc::c_int::MAX);
+        let fits = self.most.is_none_or(|most| wanted <= most);
+        if fits && (window != self.set || !self.held) {
+            // The kernel keeps twice what it is asked for, for its own bookkeeping, and no
+            // more than its limit for a process: short of twice, the buffer cannot be the
+            // window, and that limit is not asked past again.
+            let kept = set_socket_option(self.fd, libc::SOL_SOCKET, libc::SO_RCVBUF, wanted)
+                .then(|| socket_option(self.fd, libc::SOL_SOCKET, libc::SO_RCVBUF))
+                .flatten();
+            if kept.is_some_and(|kept| kept >= wanted.saturating_mul(2)) {
+                self.held = true;
+            } else {
+                self.most = Some(kept.unwrap_or(0) / 2);
+                self.loosen();
+            }
+        } else if !fits && self.held {
+            self.loosen();
+        }
+        if self.held
+            && socket_option(self.fd, libc::IPPROTO_TCP, libc::TCP_WINDOW_CLAMP) != Some(wanted)
+        {
+            set_socket_option(self.fd, libc::IPPROTO_TCP, libc::TCP_WINDOW_CLAMP, wanted);
+        }
+        self.set = window;
+    }
+
+    /// Hand the socket back to the kernel: the buffer's sizing, which grows it from where it
+    /// stands for what flows, and the clamp as it was found.
+    fn loosen(&mut self) {
+        if let Some(locks) = socket_option(self.fd, libc::SOL_SOCKET, SO_BUF_LOCK) {
+            set_socket_option(
+                self.fd,
+                libc::SOL_SOCKET,
+                SO_BUF_LOCK,
+                locks & !SOCK_RCVBUF_LOCK,
+            );
+        }
+        set_socket_option(
+            self.fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_WINDOW_CLAMP,
+            self.was.0,
+        );
+        self.held = false;
+    }
+
+    /// Give the window back as it was found: the buffer no smaller than it was, its sizing
+    /// the kernel's, the clamp its value.
+    fn release(&mut self) {
+        if self.set == 0 {
+            return;
+        }
+        if self.held {
+            set_socket_option(self.fd, libc::SOL_SOCKET, libc::SO_RCVBUF, self.was.1 / 2);
+        }
+        self.loosen();
+        self.set = 0;
+    }
+}
+
+/// An int option of a socket, or `None` where the kernel refuses.
+fn socket_option(fd: RawFd, level: libc::c_int, option: libc::c_int) -> Option<libc::c_int> {
+    let mut value: libc::c_int = 0;
+    let mut len = libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>()).ok()?;
+    // SAFETY: getsockopt writes at most `len` bytes into the int it is given.
+    let done =
+        unsafe { libc::getsockopt(fd, level, option, (&raw mut value).cast(), &raw mut len) };
+    (done == 0).then_some(value)
+}
+
+/// Set an int option of a socket; whether the kernel took it.
+fn set_socket_option(
+    fd: RawFd,
+    level: libc::c_int,
+    option: libc::c_int,
+    value: libc::c_int,
+) -> bool {
+    let len = libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>()).unwrap_or(4);
+    // SAFETY: setsockopt reads `len` bytes of the int it is given.
+    unsafe { libc::setsockopt(fd, level, option, (&raw const value).cast(), len) == 0 }
+}
 
 /// Seconds on a monotonic clock whose origin is the first call: the pacers' and the gauge's
 /// shared notion of now, comparable across every instance in the process.
@@ -150,8 +342,10 @@ pub async fn pace_gauged(pacer: &TransferPacer, gauge: &mut UplinkGauge, nbytes:
     while rest > 0 {
         let verdict = gauge.sample();
         if !gauge.alive() {
+            gauge.release_window();
             return false;
         }
+        gauge.follow(pacer.rate_bps());
         let piece = rest.min(gauged_chunk_size(pacer));
         let share = gauge.share_bps(piece);
         // Until its share can be read a download beside its session's stream has moved next
@@ -398,6 +592,9 @@ pub struct UplinkGauge {
     unread: bool,
     /// Whether the gauge is an upload's ([`UplinkGauge::for_upload`]).
     upload: bool,
+    /// Where the gauge is an upload's on a TCP socket ([`UplinkGauge::windowed`]): that
+    /// socket's window.
+    window: Option<Window>,
 }
 
 impl UplinkGauge {
@@ -429,6 +626,7 @@ impl UplinkGauge {
             moved: 0,
             unread: false,
             upload: false,
+            window: None,
         }
     }
 
@@ -445,6 +643,44 @@ impl UplinkGauge {
     pub fn for_upload(mut self) -> Self {
         self.upload = true;
         self
+    }
+
+    /// The gauge of an upload arriving on the TCP socket `fd`, valid for as long as the
+    /// gauge: the socket's window follows the allowance ([`UplinkGauge::follow`]). Without
+    /// a descriptor, or on one that is no TCP socket, the gauge paces by its reads alone.
+    #[must_use]
+    pub fn windowed(mut self, fd: Option<RawFd>) -> Self {
+        self.window = fd.and_then(Window::of);
+        self
+    }
+
+    /// Hold the upload's socket to the window its allowance of `rate_bps` warrants
+    /// ([`upload_window`]) over the gauged sockets' least round trip, or over the least its
+    /// own connection has measured where that is longer: the sockets gauged are the
+    /// session's, and a window under what the upload's own path takes to turn around would
+    /// hold it under its allowance, which is then never raised.
+    pub fn follow(&mut self, rate_bps: f64) {
+        let Some(window) = self.window.as_mut() else {
+            return;
+        };
+        let round_trip = self
+            .conns
+            .iter()
+            .filter_map(|(clock, _)| clock.floor_s())
+            .reduce(f64::min)
+            .into_iter()
+            .chain(window.least_round_trip())
+            .reduce(f64::max)
+            .unwrap_or(0.0);
+        window.hold(upload_window(rate_bps, round_trip, window.mss));
+    }
+
+    /// Give the upload's socket its window back as it was found, the upload over or no
+    /// longer gauged.
+    pub fn release_window(&mut self) {
+        if let Some(mut window) = self.window.take() {
+            window.release();
+        }
     }
 
     /// The gauge of a download: its bytes cross the path the gauged sockets' streams cross,
@@ -1351,6 +1587,113 @@ mod tests {
         tokio::time::sleep(Duration::from_secs_f64(TransferPacer::USED_SECONDS + 0.05)).await;
         pacer.pace(8192).await;
         assert_eq!(pacer.inner.lock().used_bps, None, "the reading starts over");
+    }
+
+    #[test]
+    fn an_uploads_window_is_its_allowance_over_a_round_trip_and_a_chunks_budget() {
+        // 6 Mbit/s over a path of 20 ms: 750 kB/s for 32.5 ms.
+        assert_eq!(upload_window(750_000.0, 0.02, 1460), 24_375);
+        // On a path with no round trip to speak of, the chunk budget alone.
+        assert_eq!(upload_window(750_000.0, 0.0, 1460), 9_375);
+        // Never under two segments, a modem's or a loopback's.
+        assert_eq!(upload_window(6_000.0, 0.0, 1460), 2_920);
+        assert_eq!(upload_window(750_000.0, 0.0, 65_483), 130_966);
+        // A gigabit path over 20 ms keeps its megabytes.
+        assert!(upload_window(125_000_000.0, 0.02, 1460) > 4_000_000);
+        // No rate overflows the option.
+        assert_eq!(upload_window(f64::MAX, 1.0, 1460), i32::MAX as u32);
+    }
+
+    #[test]
+    fn an_uploads_socket_follows_its_allowance_and_is_given_back() {
+        use std::os::fd::AsRawFd;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        // An Ethernet path's segments: a loopback's own are 64 KiB, and two of them more
+        // than the windows read here.
+        assert!(set_socket_option(
+            listener.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_MAXSEG,
+            1460
+        ));
+        let near = std::net::TcpStream::connect(listener.local_addr().expect("its address"))
+            .expect("a connection");
+        let (far, _) = listener.accept().expect("its far end");
+        let fd = far.as_raw_fd();
+        let tcp = |option| socket_option(fd, libc::IPPROTO_TCP, option);
+        let buffer = || socket_option(fd, libc::SOL_SOCKET, libc::SO_RCVBUF).expect("a buffer");
+        let locked =
+            || socket_option(fd, libc::SOL_SOCKET, SO_BUF_LOCK).map(|l| l & SOCK_RCVBUF_LOCK);
+        let was = (tcp(libc::TCP_WINDOW_CLAMP).expect("a TCP socket"), buffer());
+        let mss = u32::try_from(tcp(libc::TCP_MAXSEG).expect("its segment size")).expect("a size");
+        assert!(mss <= 1460, "{mss}");
+        let (_socket, clock) = fake_clock();
+        let mut gauge = socket_gauge(clock.clone()).windowed(Some(fd));
+        // 6 Mbit/s: the buffer is the window (the kernel keeps twice what it is asked for),
+        // sized by the process, and the clamp says the same.
+        gauge.follow(750_000.0);
+        let own = gauge
+            .window
+            .as_ref()
+            .and_then(Window::least_round_trip)
+            .expect("the handshake's round trip");
+        assert!(own < 0.05, "{own}");
+        let window = i32::try_from(upload_window(750_000.0, own, mss)).expect("a window");
+        let first = window;
+        assert_eq!(buffer(), 2 * window);
+        assert_eq!(locked(), Some(SOCK_RCVBUF_LOCK));
+        assert_eq!(tcp(libc::TCP_WINDOW_CLAMP), Some(window));
+        // A move under an eighth is not worth a call; a larger one is followed.
+        gauge.follow(800_000.0);
+        assert_eq!(buffer(), 2 * window);
+        gauge.follow(1_500_000.0);
+        let window = i32::try_from(upload_window(1_500_000.0, own, mss)).expect("a window");
+        assert_eq!(buffer(), 2 * window);
+        // The kernel's own tuning moves the clamp with the buffer: the next piece puts it back.
+        assert!(set_socket_option(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_WINDOW_CLAMP,
+            8 << 20
+        ));
+        gauge.follow(1_500_000.0);
+        assert_eq!(tcp(libc::TCP_WINDOW_CLAMP), Some(window));
+        // Past what the kernel lets a process size a buffer to, the socket is the kernel's
+        // again, its clamp as found, and is not asked again while the allowance stays there.
+        gauge.follow(1e12);
+        assert_eq!(locked(), Some(0));
+        assert_eq!(tcp(libc::TCP_WINDOW_CLAMP), Some(was.0));
+        let left = buffer();
+        assert!(set_socket_option(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_WINDOW_CLAMP,
+            8 << 20
+        ));
+        gauge.follow(2e12);
+        assert_eq!((locked(), buffer()), (Some(0), left));
+        assert_eq!(tcp(libc::TCP_WINDOW_CLAMP), Some(8 << 20));
+        // An allowance that fits again is held again.
+        gauge.follow(750_000.0);
+        assert_eq!(locked(), Some(SOCK_RCVBUF_LOCK));
+        assert_eq!(buffer(), 2 * first);
+        assert_eq!(tcp(libc::TCP_WINDOW_CLAMP), Some(first));
+        // Given back: the kernel sizes the buffer again, from no less than it was, and the
+        // clamp is as it was found.
+        gauge.release_window();
+        assert_eq!(locked(), Some(0));
+        assert!(buffer() >= was.1, "{} of {}", buffer(), was.1);
+        assert_eq!(tcp(libc::TCP_WINDOW_CLAMP), Some(was.0));
+        gauge.follow(750_000.0);
+        assert_eq!(locked(), Some(0), "released is released");
+        // No socket, or one that is not TCP, leaves the gauge to its reads alone.
+        let mut plain = socket_gauge(clock.clone()).windowed(None);
+        plain.follow(1_000_000.0);
+        let (unix, _other) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
+        let mut plain = socket_gauge(clock).windowed(Some(unix.as_raw_fd()));
+        plain.follow(1_000_000.0);
+        assert!(plain.window.is_none());
+        drop(near);
     }
 
     /// A session socket whose stream tells what its way back holds.
