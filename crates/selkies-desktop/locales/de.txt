@@ -287,3 +287,16 @@ Flat icon = Flaches Symbol
 Bar on every display = Leiste auf jedem Bildschirm
 Desktop mode = Desktop-Modus
 Relaunch = Erneut starten
+# What the desktop tells a reader that describes it
+Forward = Vorwärts
+Parent folder = Übergeordneter Ordner
+Location = Ort
+Add = Hinzufügen
+Hue = Farbton
+Saturation and brightness = Sättigung und Helligkeit
+Custom color = Eigene Farbe
+Change shortcut = Tastenkürzel ändern
+{name} on display {n} = {name} auf Bildschirm {n}
+Calendar = Kalender
+Previous month = Vorheriger Monat
+Next month = Nächster Monat

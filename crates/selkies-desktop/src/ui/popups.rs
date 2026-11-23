@@ -2,6 +2,7 @@
 //! context menu of a taskbar button, and tooltips.
 
 use crate::clock;
+use crate::describe::{self, Element};
 use crate::desktop::{Desktop, Hover, Popup};
 use crate::event::{Button, WindowAction};
 use crate::geom::Rect;
@@ -135,6 +136,68 @@ fn draw_volume(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Option<Rect> {
         ui::text(),
     );
     Some(frame)
+}
+
+/// The volume popup's controls, as [`crate::describe`] reports them: the mute button and the
+/// slider, which a click sets in proportion along its track.
+pub fn describe_volume(d: &mut Desktop) -> Option<Element> {
+    let frame = volume_rect(d)?;
+    let volume = d.volume?;
+    let mut mute = describe::node(
+        "toggle button",
+        tr("Mute"),
+        Rect::new(frame.x, frame.y, 44, frame.h),
+    );
+    mute.states.pressed = volume.muted;
+    let mut slider = describe::node("slider", tr("Volume"), volume_track(frame));
+    slider.text = Some(if volume.muted {
+        tr("Muted").to_string()
+    } else {
+        format!("{}%", volume.percent)
+    });
+    Some(describe::holding("panel", "", frame, vec![mute, slider]))
+}
+
+/// The calendar's controls, as [`crate::describe`] reports them: the month shown, which a
+/// click returns to the current one, and the buttons to the month before and after.
+pub fn describe_calendar(d: &mut Desktop) -> Option<Element> {
+    let frame = calendar_rect(d)?;
+    let (year, month) = shown_month(d);
+    let header = Rect::new(frame.x + CAL_PAD, frame.y + CAL_PAD, frame.w - 2 * CAL_PAD, 30);
+    let title = Rect::new(header.x + 30, header.y, header.w - 60, header.h);
+    let children = vec![
+        describe::node(
+            "button",
+            tr("Previous month"),
+            Rect::new(header.x, header.y, 30, 30),
+        ),
+        describe::node("button", format!("{} {}", clock::month_name(month), year), title),
+        describe::node(
+            "button",
+            tr("Next month"),
+            Rect::new(header.right() - 30, header.y, 30, 30),
+        ),
+    ];
+    Some(describe::holding("panel", "", frame, children))
+}
+
+/// The rows of a taskbar button's menu, as [`crate::describe`] reports them.
+pub fn describe_task_menu(d: &mut Desktop, index: usize) -> Option<Element> {
+    let frame = task_menu_rect(d, index)?;
+    let rows = task_menu_items(d, index)
+        .into_iter()
+        .enumerate()
+        .map(|(row, (label, _))| {
+            let rect = Rect::new(
+                frame.x + 6,
+                frame.y + 6 + row as i32 * TASK_ROW,
+                frame.w - 12,
+                TASK_ROW,
+            );
+            describe::node("menu item", label, rect)
+        })
+        .collect();
+    Some(describe::holding("panel", "", frame, rows))
 }
 
 /// Sets the volume from a pointer X over the slider.

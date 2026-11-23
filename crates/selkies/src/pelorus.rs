@@ -276,7 +276,7 @@ fn read_window(id: u32) -> Result<WindowRead, Unreadable> {
         .collect();
     if let Some(tree) = shell
         .as_ref()
-        .and_then(|shell| surfaces::shell_window(window, scale, shell))
+        .and_then(|shell| surfaces::shell_window(&view, window, scale, shell))
     {
         return Ok(WindowRead {
             title: window.info.title.clone(),

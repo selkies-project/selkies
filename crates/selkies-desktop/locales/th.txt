@@ -287,3 +287,16 @@ Flat icon = ไอคอนแบบแบน
 Bar on every display = แถบบนทุกจอแสดงผล
 Desktop mode = โหมดเดสก์ท็อป
 Relaunch = เปิดอีกครั้ง
+# What the desktop tells a reader that describes it
+Forward = ไปข้างหน้า
+Parent folder = โฟลเดอร์หลัก
+Location = ตำแหน่ง
+Add = เพิ่ม
+Hue = เฉดสี
+Saturation and brightness = ความอิ่มตัวและความสว่าง
+Custom color = สีกำหนดเอง
+Change shortcut = เปลี่ยนปุ่มลัด
+{name} on display {n} = {name} บนจอแสดงผล {n}
+Calendar = ปฏิทิน
+Previous month = เดือนก่อนหน้า
+Next month = เดือนถัดไป

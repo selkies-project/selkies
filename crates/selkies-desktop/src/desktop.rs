@@ -852,13 +852,26 @@ impl Desktop {
     /// bar, so the tray's icon strip, which the X server draws over the bar on its own, is taken
     /// away with it rather than left floating over the window.
     pub fn primary_bar_covered(&self) -> bool {
-        let primary = self.display_origins.first().map(|(id, _)| *id);
+        self.bar_covered(None)
+    }
+
+    /// Whether a fullscreen window covers the bar standing in for the panel at the moment, as
+    /// [`Desktop::primary_bar_covered`] decides it for the primary bar.
+    pub fn current_bar_covered(&self) -> bool {
+        self.bar_covered(self.current_bar)
+    }
+
+    /// Whether the active window is fullscreen on a bar's display: a display's bar by its
+    /// number, or the primary bar for `None`, which takes a window on a display the backend
+    /// did not name as well.
+    fn bar_covered(&self, bar: Option<u32>) -> bool {
+        let display = bar.or_else(|| self.display_origins.first().map(|(id, _)| *id));
         self.toplevels.iter().any(|t| {
             t.state.fullscreen
                 && t.state.active
                 && !t.state.minimized
                 && !t.state.hidden
-                && (t.display.is_none() || t.display == primary)
+                && (t.display == display || (bar.is_none() && t.display.is_none()))
         })
     }
 

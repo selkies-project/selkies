@@ -287,3 +287,16 @@ Flat icon = 扁平图标
 Bar on every display = 每个显示器都有任务栏
 Desktop mode = 桌面模式
 Relaunch = 重新启动
+# What the desktop tells a reader that describes it
+Forward = 前进
+Parent folder = 上级文件夹
+Location = 位置
+Add = 添加
+Hue = 色相
+Saturation and brightness = 饱和度和亮度
+Custom color = 自定义颜色
+Change shortcut = 更改快捷键
+{name} on display {n} = 显示器 {n} 上的{name}
+Calendar = 日历
+Previous month = 上个月
+Next month = 下个月

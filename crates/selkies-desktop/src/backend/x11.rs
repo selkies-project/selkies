@@ -2375,7 +2375,7 @@ impl Backend for X11Backend {
     fn surface_origin(&self, surface: SurfaceId) -> Option<(i32, i32)> {
         let (x, y, scale) = match surface {
             SurfaceId::Panel => self.panel_origin(),
-            SurfaceId::Bar(bar) => self.bar_origin(bar),
+            SurfaceId::Bar(bar) if self.monitors.get(bar as usize).is_some() => self.bar_origin(bar),
             _ => return None,
         };
         let scale = scale.max(1);

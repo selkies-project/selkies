@@ -17,6 +17,7 @@ use crate::describe::{self, Element};
 use crate::desktop::{Desktop, Hover, PanelTarget, Popup};
 use crate::event::{Button, WindowAction};
 use crate::geom::Rect;
+use crate::i18n::{tr, trf};
 use crate::render::{Align, Canvas};
 use crate::ui;
 
@@ -357,17 +358,23 @@ pub fn hit(d: &mut Desktop, x: f64, y: f64) -> Hover {
 pub fn describe(d: &mut Desktop) -> Element {
     let layout = layout(d);
     let mut children = Vec::new();
-    let mut start = describe::node("button", "Start menu", layout.start);
+    let mut start = describe::node("button", tr("Start menu"), layout.start);
     start.states.expandable = true;
     start.states.expanded = d.popup == Popup::Menu && d.popup_on_current_bar();
     children.push(start);
     for (index, rect) in &layout.launchers {
         if let Some(entry) = d.apps.entries.get(*index) {
-            children.push(describe::node("button", format!("Launch {}", entry.name), *rect));
+            let mut launch = describe::node("button", entry.name.clone(), *rect);
+            launch.text = Some(tr("Launch").to_string());
+            children.push(launch);
         }
     }
     for (index, rect) in layout.pager.iter().enumerate() {
-        let mut pill = describe::node("page tab", format!("Desktop {}", index + 1), *rect);
+        let mut pill = describe::node(
+            "page tab",
+            trf("Desktop {n}", &[("n", &(index + 1).to_string())]),
+            *rect,
+        );
         pill.states.selected = index as u32 == d.current_desktop;
         children.push(pill);
     }
@@ -389,10 +396,10 @@ pub fn describe(d: &mut Desktop) -> Element {
         }
     }
     if let Some(rect) = layout.volume {
-        let mut volume = describe::node("button", "Volume", rect);
+        let mut volume = describe::node("button", tr("Volume"), rect);
         volume.text = d.volume.map(|v| {
             if v.muted {
-                "muted".to_string()
+                tr("Muted").to_string()
             } else {
                 format!("{}%", v.percent)
             }
@@ -400,15 +407,15 @@ pub fn describe(d: &mut Desktop) -> Element {
         children.push(volume);
     }
     if let Some(rect) = layout.notifications {
-        children.push(describe::node("button", "Notifications", rect));
+        children.push(describe::node("button", tr("Notifications"), rect));
     }
     if let Some(rect) = layout.clock {
-        let mut clock = describe::node("button", "Clock", rect);
+        let mut clock = describe::node("button", tr("Clock"), rect);
         clock.text = Some(d.clock.clone());
         children.push(clock);
     }
     if let Some(rect) = layout.show_desktop {
-        children.push(describe::node("button", "Show desktop", rect));
+        children.push(describe::node("button", tr("Show desktop"), rect));
     }
     describe::holding("panel", "", layout.bar, children)
 }

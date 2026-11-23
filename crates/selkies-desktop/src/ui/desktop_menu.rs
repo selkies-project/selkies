@@ -24,6 +24,7 @@
 
 use std::path::PathBuf;
 
+use crate::describe::{self, Element};
 use crate::desktop::{Desktop, Hover, Popup};
 use crate::entries;
 use crate::event::Button;
@@ -216,6 +217,25 @@ fn rows(d: &Desktop, frame: Rect) -> Vec<Rect> {
             rect
         })
         .collect()
+}
+
+/// The menu's rows, as [`crate::describe`] reports them.
+pub fn describe(d: &Desktop, at: (i32, i32)) -> Element {
+    let frame = menu_rect(d, at);
+    let items = d
+        .desktop_menu
+        .iter()
+        .zip(rows(d, frame))
+        .filter_map(|(entry, rect)| match entry {
+            Entry::Item { label, enabled, .. } => {
+                let mut item = describe::node("menu item", label.clone(), rect);
+                item.states.enabled = *enabled;
+                Some(item)
+            }
+            Entry::Separator => None,
+        })
+        .collect();
+    describe::holding("panel", "", frame, items)
 }
 
 /// Draws the menu; returns its rectangle.

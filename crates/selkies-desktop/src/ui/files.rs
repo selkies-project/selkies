@@ -521,7 +521,7 @@ pub fn describe(d: &mut Desktop, id: u32) -> Option<Element> {
                 MenuRow::Separator => top += MENU_SEP,
             }
         }
-        return Some(describe::frame(&w.title(), w.geometry, children));
+        return Some(describe::frame(&shown_title(w), w.geometry, children));
     }
     if let Some(confirm) = &w.confirm {
         let (bx, cancel, delete) = confirm_rects(w);
@@ -540,18 +540,18 @@ pub fn describe(d: &mut Desktop, id: u32) -> Option<Element> {
         ));
         children.push(describe::node("button", tr("Cancel"), cancel));
         children.push(describe::node("button", tr("Delete"), delete));
-        return Some(describe::frame(&w.title(), w.geometry, children));
+        return Some(describe::frame(&shown_title(w), w.geometry, children));
     }
-    let mut back = describe::node("button", "Back", layout.back);
+    let mut back = describe::node("button", tr("Back"), layout.back);
     back.states.enabled = w.history_pos > 0;
-    let mut forward = describe::node("button", "Forward", layout.forward);
+    let mut forward = describe::node("button", tr("Forward"), layout.forward);
     forward.states.enabled = w.history_pos + 1 < w.history.len();
-    let mut up = describe::node("button", "Up", layout.up);
+    let mut up = describe::node("button", tr("Parent folder"), layout.up);
     up.states.enabled = w.dir.parent().is_some();
     children.extend([back, forward, up]);
     match &w.path_edit {
         Some(text) => {
-            let mut field = describe::node("text", "Location", layout.path);
+            let mut field = describe::node("text", tr("Location"), layout.path);
             field.text = Some(text.clone());
             field.states.focused = true;
             field.states.editable = true;
@@ -569,11 +569,11 @@ pub fn describe(d: &mut Desktop, id: u32) -> Option<Element> {
         }
     }
     let toggle = match w.view {
-        View::Icons => "List view",
-        View::List => "Icon view",
+        View::Icons => tr("List view"),
+        View::List => tr("Icon view"),
     };
     children.push(describe::node("button", toggle, layout.view_toggle));
-    children.push(describe::node("button", "Sort", layout.sort));
+    children.push(describe::node("button", tr("Sort"), layout.sort));
     for (i, place) in d.files.places.iter().enumerate() {
         let rect = Rect::new(
             layout.sidebar.x,
@@ -601,7 +601,7 @@ pub fn describe(d: &mut Desktop, id: u32) -> Option<Element> {
             continue;
         }
         let mut row = describe::node("list item", item.name.clone(), rect);
-        row.text = item.is_dir.then(|| "folder".to_string());
+        row.text = item.is_dir.then(|| tr("Folder").to_string());
         row.states.selected = w.selection.contains(&i);
         if let Some(rename) = w.rename.as_ref().filter(|r| r.index == i) {
             row.text = Some(rename.text.clone());
@@ -615,7 +615,17 @@ pub fn describe(d: &mut Desktop, id: u32) -> Option<Element> {
         children.push(describe::node("button", tr("Cancel"), cancel));
         children.push(describe::node("button", tr("Open"), open));
     }
-    Some(describe::frame(&w.title(), w.geometry, children))
+    Some(describe::frame(&shown_title(w), w.geometry, children))
+}
+
+/// The title the window manager was last given for a window: the one it opened with until a
+/// frame has been drawn.
+fn shown_title(w: &FilesWindow) -> String {
+    if w.shown_title.is_empty() {
+        w.title()
+    } else {
+        w.shown_title.clone()
+    }
 }
 
 /// The names of a folder's breadcrumbs, in the order [`crumb_rects`] numbers them.

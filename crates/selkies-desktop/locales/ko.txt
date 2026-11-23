@@ -287,3 +287,16 @@ Flat icon = 평면 아이콘
 Bar on every display = 모든 디스플레이에 막대
 Desktop mode = 데스크톱 모드
 Relaunch = 다시 실행
+# What the desktop tells a reader that describes it
+Forward = 앞으로
+Parent folder = 상위 폴더
+Location = 위치
+Add = 추가
+Hue = 색조
+Saturation and brightness = 채도 및 밝기
+Custom color = 사용자 지정 색상
+Change shortcut = 단축키 변경
+{name} on display {n} = 디스플레이 {n}의 {name}
+Calendar = 달력
+Previous month = 이전 달
+Next month = 다음 달

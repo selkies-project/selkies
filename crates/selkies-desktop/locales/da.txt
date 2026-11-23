@@ -287,3 +287,16 @@ Flat icon = Flad ikon
 Bar on every display = Panel på hver skærm
 Desktop mode = Skrivebordstilstand
 Relaunch = Start igen
+# What the desktop tells a reader that describes it
+Forward = Frem
+Parent folder = Overordnet mappe
+Location = Placering
+Add = Tilføj
+Hue = Nuance
+Saturation and brightness = Mætning og lysstyrke
+Custom color = Brugerdefineret farve
+Change shortcut = Skift genvej
+{name} on display {n} = {name} på skærm {n}
+Calendar = Kalender
+Previous month = Forrige måned
+Next month = Næste måned

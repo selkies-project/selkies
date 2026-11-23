@@ -287,3 +287,16 @@ Flat icon = Patag na icon
 Bar on every display = Bar sa bawat display
 Desktop mode = Mode ng desktop
 Relaunch = Buksan muli
+# What the desktop tells a reader that describes it
+Forward = Pasulong
+Parent folder = Parent na folder
+Location = Lokasyon
+Add = Idagdag
+Hue = Hue
+Saturation and brightness = Saturation at liwanag
+Custom color = Custom na kulay
+Change shortcut = Palitan ang shortcut
+{name} on display {n} = {name} sa display {n}
+Calendar = Kalendaryo
+Previous month = Nakaraang buwan
+Next month = Susunod na buwan

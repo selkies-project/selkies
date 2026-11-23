@@ -287,3 +287,16 @@ Flat icon = Biểu tượng phẳng
 Bar on every display = Thanh trên mọi màn hình
 Desktop mode = Chế độ máy tính để bàn
 Relaunch = Mở lại
+# What the desktop tells a reader that describes it
+Forward = Tiến
+Parent folder = Thư mục cha
+Location = Vị trí
+Add = Thêm
+Hue = Sắc độ
+Saturation and brightness = Độ bão hòa và độ sáng
+Custom color = Màu tùy chỉnh
+Change shortcut = Đổi phím tắt
+{name} on display {n} = {name} trên màn hình {n}
+Calendar = Lịch
+Previous month = Tháng trước
+Next month = Tháng sau

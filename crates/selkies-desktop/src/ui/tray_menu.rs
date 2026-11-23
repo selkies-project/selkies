@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use tiny_skia::{PathBuilder, Pixmap};
 
+use crate::describe::{self, Element};
 use crate::desktop::{Desktop, Hover, Popup};
 use crate::event::{Button, Request};
 use crate::geom::Rect;
@@ -397,6 +398,39 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Vec<Rect> {
         }
     }
     levels.into_iter().map(|l| l.frame).collect()
+}
+
+/// A tray item's open menu, as [`crate::describe`] reports it: every open level's rows, a
+/// row with a submenu expandable and expanded while its submenu is the next level open.
+pub fn describe(d: &mut Desktop) -> Option<Element> {
+    let levels = placed(d);
+    let menu = d.tray_menu.clone()?;
+    let frame = levels.iter().map(|l| l.frame).reduce(|a, b| a.union(&b))?;
+    let children = levels
+        .iter()
+        .zip(menu.levels())
+        .enumerate()
+        .map(|(depth, (level, entries))| {
+            let rows = entries
+                .iter()
+                .zip(&level.rows)
+                .enumerate()
+                .filter(|(_, (entry, _))| !entry.separator)
+                .map(|(row, (entry, rect))| {
+                    let mut item = describe::node("menu item", entry.label.clone(), *rect);
+                    item.states.enabled = entry.enabled;
+                    item.states.checked = matches!(entry.toggle, Toggle::Check(true) | Toggle::Radio(true));
+                    if !entry.children.is_empty() {
+                        item.states.expandable = true;
+                        item.states.expanded = menu.open.get(depth) == Some(&row);
+                    }
+                    item
+                })
+                .collect();
+            describe::holding("panel", "", level.frame, rows)
+        })
+        .collect();
+    Some(describe::holding("panel", "", frame, children))
 }
 
 /// A check mark centered in a box.

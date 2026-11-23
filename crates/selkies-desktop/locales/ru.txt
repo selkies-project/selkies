@@ -287,3 +287,16 @@ Flat icon = Плоский значок
 Bar on every display = Панель на каждом экране
 Desktop mode = Режим рабочего стола
 Relaunch = Запустить снова
+# What the desktop tells a reader that describes it
+Forward = Вперёд
+Parent folder = Родительская папка
+Location = Расположение
+Add = Добавить
+Hue = Оттенок
+Saturation and brightness = Насыщенность и яркость
+Custom color = Свой цвет
+Change shortcut = Изменить сочетание клавиш
+{name} on display {n} = {name} на экране {n}
+Calendar = Календарь
+Previous month = Предыдущий месяц
+Next month = Следующий месяц

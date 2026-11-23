@@ -287,3 +287,16 @@ Flat icon = सपाट आइकन
 Bar on every display = हर डिस्प्ले पर बार
 Desktop mode = डेस्कटॉप मोड
 Relaunch = फिर से चलाएँ
+# What the desktop tells a reader that describes it
+Forward = आगे
+Parent folder = मूल फ़ोल्डर
+Location = स्थान
+Add = जोड़ें
+Hue = ह्यू
+Saturation and brightness = संतृप्ति और चमक
+Custom color = कस्टम रंग
+Change shortcut = शॉर्टकट बदलें
+{name} on display {n} = डिस्प्ले {n} पर {name}
+Calendar = कैलेंडर
+Previous month = पिछला महीना
+Next month = अगला महीना

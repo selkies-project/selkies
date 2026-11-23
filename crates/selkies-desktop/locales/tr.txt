@@ -287,3 +287,16 @@ Flat icon = Düz simge
 Bar on every display = Her ekranda çubuk
 Desktop mode = Masaüstü modu
 Relaunch = Yeniden başlat
+# What the desktop tells a reader that describes it
+Forward = İleri
+Parent folder = Üst klasör
+Location = Konum
+Add = Ekle
+Hue = Ton
+Saturation and brightness = Doygunluk ve parlaklık
+Custom color = Özel renk
+Change shortcut = Kısayolu değiştir
+{name} on display {n} = {n}. ekrandaki {name}
+Calendar = Takvim
+Previous month = Önceki ay
+Next month = Sonraki ay

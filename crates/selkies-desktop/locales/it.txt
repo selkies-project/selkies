@@ -287,3 +287,16 @@ Flat icon = Icona piatta
 Bar on every display = Barra su ogni schermo
 Desktop mode = Modalità desktop
 Relaunch = Riavvia
+# What the desktop tells a reader that describes it
+Forward = Avanti
+Parent folder = Cartella superiore
+Location = Percorso
+Add = Aggiungi
+Hue = Tonalità
+Saturation and brightness = Saturazione e luminosità
+Custom color = Colore personalizzato
+Change shortcut = Cambia scorciatoia
+{name} on display {n} = {name} sullo schermo {n}
+Calendar = Calendario
+Previous month = Mese precedente
+Next month = Mese successivo

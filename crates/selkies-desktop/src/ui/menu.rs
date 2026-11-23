@@ -1002,7 +1002,7 @@ pub fn describe(d: &mut Desktop) -> Option<Element> {
         }
         return Some(describe::holding("panel", "", rect, children));
     }
-    let mut search = describe::node("text", "Search", layout.search);
+    let mut search = describe::node("text", tr("Search applications"), layout.search);
     search.text = Some(d.menu.query.clone());
     search.states.focused = true;
     search.states.editable = true;

@@ -26,6 +26,9 @@ use crate::element::{Element, Rect, States};
 /// The line that asks the shell for its [`Description`].
 pub const DESCRIBE: &str = "describe";
 
+/// Every [`Surface::key`] is under this; a reader drops a surface whose key is not.
+pub const KEY_LIMIT: u32 = 1 << 16;
+
 /// Everything the shell shows.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -38,8 +41,11 @@ pub struct Description {
 #[serde(default)]
 pub struct Surface {
     /// A number that names a surface the window manager does not manage the same way across
-    /// reads while it shows (the bar, the start menu); 0 for a window.
+    /// reads while it shows (the bar, the start menu), under [`KEY_LIMIT`]; 0 for a window.
     pub key: u32,
+    /// The shell's own number for a window, which counts up as windows open, so windows of one
+    /// title are told apart by the order they opened in; 0 for any other surface.
+    pub window: u32,
     /// A window's title, by which a reader finds it among the window manager's windows, or the
     /// name of a surface the window manager does not manage.
     pub name: String,
@@ -74,25 +80,26 @@ pub fn group(role: &str, name: impl Into<String>, rect: Rect, children: Vec<Elem
 }
 
 /// A tree whose bounds are relative to a surface whose corner lies at `origin` in logical
-/// layout units, in screen pixels at `scale`.
-pub fn placed(tree: &Element, origin: (i32, i32), scale: f64) -> Element {
+/// layout units, moved into screen pixels at `scale`.
+pub fn placed(mut tree: Element, origin: (i32, i32), scale: f64) -> Element {
+    place(&mut tree, origin, scale);
+    tree
+}
+
+/// Moves every rectangle of a tree into screen pixels, in place.
+fn place(tree: &mut Element, origin: (i32, i32), scale: f64) {
     let px = |v: i32| (f64::from(v) * scale).round() as i32;
-    Element {
-        bounds: tree.bounds.map(|r| {
-            let (x, y) = (px(origin.0 + r.x), px(origin.1 + r.y));
-            Rect {
-                x,
-                y,
-                w: px(origin.0 + r.x + r.w) - x,
-                h: px(origin.1 + r.y + r.h) - y,
-            }
-        }),
-        children: tree
-            .children
-            .iter()
-            .map(|child| placed(child, origin, scale))
-            .collect(),
-        ..tree.clone()
+    tree.bounds = tree.bounds.map(|r| {
+        let (x, y) = (px(origin.0 + r.x), px(origin.1 + r.y));
+        Rect {
+            x,
+            y,
+            w: px(origin.0 + r.x + r.w) - x,
+            h: px(origin.1 + r.y + r.h) - y,
+        }
+    });
+    for child in &mut tree.children {
+        place(child, origin, scale);
     }
 }
 
@@ -122,7 +129,7 @@ mod tests {
                 },
             )],
         );
-        let placed = placed(&tree, (100, 50), 1.5);
+        let placed = placed(tree, (100, 50), 1.5);
         assert_eq!(
             placed.children[0].bounds,
             Some(Rect {
@@ -140,6 +147,7 @@ mod tests {
         let description = Description {
             surfaces: vec![Surface {
                 key: 2,
+                window: 0,
                 name: "Start menu".to_string(),
                 origin: Some((0, 1040)),
                 tree: control(

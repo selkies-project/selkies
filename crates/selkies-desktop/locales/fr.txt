@@ -287,3 +287,16 @@ Flat icon = Icône plate
 Bar on every display = Barre sur chaque écran
 Desktop mode = Mode bureau
 Relaunch = Relancer
+# What the desktop tells a reader that describes it
+Forward = Suivant
+Parent folder = Dossier parent
+Location = Emplacement
+Add = Ajouter
+Hue = Teinte
+Saturation and brightness = Saturation et luminosité
+Custom color = Couleur personnalisée
+Change shortcut = Modifier le raccourci
+{name} on display {n} = {name} sur l’écran {n}
+Calendar = Calendrier
+Previous month = Mois précédent
+Next month = Mois suivant

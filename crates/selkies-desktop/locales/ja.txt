@@ -287,3 +287,16 @@ Flat icon = フラットなアイコン
 Bar on every display = すべてのディスプレイにバー
 Desktop mode = デスクトップモード
 Relaunch = 再起動
+# What the desktop tells a reader that describes it
+Forward = 進む
+Parent folder = 親フォルダー
+Location = 場所
+Add = 追加
+Hue = 色相
+Saturation and brightness = 彩度と明るさ
+Custom color = カスタムカラー
+Change shortcut = ショートカットを変更
+{name} on display {n} = ディスプレイ {n} の{name}
+Calendar = カレンダー
+Previous month = 前の月
+Next month = 次の月

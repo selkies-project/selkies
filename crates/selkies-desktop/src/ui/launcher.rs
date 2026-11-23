@@ -208,7 +208,7 @@ pub fn hit(d: &mut Desktop, x: f64, y: f64) -> Option<Hover> {
 pub fn describe(d: &mut Desktop) -> Option<Element> {
     ensure_items(d);
     let layout = layout(d);
-    let mut search = describe::node("text", "Run", layout.search);
+    let mut search = describe::node("text", tr("Run command"), layout.search);
     search.text = Some(d.launcher.query.clone());
     search.states.focused = true;
     search.states.editable = true;
@@ -216,7 +216,7 @@ pub fn describe(d: &mut Desktop) -> Option<Element> {
     for (row, item) in d.launcher.items.iter().enumerate() {
         let name = match item {
             Item::App(index) => d.apps.entries.get(*index).map(|e| e.name.clone()),
-            Item::Command(command) => Some(format!("Run {command}")),
+            Item::Command(command) => Some(command.clone()),
         };
         if let Some(name) = name {
             let mut result = describe::node("list item", name, row_rect(&layout, row));

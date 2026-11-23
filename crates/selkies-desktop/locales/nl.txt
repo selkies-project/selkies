@@ -287,3 +287,16 @@ Flat icon = Plat pictogram
 Bar on every display = Balk op elk scherm
 Desktop mode = Bureaubladmodus
 Relaunch = Opnieuw starten
+# What the desktop tells a reader that describes it
+Forward = Vooruit
+Parent folder = Bovenliggende map
+Location = Locatie
+Add = Toevoegen
+Hue = Tint
+Saturation and brightness = Verzadiging en helderheid
+Custom color = Aangepaste kleur
+Change shortcut = Sneltoets wijzigen
+{name} on display {n} = {name} op scherm {n}
+Calendar = Kalender
+Previous month = Vorige maand
+Next month = Volgende maand

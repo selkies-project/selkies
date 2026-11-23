@@ -9,7 +9,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// A command another process sent.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -163,12 +163,34 @@ impl Drop for Server {
 }
 
 /// Writes an answer on a connection a command came on, as one line, giving up on a reader
-/// that does not take it within a moment rather than holding the desktop up.
+/// that has not taken all of it within [`ANSWER_TIMEOUT`] rather than holding the desktop up:
+/// the bound is on the whole answer, not on each write, so a reader taking a byte at a time
+/// cannot stretch it.
 pub fn answer(mut stream: &UnixStream, text: &str) {
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
-    let _ = stream.write_all(text.as_bytes());
-    let _ = stream.write_all(b"\n");
+    let deadline = Instant::now() + ANSWER_TIMEOUT;
+    let line = format!("{text}\n");
+    let mut rest = line.as_bytes();
+    while !rest.is_empty() {
+        let Some(left) = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+        else {
+            return;
+        };
+        if stream.set_write_timeout(Some(left)).is_err() {
+            return;
+        }
+        match stream.write(rest) {
+            Ok(0) => return,
+            Ok(written) => rest = &rest[written..],
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
+    }
 }
+
+/// The longest an answer may take to be written.
+const ANSWER_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Sends a command to the running desktop.
 ///

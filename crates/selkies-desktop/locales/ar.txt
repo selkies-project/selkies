@@ -287,3 +287,16 @@ Flat icon = أيقونة مسطّحة
 Bar on every display = شريط على كل شاشة
 Desktop mode = وضع سطح المكتب
 Relaunch = إعادة التشغيل
+# What the desktop tells a reader that describes it
+Forward = إلى الأمام
+Parent folder = المجلد الأصل
+Location = الموقع
+Add = إضافة
+Hue = تدرج اللون
+Saturation and brightness = التشبع والسطوع
+Custom color = لون مخصص
+Change shortcut = تغيير الاختصار
+{name} on display {n} = {name} على الشاشة {n}
+Calendar = التقويم
+Previous month = الشهر السابق
+Next month = الشهر التالي

@@ -1237,6 +1237,25 @@ pub fn draw_panel_menu(d: &mut Desktop, canvas: &mut Canvas<'_>, x: i32) -> Rect
     frame
 }
 
+/// The rows of the bar's right-click menu, as [`crate::describe`] reports them.
+pub fn describe_panel_menu(d: &Desktop, x: i32) -> Element {
+    let frame = panel_menu_rect(d, x);
+    let rows = panel_menu_rows(d, frame);
+    let items = panel_menu_items(d)
+        .into_iter()
+        .zip(rows)
+        .filter_map(|(entry, rect)| match entry {
+            MenuEntry::Item { label, enabled, .. } => {
+                let mut item = describe::node("menu item", label, rect);
+                item.states.enabled = enabled;
+                Some(item)
+            }
+            MenuEntry::Separator => None,
+        })
+        .collect();
+    describe::holding("panel", "", frame, items)
+}
+
 /// The right-click menu item under a point, or `None` outside the menu.
 ///
 /// # Arguments
@@ -3381,16 +3400,14 @@ pub fn describe(d: &Desktop) -> Option<Element> {
             .map(|t| t.text.clone())
             .unwrap_or_default()
     };
+    let under_picker = |r: Rect| layout.picker.is_some_and(|p| describe::shows_in(r, p.frame));
     let mut tabs = Vec::new();
     let mut placed: Vec<(Rect, String, Element)> = Vec::new();
     for (index, control) in layout.controls.iter().enumerate() {
         let shown = control
             .clip
             .is_none_or(|clip| describe::shows_in(control.rect, clip))
-            && (index >= first
-                || layout
-                    .picker
-                    .is_none_or(|p| !describe::shows_in(control.rect, p.frame)));
+            && (index >= first || !under_picker(control.rect));
         if !shown {
             continue;
         }
@@ -3401,7 +3418,11 @@ pub fn describe(d: &Desktop) -> Option<Element> {
             _ => placed.push((control.rect, row_name(control.rect), element)),
         }
     }
-    for text in layout.texts.iter().filter(|t| describe::shows_in(t.rect, page)) {
+    for text in layout
+        .texts
+        .iter()
+        .filter(|t| describe::shows_in(t.rect, page) && !under_picker(t.rect))
+    {
         let (role, name) = match text.tone {
             Tone::Name => continue,
             Tone::Caption => ("heading", text.text.clone()),
@@ -3445,15 +3466,15 @@ fn describe_control(control: &Control) -> Element {
         Kind::Segment | Kind::Preset | Kind::Wallpaper => ("radio button", label),
         Kind::Switch | Kind::AppRow => ("check box", label),
         Kind::Text => ("text", String::new()),
-        Kind::Button if label == "+" => ("button", "Add".to_string()),
+        Kind::Button if label == "+" => ("button", tr("Add").to_string()),
         Kind::Button => ("button", label),
         Kind::Swatch => ("radio button", control.color.map(hex).unwrap_or_default()),
-        Kind::Picker => ("button", "Custom color".to_string()),
-        Kind::Chip => ("button", format!("Remove {label}")),
+        Kind::Picker => ("button", tr("Custom color").to_string()),
+        Kind::Chip => ("button", label),
         Kind::Slider => ("slider", String::new()),
-        Kind::HueStrip => ("slider", "Hue".to_string()),
-        Kind::ColorArea => ("slider", "Saturation and brightness".to_string()),
-        Kind::Keys => ("button", "Change shortcut".to_string()),
+        Kind::HueStrip => ("slider", tr("Hue").to_string()),
+        Kind::ColorArea => ("slider", tr("Saturation and brightness").to_string()),
+        Kind::Keys => ("button", tr("Change shortcut").to_string()),
     };
     let mut element = describe::node(role, name, control.rect);
     match control.kind {
@@ -3464,6 +3485,7 @@ fn describe_control(control: &Control) -> Element {
             element.states.editable = true;
         }
         Kind::Slider | Kind::Keys => element.text = Some(control.label.clone()),
+        Kind::Chip => element.text = Some(tr("Remove").to_string()),
         Kind::Picker => {
             element.states.expandable = true;
             element.states.expanded = control.active;

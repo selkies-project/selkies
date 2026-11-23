@@ -37,6 +37,7 @@ use std::time::{Duration, Instant};
 
 use tiny_skia::{Color, PathBuilder, Pixmap, PixmapPaint, Transform};
 
+use crate::describe::{self, Element};
 use crate::desktop::{Desktop, Hover, Popup};
 use crate::entries::{self, Apps};
 use crate::event::{Button, Request};
@@ -1535,6 +1536,33 @@ pub fn center_hit(d: &mut Desktop, x: f64, y: f64) -> Option<Hover> {
         }
     }
     Some(Hover::None)
+}
+
+/// The notification center's controls, as [`crate::describe`] reports them: Clear all, the Do
+/// not disturb switch, and each notification in view, with the button that removes it.
+pub fn describe_center(d: &mut Desktop) -> Option<Element> {
+    let frame = center_rect(d)?;
+    let (clear, dnd, _, list) = center_parts(d, frame);
+    let mut children = vec![describe::node("button", tr("Clear all"), clear)];
+    let mut quiet = describe::node("check box", tr("Do not disturb"), dnd);
+    quiet.states.checked = d.notifications.dnd;
+    children.push(quiet);
+    for (index, record) in d.notifications.history().enumerate() {
+        let (row, close) = center_row(d, list, index);
+        if !describe::shows_in(row, list) {
+            continue;
+        }
+        let name = if record.note.summary.is_empty() {
+            record.note.app_name.clone()
+        } else {
+            record.note.summary.clone()
+        };
+        let mut entry = describe::node("label", name, row);
+        entry.text = (!record.note.body.is_empty()).then(|| record.note.body.clone());
+        children.push(entry);
+        children.push(describe::node("button", tr("Close"), close));
+    }
+    Some(describe::holding("panel", "", frame, children))
 }
 
 /// Handles a press; returns whether it landed in the center.

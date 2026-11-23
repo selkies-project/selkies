@@ -24,8 +24,9 @@
 //! anything, since there is no window to raise and raising another would close a popup.
 
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ::pelorus::shell::{self, Description};
 use ::pelorus::{Element, Rect as PxRect};
@@ -43,7 +44,7 @@ pub const SHELL_SURFACES: u32 = 0xFFFF_0000;
 const SHELL_TIMEOUT: Duration = Duration::from_millis(800);
 
 /// The most bytes of the shell's answer read; a longer one is refused.
-const SHELL_ANSWER_LIMIT: u64 = 4 << 20;
+const SHELL_ANSWER_LIMIT: usize = 4 << 20;
 
 /// Whether a number names something listed here rather than a window.
 pub fn is_surface(id: u32) -> bool {
@@ -56,30 +57,55 @@ pub struct Shell {
     pub description: Description,
 }
 
-/// Ask the running shell to describe itself; `None` where no shell answers. Blocks for up to
-/// [`SHELL_TIMEOUT`] each way.
+/// Ask the running shell to describe itself; `None` where no shell answers. The whole exchange
+/// is held to [`SHELL_TIMEOUT`]: the connection is made without blocking, so a shell that has
+/// stopped accepting and left its backlog full is refused at once rather than waited on, and
+/// the answer is read against one deadline rather than a timeout per read, which a peer
+/// trickling bytes could stretch without end.
 pub fn read_shell() -> Option<Shell> {
+    use nix::sys::socket::{self, AddressFamily, SockFlag, SockType, UnixAddr, sockopt};
+
+    let deadline = Instant::now() + SHELL_TIMEOUT;
     let env = crate::wm::launch_env()?;
     let path = selkies_draw::style::desktop_socket_path(|name| env.get(name).cloned());
-    let mut stream = UnixStream::connect(path).ok()?;
-    let pid = nix::sys::socket::getsockopt(&stream, nix::sys::socket::sockopt::PeerCredentials)
+    let fd = socket::socket(
+        AddressFamily::Unix,
+        SockType::Stream,
+        SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
+        None,
+    )
+    .ok()?;
+    socket::connect(fd.as_raw_fd(), &UnixAddr::new(&path).ok()?).ok()?;
+    let mut stream = UnixStream::from(fd);
+    stream.set_nonblocking(false).ok()?;
+    let pid = socket::getsockopt(&stream, sockopt::PeerCredentials)
         .ok()
         .and_then(|credentials| u32::try_from(credentials.pid()).ok())?;
-    stream.set_read_timeout(Some(SHELL_TIMEOUT)).ok()?;
     stream.set_write_timeout(Some(SHELL_TIMEOUT)).ok()?;
     stream
         .write_all(format!("{}\n", shell::DESCRIBE).as_bytes())
         .ok()?;
     stream.shutdown(std::net::Shutdown::Write).ok()?;
-    let mut answer = String::new();
-    stream
-        .take(SHELL_ANSWER_LIMIT + 1)
-        .read_to_string(&mut answer)
-        .ok()?;
-    if answer.len() as u64 > SHELL_ANSWER_LIMIT {
-        return None;
+    let mut answer = Vec::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let left = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())?;
+        stream.set_read_timeout(Some(left)).ok()?;
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => {
+                answer.extend_from_slice(&chunk[..read]);
+                if answer.len() > SHELL_ANSWER_LIMIT {
+                    return None;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
     }
-    let description = serde_json::from_str(answer.trim()).ok()?;
+    let description = serde_json::from_slice(answer.trim_ascii()).ok()?;
     Some(Shell { pid, description })
 }
 
@@ -104,8 +130,11 @@ pub fn surfaces(view: &DesktopView, shell: Option<&Shell>) -> Vec<Surface> {
             let Some(origin) = surface.origin else {
                 continue;
             };
+            if surface.key >= shell::KEY_LIMIT {
+                continue;
+            }
             let scale = scale_at(&view.outputs, origin.0, origin.1);
-            let tree = shell::placed(&surface.tree, origin, scale);
+            let tree = shell::placed(surface.tree.clone(), origin, scale);
             let clip = tree.bounds.unwrap_or_default();
             out.push(Surface {
                 id: SHELL_SURFACES + surface.key,
@@ -120,16 +149,37 @@ pub fn surfaces(view: &DesktopView, shell: Option<&Shell>) -> Vec<Surface> {
 
 /// A shell window's controls, placed where the window manager put the window; `None` for a
 /// window of any other process, or one the shell did not describe.
-pub fn shell_window(window: &WindowView, scale: f64, shell: &Shell) -> Option<Element> {
+///
+/// The shell names a window by its title, which two of its windows can share (two file
+/// managers on one folder), so windows of one title are paired in the order they opened: the
+/// shell's own numbers count up as it opens them, and so do the window manager's ids as it
+/// maps them, both backends numbering windows from a counter.
+pub fn shell_window(
+    view: &DesktopView,
+    window: &WindowView,
+    scale: f64,
+    shell: &Shell,
+) -> Option<Element> {
     if window.info.pid != Some(shell.pid) {
         return None;
     }
-    let surface = shell
+    let mut namesakes: Vec<u32> = view
+        .windows
+        .iter()
+        .filter(|w| w.info.pid == Some(shell.pid) && w.info.title == window.info.title)
+        .map(|w| w.info.id)
+        .collect();
+    namesakes.sort_unstable();
+    let rank = namesakes.iter().position(|id| *id == window.info.id)?;
+    let mut described: Vec<&shell::Surface> = shell
         .description
         .surfaces
         .iter()
-        .find(|s| s.origin.is_none() && s.name == window.info.title)?;
-    Some(shell::placed(&surface.tree, window.origin, scale))
+        .filter(|s| s.origin.is_none() && s.name == window.info.title)
+        .collect();
+    described.sort_unstable_by_key(|s| s.window);
+    let surface = described.get(rank)?;
+    Some(shell::placed(surface.tree.clone(), window.origin, scale))
 }
 
 /// The window manager's open menu, every level's rows under one surface.
@@ -252,6 +302,60 @@ mod tests {
             Some((200, 208, 400, 52))
         );
         assert!(rows[1].states.expanded);
+    }
+
+    /// Two shell windows of one title, as two file managers on one folder are, each read the
+    /// description of the window the shell opened in the same order.
+    #[test]
+    fn shell_windows_of_one_title_are_paired_in_the_order_they_opened() {
+        let window = |id: u32| WindowView {
+            info: pixelflux::wm::WindowInfo {
+                id,
+                pid: Some(40),
+                title: "Documents".to_string(),
+                ..pixelflux::wm::WindowInfo::default()
+            },
+            ..WindowView::default()
+        };
+        let described = |number: u32, item: &str| shell::Surface {
+            window: number,
+            name: "Documents".to_string(),
+            tree: shell::group(
+                "frame",
+                "Documents",
+                PxRect::default(),
+                vec![shell::control("list item", item, PxRect::default())],
+            ),
+            ..shell::Surface::default()
+        };
+        let view = DesktopView {
+            windows: vec![window(9), window(4)],
+            ..view(Vec::new())
+        };
+        let shell = Shell {
+            pid: 40,
+            description: Description {
+                surfaces: vec![described(7, "second"), described(3, "first")],
+            },
+        };
+        let item = |id: u32| {
+            let window = view.windows.iter().find(|w| w.info.id == id).unwrap();
+            shell_window(&view, window, 1.0, &shell).unwrap().children[0]
+                .name
+                .clone()
+        };
+        assert_eq!(
+            (item(4), item(9)),
+            ("first".to_string(), "second".to_string())
+        );
+        let stranger = WindowView {
+            info: pixelflux::wm::WindowInfo {
+                pid: Some(41),
+                ..window(4).info
+            },
+            ..window(4)
+        };
+        assert!(shell_window(&view, &stranger, 1.0, &shell).is_none());
     }
 
     #[test]
