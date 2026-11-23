@@ -5618,7 +5618,10 @@ fn render_node_tick(
                                             damage_rects = changed;
                                         }
                                     }
-                                    Err(e) => eprintln!("Render error: {:?}", e),
+                                    Err(e) => crate::log::debug!(
+                                        "[Wayland] Output {}: render failed: {e:?}.",
+                                        node.id
+                                    ),
                                 }
                                 if let (Some(id), Some(c)) = (slot_id, cap.as_deref_mut()) {
                                     c.render_seq += 1;
@@ -5819,7 +5822,10 @@ fn render_node_tick(
                                     damage_rects = changed;
                                 }
                             }
-                            Err(e) => eprintln!("Render error: {:?}", e),
+                            Err(e) => crate::log::debug!(
+                                "[Wayland] Output {}: render failed: {e:?}.",
+                                node.id
+                            ),
                         }
                         if let Some(c) = cap {
                             c.render_seq += 1;
