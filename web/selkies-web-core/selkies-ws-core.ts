@@ -6872,7 +6872,14 @@ let receivedBytes = 0;
 let probeSeq = 0, probeMark = -1, probeAt = 0;
 function send(data) {
   // An ack leaves with the count, whoever wrote it: the socket is read here.
-  if (typeof data === 'string' && data.startsWith('CLIENT_FRAME_ACK ')) data += ' ' + receivedBytes;
+  // It leaves stamped by this clock too: the page's starts at an origin of
+  // its own, and acks stamped by both would read the distance between the
+  // two as a way back held.
+  if (typeof data === 'string' && data.startsWith('CLIENT_FRAME_ACK ')) {
+    const parts = data.split(' ');
+    parts[3] = (performance.timeOrigin + performance.now()).toFixed(1);
+    data = parts.join(' ') + ' ' + receivedBytes;
+  }
   // What pongs took off since the last read comes off 'gone' first, or the
   // new bytes would fill the gap and go unreported.
   if (ws.bufferedAmount < gone) gone = ws.bufferedAmount;
@@ -7903,8 +7910,9 @@ class WorkerWebSocket {
           // How long this id waited for the tick; the server subtracts it so a
           // throttled ack cadence is not reported as network latency. The
           // stamp is this clock as the ack leaves, and the count of what the
-          // socket has handed over follows it: the socket worker adds its own
-          // as the ack passes it, this page where it reads the socket itself.
+          // socket has handed over follows it: the socket worker stamps by its
+          // own clock and adds its count as the ack passes it, this page where
+          // it reads the socket itself.
           const held = Math.max(0, Math.round(now - at));
           const counted = directReceived ? ` ${directReceived()}` : '';
           websocket.send(`CLIENT_FRAME_ACK ${acked} ${held} ${(performance.timeOrigin + now).toFixed(1)}${counted}`);

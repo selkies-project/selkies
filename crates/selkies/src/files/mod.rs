@@ -551,4 +551,48 @@ pub(crate) mod testing {
     pub fn json(body: &[u8]) -> Json {
         serde_json::from_slice(body).unwrap_or(Json::Null)
     }
+
+    /// A transport with one session socket whose peer answers each ping the moment it goes
+    /// out: a transfer gauged over it reads a clear path.
+    pub struct AnsweringSessions {
+        clock: Arc<pacing::UplinkClock>,
+    }
+
+    /// The socket's peer, which answers into the clock that pings it.
+    struct Answering(std::sync::OnceLock<std::sync::Weak<pacing::UplinkClock>>);
+
+    impl pacing::SessionPing for Answering {
+        fn ping(&self, payload: &[u8]) -> bool {
+            if let Some(clock) = self.0.get().and_then(std::sync::Weak::upgrade) {
+                clock.note_pong(payload);
+            }
+            true
+        }
+    }
+
+    impl AnsweringSessions {
+        pub fn new() -> Arc<AnsweringSessions> {
+            let peer = Arc::new(Answering(std::sync::OnceLock::new()));
+            let clock = Arc::new(pacing::UplinkClock::new(peer.clone()));
+            let _ = peer.0.set(Arc::downgrade(&clock));
+            Arc::new(AnsweringSessions { clock })
+        }
+
+        /// Whether a transfer has pinged the socket.
+        pub fn pinged(&self) -> bool {
+            self.clock.answered().is_some()
+        }
+    }
+
+    impl SessionDirectory for AnsweringSessions {
+        fn uplink_sessions(&self) -> Vec<UplinkSession> {
+            vec![UplinkSession {
+                clock: self.clock.clone(),
+                token: None,
+                remote: None,
+            }]
+        }
+
+        fn announce_print_document(&self, _name: &str, _size_bytes: u64) {}
+    }
 }

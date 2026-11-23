@@ -2772,6 +2772,111 @@ async fn an_https_port_serves_tls_beside_a_plain_http_port() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An upload over the server's own TLS lands whole under its name, a small one and one large
+/// enough to be gauged on the requester's session socket alike, nothing of its staging left.
+#[tokio::test]
+async fn an_upload_over_the_servers_own_tls_lands_whole() {
+    use rustls::pki_types::pem::PemObject;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let dir = super::testing::tempfile_dir("selkies-http-tls-upload-");
+    let root = dir.join("files");
+    std::fs::create_dir_all(&root).unwrap();
+    let files = crate::files::testing::state(&root, Arc::default());
+    let sessions = crate::files::testing::AnsweringSessions::new();
+    files.set_hooks(crate::files::Hooks {
+        sessions: Some(sessions.clone()),
+        ..crate::files::Hooks::default()
+    });
+    let https_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let config = HttpConfig {
+        listen: ListenConfig {
+            addr: "127.0.0.1".into(),
+            port: 0,
+            ..ListenConfig::default()
+        },
+        port_given: true,
+        https_port,
+        tls: super::tls::TlsConfig {
+            enable_https: false,
+            cert: dir.join("cert.pem").to_string_lossy().into_owned(),
+            key: dir.join("cert.key").to_string_lossy().into_owned(),
+            reload_interval: 0,
+        },
+        ..HttpConfig::default()
+    };
+    let state = AppState::new(config, FixedSupervisor::new(None, &[]));
+    let extra = Router::new().nest("/api", crate::files::router(files));
+    let server = super::Server::start(&state, build(state.clone(), vec![extra]))
+        .await
+        .expect("server");
+    let [_, secure] = server.local_addrs() else {
+        panic!("two listeners: {}", server.endpoint());
+    };
+    let secure = *secure;
+    let minted = rustls::pki_types::CertificateDer::from_pem_file(dir.join("cert.pem"))
+        .expect("the certificate is minted at the configured path");
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(minted).unwrap();
+    let client = Arc::new(
+        rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth(),
+    );
+    let upload = |name: &'static str, body: Vec<u8>| {
+        let client = client.clone();
+        async move {
+            let stream = tokio::net::TcpStream::connect(secure).await.unwrap();
+            let mut tls = tokio_rustls::TlsConnector::from(client)
+                .connect(
+                    rustls::pki_types::ServerName::IpAddress(secure.ip().into()),
+                    stream,
+                )
+                .await
+                .expect("the port speaks TLS");
+            let head = format!(
+                "POST /api/upload HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Upload-Path: {name}\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            tls.write_all(head.as_bytes()).await.unwrap();
+            tls.write_all(&body).await.unwrap();
+            let mut reply = Vec::new();
+            let _ = tls.read_to_end(&mut reply).await;
+            String::from_utf8_lossy(&reply).into_owned()
+        }
+    };
+    let small = b"a small upload".to_vec();
+    let reply = upload("small.bin", small.clone()).await;
+    assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+    assert!(!sessions.pinged(), "a small upload is not gauged");
+    let large: Vec<u8> = (0..crate::files::pacing::TRANSFER_MIN_GAUGED_BYTES)
+        .map(|i| u8::try_from(i % 251).expect("under 251"))
+        .collect();
+    let reply = tokio::time::timeout(Duration::from_secs(30), upload("large.bin", large.clone()))
+        .await
+        .expect("the gauged upload finishes");
+    assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+    assert!(sessions.pinged(), "a large one is gauged");
+    assert_eq!(std::fs::read(root.join("small.bin")).unwrap(), small);
+    assert_eq!(std::fs::read(root.join("large.bin")).unwrap(), large);
+    let staged: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+        .collect();
+    assert!(staged.is_empty(), "{staged:?}");
+    server.stop().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The listeners a server with `config`'s listen settings brings up, as its contract endpoint
 /// and its TCP addresses.
 async fn listeners_of(config: HttpConfig) -> (String, Vec<std::net::SocketAddr>) {

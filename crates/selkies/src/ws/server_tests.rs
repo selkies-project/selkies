@@ -2590,6 +2590,120 @@ async fn the_clipboard_host_sends_to_one_client_and_waits_on_its_queue() {
     );
 }
 
+/// The allowance a client's bulk transfers are paced in, once one asked for a window.
+async fn bulk_rate(rig: &Rig, client: crate::ws::client::ClientId) -> f64 {
+    let pace = rig
+        .service
+        .reg
+        .lock()
+        .bulk
+        .get(&client)
+        .cloned()
+        .expect("a bulk allowance");
+    pace.lock().await.1.rate_bps()
+}
+
+/// The pings a page was sent.
+fn pings(page: &RigPage) -> Vec<Bytes> {
+    page.page
+        .sent
+        .lock()
+        .iter()
+        .filter_map(|frame| match frame {
+            crate::ws::client::Frame::Ping(payload) => Some(payload.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_bulk_window_for_a_client_gone_waits_on_nothing() {
+    use crate::clipboard::outbound::ClipboardHost;
+    let rig = Rig::new();
+    let started = crate::ws::now();
+    rig.service.bulk_window(9999, 1 << 20).await;
+    assert!(crate::ws::now() - started < 0.1);
+    assert!(rig.service.reg.lock().bulk.is_empty(), "no allowance kept");
+}
+
+#[tokio::test]
+async fn each_clients_bulk_window_is_its_own() {
+    use crate::clipboard::outbound::ClipboardHost;
+    let rig = Rig::new();
+    let owner = rig.controller().await;
+    let viewer = rig.viewer().await;
+    // Two megabytes overdraw the owner's opening allowance for seconds.
+    let service = rig.service.clone();
+    let owner_id = owner.id();
+    let large = tokio::spawn(async move { service.bulk_window(owner_id, 2 << 20).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!large.is_finished(), "the owner's transfer is paced");
+    let started = crate::ws::now();
+    rig.service.bulk_window(viewer.id(), 16_000).await;
+    assert!(
+        crate::ws::now() - started < 0.1,
+        "the viewer's window waits on none of it"
+    );
+    large.abort();
+}
+
+#[tokio::test]
+async fn a_bulk_window_follows_its_sockets_verdicts() {
+    use crate::clipboard::outbound::ClipboardHost;
+    let rig = Rig::new();
+    let owner = rig.controller().await;
+    rig.service.bulk_window(owner.id(), 16_000).await;
+    let opening = bulk_rate(&rig, owner.id()).await;
+    // Every ping answered at once: a clear path, and the allowance the transfer fills grows.
+    let mut answered = 0;
+    let deadline = crate::ws::now() + 3.0;
+    while bulk_rate(&rig, owner.id()).await < 2.0 * opening && crate::ws::now() < deadline {
+        rig.service.bulk_window(owner.id(), 16_000).await;
+        for ping in pings(&owner).into_iter().skip(answered) {
+            owner.client().note_pong(&ping);
+            answered += 1;
+        }
+    }
+    let raised = bulk_rate(&rig, owner.id()).await;
+    assert!(raised >= 2.0 * opening, "{opening} -> {raised}");
+    // The next pong comes back late over the path's floor: the allowance is cut.
+    let deadline = crate::ws::now() + 3.0;
+    while pings(&owner).len() == answered && crate::ws::now() < deadline {
+        rig.service.bulk_window(owner.id(), 16_000).await;
+    }
+    let late = pings(&owner).pop().expect("a ping");
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    owner.client().note_pong(&late);
+    let before = bulk_rate(&rig, owner.id()).await;
+    rig.service.bulk_window(owner.id(), 16_000).await;
+    let cut = bulk_rate(&rig, owner.id()).await;
+    assert!(cut < before, "{before} -> {cut}");
+}
+
+#[tokio::test]
+async fn a_bulk_window_waits_for_its_sockets_backlog() {
+    use crate::clipboard::outbound::ClipboardHost;
+    let rig = Rig::new();
+    let owner = rig.controller().await;
+    owner.page.unsent.store(
+        i64::try_from(4 * crate::ws::protocol::WS_BULK_BACKLOG_BYTES).unwrap(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let service = rig.service.clone();
+    let owner_id = owner.id();
+    let window = tokio::spawn(async move { service.bulk_window(owner_id, 1000).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!window.is_finished(), "a backlog past the bound holds it");
+    owner
+        .page
+        .unsent
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    tokio::time::timeout(Duration::from_millis(500), window)
+        .await
+        .expect("the drained backlog lets it go")
+        .unwrap();
+}
+
 #[tokio::test]
 async fn capture_demand_goes_to_controllers_on_the_primary() {
     use crate::webcam::demand::DemandTransport;

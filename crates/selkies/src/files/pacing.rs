@@ -167,8 +167,8 @@ struct Window {
 
 /// `SO_BUF_LOCK` and its receive bit (Linux 5.14): which of a socket's buffers the process
 /// sized, cleared to hand the sizing back to the kernel.
-const SO_BUF_LOCK: libc::c_int = 72;
-const SOCK_RCVBUF_LOCK: libc::c_int = 2;
+pub(crate) const SO_BUF_LOCK: libc::c_int = 72;
+pub(crate) const SOCK_RCVBUF_LOCK: libc::c_int = 2;
 /// Where `struct tcp_info` keeps the least round trip the connection has measured, in
 /// microseconds (`tcpi_min_rtt`, Linux 4.6), all ones before any.
 const TCPI_MIN_RTT: usize = 148;
@@ -267,22 +267,27 @@ impl Window {
         self.held = false;
     }
 
-    /// Give the window back as it was found: the buffer no smaller than it was, its sizing
-    /// the kernel's, the clamp its value.
+    /// Give the window back as it was found: the buffer no smaller than it was, or than a
+    /// process may size one (`net.core.rmem_max`, past which only the kernel's own tuning
+    /// grows it back), its sizing the kernel's, the clamp its value. Whether or not the
+    /// last hold took: one loosened or refused leaves the buffer where a hold before it
+    /// sized it.
     fn release(&mut self) {
         if self.set == 0 {
             return;
         }
-        if self.held {
-            set_socket_option(self.fd, libc::SOL_SOCKET, libc::SO_RCVBUF, self.was.1 / 2);
-        }
+        set_socket_option(self.fd, libc::SOL_SOCKET, libc::SO_RCVBUF, self.was.1 / 2);
         self.loosen();
         self.set = 0;
     }
 }
 
 /// An int option of a socket, or `None` where the kernel refuses.
-fn socket_option(fd: RawFd, level: libc::c_int, option: libc::c_int) -> Option<libc::c_int> {
+pub(crate) fn socket_option(
+    fd: RawFd,
+    level: libc::c_int,
+    option: libc::c_int,
+) -> Option<libc::c_int> {
     let mut value: libc::c_int = 0;
     let mut len = libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>()).ok()?;
     // SAFETY: getsockopt writes at most `len` bytes into the int it is given.
@@ -576,15 +581,27 @@ pub struct UplinkSession {
     pub remote: Option<IpAddr>,
 }
 
+/// One session socket a gauge reads.
+struct Gauged {
+    clock: Arc<UplinkClock>,
+    /// The clock's count of answered pings as the gauge last read it.
+    seq: u64,
+    /// The socket's stream bytes as a download's gauge last read them.
+    streamed: Option<u64>,
+}
+
 /// Congestion verdicts for one client's bulk transfer, timed end to end over that client's
 /// own session socket(s) (module docs).
 pub struct UplinkGauge {
-    conns: Vec<(Arc<UplinkClock>, u64)>,
+    conns: Vec<Gauged>,
     last_ping: f64,
     inflation_us: u32,
     /// Where the gauge is a download's ([`UplinkGauge::beside_stream`]): when, with what the
     /// download had moved by then and what the gauged sockets' streams had written.
     beside: Option<VecDeque<(f64, u64, u64)>>,
+    /// What the gauged sockets' streams have written while gauged, each socket's counted
+    /// from its first reading: a socket that leaves the gauge takes nothing it wrote out.
+    streamed: u64,
     /// The bytes the transfer has moved under this gauge.
     moved: u64,
     /// Whether a download's share is yet to be read, its split having been counted for
@@ -617,12 +634,16 @@ impl UplinkGauge {
         UplinkGauge {
             conns: clocks
                 .into_iter()
-                .map(|c| (c.seq(), c))
-                .map(|(s, c)| (c, s))
+                .map(|clock| Gauged {
+                    seq: clock.seq(),
+                    clock,
+                    streamed: None,
+                })
                 .collect(),
             last_ping: f64::NEG_INFINITY,
             inflation_us: 0,
             beside: None,
+            streamed: 0,
             moved: 0,
             unread: false,
             upload: false,
@@ -666,7 +687,7 @@ impl UplinkGauge {
         let round_trip = self
             .conns
             .iter()
-            .filter_map(|(clock, _)| clock.floor_s())
+            .filter_map(|gauged| gauged.clock.floor_s())
             .reduce(f64::min)
             .into_iter()
             .chain(window.least_round_trip())
@@ -704,11 +725,17 @@ impl UplinkGauge {
 
     /// [`UplinkGauge::share_bps`] at `now` on the [`monotonic`] clock.
     fn share_bps_at(&mut self, nbytes: usize, now: f64) -> Option<f64> {
-        let stream = self
-            .conns
-            .iter()
-            .filter_map(|(clock, _)| clock.stream_bytes())
-            .reduce(|all, one| all + one);
+        let mut counted = false;
+        for gauged in &mut self.conns {
+            let Some(written) = gauged.clock.stream_bytes() else {
+                continue;
+            };
+            counted = true;
+            let since = written.saturating_sub(gauged.streamed.unwrap_or(written));
+            self.streamed += since;
+            gauged.streamed = Some(written);
+        }
+        let stream = counted.then_some(self.streamed);
         // What has moved by now: the piece counted here moves after it.
         let so_far = self.moved;
         self.moved += nbytes as u64;
@@ -770,16 +797,20 @@ impl UplinkGauge {
         let now = monotonic();
         if now - self.last_ping >= Self::PING_INTERVAL {
             self.last_ping = now;
-            self.conns.retain(|(clock, _)| clock.ping_behind());
+            self.conns.retain(|gauged| gauged.clock.ping_behind());
         }
         let mut verdict: Option<bool> = None;
         let mut inflation = 0u32;
-        for (clock, last) in &mut self.conns {
-            let Some((rtt, floor, seq)) = clock.fresh(*last) else {
+        for gauged in &mut self.conns {
+            let Some((rtt, floor, seq)) = gauged.clock.fresh(gauged.seq) else {
                 continue;
             };
-            *last = seq;
-            let held = if self.upload { clock.way_back() } else { None };
+            gauged.seq = seq;
+            let held = if self.upload {
+                gauged.clock.way_back()
+            } else {
+                None
+            };
             let over = held.map_or(rtt.saturating_sub(floor), |held| {
                 let held = (held.max(0.0) * 1e6).min(f64::from(u32::MAX)) as u32;
                 held.min(rtt.saturating_sub(floor))
@@ -858,6 +889,9 @@ impl TransferPacer {
     /// it within a quarter of that rate.
     const USED_SECONDS: f64 = 0.25;
     const FILLED: f64 = 0.8;
+    /// The idle seconds after which the allowance is stale and the multiplicative ramp is
+    /// re-entered (TCP's restart after idle), and the transfers' rate is read afresh.
+    const RESTART_SECONDS: f64 = 10.0;
 
     /// A pacer: `static_bps` caps it (0 for none) and `adaptive` lets verdicts steer it.
     pub fn new(static_bps: u64, adaptive: bool) -> Self {
@@ -989,12 +1023,11 @@ impl TransferPacer {
     fn bucket(&self, nbytes: usize) -> Option<Duration> {
         let now = monotonic();
         let mut s = self.inner.lock();
-        if self.adaptive && now - s.ts > 10.0 {
+        // What the transfers moved up to now, the piece drained here moving after it. A pause
+        // within a transfer is time it moved nothing in, read into the rate like any other;
+        // one as long as the restart's is a new transfer, whose reading starts over.
+        if self.adaptive && now - s.ts > Self::RESTART_SECONDS {
             s.slow_start = true;
-        }
-        // What the transfers moved up to now, the piece drained here moving after it; a
-        // pause longer than the window is no rate of theirs, and the reading starts over.
-        if now - s.ts > Self::USED_SECONDS {
             s.drains.clear();
             s.used_bps = None;
         }
@@ -1583,10 +1616,35 @@ mod tests {
             .expect("half the window was read");
         let most = 8192.0 / half;
         assert!(used > 0.5 * most && used <= most, "{used} of {most}");
-        // A pause longer than the window is no rate of the transfers', and starts it over.
-        tokio::time::sleep(Duration::from_secs_f64(TransferPacer::USED_SECONDS + 0.05)).await;
+        // A pause longer than the window is time the transfers moved nothing in.
+        let pause = TransferPacer::USED_SECONDS + 0.05;
+        tokio::time::sleep(Duration::from_secs_f64(pause)).await;
+        pacer.pace(8192).await;
+        let after = pacer.inner.lock().used_bps.expect("the pause was read");
+        assert!(after <= 8192.0 / pause, "{after} after {used}");
+        // One as long as the restart's is a new transfer, read afresh.
+        pacer.inner.lock().ts -= TransferPacer::RESTART_SECONDS;
         pacer.pace(8192).await;
         assert_eq!(pacer.inner.lock().used_bps, None, "the reading starts over");
+    }
+
+    #[tokio::test]
+    async fn an_allowance_is_not_raised_across_a_pause_in_its_transfers() {
+        let pacer = TransferPacer::adaptive();
+        set_rate(&pacer, 1_000_000.0);
+        // A download read by a slow client in large pieces: a piece, then a pause longer than
+        // the window while the client reads, then the next.
+        pacer.pace(8192).await;
+        tokio::time::sleep(Duration::from_secs_f64(TransferPacer::USED_SECONDS + 0.05)).await;
+        pacer.pace(8192).await;
+        for _ in 0..4 {
+            pacer.gauge_backoff(false, true, 0.65, DEFAULT_STEP, None);
+        }
+        assert_eq!(
+            pacer.rate_bps(),
+            1_000_000.0,
+            "clear verdicts on an unfilled allowance"
+        );
     }
 
     #[test]
@@ -1678,11 +1736,19 @@ mod tests {
         assert_eq!(locked(), Some(SOCK_RCVBUF_LOCK));
         assert_eq!(buffer(), 2 * first);
         assert_eq!(tcp(libc::TCP_WINDOW_CLAMP), Some(first));
-        // Given back: the kernel sizes the buffer again, from no less than it was, and the
-        // clamp is as it was found.
+        // An allowance past it again hands the socket back where the last hold sized it.
+        gauge.follow(2e12);
+        assert_eq!((locked(), buffer()), (Some(0), 2 * first));
+        // Given back: the buffer as it was, or as large as a process may size one, the
+        // kernel sizing it again, and the clamp as it was found.
         gauge.release_window();
+        let most: libc::c_int = std::fs::read_to_string("/proc/sys/net/core/rmem_max")
+            .expect("the kernel's limit")
+            .trim()
+            .parse()
+            .expect("a size");
         assert_eq!(locked(), Some(0));
-        assert!(buffer() >= was.1, "{} of {}", buffer(), was.1);
+        assert_eq!(buffer(), 2 * (was.1 / 2).min(most));
         assert_eq!(tcp(libc::TCP_WINDOW_CLAMP), Some(was.0));
         gauge.follow(750_000.0);
         assert_eq!(locked(), Some(0), "released is released");
@@ -1822,6 +1888,38 @@ mod tests {
         assert_eq!(share_after(&mut upload, &socket, 300_000, 0.2), None);
         assert!(!upload.share_unread(), "and none is awaited");
         assert_eq!(share_after(&mut upload, &socket, 300_000, 3.0), None);
+    }
+
+    #[test]
+    fn a_socket_that_leaves_the_gauge_takes_none_of_the_split_with_it() {
+        let streams = [300_000u64, 300_000];
+        let sockets = streams.map(|_| {
+            Arc::new(StreamingSocket {
+                written: AtomicU64::new(0),
+            })
+        });
+        let clocks = sockets
+            .clone()
+            .map(|socket| Arc::new(UplinkClock::new(socket)));
+        let mut gauge = UplinkGauge::new(clocks).beside_stream();
+        // 100 kB/s beside two sockets of 300 kB/s each for three seconds, the second closing
+        // at the last half second's start.
+        let mut share = None;
+        for tick in 0..=30u64 {
+            for (socket, bps) in sockets.iter().zip(streams) {
+                socket.written.store(tick * bps / 10, Ordering::Relaxed);
+            }
+            if tick == 25 {
+                // As a ping to the closed socket drops it.
+                gauge.conns.pop();
+            }
+            share = gauge.share_bps_at(10_000, 100.0 + tick as f64 / 10.0);
+        }
+        // Over the last second the download moved 100 kB, the streams 420 kB: both until the
+        // second closed, the first alone after.
+        let share = share.expect("a share");
+        let even = 260_000.0 * BESIDE_SHARE;
+        assert!((share - even).abs() < 0.1 * even, "{share} of {even}");
     }
 
     #[test]

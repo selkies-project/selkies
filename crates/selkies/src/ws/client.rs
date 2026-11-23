@@ -825,9 +825,11 @@ impl Client {
         back
     }
 
-    /// How long its way back held the page's last ack, by its stamp (`Flight::way_back`).
+    /// How long its way back holds what the page sends, by its stamps: the least of the last
+    /// few (`Flight::held_back`), which one ack read late or delayed on its own does not
+    /// move.
     pub fn held_back(&self) -> f64 {
-        self.flight.lock().way_back(now())
+        self.flight.lock().held_back(now())
     }
 
     /// Resolve a received pong against the ping clocks: each ignores the other's payloads. A
@@ -1578,6 +1580,41 @@ mod tests {
             held: 0.0,
         };
         client.note_stamp((now() + 3600.0) * 1000.0, said);
+    }
+
+    /// The gate reads what the way back holds off the page's last few stamps: one ack read
+    /// late on its own moves it no further than the least of them, and a hold every one of
+    /// them shows moves it in full.
+    #[tokio::test]
+    async fn one_late_ack_does_not_widen_the_gate() {
+        let page = Page::new(7, "controller");
+        let said = Said {
+            received: 0,
+            frame: 0,
+            held: 0.0,
+        };
+        // A stamp that left the page `late` seconds before it would have on time.
+        let stamp = |late: f64| {
+            page.client
+                .note_stamp((now() + 3600.0 - late) * 1000.0, said)
+        };
+        for _ in 0..3 {
+            stamp(0.0);
+        }
+        assert!(stamp(0.4) > 0.35, "the late ack's own hold");
+        assert!(
+            page.client.held_back() < 0.01,
+            "{}",
+            page.client.held_back()
+        );
+        for _ in 0..4 {
+            stamp(0.4);
+        }
+        assert!(
+            page.client.held_back() > 0.35,
+            "{}",
+            page.client.held_back()
+        );
     }
 
     /// A video frame is written at once while the page counts what it is sent; once a frame

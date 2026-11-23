@@ -539,6 +539,7 @@ mod tests {
     //! An upload carries the mode of a file it replaces only from this user's own file, never its
     //! set-ID or sticky bits.
 
+    use super::super::pacing::{SO_BUF_LOCK, SOCK_RCVBUF_LOCK, socket_option};
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
@@ -557,6 +558,68 @@ mod tests {
         let mode = std::fs::metadata(&staging).unwrap().permissions().mode() & 0o7777;
         std::fs::remove_dir_all(&root).unwrap();
         mode
+    }
+
+    /// Whether the process sized the socket's receive buffer (`SO_BUF_LOCK`'s receive bit).
+    fn sized(fd: RawFd) -> bool {
+        socket_option(fd, libc::SOL_SOCKET, SO_BUF_LOCK).expect("a socket") & SOCK_RCVBUF_LOCK != 0
+    }
+
+    #[tokio::test]
+    async fn a_failed_upload_gives_its_socket_window_back() {
+        use std::os::fd::AsRawFd;
+        let root = super::super::testing::scratch("selkies-upload-window");
+        let state = super::super::testing::state(&root, Arc::default());
+        let sessions = super::super::testing::AnsweringSessions::new();
+        state.set_hooks(super::super::Hooks {
+            sessions: Some(sessions.clone()),
+            ..super::super::Hooks::default()
+        });
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let _near = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (far, _) = listener.accept().unwrap();
+        let fd = far.as_raw_fd();
+        let clamp = socket_option(fd, libc::IPPROTO_TCP, libc::TCP_WINDOW_CLAMP);
+        assert!(!sized(fd));
+        // A body declared at the gauged size that carries more: its first piece is paced
+        // under the window, and the next is refused.
+        let first = bytes::Bytes::from(vec![0u8; 64 * 1024]);
+        let over = bytes::Bytes::from(vec![0u8; TRANSFER_MIN_GAUGED_BYTES as usize]);
+        let pieces = futures::stream::iter([Ok::<_, std::io::Error>(first)]).chain(
+            futures::stream::once(async move {
+                assert!(sized(fd), "the window is held while the upload runs");
+                Ok(over)
+            }),
+        );
+        let auth = RequestAuth {
+            viewer_ceiling: false,
+            origin_allowed: true,
+            session_tokens: Vec::new(),
+            remote: None,
+        };
+        let dir_fd = Arc::new(OwnedFd::from(std::fs::File::open(&root).unwrap()));
+        let streamed = stream_upload_body(
+            &state,
+            &auth,
+            Some(fd),
+            Some(TRANSFER_MIN_GAUGED_BYTES),
+            Body::from_stream(pieces),
+            "big.bin",
+            &dir_fd,
+            false,
+        )
+        .await;
+        assert_eq!(
+            streamed,
+            Err("body exceeds declared Content-Length".to_string())
+        );
+        assert!(sessions.pinged(), "the upload was gauged");
+        assert!(!sized(fd), "the buffer's sizing is the kernel's again");
+        assert_eq!(
+            socket_option(fd, libc::IPPROTO_TCP, libc::TCP_WINDOW_CLAMP),
+            clamp
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

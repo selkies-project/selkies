@@ -1253,8 +1253,9 @@ pub trait GateEffects {
     fn paced_bps(&self) -> Option<f64> {
         None
     }
-    /// How long the page's last ack was held on its way back, past the least any took, in
-    /// seconds, where its stamps tell (`ws::flight`): an upload filling its uplink.
+    /// How long the page's acks are held on their way back, past the least any took, in
+    /// seconds: the least of the last few stamps, where they tell (`ws::flight`), an upload
+    /// filling its uplink.
     fn held_back(&self) -> f64 {
         0.0
     }

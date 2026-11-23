@@ -2804,17 +2804,7 @@ async fn a_signaling_sockets_clock_keeps_its_floor_with_no_transfer() {
     sessions.bind(rig.service.clone());
     sessions.keep_floors();
     let (tx, mut outbox) = signaling_client(&registry, "primary").await;
-    let ping = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            match outbox.recv().await {
-                Some(Outbound::Ping(payload)) => break payload,
-                Some(_) => {}
-                None => panic!("the socket ended"),
-            }
-        }
-    })
-    .await
-    .expect("a ping on the directory's own beat");
+    let ping = next_ping(&mut outbox).await;
     let clock = sessions.uplink_sessions().remove(0).clock;
     assert_eq!(clock.floor_s(), None, "no floor before a pong");
     tx.send(Inbound::Pong(ping)).await.unwrap();
@@ -2825,6 +2815,85 @@ async fn a_signaling_sockets_clock_keeps_its_floor_with_no_transfer() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(clock.floor_s().is_some(), "the pong is the socket's floor");
+    rig.service.shutdown().await;
+}
+
+/// The next ping a signaling socket's peer is sent, within three seconds.
+async fn next_ping(outbox: &mut selkies_rtc::signaling::SocketOutbox) -> Vec<u8> {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match outbox.recv().await {
+                Some(Outbound::Ping(payload)) => break payload,
+                Some(_) => {}
+                None => panic!("the socket ended"),
+            }
+        }
+    })
+    .await
+    .expect("a ping")
+}
+
+/// Each signaling socket keeps a clock of its own: a pong is resolved against the socket it
+/// came on alone, the directory's beat pings a socket no sooner than the floor's interval, and
+/// a socket that closes leaves the directory and every gauge over it.
+#[tokio::test]
+async fn a_signaling_sockets_clock_is_its_own_and_goes_with_it() {
+    use crate::files::SessionDirectory;
+    use crate::files::pacing::UplinkGauge;
+
+    let rig = Rig::new((1920, 1080), quick());
+    rig.service.begin().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let registry = rig.service.peer_registry().expect("running");
+    let sessions = Arc::new(crate::webrtc::wiring::RtcSessions::default());
+    sessions.bind(rig.service.clone());
+    sessions.keep_floors();
+    let (first_tx, mut first_out) = signaling_client(&registry, "primary").await;
+    let (second_tx, mut second_out) = signaling_client(&registry, "display2").await;
+    let (first_ping, second_ping) = (
+        next_ping(&mut first_out).await,
+        next_ping(&mut second_out).await,
+    );
+    let listed = sessions.uplink_sessions();
+    assert_eq!(listed.len(), 2, "both sockets are listed");
+    let (first, second) = (listed[0].clock.clone(), listed[1].clock.clone());
+    // Each clock counts its own pings: the two payloads are alike, and the pong is the
+    // second socket's alone.
+    assert_eq!(first_ping, second_ping);
+    second_tx.send(Inbound::Pong(second_ping)).await.unwrap();
+    for _ in 0..100 {
+        if second.floor_s().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(second.floor_s().is_some(), "the pong is its socket's floor");
+    assert_eq!(first.floor_s(), None, "and not the other's");
+    // The beat runs each second; no socket is pinged again within the floor's interval.
+    let window = Duration::from_millis(2500);
+    assert!(UplinkGauge::FLOOR_PING_INTERVAL > window.as_secs_f64());
+    assert!(
+        tokio::time::timeout(window, next_ping(&mut first_out))
+            .await
+            .is_err(),
+        "a ping within the interval"
+    );
+    // The first socket closes: a gauge over its clock is left with nothing to gauge, and the
+    // directory lists the second alone.
+    let mut gauge = UplinkGauge::new([first.clone()]);
+    first_tx.send(Inbound::CloseFrame).await.unwrap();
+    for _ in 0..300 {
+        if sessions.uplink_sessions().len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let left = sessions.uplink_sessions();
+    assert_eq!(left.len(), 1, "the closed socket leaves the directory");
+    assert!(Arc::ptr_eq(&left[0].clock, &second));
+    let _ = gauge.sample();
+    assert!(!gauge.alive(), "a gauge over the closed socket stops");
+    drop(second_tx);
     rig.service.shutdown().await;
 }
 
