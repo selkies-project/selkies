@@ -535,12 +535,13 @@ pub struct Desktop {
     /// A slider value not yet applied to the bar, with the key it is for and
     /// when the drag has rested long enough to apply it.
     preview: Option<(String, i32, Instant)>,
-    /// Whether the display cannot show alpha, so the bar is blended over
-    /// the wallpaper before it is handed over, as on X11 without a
-    /// compositing manager.
+    /// Whether the display cannot show alpha, as on X11, where the shell's
+    /// windows take the root visual: the bar and the start menu are drawn
+    /// opaque, notifications never fade, and the Panel page offers no
+    /// opacity.
     pub opaque_output: bool,
     /// Where the panel surface's top-left corner sits in the primary
-    /// background's logical coordinates, for that blending.
+    /// background's logical coordinates.
     pub panel_offset: (i32, i32),
     /// The wallpaper pictures shrunk for the settings window's previews, by
     /// the path and the length of the longer side in pixels each was made
@@ -1585,6 +1586,16 @@ impl Desktop {
         })
     }
 
+    /// The opacity of the strip a hidden bar leaves to reveal it in percent: half the bar's
+    /// where alpha shows, else opaque.
+    fn reveal_opacity(&self) -> i32 {
+        if self.opaque_output {
+            100
+        } else {
+            self.config.panel_opacity / 2
+        }
+    }
+
     /// Whether the bar sits along the top edge.
     pub fn panel_top(&self) -> bool {
         self.config.panel_position == crate::config::PanelPosition::Top
@@ -1622,10 +1633,10 @@ impl Desktop {
         (lerp(float_x, attached_x), lerp(float_w, attached_w))
     }
 
-    /// The opacity the start menu's background takes in percent: the bar's, except on a display
-    /// that drops alpha, where the panel is blended over the wallpaper and a menu over a window
-    /// would show the wallpaper through it, so the menu stays opaque.
-    pub fn menu_opacity(&self) -> i32 {
+    /// The opacity the bar and the start menu take in percent: the setting, except on a display
+    /// that drops alpha, where nothing blends a surface with what is behind it, so both are
+    /// opaque.
+    pub fn panel_opacity(&self) -> i32 {
         if self.opaque_output {
             100
         } else {
@@ -3438,14 +3449,14 @@ impl Desktop {
             let clear = previous.iter().fold(visible[0], |acc, r| acc.union(r));
             canvas.clear(clear.inflate(CLEAR_MARGIN));
             if hidden {
-                canvas.fill_rect(self.reveal_strip(), ui::panel_bg(self.config.panel_opacity / 2));
+                canvas.fill_rect(self.reveal_strip(), ui::panel_bg(self.reveal_opacity()));
             } else {
                 panel::draw(self, &mut canvas);
                 visible.extend(popups::draw(self, &mut canvas));
             }
         }
         if self.opaque_output {
-            self.flatten_over_wallpaper(&mut pix, &visible);
+            self.settle_opaque(&mut pix, &visible);
         }
         let damage: Vec<Rect> = if fresh {
             vec![whole]
@@ -3477,45 +3488,35 @@ impl Desktop {
         })
     }
 
-    /// Blends the panel's pixels over the wallpaper behind them and makes
-    /// them opaque, for a display that drops alpha.  Pixels the wallpaper
-    /// does not reach are left as they are.
+    /// Makes the panel's pixels opaque for a display that drops alpha, each pixel short of full
+    /// coverage taken over its own surface's color: the bar's for the first rectangle, the
+    /// popups' for the rest. The window's one-bit shape keeps the antialiased edge of a rounded
+    /// fill and the shadow beside a popup, which the server would show darkened by the alpha it
+    /// drops; over the surface's color they read as its stepped edge, and nothing behind the
+    /// panel shows through.
     ///
     /// # Arguments
     /// * `pix` - The panel pixmap, premultiplied.
-    /// * `rects` - The logical rectangles to blend.
-    fn flatten_over_wallpaper(&self, pix: &mut Pixmap, rects: &[Rect]) {
-        let Some((_, layer)) = self.primary_background().and_then(|b| b.wallpaper_cache.as_ref()) else {
-            return;
-        };
+    /// * `rects` - The logical rectangles drawn, the bar's first.
+    fn settle_opaque(&self, pix: &mut Pixmap, rects: &[Rect]) {
         let scale = self.panel.scale.max(1);
-        let (ox, oy) = (self.panel_offset.0 * scale, self.panel_offset.1 * scale);
         let (pw, ph) = (pix.width() as i32, pix.height() as i32);
-        let (lw, lh) = (layer.width() as i32, layer.height() as i32);
-        let layer_data = layer.data();
+        let theme = ui::theme();
         let data = pix.data_mut();
-        for rect in rects {
+        for (i, rect) in rects.iter().enumerate() {
+            let under = if i == 0 { theme.panel } else { theme.popup }.to_color_u8();
+            let under = [under.red(), under.green(), under.blue()];
             let r = rect.scaled(scale).intersect(&Rect::new(0, 0, pw, ph));
             for y in r.y..r.bottom() {
-                let by = y + oy;
-                if by < 0 || by >= lh {
-                    continue;
-                }
+                let row = y as usize * pw as usize;
                 for x in r.x..r.right() {
-                    let bx = x + ox;
-                    if bx < 0 || bx >= lw {
+                    let d = (row + x as usize) * 4;
+                    let inv = 255 - u32::from(data[d + 3]);
+                    if inv == 0 {
                         continue;
                     }
-                    let d = (y as usize * pw as usize + x as usize) * 4;
-                    let s = (by as usize * lw as usize + bx as usize) * 4;
-                    let a = u32::from(data[d + 3]);
-                    if a == 255 {
-                        continue;
-                    }
-                    let inv = 255 - a;
-                    for c in 0..3 {
-                        data[d + c] = (u32::from(data[d + c]) + u32::from(layer_data[s + c]) * inv / 255)
-                            .min(255) as u8;
+                    for (out, u) in data[d..d + 3].iter_mut().zip(under) {
+                        *out = (u32::from(*out) + u32::from(u) * inv / 255).min(255) as u8;
                     }
                     data[d + 3] = 255;
                 }

@@ -57,10 +57,11 @@ people reach for in a multi-application container:
   picker; Windows, the frames' shading, button side, glyphs and corners;
   Wallpaper, for every monitor, shared or one by one, under a preview of
   the monitor painted as the desktop paints it.  Workspace: Panel, the
-  bar's edge, auto-hide, height, width, opacity, icon, label, layout,
-  margin, items, quick launch buttons and start menu; Desktops, how many
-  and the pager; Shortcuts, an editor of the keyboard shortcuts the window
-  manager publishes in `$XDG_RUNTIME_DIR/selkies-wm/keybinds` (per line the
+  bar's edge, auto-hide, height, width, opacity (not on X11), icon,
+  label, layout, margin, items, quick launch buttons and start menu;
+  Desktops, how many and the pager; Shortcuts, an editor of the keyboard
+  shortcuts the window manager publishes in
+  `$XDG_RUNTIME_DIR/selkies-wm/keybinds` (per line the
   chord in openbox's spelling, the chord the configuration gives, the label
   and the description, tab-separated; `execute` lines for command binds).
   A click on a bind's keys captures a new chord (Escape cancels, Backspace
@@ -195,7 +196,7 @@ applies within a moment.
 | `panel_position` | `bottom` | `bottom` or `top` |
 | `panel_height` | `44` | Height of the bar in logical pixels, 24 to 64; icons grow with it |
 | `panel_width` | `100` | Width of the bar as a percentage of the screen, centered with rounded corners when narrower |
-| `panel_opacity` | `95` | Opacity of the bar's background in percent |
+| `panel_opacity` | `95` | Opacity of the bar's and the start menu's background in percent; on X11 both are opaque and the Panel page leaves it out |
 | `panel_autohide` | `false` | Hide the bar until the pointer touches the screen edge it sits on; it then reserves no space |
 | `panel_layout` | `left` | `left` keeps the start button, quick launch and taskbar at the left; `centered` puts them in the middle of the bar |
 | `panel_float` | `true` | Float the bar clear of the screen edges while no window needs the space; a maximized, tiled, full-height, or fullscreen window reaching the bar's edge attaches it there, and the bar floats again once none does. The band the bar reserves is the same either way, so no window moves |

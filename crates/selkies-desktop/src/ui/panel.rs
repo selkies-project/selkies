@@ -572,7 +572,7 @@ fn cycle_windows(d: &mut Desktop, forward: bool) {
 /// * `canvas` - The panel canvas.
 pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
     let layout = layout(d);
-    let bg = ui::panel_bg(d.config.panel_opacity);
+    let bg = ui::panel_bg(d.panel_opacity());
     let (shape, radius) = d.bar_shape();
     ui::fill_surface(canvas, shape, radius, bg);
     let surface = Rect::new(0, 0, d.panel.width, d.panel.height);

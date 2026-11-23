@@ -479,7 +479,7 @@ fn draw_files(d: &mut Desktop, canvas: &mut Canvas<'_>, rect: Rect) {
 /// or the application list with the favorites' tiles.
 fn draw_menu(d: &mut Desktop, canvas: &mut Canvas<'_>, rect: Rect, layout: MenuLayout) {
     let radius = (ui::popup_radius() * 0.75).round();
-    ui::fill_surface(canvas, rect, radius, ui::menu_bg(d.menu_opacity()));
+    ui::fill_surface(canvas, rect, radius, ui::menu_bg(d.panel_opacity()));
     canvas.stroke_rounded(rect, radius, 1.0, ui::popup_border());
     let search = Rect::new(rect.x + 5, rect.y + 5, rect.w - 10, 14);
     canvas.fill_rounded(search, 4.0, ui::field_bg());
@@ -642,7 +642,7 @@ fn draw_bar(d: &mut Desktop, canvas: &mut Canvas<'_>, screen: Rect, look: &Look,
     } else {
         Rect::new(x, screen.bottom() - height - margin, width, height)
     };
-    let bg = ui::panel_bg(d.config.panel_opacity);
+    let bg = ui::panel_bg(d.panel_opacity());
     if margin > 0 {
         let radius = if corners == 0 {
             0.0

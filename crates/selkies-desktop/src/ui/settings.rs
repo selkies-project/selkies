@@ -2343,6 +2343,9 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
                 .iter()
                 .zip(SLIDERS.iter())
             {
+                if *key == "panel_opacity" && d.opaque_output {
+                    continue;
+                }
                 groups.slider(label, key, slider_value(d, key), unit);
             }
             groups.field(

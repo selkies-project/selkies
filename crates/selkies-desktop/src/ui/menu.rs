@@ -1328,7 +1328,7 @@ fn scroll_to_selection(d: &mut Desktop) {
 pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Rect {
     ensure_items(d);
     let layout = layout(d);
-    ui::draw_popup_frame_in(canvas, layout.frame, ui::menu_bg(d.menu_opacity()));
+    ui::draw_popup_frame_in(canvas, layout.frame, ui::menu_bg(d.panel_opacity()));
 
     canvas.fill_rounded(layout.search, 6.0, ui::field_bg());
     if let Some(glass) = ui::search_path(layout.search.x + 16, layout.search.y + layout.search.h / 2) {
@@ -1456,7 +1456,7 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Rect {
             ui::popup_radius(),
             crate::render::rgba(0, 0, 0, 0x50),
         );
-        ui::draw_popup_frame_in(canvas, rect, ui::menu_bg(d.menu_opacity()));
+        ui::draw_popup_frame_in(canvas, rect, ui::menu_bg(d.panel_opacity()));
         for (i, (label, _, _)) in context_rows(d, index).into_iter().enumerate() {
             let item = Rect::new(
                 rect.x + 6,
