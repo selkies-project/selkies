@@ -121,7 +121,7 @@ jobs:
       # cache would hand back the last build's: the distribution archive (its
       # release files' dates, read in the distribution's own image on this
       # architecture), Mozilla's and Google's apt repositories, and the
-      # proot-apps and FerrisPad releases.
+      # proot-apps release.
       - name: Read the upstream states the floating layers take
         id: upstream
         env:
@@ -135,7 +135,6 @@ jobs:
               'apt-get update -qq > /dev/null && sed -n "s/^Date: //p" /var/lib/apt/lists/*Release | sort | sha256sum | cut -c1-16')"
             echo "browsers=$(archive_date https://packages.mozilla.org/apt/dists/mozilla/InRelease); $(archive_date https://dl.google.com/linux/chrome/deb/dists/stable/InRelease)"
             echo "proot_apps=$(gh api repos/linuxserver/proot-apps/releases/latest --jq .tag_name)"
-            echo "ferrispad=$(gh api repos/fedro86/ferrispad/releases/latest --jq .tag_name)"
           } | tee -a "$GITHUB_OUTPUT"
       # The session without a desktop, which the desktop image is then built
       # on. Both are built in this one job so the desktop image can name the base it was
@@ -170,7 +169,6 @@ jobs:
             DISTRIB_ARCHIVE=${{ steps.upstream.outputs.archive }}
             BROWSER_ARCHIVES=${{ steps.upstream.outputs.browsers }}
             PROOT_APPS_VERSION=${{ steps.upstream.outputs.proot_apps }}
-            FERRISPAD_VERSION=${{ steps.upstream.outputs.ferrispad }}
           outputs: type=image,"name=${{ env.IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
           cache-scope: desktop-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
           retry-delay: ${{ env.PUSH_RETRY_DELAY }}

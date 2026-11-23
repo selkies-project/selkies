@@ -152,7 +152,7 @@
   peer-controlled sizes in pixelflux and pcmflux; the interposers' C code; file upload and download confinement.
 - In scope but lower: the web client (origin checks on `postMessage`, token handling), CI workflows and release
   scripts, and what the images download at build time outside a signed apt repository: the desktop image takes the
-  proot-apps release and the FerrisPad package checked against the digests GitHub records for them.
+  proot-apps release checked against the digest GitHub records for it.
 - In scope but lower, too: the `selkies-desktop` shell (`crates/selkies-desktop`), its own process the server
   starts under `--desktop`, whose control socket sits in the session's `$XDG_RUNTIME_DIR` and whose file manager
   decodes images and scans directories under the session user's home; it is kept out of the stream's process for

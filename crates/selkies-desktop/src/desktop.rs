@@ -3795,7 +3795,6 @@ const DEFAULT_FAVORITES: &[&[&str]] = &[
         "org.chromium.Chromium.desktop",
     ],
     &[
-        "selkies-terminal.desktop",
         "org.gnome.Console.desktop",
         "org.gnome.Terminal.desktop",
         "org.kde.konsole.desktop",

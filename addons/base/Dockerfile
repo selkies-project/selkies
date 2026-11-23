@@ -248,7 +248,9 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         netcat-openbsd \
         haveged \
         # Archive handling, which a file manager shells out to and a session
-        # with no unpacker cannot do at all
+        # with no unpacker cannot do at all; 7zip for the encrypted and
+        # multi-volume 7z archives libarchive cannot open
+        7zip \
         zip \
         unzip \
         xz-utils \

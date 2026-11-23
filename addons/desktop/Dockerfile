@@ -77,15 +77,17 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         breeze-gtk-theme \
         qt5-gtk-platformtheme \
         qt6-gtk-platformtheme \
-        # The terminals: foot on Wayland, xfce4-terminal on X11, which
-        # selkies-terminal picks between as the x-terminal-emulator below
-        foot \
-        xfce4-terminal \
-        # What the desktop's file manager opens files with: an image viewer,
-        # a document viewer, a music player, an archive manager, and a
-        # calculator, libadwaita applications that take the shell's light or
-        # dark scheme and its accent from its settings portal; the text editor
-        # and the system monitor follow below
+        # The terminal, on both backends: GNOME Console, a libadwaita
+        # application that takes the shell's scheme like those below, and that
+        # registers itself as the x-terminal-emulator the menus and the
+        # desktop's Terminal=true entries open
+        gnome-console \
+        # What the desktop's file manager opens files with: a text editor, an
+        # image viewer, a document viewer, a music player, an archive manager,
+        # and a calculator, libadwaita applications that take the shell's light
+        # or dark scheme and its accent from its settings portal; the system
+        # monitor follows below
+        gnome-text-editor \
         loupe \
         papers \
         amberol \
@@ -126,19 +128,9 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         gtk-update-icon-cache && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
-# The text editor, FerrisPad, from its release's package, checked against the
-# digest GitHub records for it; it takes light or dark from the GSettings the
-# shell sets. Its build needs a newer C library than some bases carry, and apt
-# refuses it there, so GNOME Text Editor takes its place. Resources, the system monitor, comes where the
-# distribution carries it.
-ARG FERRISPAD_VERSION=""
-RUN --mount=type=secret,id=github_token,uid=1000 set -eu; \
+# Resources, the system monitor, where the distribution carries it.
+RUN set -eu; \
     apt-get clean && apt-get update; \
-    fetch-verified release fedro86/ferrispad "${FERRISPAD_VERSION:-latest}" \
-        "FerrisPad-v{version}-ubuntu-$(dpkg --print-architecture).deb" /tmp/ferrispad.deb > /dev/null; \
-    if ! apt-get install --no-install-recommends -y /tmp/ferrispad.deb; then \
-        apt-get install --no-install-recommends -y gnome-text-editor; \
-    fi; \
     if apt-cache show resources > /dev/null 2>&1; then \
         apt-get install --no-install-recommends -y resources; \
     fi; \
@@ -147,16 +139,15 @@ RUN --mount=type=secret,id=github_token,uid=1000 set -eu; \
 # The browsers, in one apt operation: Firefox from Mozilla's own APT repository,
 # which serves real .deb builds and is pinned over the distribution package, and
 # Google Chrome as a downloaded .deb for the H.264/AV1 media stack the
-# distribution Chromium builds do not carry. Chrome's own launcher script gains
-# two switches, so every way of starting it -- menu entry, xdg-open, a shell --
-# carries them. --no-sandbox where the container denies Chrome's sandbox, which
-# needs CAP_SYS_ADMIN for its setuid helper or unprivileged user namespaces for
-# its zygote: a container's default seccomp profile grants neither, and a stock
-# Chrome aborts at the zygote (the container is the isolation boundary there).
-# The launcher asks for the namespaces the zygote creates at every start and
-# keeps the sandbox wherever they are granted, as under an unconfined seccomp
-# profile. And the basic password store, because the container runs no keyring
-# daemon to unlock and Chrome otherwise blocks on a prompt nobody can answer.
+# distribution Chromium builds do not carry. Chrome's own launcher script is
+# made to source /usr/share/selkies/google-chrome.sh (from the rootfs below)
+# before it execs the browser, so every way of starting it -- menu entry,
+# xdg-open, a shell -- carries the switches that file documents: the sandbox
+# where the container grants it, the basic password store, the Wayland
+# platform where the session has a Wayland display, and accessibility while
+# Pelorus reads the windows; it also clears a profile lock an unclean shutdown
+# left behind. The edit is checked, so a launcher that no longer matches fails
+# the build rather than a session.
 # Both come from their vendors' apt repositories, whose packages apt checks
 # against the signing key each names; the keys are checked against the
 # fingerprints Mozilla and Google publish (`fetch-verified`). Chrome's package
@@ -175,8 +166,9 @@ RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.
     printf 'repo_add_once="false"\nrepo_reenable_on_distupgrade="false"\n' > /etc/default/google-chrome && \
     apt-get clean && apt-get update && \
     apt-get install --no-install-recommends -y firefox google-chrome-stable && \
-    sed -i 's#^exec -a "$0" "$HERE/chrome" "$@"$#exec -a "$0" "$HERE/chrome" $(unshare --user --map-root-user --pid --net --fork true 2> /dev/null || echo --no-sandbox) --password-store=basic "$@"#' /opt/google/chrome/google-chrome && \
-    grep -q -- '|| echo --no-sandbox) --password-store=basic "$@"' /opt/google/chrome/google-chrome && \
+    sed -i 's#^exec -a "$0" "$HERE/chrome" "$@"$#. /usr/share/selkies/google-chrome.sh\nexec -a "$0" "$HERE/chrome" "${SELKIES_CHROME_FLAGS[@]}" "$@"#' /opt/google/chrome/google-chrome && \
+    grep -qxF '. /usr/share/selkies/google-chrome.sh' /opt/google/chrome/google-chrome && \
+    grep -qxF 'exec -a "$0" "$HERE/chrome" "${SELKIES_CHROME_FLAGS[@]}" "$@"' /opt/google/chrome/google-chrome && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
 # proot-apps (https://github.com/linuxserver/proot-apps) backs the dashboards'
@@ -259,19 +251,14 @@ RUN set -eu; \
 # The desktop's defaults, each documented in its own file: the window
 # manager's settings in the openbox format it reads, under /etc/xdg/openbox on
 # both backends (its right-click menu is its own built-in one); the autostart
-# that prepares the home; the
-# terminals' look,
-# shared between foot and xfce4-terminal; the applications files and links
-# open with; and the one Terminal entry in the start menu, which
-# selkies-terminal backs as the x-terminal-emulator on either backend, in place
-# of each terminal's own. Copied over what the packages above installed at the
-# same paths. An interactive shell also gets proot-apps on its PATH with its
-# completion, as the desktop's own session does.
+# that prepares the home; the applications files and links open with; and the
+# switches Google Chrome starts with.
+# Copied over what the packages above installed at the same paths. An
+# interactive shell also gets proot-apps on its PATH with its completion, as
+# the desktop's own session does.
 COPY --chown=1000:1000 addons/desktop/rootfs/ /
-COPY --chown=1000:1000 addons/desktop/selkies-terminal /usr/local/bin/
-RUN chmod -f 755 /usr/local/bin/selkies-terminal /etc/xdg/openbox/autostart && \
-    update-alternatives --install /usr/bin/x-terminal-emulator x-terminal-emulator /usr/local/bin/selkies-terminal 50 && \
-    [ "$(readlink -f /etc/alternatives/x-terminal-emulator)" = /usr/local/bin/selkies-terminal ] && \
+RUN chmod -f 755 /etc/xdg/openbox/autostart && \
+    [ "$(readlink -f /etc/alternatives/x-terminal-emulator)" = /usr/bin/kgx ] && \
     printf '%s\n' \
         '' \
         '# proot-apps from a terminal: its tools on the PATH and its completion' \

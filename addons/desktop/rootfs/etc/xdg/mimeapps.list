@@ -10,13 +10,13 @@
 # Types that derive from these (source code, shell scripts, and logs from
 # text/plain) follow their parent.
 [Default Applications]
-text/plain=ferrispad.desktop;org.gnome.TextEditor.desktop;
-text/markdown=ferrispad.desktop;org.gnome.TextEditor.desktop;
-text/x-log=ferrispad.desktop;org.gnome.TextEditor.desktop;
-application/json=ferrispad.desktop;org.gnome.TextEditor.desktop;
-application/xml=ferrispad.desktop;org.gnome.TextEditor.desktop;
-application/x-yaml=ferrispad.desktop;org.gnome.TextEditor.desktop;
-application/x-shellscript=ferrispad.desktop;org.gnome.TextEditor.desktop;
+text/plain=org.gnome.TextEditor.desktop;
+text/markdown=org.gnome.TextEditor.desktop;
+text/x-log=org.gnome.TextEditor.desktop;
+application/json=org.gnome.TextEditor.desktop;
+application/xml=org.gnome.TextEditor.desktop;
+application/x-yaml=org.gnome.TextEditor.desktop;
+application/x-shellscript=org.gnome.TextEditor.desktop;
 image/png=org.gnome.Loupe.desktop;
 image/jpeg=org.gnome.Loupe.desktop;
 image/gif=org.gnome.Loupe.desktop;

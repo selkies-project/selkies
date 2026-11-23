@@ -940,7 +940,7 @@ impl Action {
                 "selkies-desktop --toggle-menu" => tr("Start menu").to_string(),
                 "selkies-desktop --files" => tr("File manager").to_string(),
                 "selkies-desktop --settings" => tr("Settings").to_string(),
-                "x-terminal-emulator" | "selkies-terminal" => tr("Terminal").to_string(),
+                "x-terminal-emulator" | "kgx" => tr("Terminal").to_string(),
                 other => format!("{} {other}", tr("Run command")),
             },
             Action::ShowMenu(id) if id == "client-menu" => tr("Window menu").to_string(),
