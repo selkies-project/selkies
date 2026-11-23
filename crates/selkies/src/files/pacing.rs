@@ -1030,24 +1030,29 @@ impl TransferPacer {
         }
     }
 
-    /// Drain `nbytes` from the token bucket; the overdraw to sleep off, if any.
     /// Fold the transfers' pause since the last piece, if they took one, into the reading at
     /// `now`: one longer than [`TransferPacer::USED_SECONDS`] is no rate of theirs, and the
-    /// reading starts over, the allowance not shown filled until it is read again; one as
-    /// long as [`TransferPacer::RESTART_SECONDS`] ends the transfers, and the next start
-    /// afresh, as the allowance's ramp does.
+    /// reading starts over, the allowance not shown filled until it is read again where the
+    /// transfers had shown it a rate before; one as long as
+    /// [`TransferPacer::RESTART_SECONDS`] ends the transfers, and the next start afresh, as
+    /// the allowance's ramp does. A pacer that never read a rate starts as a new transfer
+    /// does: held there, the first transfer's ramp ends a doubling short of the overshoot
+    /// whose cuts find the path's rate, at an allowance over it whose window keeps a queue
+    /// just under what a verdict cuts for. Called before a verdict and again as the piece
+    /// drains, so the second call finds nothing left to discard.
     fn note_pause(s: &mut PacerState, now: f64) {
         let idle = now - s.ts;
-        if idle > Self::USED_SECONDS {
-            s.drains.clear();
-            s.used_bps = None;
-            s.paused = idle < Self::RESTART_SECONDS;
-        }
         if idle > Self::RESTART_SECONDS {
             s.slow_start = true;
         }
+        if idle > Self::USED_SECONDS && (s.used_bps.is_some() || !s.drains.is_empty()) {
+            s.paused = idle < Self::RESTART_SECONDS && s.used_bps.is_some();
+            s.drains.clear();
+            s.used_bps = None;
+        }
     }
 
+    /// Drain `nbytes` from the token bucket; the overdraw to sleep off, if any.
     fn bucket(&self, nbytes: usize) -> Option<Duration> {
         let now = monotonic();
         let mut s = self.inner.lock();
@@ -1685,6 +1690,13 @@ mod tests {
             "{}",
             pacer.rate_bps()
         );
+        // A pacer that never read a rate starts as a new transfer does, however long it
+        // stood idle: its first clear verdict doubles it.
+        let fresh = TransferPacer::adaptive();
+        let start = fresh.rate_bps();
+        fresh.inner.lock().ts -= 1.0;
+        fresh.pace_verdict(8192, Some(false), None).await;
+        assert_eq!(fresh.rate_bps(), 2.0 * start);
     }
 
     #[test]
