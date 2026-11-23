@@ -132,6 +132,7 @@ import {
 import { detectKeyboardLayout } from './lib/keyboard-layout.ts';
 import { currentColorScheme, onColorSchemeChange } from './lib/color-scheme.ts';
 import { installAuthGuard } from './lib/auth-guard.ts';
+import { workersBlocked } from './lib/worker-block.ts';
 import { getSessionToken, installSessionCookie, sessionAuthHeaders, sessionTokenProtocols } from './lib/session-token.ts';
 import { urlFragmentKeyword } from './lib/page-url.ts';
 import { titleFromSettings } from './lib/page-title.ts';
@@ -282,6 +283,8 @@ let isSecondaryDisplayConnected = false;
 /** Display rectangles (+ per-page scale) from the last DISPLAY_CONFIG_UPDATE. */
 let latestDisplayLayouts: DisplayLayouts | null = null;
 let audioDecoderWorker: Worker | null = null;
+/** Whether the log already says audio stays off under a policy refusing workers. */
+let audioRefusedNoted = false;
 let canvas: HTMLCanvasElement | null = null;
 let canvasContext: CanvasRenderingContext2D | null = null;
 /** A message as the session socket delivers it: a browser event, or the plain record the worker socket and a replay hand over. */
@@ -2942,11 +2945,12 @@ function announceSink(description: string): void {
  * main-thread decode while the sink stays up for transferred frames; for the
  * stats, `decodeFacts` whenever what its decoder turns out changes, and
  * `decodeStats` when the page asks for a sample.
- * @returns True once a sink is wired; until then frames fall back to
+ * @returns True once a sink is wired; until then, and for good where the
+ *     page's policy refuses workers (`workersBlocked`), frames fall back to
  *     the main canvas.
  */
 function ensureVideoWorker(): boolean {
-  if (videoWorkerSinkInert) return false;
+  if (videoWorkerSinkInert || workersBlocked()) return false;
   if (videoWorkerReady) return true;
   if (videoWorker) return false;
   try {
@@ -4563,7 +4567,7 @@ function deactivateStripeWorker(): void {
 function ensureStripeWorker(): boolean {
   if (stripeWorker) return true;
   if (!stripeCompositeEnabled || typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined'
-      || typeof createImageBitmap !== 'function') {
+      || typeof createImageBitmap !== 'function' || workersBlocked()) {
     return false;
   }
   try {
@@ -5305,7 +5309,9 @@ function applyGamepadPolling(): void {
  * governed (a shared viewer cannot switch video or audio on, and a second
  * display page exists to show its display), and a pipeline the user already
  * toggled keeps that choice. Video and audio off are applied before anything
- * was requested, and the server starts neither for this page; the
+ * was requested, and the server starts neither for this page; audio starts
+ * off as well where the page's policy refuses workers (`workersBlocked`),
+ * since its decoder runs in one; the
  * microphone and webcam start their uplinks; the gamepad policy seeds a
  * toggle the browser has not persisted.
  * @param serverSettings
@@ -5332,7 +5338,7 @@ function applyStartPolicy(serverSettings: Record<string, ServerSettingEntry>): v
   // audio_enabled=false wins: the held START_AUDIO still goes out so the
   // server's AUDIO_DISABLED reply tears the workers down.
   const audioDisabledByServer = startsOn('audio_enabled', true) === false;
-  if (untouched('audio') && !startsOn('audio_on_start', true) && !audioDisabledByServer && isAudioPipelineActive) {
+  if (untouched('audio') && (!startsOn('audio_on_start', true) || workersBlocked()) && !audioDisabledByServer && isAudioPipelineActive) {
     isAudioPipelineActive = false;
     window.postMessage({ type: 'pipelineStatusUpdate', audio: false }, window.location.origin);
     if (audioDecoderWorker) audioDecoderWorker.postMessage({ type: 'updatePipelineStatus', data: { isActive: false } });
@@ -5740,6 +5746,10 @@ function receiveMessage(event: Pick<MessageEvent<DashboardMessage>, 'origin' | '
         }
         if (!audioEnabled) {
           console.log("Audio is disabled. Audio pipeline control blocked.");
+          break;
+        }
+        if (desiredState && workersBlocked()) {
+          console.warn("[Main] The page's Content-Security-Policy refuses workers; audio, decoded in one, stays off.");
           break;
         }
         pipelinesToggledByUser.add('audio');
@@ -7079,8 +7089,11 @@ class WorkerWebSocket {
    *     that one takes the audio short-circuit.
    * @param [protocols] Subprotocols the handshake offers
    *     (`sessionTokenProtocols`).
+   * @param [onBlocked] Called, in place of any event of this socket, when
+   *     the page's policy refused the worker before it ever reported
+   *     (`workersBlocked`); the owner then reads the socket on the page.
    */
-  constructor(url: string, primary: boolean, protocols: string[] = []) {
+  constructor(url: string, primary: boolean, protocols: string[] = [], onBlocked?: () => void) {
     this.readyState = WebSocket.CONNECTING;
     this.binaryType = 'arraybuffer';
     this.onopen = this.onmessage = this.onerror = this.onclose = null;
@@ -7090,7 +7103,9 @@ class WorkerWebSocket {
     const workerURL = URL.createObjectURL(blob);
     this._worker = new Worker(workerURL);
     URL.revokeObjectURL(workerURL);
+    let reported = false;
     this._worker.onmessage = (e: MessageEvent<SocketWorkerMessage>): void => {
+      reported = true;
       const m = e.data;
       if (m.type === 'message') {
         const ev = { data: m.data, at: m.at };
@@ -7119,6 +7134,14 @@ class WorkerWebSocket {
         this._retire();
         return;
       }
+    };
+    this._worker.onerror = (): void => {
+      if (reported || !onBlocked) return;
+      setTimeout((): void => {
+        if (reported || !workersBlocked()) return;
+        this._retire();
+        onBlocked();
+      }, 0);
     };
     this._worker.postMessage({ type: 'open', url, primary, protocols });
   }
@@ -7291,10 +7314,22 @@ class WorkerWebSocket {
   }
 }
 
+  /**
+   * Builds the playback pipeline: the context, its worklet, and the decoder
+   * worker. Nothing is built where the page's policy refuses workers
+   * (`workersBlocked`): the decoder runs nowhere else, and a pipeline whose
+   * worker the policy refuses would be torn down and rebuilt on every packet.
+   * @returns True where a pipeline kept through a reconnect was rewired.
+   */
   async function initializeAudio(): Promise<true | undefined> {
     if (displayId !== 'primary') {
         console.log("Secondary display: Audio pipeline initialization skipped.");
         return;
+    }
+    if (workersBlocked()) {
+      if (!audioRefusedNoted) console.warn("[Main] The page's Content-Security-Policy refuses workers; audio, decoded in one, stays off.");
+      audioRefusedNoted = true;
+      return;
     }
 
     if (window.isAudioInitializing) return;
@@ -7747,6 +7782,7 @@ class WorkerWebSocket {
 
   /** Reinitializes the audio decoder in its worker, building the whole pipeline first if it is missing. */
   async function initializeDecoderAudio(): Promise<void> {
+    if (workersBlocked()) return;
     if (audioDecoderWorker) {
       console.log('[Main] Requesting Audio Decoder Worker to reinitialize its decoder.');
       audioDecoderWorker.postMessage({
@@ -7790,32 +7826,19 @@ class WorkerWebSocket {
     : getBoolParam('socket_worker', true);
   // The count of what a socket read on this page has handed over, where one is.
   let directReceived: (() => number) | null = null;
-  /**
-   * Opens the session socket and wires the decoders' lines into it; the page
-   * binds its handlers to it next (`bindSessionSocket`). Runs again for each
-   * in-place reconnect.
-   */
-  const openSessionSocket = (): void => {
-    directReceived = null;
-    try {
-      if (!socketWorkerEnabled) throw new Error('socket_worker=false');
-      websocket = new WorkerWebSocket(websocketEndpointURL.href, displayId === 'primary', tokenProtocols);
-      if (streamStats.open) websocket.setStats!(true);
-    } catch (e) {
-      // No worker to be had (a policy forbidding blob workers, say). The socket
-      // then runs here, where a busy thread costs audio its cadence, which is
-      // still better than no session.
-      if (socketWorkerEnabled) console.warn('[websockets] socket worker unavailable, reading on the page:', e);
-      const direct = new WebSocket(websocketEndpointURL.href, tokenProtocols);
-      direct.binaryType = 'arraybuffer';
-      // Read here, the socket is counted here, as the worker counts its own.
-      let received = 0;
-      direct.addEventListener('message', (event: MessageEvent) => {
-        if (event.data instanceof ArrayBuffer) received += event.data.byteLength;
-      });
-      directReceived = () => received;
-      websocket = asSessionSocket(direct);
-    }
+  /** Opens the session socket on the page, counted here as the worker counts its own. */
+  const openPageSocket = (): void => {
+    const direct = new WebSocket(websocketEndpointURL.href, tokenProtocols);
+    direct.binaryType = 'arraybuffer';
+    let received = 0;
+    direct.addEventListener('message', (event: MessageEvent) => {
+      if (event.data instanceof ArrayBuffer) received += event.data.byteLength;
+    });
+    directReceived = () => received;
+    websocket = asSessionSocket(direct);
+  };
+  /** Wires the decoders' lines into the socket just opened. */
+  const wireSessionSocket = (): void => {
     // The socket itself is in a worker, so this handle is what page-side
     // tooling has to observe or close the transport through.
     window.selkiesTransport = websocket;
@@ -7823,6 +7846,36 @@ class WorkerWebSocket {
     // A fresh socket worker holds the divert default; re-point it.
     videoDivertOn = false;
     wireSocketToVideoWorker();
+  };
+  /**
+   * Opens the session socket and wires the decoders' lines into it; the page
+   * binds its handlers to it next (`bindSessionSocket`). Runs again for each
+   * in-place reconnect. The socket is read in a worker unless
+   * `socket_worker=false` or the page's policy refuses workers
+   * (`workersBlocked`): then on the page, where a busy thread costs audio its
+   * cadence, which is still better than no session. Engines report that
+   * refusal after the worker was handed back, so a worker socket the policy
+   * refused is replaced by a page socket in place.
+   */
+  const openSessionSocket = (): void => {
+    directReceived = null;
+    try {
+      if (!socketWorkerEnabled) throw new Error('socket_worker=false');
+      if (workersBlocked()) throw new Error("the page's Content-Security-Policy refuses workers");
+      const candidate: WorkerWebSocket = new WorkerWebSocket(websocketEndpointURL.href, displayId === 'primary', tokenProtocols, (): void => {
+        if (websocket !== candidate) return;
+        console.warn("[websockets] the page's Content-Security-Policy refused the socket worker; reading on the page");
+        openPageSocket();
+        wireSessionSocket();
+        bindSessionSocket();
+      });
+      websocket = candidate;
+      if (streamStats.open) websocket.setStats!(true);
+    } catch (e) {
+      if (socketWorkerEnabled) console.warn('[websockets] socket worker unavailable, reading on the page:', e);
+      openPageSocket();
+    }
+    wireSessionSocket();
   };
   openSessionSocket();
 
@@ -8174,7 +8227,7 @@ class WorkerWebSocket {
         const audioHeaderLength = 2;
         if (arrayBuffer.byteLength < audioHeaderLength) return;
 
-        if ((isAudioPipelineActive || isSharedMode)) {
+        if ((isAudioPipelineActive || isSharedMode) && !workersBlocked()) {
           if (audioDecoderWorker) {
             if (audioContext && audioContext.state !== 'running') {
               audioContext.resume().catch((e: unknown): void => console.error("Error resuming audio context", e));
