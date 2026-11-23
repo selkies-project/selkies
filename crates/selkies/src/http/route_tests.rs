@@ -604,6 +604,143 @@ async fn secure_subfolder() {
     app.stop().await;
 }
 
+/// Every Pelorus route as one request each, the real router's.
+const PELORUS: &[(&str, &str)] = &[
+    ("GET", "/api/pelorus/desktop"),
+    ("GET", "/api/pelorus/window/1/outline"),
+    ("GET", "/api/pelorus/window/1/tree"),
+    ("POST", "/api/pelorus/window/1/close"),
+    ("GET", "/api/pelorus/tools"),
+    ("POST", "/api/pelorus/tool"),
+    ("GET", "/api/pelorus/models"),
+    ("POST", "/api/pelorus/models"),
+    ("POST", "/api/pelorus/models/names"),
+    ("PUT", "/api/pelorus/models/x"),
+    ("DELETE", "/api/pelorus/models/x"),
+    ("POST", "/api/pelorus/run"),
+    ("DELETE", "/api/pelorus/session/x"),
+];
+
+/// The real Pelorus routes behind the real gate, with the stub tokens provisioned.
+async fn pelorus_server(config: HttpConfig) -> TestServer {
+    let state = AppState::new(
+        config,
+        FixedSupervisor::new(Some("websockets"), &["websockets", "webrtc"]),
+    );
+    state.tokens.provision(
+        json!({
+            CTRL: {"role": "controller", "slot": 1},
+            VIEW: {"role": "viewer", "slot": null},
+        })
+        .as_object()
+        .unwrap(),
+    );
+    TestServer::start(build(state, vec![crate::pelorus::routes()])).await
+}
+
+#[tokio::test]
+async fn secure_mode_holds_every_pelorus_route_to_a_controller_token() {
+    for basic_on in [false, true] {
+        let app = pelorus_server(HttpConfig {
+            enable_basic_auth: basic_on,
+            ..secure_config()
+        })
+        .await;
+        for (method, path) in PELORUS {
+            let r = app.call(method, path, &[]).await;
+            assert_eq!(
+                r.status, 401,
+                "basic {basic_on}, no credential: {method} {path}"
+            );
+            let r = app
+                .call(method, path, &[("authorization", &bearer(VIEW))])
+                .await;
+            assert_eq!(
+                r.status, 403,
+                "basic {basic_on}, viewer token: {method} {path}"
+            );
+            let r = app.call(method, path, &[("cookie", &cookie(VIEW))]).await;
+            assert_eq!(
+                r.status, 403,
+                "basic {basic_on}, viewer cookie: {method} {path}"
+            );
+        }
+        if basic_on {
+            let login = basic("user", &PASSWORD);
+            for (method, path) in PELORUS {
+                let r = app.call(method, path, &[("authorization", &login)]).await;
+                assert_eq!(
+                    r.status, 403,
+                    "a Basic login without a token is a viewer: {method} {path}"
+                );
+            }
+        }
+        for credential in [
+            ("authorization", bearer(CTRL)),
+            ("authorization", bearer(MASTER)),
+            ("cookie", cookie(CTRL)),
+        ] {
+            let r = app
+                .call(
+                    "POST",
+                    "/api/pelorus/tool",
+                    &[(credential.0, &credential.1)],
+                )
+                .await;
+            assert_eq!(
+                r.status, 400,
+                "basic {basic_on}, {}: a controller reaches the tool handler",
+                credential.0
+            );
+        }
+        app.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn a_pelorus_write_from_another_site_is_refused_on_any_server() {
+    let evil = ("origin", "https://evil.example");
+    let login = basic("user", &PASSWORD);
+    let legacy = pelorus_server(HttpConfig {
+        master_token: String::new(),
+        enable_basic_auth: true,
+        ..secure_config()
+    })
+    .await;
+    let secure = pelorus_server(secure_config()).await;
+    for (app, credential) in [
+        (&legacy, ("authorization", login.clone())),
+        (&secure, ("authorization", bearer(CTRL))),
+        (&secure, ("cookie", cookie(CTRL))),
+    ] {
+        let auth = (credential.0, credential.1.as_str());
+        for (method, path) in PELORUS.iter().filter(|(m, _)| *m != "GET") {
+            let r = app.call(method, path, &[auth, evil]).await;
+            assert_eq!(
+                r.status, 403,
+                "{} from another site: {method} {path}",
+                auth.0
+            );
+            let r = app
+                .call(method, path, &[auth, ("sec-fetch-site", "cross-site")])
+                .await;
+            assert_eq!(
+                r.status, 403,
+                "{} from another site naming no Origin: {method} {path}",
+                auth.0
+            );
+        }
+        let r = app.call("POST", "/api/pelorus/tool", &[auth]).await;
+        assert_eq!(
+            r.status, 400,
+            "{} with no Origin reaches the handler",
+            auth.0
+        );
+    }
+    legacy.stop().await;
+    secure.stop().await;
+}
+
 #[tokio::test]
 async fn secure_basic_on() {
     let (app, _state) = stub_server(HttpConfig {

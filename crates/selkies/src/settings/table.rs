@@ -2571,7 +2571,7 @@ pub static DEFINITIONS: &[SettingDef] = &[
         name: "pelorus",
         kind: Kind::Bool,
         default: "False",
-        help: "Serve Pelorus under /pelorus: the desktop described as text (windows, their controls, and where to click them) and the actions on it, for an agent or a script. A caller there holds what the session's user holds, so it takes a controller's credential. Locked (true|locked), the agent's model is the one these settings name and nothing of it is configured or shown in a browser.",
+        help: "Serve Pelorus, its page under /pelorus/ and its API under /api/pelorus: the desktop described as text (windows, their controls, and where to click them) and the actions on it, for an agent or a script. A caller there holds what the session's user holds, so it takes a controller's credential: in secure mode a controller's session token or the master token, as every other API route does. Locked (true|locked), the agent's model is the one these settings name and nothing of it is configured or shown in a browser.",
         env_vars: &[],
         allowed: &[],
         value_range: None,

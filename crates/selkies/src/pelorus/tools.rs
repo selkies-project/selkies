@@ -867,7 +867,7 @@ pub async fn call(name: &str, args: &Json, capabilities: Capabilities) -> Output
     }
 }
 
-/// `GET /pelorus/api/tools`: the tools this session offers and their argument schemas, for a
+/// `GET /api/pelorus/tools`: the tools this session offers and their argument schemas, for a
 /// caller that brings its own model. `screenshot` is listed, since the caller decides whether
 /// its model sees.
 pub async fn handle_tools(ceiling: Ceiling) -> Response {
@@ -881,7 +881,7 @@ pub async fn handle_tools(ceiling: Ceiling) -> Response {
     axum::Json(json!({"tools": tools})).into_response()
 }
 
-/// `POST /pelorus/api/tool`: one tool call, `{"name": ..., "arguments": {...}}`, answered with
+/// `POST /api/pelorus/tool`: one tool call, `{"name": ..., "arguments": {...}}`, answered with
 /// `{"text", "failed"}` and the picture as base64 PNG in `image` where the tool made one.
 pub async fn handle_tool(ceiling: Ceiling, body: Bytes) -> Response {
     if ceiling.is_viewer() {

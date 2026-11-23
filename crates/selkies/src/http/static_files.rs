@@ -278,8 +278,9 @@ pub async fn manifest(config: &super::HttpConfig, client: &WebClient) -> Respons
 }
 
 /// Where the Pelorus page lives in the client: `pelorus` moves a browser to `pelorus/`, the
-/// directory whose relative addresses the page and its API share, and `pelorus/` is the page.
-/// With `pelorus` off nothing under it is served: the page is closed with its API.
+/// directory the page's relative addresses resolve against (its API is `../api/pelorus`), and
+/// `pelorus/` is the page. With `pelorus` off nothing under it is served: the page is closed
+/// with its API.
 const PELORUS: &str = "pelorus";
 const PELORUS_DIR: &str = "pelorus/";
 const PELORUS_PAGE: &str = "pelorus/index.html";

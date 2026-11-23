@@ -332,7 +332,7 @@ pub async fn run(
     turns
 }
 
-/// `POST /pelorus/api/run`: give the agent a task. The body names the `prompt`, a `session`
+/// `POST /api/pelorus/run`: give the agent a task. The body names the `prompt`, a `session`
 /// to continue (a new one where absent), `stream` for a server-sent stream of events instead
 /// of one answer, the `config` to run on (the default where absent), and what of it the
 /// request changes (`model`, `effort`, `vision`), the `api_key` a sealed configuration's
@@ -480,7 +480,7 @@ pub async fn handle_run(ceiling: Ceiling, body: Bytes) -> Response {
     .into_response()
 }
 
-/// `DELETE /pelorus/api/session/{id}`: forget a conversation; refused while a run holds it.
+/// `DELETE /api/pelorus/session/{id}`: forget a conversation; refused while a run holds it.
 pub async fn handle_forget(ceiling: Ceiling, Path(id): Path<String>) -> Response {
     if ceiling.is_viewer() {
         return refused();

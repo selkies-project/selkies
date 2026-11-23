@@ -38,7 +38,7 @@ import { unseal, useHeld } from "@/pelorus/keys";
 import { Inline, Markdown } from "@/pelorus/markdown";
 
 interface PelorusCompactProps {
-  /** The API's address, the prefixed `/pelorus/api`. */
+  /** The API's address, the prefixed `/api/pelorus`. */
   base: string;
   /** The page the pop-out opens. */
   popoutHref: string;

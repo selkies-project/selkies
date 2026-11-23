@@ -112,8 +112,10 @@
   name with a path ignored, and a menu cut to 512 entries and eight levels. An item can show an icon, a tooltip,
   and a menu on the user's bar and learn which entry the user chose; nothing it sends is run or written.
 - Under `--pelorus` (`crates/selkies/src/pelorus.rs` and `pelorus/`, the `pelorus` crate's accessibility-bus reader
-  and the shell's description it reads from the desktop shell's control socket, the dashboard's `src/pelorus`): routes under `/pelorus` that every credential short of the controller's is refused
-  (the desktop as text, the agent's tools, `api/run`, `api/models`, `api/models/names`, `api/session`). A run hands
+  and the shell's description it reads from the desktop shell's control socket, the dashboard's `src/pelorus`): routes under `/api/pelorus` that every credential short of the controller's is refused, in secure mode a
+  controller's session token or the master token as on every other API route, and every write from another site's
+  page is refused whatever it carries (the desktop as text, the agent's tools, `run`, `models`, `models/names`,
+  `session`); the page itself is static under `/pelorus/`. A run hands
   the model the session user's reach: input through Computer Use, and the `shell` tool and the `apps` tool where
   `--command-enabled` allows it (`pelorus/apps.rs`: the apps panel's jobs on the panel's own queue and rules, an
   install only of a name the catalog lists), so what the model reads on screen is untrusted input steering the session user's own power; a model

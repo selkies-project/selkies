@@ -26,7 +26,7 @@
 //!
 //! A key saved from the interface is kept one of two ways. Kept on the server, it is in the
 //! file as typed, and any caller holding the controller's credential can run on it: the
-//! dashboard of any browser, a script against `/pelorus/api/run`. Sealed, the file holds
+//! dashboard of any browser, a script against `/api/pelorus/run`. Sealed, the file holds
 //! only what the browser that saved it encrypted (`sealed`), under a key that browser keeps
 //! and never sends; the browser opens it and sends the key with each run and each model
 //! listing, which the server uses for that request alone and never writes. The file, its
@@ -438,7 +438,7 @@ fn not_json() -> Response {
     json_error(StatusCode::BAD_REQUEST, "the body must be JSON")
 }
 
-/// `GET /pelorus/api/models`: the configurations a run can name, never their keys, and what
+/// `GET /api/pelorus/models`: the configurations a run can name, never their keys, and what
 /// an interface needs to draw itself: whether the configuration is locked, what the session
 /// offers the agent, and the providers the server knows, each with its address, its default
 /// model, whether it takes a key, and whether its address is a person's to set, so a form asks
@@ -481,7 +481,7 @@ pub async fn handle_list(ceiling: Ceiling) -> Response {
     .into_response()
 }
 
-/// `POST /pelorus/api/models`: save a new configuration; answers with it as listed.
+/// `POST /api/pelorus/models`: save a new configuration; answers with it as listed.
 pub async fn handle_create(ceiling: Ceiling, body: Bytes) -> Response {
     if ceiling.is_viewer() {
         return refused();
@@ -519,7 +519,7 @@ pub async fn handle_create(ceiling: Ceiling, body: Bytes) -> Response {
     axum::Json(config.listed(true)).into_response()
 }
 
-/// `PUT /pelorus/api/models/{id}`: change a saved configuration; a field left out keeps its
+/// `PUT /api/pelorus/models/{id}`: change a saved configuration; a field left out keeps its
 /// value, the key among them.
 pub async fn handle_update(ceiling: Ceiling, Path(id): Path<String>, body: Bytes) -> Response {
     if ceiling.is_viewer() {
@@ -550,7 +550,7 @@ pub async fn handle_update(ceiling: Ceiling, Path(id): Path<String>, body: Bytes
     }
 }
 
-/// `DELETE /pelorus/api/models/{id}`: forget a saved configuration.
+/// `DELETE /api/pelorus/models/{id}`: forget a saved configuration.
 pub async fn handle_delete(ceiling: Ceiling, Path(id): Path<String>) -> Response {
     if ceiling.is_viewer() {
         return refused();
@@ -573,7 +573,7 @@ pub async fn handle_delete(ceiling: Ceiling, Path(id): Path<String>) -> Response
     }
 }
 
-/// `POST /pelorus/api/models/names`: the models a provider offers, for a form's list: with an
+/// `POST /api/pelorus/models/names`: the models a provider offers, for a form's list: with an
 /// `id`, as that configuration reaches it, any other field of the request in place of the
 /// saved one (an endpoint or key typed and not yet saved), as [`probe`] settles it.
 pub async fn handle_names(ceiling: Ceiling, body: Bytes) -> Response {

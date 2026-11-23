@@ -14,7 +14,10 @@
 //! desktop or application mode, a session disconnect, a recording start or stop) take the Bearer master token, in `Authorization`
 //! first and in [`MASTER_TOKEN_HEADER`] second for a caller whose `Authorization` a Basic login
 //! in front already owns; a control request not so authenticated is held to the Origin rule a
-//! browser's cached Basic credentials would otherwise ride past; in secure mode every other API
+//! browser's cached Basic credentials would otherwise ride past, and every Pelorus request but
+//! a read, whatever it carries, to [`fetched_cross_site`], which also refuses another site's
+//! request that names no Origin, since such a page can post a Pelorus tool call as plain text;
+//! in secure mode every other API
 //! route takes a session token (Bearer header, `?token=`, or the client's cookie), the only
 //! credential when Basic auth is off and one accepted beside it when on, where a Basic login
 //! without a valid token is a viewer; a cookie-carried
@@ -560,7 +563,15 @@ fn authorize(state: &AppState, request: &Request) -> Verdict {
     if secure && is_control_path && carries_master_token(headers, &config.master_token) {
         return Verdict::Pass(None);
     }
-    if is_control_path && !is_origin_allowed(headers, allowed_origins) {
+    let is_pelorus_write = route.is_some_and(crate::pelorus::is_api_route)
+        && method != Method::GET
+        && method != Method::HEAD;
+    let refused_origin = if is_pelorus_write {
+        fetched_cross_site(headers, allowed_origins)
+    } else {
+        is_control_path && !is_origin_allowed(headers, allowed_origins)
+    };
+    if refused_origin {
         log::warn!(target: "server", "Rejected {method} {path} from disallowed Origin: {:?}", origin_text(headers));
         return Verdict::Refused(forbidden_origin());
     }

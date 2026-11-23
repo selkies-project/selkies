@@ -147,9 +147,9 @@ const SECTIONS: &[Section] = &[
     },
     Section {
         title: "Pelorus",
-        lead: "The agent interface under `/pelorus`: the desktop as text, the actions on it, and a \
-               model that drives it from a chat. Off unless `pelorus` is on, and a caller there \
-               holds what the session's user holds. `pelorus` set to `true|locked` fixes the model \
+        lead: "The agent interface, its page under `/pelorus/` and its API under `/api/pelorus`: \
+               the desktop as text, the actions on it, and a model that drives it from a chat. Off \
+               unless `pelorus` is on, and a caller there holds what the session's user holds. `pelorus` set to `true|locked` fixes the model \
                to these settings: nothing is configured from a browser.",
         names: &[
             "pelorus",

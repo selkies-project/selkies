@@ -5,8 +5,9 @@
  */
 
 /**
- * The client of the server's Pelorus API (`/pelorus/api`), for the chat panel
- * and the standalone page alike.
+ * The client of the server's Pelorus API (`/api/pelorus`), for the chat panel
+ * and the standalone page alike. Every request carries the page's session
+ * token where it holds one, as the server's other API requests do.
  *
  * A run is one `POST run` answered as a server-sent stream: each `data:` line
  * is one event of the agent's work (its reasoning, what it said, a tool call,
@@ -18,6 +19,7 @@
  * @module
  */
 import { fields, hasFields, isRecord, stringOr, type FieldKind } from "../../../selkies-web-core/lib/narrow.ts";
+import { sessionAuthHeaders } from "../../../selkies-web-core/lib/session-token.ts";
 
 /** One model configuration as the server lists it. */
 export interface ModelConfig {
@@ -172,7 +174,7 @@ export interface RunRequest {
 
 /**
  * Sends a JSON request and reads a JSON answer.
- * @param base The API's address, ending in `/pelorus/api`.
+ * @param base The API's address, ending in `/api/pelorus`.
  * @param path The route under it.
  * @param method The HTTP method.
  * @param body The request body, where the method takes one.
@@ -183,7 +185,7 @@ async function call(base: string, path: string, method = "GET", body?: unknown):
   const response = await fetch(`${base}/${path}`, {
     method,
     credentials: "same-origin",
-    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    headers: sessionAuthHeaders(body === undefined ? undefined : { "Content-Type": "application/json" }),
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data: unknown = await response.json().catch(() => ({}));
@@ -232,7 +234,7 @@ export async function run(base: string, request: RunRequest, onEvent: (event: Ru
   const response = await fetch(`${base}/run`, {
     method: "POST",
     credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
+    headers: sessionAuthHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ ...request, stream: true }),
     signal,
   });

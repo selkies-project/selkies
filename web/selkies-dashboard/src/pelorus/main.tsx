@@ -8,7 +8,9 @@
  * Entry point of the Pelorus page, served at `pelorus/` where the server has
  * Pelorus on: the agent's work in full (`page.tsx`), with no stream beside it.
  * The page sits one directory under the client's root, so the API it talks to
- * is `api` relative to its own address, whatever prefix the server is under.
+ * is `../api/pelorus` relative to its own address, whatever prefix the server
+ * is under; in secure mode the session cookie the client's page installed
+ * carries the token there, since this page's own address holds none.
  * @module
  */
 import React from "react";
@@ -23,7 +25,7 @@ if (mount) {
     <React.StrictMode>
       <ThemeProvider defaultTheme="dark" storageKey="theme">
         <div className="h-dvh w-full bg-background text-foreground">
-          <PelorusPage base="api" />
+          <PelorusPage base="../api/pelorus" />
         </div>
       </ThemeProvider>
     </React.StrictMode>,

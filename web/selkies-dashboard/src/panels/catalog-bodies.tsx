@@ -20,6 +20,8 @@ import { Sharing } from "@/panels/sharing";
 import { useDashboard } from "@/state/dashboard";
 import { t } from "@/i18n";
 import { getRoutePrefix } from "@/utils";
+import { readUrlFragment } from "../../../selkies-web-core/lib/page-url.ts";
+import { withSessionToken } from "../../../selkies-web-core/lib/session-token.ts";
 
 /** The files: an upload, and the file manager's dialog. */
 export function FilesActions() {
@@ -50,10 +52,24 @@ export function GamepadsBody({ place }: { place: PanelPlace }) {
   return <GamepadControls showInput={place === "float"} rumbleButton={place === "section"} />;
 }
 
+/**
+ * The Pelorus page this page pops out: on this page's origin, written out so a
+ * prefix starting with `//` names no other host, and carrying this page's
+ * session token the way it came, in the query or in the fragment, since the
+ * session cookie may not reach a window of its own.
+ * @param prefix The route prefix the client is served under.
+ * @returns The URL to open.
+ */
+function pelorusPageURL(prefix: string): string {
+  const page = withSessionToken(`${window.location.origin}${prefix}/pelorus/`);
+  const { token } = readUrlFragment();
+  return token ? `${page}#token=${encodeURIComponent(token)}` : page;
+}
+
 /** The Pelorus prompt against this server's API, with the page of its own one press away. */
 export function PelorusBody() {
   const prefix = getRoutePrefix();
-  return <PelorusCompact base={`${prefix}/pelorus/api`} popoutHref={`${prefix}/pelorus/`} />;
+  return <PelorusCompact base={`${prefix}/api/pelorus`} popoutHref={pelorusPageURL(prefix)} />;
 }
 
 /** A settings panel's cards one after the other, as a section lists them. */

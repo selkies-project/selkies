@@ -4,7 +4,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! Pelorus: the desktop described for a caller that cannot see it, served under `/pelorus`.
+//! Pelorus: the desktop described for a caller that cannot see it, its API served under
+//! [`API_PREFIX`] and its page under `/pelorus/`.
 //!
 //! A model without vision, or a script, drives a session from text: which windows are open,
 //! where each one is, and where to click. The window manager is the one source of that
@@ -22,7 +23,10 @@
 //! Everything is in the pixels the Computer Use actions take: the window manager's logical
 //! layout coordinates multiplied by the output's scale. A caller here holds what the session's
 //! user holds, so every route refuses a view-only credential, and none is mounted unless
-//! `--pelorus` is on.
+//! `--pelorus` is on. The API sits under `/api/` so the gate holds it to the session token in
+//! secure mode as it does every other API route, and the session cookie, scoped to `/api/`,
+//! reaches it from the page; the gate refuses a write from another site's page on any server
+//! ([`crate::http::auth`]), since a run or a tool call acts as the session user.
 
 mod agent;
 pub mod apps;
@@ -56,29 +60,38 @@ const OUTLINE_LINES: usize = 400;
 /// one that failed, since the bus comes and goes with the session's applications.
 static BUS: Mutex<Option<Bus>> = Mutex::new(None);
 
-/// The routes, written from the root the `http` module nests under the subfolder prefix.
+/// Where every API route is mounted, under the subfolder prefix.
+pub const API_PREFIX: &str = "/api/pelorus";
+
+/// Whether a route, the subfolder prefix taken off, is one of the API's.
+pub fn is_api_route(route: &str) -> bool {
+    route
+        .strip_prefix(API_PREFIX)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// The routes under [`API_PREFIX`], written from the root the `http` module nests under the
+/// subfolder prefix.
 pub fn routes() -> Router {
-    Router::new()
-        .route("/pelorus/api/desktop", get(handle_desktop))
-        .route("/pelorus/api/window/{id}/outline", get(handle_outline))
-        .route("/pelorus/api/window/{id}/tree", get(handle_tree))
-        .route("/pelorus/api/window/{id}/{verb}", post(handle_window))
-        .route("/pelorus/api/tools", get(tools::handle_tools))
-        .route("/pelorus/api/tool", post(tools::handle_tool))
+    let api = Router::new()
+        .route("/desktop", get(handle_desktop))
+        .route("/window/{id}/outline", get(handle_outline))
+        .route("/window/{id}/tree", get(handle_tree))
+        .route("/window/{id}/{verb}", post(handle_window))
+        .route("/tools", get(tools::handle_tools))
+        .route("/tool", post(tools::handle_tool))
         .route(
-            "/pelorus/api/models",
+            "/models",
             get(configs::handle_list).post(configs::handle_create),
         )
-        .route("/pelorus/api/models/names", post(configs::handle_names))
+        .route("/models/names", post(configs::handle_names))
         .route(
-            "/pelorus/api/models/{id}",
+            "/models/{id}",
             axum::routing::put(configs::handle_update).delete(configs::handle_delete),
         )
-        .route("/pelorus/api/run", post(agent::handle_run))
-        .route(
-            "/pelorus/api/session/{id}",
-            axum::routing::delete(agent::handle_forget),
-        )
+        .route("/run", post(agent::handle_run))
+        .route("/session/{id}", axum::routing::delete(agent::handle_forget));
+    Router::new().nest(API_PREFIX, api)
 }
 
 /// The refusal every route gives a view-only credential.
@@ -102,7 +115,7 @@ fn window_verb(verb: &str) -> Option<Request> {
     }
 }
 
-/// `POST /pelorus/api/window/{id}/{verb}`: ask the window manager to activate (focus and
+/// `POST /api/pelorus/window/{id}/{verb}`: ask the window manager to activate (focus and
 /// raise), close, minimize, restore, maximize, or unmaximize a window, as its taskbar button
 /// or frame would. A close is the client's to honor: one with unsaved work may ask first.
 async fn handle_window(ceiling: Ceiling, Path((id, verb)): Path<(u32, String)>) -> Response {
@@ -122,7 +135,7 @@ async fn handle_window(ceiling: Ceiling, Path((id, verb)): Path<(u32, String)>) 
     }
 }
 
-/// `GET /pelorus/api/desktop`: the outputs and every window, bottom of the stack first, and
+/// `GET /api/pelorus/desktop`: the outputs and every window, bottom of the stack first, and
 /// the menu and desktop surfaces Selkies draws itself, top first.
 async fn handle_desktop(ceiling: Ceiling) -> Response {
     if ceiling.is_viewer() {
@@ -324,7 +337,7 @@ fn unreadable(why: &Unreadable) -> Response {
     json_error(status, &message)
 }
 
-/// `GET /pelorus/api/window/{id}/outline`: the window's controls as text, a line a control
+/// `GET /api/pelorus/window/{id}/outline`: the window's controls as text, a line a control
 /// with the point to click it at (the `pelorus` crate's `outline` module has the format).
 async fn handle_outline(ceiling: Ceiling, Path(id): Path<u32>) -> Response {
     if ceiling.is_viewer() {
@@ -354,7 +367,7 @@ async fn handle_outline(ceiling: Ceiling, Path(id): Path<u32>) -> Response {
     }
 }
 
-/// `GET /pelorus/api/window/{id}/tree`: the window's controls as the tree the outline is
+/// `GET /api/pelorus/window/{id}/tree`: the window's controls as the tree the outline is
 /// written from, every control with its rectangle in pixels and nothing folded away.
 async fn handle_tree(ceiling: Ceiling, Path(id): Path<u32>) -> Response {
     if ceiling.is_viewer() {
