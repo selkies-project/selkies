@@ -38,9 +38,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pixelflux::wm::{
-    Command, DesktopView, Event, Extents, Frame, KeyEvent, Modifiers, OutputId, OutputInfo, PointerEvent,
-    PointerKind, Rect, Request, ResizeEdge, Size, States, Transform, Under, Verdict, WindowId, WindowInfo,
-    WindowPolicy, WindowType, WindowView,
+    Command, DesktopView, Event, Extents, Frame, KeyEvent, MenuEntryKind, MenuEntryView, MenuView, Modifiers,
+    OutputId, OutputInfo, PointerEvent, PointerKind, Rect, Request, ResizeEdge, Size, States, Transform,
+    Under, Verdict, WindowId, WindowInfo, WindowPolicy, WindowType, WindowView,
 };
 
 use self::effects::{EffectKind, Effects};
@@ -5183,8 +5183,59 @@ impl WindowPolicy for Engine {
             focus: self.focus,
             desktop_count: self.desktop_count,
             current_desktop: self.current_desktop,
+            menus: self.menu.as_ref().map(menu_views).unwrap_or_default(),
         }
     }
+}
+
+/// The levels of an open menu as a consumer that describes the desktop reads them.
+fn menu_views(menu: &MenuState) -> Vec<MenuView> {
+    menu.levels
+        .iter()
+        .map(|level| MenuView {
+            id: level.id.clone(),
+            rect: level.rect,
+            entries: level
+                .entries
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| {
+                    let rect = level.row_rect(index);
+                    match entry {
+                        Entry::Item {
+                            label,
+                            enabled,
+                            checked,
+                            ..
+                        } => MenuEntryView {
+                            label: label.clone(),
+                            kind: MenuEntryKind::Item,
+                            rect,
+                            enabled: *enabled,
+                            checked: *checked,
+                            open: false,
+                        },
+                        Entry::Submenu { label, .. } => MenuEntryView {
+                            label: label.clone(),
+                            kind: MenuEntryKind::Submenu,
+                            rect,
+                            enabled: true,
+                            checked: false,
+                            open: level.open == Some(index),
+                        },
+                        Entry::Separator { label } => MenuEntryView {
+                            label: label.clone().unwrap_or_default(),
+                            kind: MenuEntryKind::Separator,
+                            rect,
+                            enabled: false,
+                            checked: false,
+                            open: false,
+                        },
+                    }
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 #[cfg(test)]

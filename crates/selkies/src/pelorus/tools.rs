@@ -45,6 +45,7 @@ use selkies_draw::apps::{self, Apps, Entry};
 use serde_json::{Value as Json, json};
 use tokio::io::AsyncReadExt as _;
 
+use super::surfaces::{self, Surface};
 use super::{OUTLINE_LINES, px_rect, read_window, refused, scale_at};
 use crate::http::auth::Ceiling;
 use crate::http::routes::json_error;
@@ -159,10 +160,23 @@ pub async fn capabilities(vision: bool) -> Capabilities {
     }
 }
 
-/// The windows a model is told of, top of the stack first: the mapped ones that are not the
+/// The windows a model is told of, top of the stack first: the window manager's open menu and
+/// the shell's bars and popups ([`super::surfaces`]), then the mapped windows that are not the
 /// desktop's own surfaces or passing decorations.
-fn window_lines(view: &DesktopView) -> Vec<WindowLine> {
-    view.windows
+fn window_lines(view: &DesktopView, listed: &[Surface]) -> Vec<WindowLine> {
+    let surfaces = listed.iter().map(|s| WindowLine {
+        id: s.id,
+        title: s.title.clone(),
+        app: "selkies".to_string(),
+        rect: s.clip,
+        focused: false,
+        minimized: false,
+        maximized: false,
+        fullscreen: false,
+        elsewhere: false,
+    });
+    let windows = view
+        .windows
         .iter()
         .rev()
         .filter(|w| w.mapped)
@@ -194,20 +208,24 @@ fn window_lines(view: &DesktopView) -> Vec<WindowLine> {
                 fullscreen: w.states.fullscreen,
                 elsewhere: w.states.hidden,
             }
-        })
-        .collect()
+        });
+    surfaces.chain(windows).collect()
 }
 
 /// The windows now, and the size of the screen they are on; `None` with no window manager.
 async fn desktop() -> Option<(Vec<WindowLine>, (i32, i32))> {
-    let view = tokio::task::spawn_blocking(crate::wm::desktop_view)
-        .await
-        .ok()??;
+    let (view, listed) = tokio::task::spawn_blocking(|| {
+        let view = crate::wm::desktop_view()?;
+        let listed = surfaces::surfaces(&view, surfaces::read_shell().as_ref());
+        Some((view, listed))
+    })
+    .await
+    .ok()??;
     let screen = view.outputs.iter().fold((0, 0), |size, o| {
         let rect: PxRect = px_rect(o.rect, o.scale);
         (size.0.max(rect.x + rect.w), size.1.max(rect.y + rect.h))
     });
-    Some((window_lines(&view), screen))
+    Some((window_lines(&view, &listed), screen))
 }
 
 /// The windows once they stop changing after an action: a dialog an action closes, or the
@@ -326,18 +344,20 @@ async fn look(args: &Json) -> Output {
     let Some(id) = id.as_u64().and_then(|id| u32::try_from(id).ok()) else {
         return Output::fail("`window` must be a window number from the window list");
     };
-    let raised = tokio::task::spawn_blocking(move || {
-        crate::wm::window_request(id, Request::Unminimize);
-        crate::wm::window_request(id, Request::Activate)
-    })
-    .await
-    .unwrap_or(false);
-    if !raised {
-        return Output::fail(format!(
-            "There is no window #{id}. Look without arguments for the window list."
-        ));
+    if !surfaces::is_surface(id) {
+        let raised = tokio::task::spawn_blocking(move || {
+            crate::wm::window_request(id, Request::Unminimize);
+            crate::wm::window_request(id, Request::Activate)
+        })
+        .await
+        .unwrap_or(false);
+        if !raised {
+            return Output::fail(format!(
+                "There is no window #{id}. Look without arguments for the window list."
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    tokio::time::sleep(Duration::from_millis(250)).await;
     match tokio::task::spawn_blocking(move || read_window(id)).await {
         Ok(Ok(read)) => {
             let covered = |x: i32, y: i32| read.above.iter().any(|frame| frame.contains(x, y));

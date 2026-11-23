@@ -9,6 +9,7 @@
 //! rows of an empty field one dim line names the window manager's tiling
 //! and desktop keys, the one place a new user is sure to pass.
 
+use crate::describe::{self, Element};
 use crate::desktop::{Desktop, Hover, Popup};
 use crate::entries;
 use crate::event::Button;
@@ -200,6 +201,30 @@ pub fn hit(d: &mut Desktop, x: f64, y: f64) -> Option<Hover> {
         }
     }
     Some(Hover::None)
+}
+
+/// The launcher's controls, as [`crate::describe`] reports them: the search field and a row
+/// for each result.
+pub fn describe(d: &mut Desktop) -> Option<Element> {
+    ensure_items(d);
+    let layout = layout(d);
+    let mut search = describe::node("text", "Run", layout.search);
+    search.text = Some(d.launcher.query.clone());
+    search.states.focused = true;
+    search.states.editable = true;
+    let mut children = vec![search];
+    for (row, item) in d.launcher.items.iter().enumerate() {
+        let name = match item {
+            Item::App(index) => d.apps.entries.get(*index).map(|e| e.name.clone()),
+            Item::Command(command) => Some(format!("Run {command}")),
+        };
+        if let Some(name) = name {
+            let mut result = describe::node("list item", name, row_rect(&layout, row));
+            result.states.selected = d.launcher.selected == row;
+            children.push(result);
+        }
+    }
+    Some(describe::holding("panel", "", layout.frame, children))
 }
 
 /// Handles a click; returns whether it landed inside the launcher.

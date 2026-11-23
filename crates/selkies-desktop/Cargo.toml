@@ -44,3 +44,5 @@ zbus = { version = "6", default-features = false, features = ["default-rt", "ser
 futures-core = "0.3"
 # The metadata of wallpaper packages.
 serde_json = "1"
+# The description of the desktop's controls it answers on its control socket for Pelorus.
+pelorus = { path = "../pelorus" }

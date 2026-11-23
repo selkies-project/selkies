@@ -19,10 +19,14 @@
 //! material the applications happen to publish, and what is written is whatever lets a model
 //! act, so containers that say nothing are folded away and a control another window covers is
 //! marked as one a click would not reach.
+//!
+//! The Selkies desktop shell draws its own interface, so it describes it itself rather than
+//! over the bus: [`shell`] is the description it gives and how a reader places it.
 
 pub mod atspi;
 pub mod element;
 pub mod outline;
+pub mod shell;
 pub mod summary;
 pub mod tools;
 

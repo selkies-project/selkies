@@ -101,6 +101,14 @@ pub trait Backend {
     fn bar_origin(&self, _bar: u32) -> (i32, i32, i32) {
         (0, 0, 1)
     }
+
+    /// Where the top-left corner of a surface the window manager does not place (the panel
+    /// or a display's bar) sits in the window manager's logical layout, which a reader of
+    /// [`crate::describe`] places its controls by; `None` for any other surface, or one whose
+    /// display has no known position yet.
+    fn surface_origin(&self, _surface: SurfaceId) -> Option<(i32, i32)> {
+        None
+    }
 }
 
 /// Connects to the first display server that works.

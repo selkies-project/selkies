@@ -13,6 +13,7 @@
 //! always carries its window's index into the desktop's window list, so
 //! filtering changes which buttons exist, never what an index means.
 
+use crate::describe::{self, Element};
 use crate::desktop::{Desktop, Hover, PanelTarget, Popup};
 use crate::event::{Button, WindowAction};
 use crate::geom::Rect;
@@ -348,6 +349,68 @@ pub fn hit(d: &mut Desktop, x: f64, y: f64) -> Hover {
         return Hover::ShowDesktop;
     }
     Hover::None
+}
+
+/// The bar's controls, as [`crate::describe`] reports them: the start button, the quick
+/// launch buttons, the pager, a button for each window, the tray items, the volume, the
+/// notifications bell, the clock, and the show desktop button.
+pub fn describe(d: &mut Desktop) -> Element {
+    let layout = layout(d);
+    let mut children = Vec::new();
+    let mut start = describe::node("button", "Start menu", layout.start);
+    start.states.expandable = true;
+    start.states.expanded = d.popup == Popup::Menu && d.popup_on_current_bar();
+    children.push(start);
+    for (index, rect) in &layout.launchers {
+        if let Some(entry) = d.apps.entries.get(*index) {
+            children.push(describe::node("button", format!("Launch {}", entry.name), *rect));
+        }
+    }
+    for (index, rect) in layout.pager.iter().enumerate() {
+        let mut pill = describe::node("page tab", format!("Desktop {}", index + 1), *rect);
+        pill.states.selected = index as u32 == d.current_desktop;
+        children.push(pill);
+    }
+    for (index, rect) in &layout.tasks {
+        if let Some(toplevel) = d.toplevels.get(*index) {
+            let mut task = describe::node("toggle button", toplevel.label(), *rect);
+            task.states.pressed = toplevel.state.active && !toplevel.state.minimized;
+            children.push(task);
+        }
+    }
+    for (index, rect) in &layout.status {
+        if let Some(item) = d.status_items.get(*index) {
+            let name = if item.title.is_empty() {
+                &item.tooltip
+            } else {
+                &item.title
+            };
+            children.push(describe::node("button", name.clone(), *rect));
+        }
+    }
+    if let Some(rect) = layout.volume {
+        let mut volume = describe::node("button", "Volume", rect);
+        volume.text = d.volume.map(|v| {
+            if v.muted {
+                "muted".to_string()
+            } else {
+                format!("{}%", v.percent)
+            }
+        });
+        children.push(volume);
+    }
+    if let Some(rect) = layout.notifications {
+        children.push(describe::node("button", "Notifications", rect));
+    }
+    if let Some(rect) = layout.clock {
+        let mut clock = describe::node("button", "Clock", rect);
+        clock.text = Some(d.clock.clone());
+        children.push(clock);
+    }
+    if let Some(rect) = layout.show_desktop {
+        children.push(describe::node("button", "Show desktop", rect));
+    }
+    describe::holding("panel", "", layout.bar, children)
 }
 
 /// Handles a button press on the bar.

@@ -6,6 +6,7 @@ mod audio;
 mod backend;
 mod clock;
 mod config;
+mod describe;
 mod desktop;
 mod desktop_folder;
 mod entries;
@@ -420,7 +421,7 @@ fn run() -> i32 {
             && fds[index].revents & libc::POLLIN != 0
             && let Some(server) = server.as_ref()
         {
-            for command in server.drain() {
+            for (command, connection) in server.drain() {
                 match command {
                     ipc::Command::ToggleMenu => desktop.toggle_menu(),
                     ipc::Command::Launcher => desktop.toggle_launcher(),
@@ -434,6 +435,13 @@ fn run() -> i32 {
                     }
                     ipc::Command::NewFolder => desktop.new_desktop_folder(),
                     ipc::Command::BarsAttached(edges) => desktop.set_bars_attached(&edges),
+                    ipc::Command::Describe => {
+                        let description =
+                            describe::describe(&mut desktop, |surface| backend.surface_origin(surface));
+                        if let Ok(line) = serde_json::to_string(&description) {
+                            ipc::answer(&connection, &line);
+                        }
+                    }
                     ipc::Command::Quit => return 0,
                 }
             }

@@ -4132,6 +4132,7 @@ dependencies = [
  "image",
  "libc",
  "memmap2",
+ "pelorus",
  "selkies-draw",
  "serde_json",
  "tiny-skia",

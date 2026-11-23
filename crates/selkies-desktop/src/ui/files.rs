@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use tiny_skia::{Color, PathBuilder, Pixmap};
 
+use crate::describe::{self, Element};
 use crate::desktop::{Desktop, Hover};
 use crate::entries;
 use crate::event::{Button, Modifiers, Request, SurfaceId};
@@ -485,6 +486,141 @@ pub fn hit(d: &mut Desktop, id: u32, x: f64, y: f64) -> Hit {
         return found.map_or(Hit::Content, Hit::Item);
     }
     Hit::None
+}
+
+/// A window's controls, as [`crate::describe`] reports them: the toolbar, the path bar's
+/// breadcrumbs or the location field, the places, the column headers, the items in view, and
+/// the picker's buttons; only the context menu's rows while it is open and only the
+/// confirmation's buttons while it asks, since a click anywhere else only dismisses them.
+/// `None` for a window that is not open.
+pub fn describe(d: &mut Desktop, id: u32) -> Option<Element> {
+    let index = d.files.windows.iter().position(|w| w.id == id)?;
+    let (dir, scale) = (
+        d.files.windows[index].dir.clone(),
+        d.files.windows[index].geometry.scale,
+    );
+    let layout = layout(&d.files.windows[index]);
+    let crumbs = crumb_rects(&mut d.fonts, &dir, scale, layout.path);
+    let w = &d.files.windows[index];
+    let mut children = Vec::new();
+    if let Some(menu) = &w.menu {
+        let frame = menu_rect(w, menu);
+        let mut top = frame.y + 6;
+        for row in &menu.rows {
+            match row {
+                MenuRow::Action(label, _, enabled) => {
+                    let mut item = describe::node(
+                        "menu item",
+                        label.clone(),
+                        Rect::new(frame.x + 6, top, frame.w - 12, MENU_ROW),
+                    );
+                    item.states.enabled = *enabled;
+                    children.push(item);
+                    top += MENU_ROW;
+                }
+                MenuRow::Separator => top += MENU_SEP,
+            }
+        }
+        return Some(describe::frame(&w.title(), w.geometry, children));
+    }
+    if let Some(confirm) = &w.confirm {
+        let (bx, cancel, delete) = confirm_rects(w);
+        let question = if confirm.paths.len() == 1 {
+            trf(
+                "Delete “{name}”?",
+                &[("name", &files::ops::file_name(&confirm.paths[0]))],
+            )
+        } else {
+            trf("Delete {n} items?", &[("n", &confirm.paths.len().to_string())])
+        };
+        children.push(describe::node(
+            "label",
+            question,
+            Rect::new(bx.x + 16, bx.y + 14, bx.w - 32, 26),
+        ));
+        children.push(describe::node("button", tr("Cancel"), cancel));
+        children.push(describe::node("button", tr("Delete"), delete));
+        return Some(describe::frame(&w.title(), w.geometry, children));
+    }
+    let mut back = describe::node("button", "Back", layout.back);
+    back.states.enabled = w.history_pos > 0;
+    let mut forward = describe::node("button", "Forward", layout.forward);
+    forward.states.enabled = w.history_pos + 1 < w.history.len();
+    let mut up = describe::node("button", "Up", layout.up);
+    up.states.enabled = w.dir.parent().is_some();
+    children.extend([back, forward, up]);
+    match &w.path_edit {
+        Some(text) => {
+            let mut field = describe::node("text", "Location", layout.path);
+            field.text = Some(text.clone());
+            field.states.focused = true;
+            field.states.editable = true;
+            children.push(field);
+        }
+        None => {
+            let names = crumbs_of(&w.dir);
+            for (i, rect) in crumbs {
+                if let Some(name) = names.get(i) {
+                    let mut crumb = describe::node("button", name.clone(), rect);
+                    crumb.states.selected = i + 1 == names.len();
+                    children.push(crumb);
+                }
+            }
+        }
+    }
+    let toggle = match w.view {
+        View::Icons => "List view",
+        View::List => "Icon view",
+    };
+    children.push(describe::node("button", toggle, layout.view_toggle));
+    children.push(describe::node("button", "Sort", layout.sort));
+    for (i, place) in d.files.places.iter().enumerate() {
+        let rect = Rect::new(
+            layout.sidebar.x,
+            layout.sidebar.y + PAD + i as i32 * PLACE_ROW - w.sidebar_scroll as i32,
+            layout.sidebar.w,
+            PLACE_ROW,
+        );
+        if layout.sidebar.w > 0 && describe::shows_in(rect, layout.sidebar) {
+            let mut row = describe::node("list item", place.name.clone(), rect);
+            row.states.selected = place.path == w.dir;
+            children.push(row);
+        }
+    }
+    if layout.header.h > 0 {
+        for (key, rect) in columns(layout.header) {
+            let mut header = describe::node("button", key.label(), rect);
+            header.states.selected = key == w.sort;
+            children.push(header);
+        }
+    }
+    for (i, item) in w.items.iter().enumerate() {
+        let mut rect = item_rect(w, layout.content, i);
+        rect.y -= w.scroll as i32;
+        if !describe::shows_in(rect, layout.content) {
+            continue;
+        }
+        let mut row = describe::node("list item", item.name.clone(), rect);
+        row.text = item.is_dir.then(|| "folder".to_string());
+        row.states.selected = w.selection.contains(&i);
+        if let Some(rename) = w.rename.as_ref().filter(|r| r.index == i) {
+            row.text = Some(rename.text.clone());
+            row.states.focused = true;
+            row.states.editable = true;
+        }
+        children.push(row);
+    }
+    if let Some(footer) = layout.footer {
+        let (cancel, open) = footer_buttons(footer);
+        children.push(describe::node("button", tr("Cancel"), cancel));
+        children.push(describe::node("button", tr("Open"), open));
+    }
+    Some(describe::frame(&w.title(), w.geometry, children))
+}
+
+/// The names of a folder's breadcrumbs, in the order [`crumb_rects`] numbers them.
+fn crumbs_of(dir: &Path) -> Vec<String> {
+    crumbs(dir).into_iter().map(|(name, _)| name).collect()
 }
 
 /// Handles pointer motion: hover, and the start of a drag.

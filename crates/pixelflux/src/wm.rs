@@ -658,6 +658,43 @@ pub struct WindowView {
     pub listed: bool,
 }
 
+/// What kind of row a menu entry is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MenuEntryKind {
+    /// A row that does something when picked.
+    #[default]
+    Item,
+    /// A row that opens another level beside its own.
+    Submenu,
+    /// A dividing line, or a caption between groups.
+    Separator,
+}
+
+/// One row of an open menu level.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MenuEntryView {
+    pub label: String,
+    pub kind: MenuEntryKind,
+    /// The row in logical layout coordinates.
+    pub rect: Rect,
+    pub enabled: bool,
+    /// Whether the row shows a mark for a state it toggles that is on.
+    pub checked: bool,
+    /// Whether the row's submenu is the next level open.
+    pub open: bool,
+}
+
+/// One open level of a menu the policy draws itself (a root menu, a window menu), the first
+/// level the one opened and every other the submenu of the one before.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MenuView {
+    /// The id of the menu the level shows, as the policy's menu files name it.
+    pub id: String,
+    /// The level in logical layout coordinates; it lies over every window.
+    pub rect: Rect,
+    pub entries: Vec<MenuEntryView>,
+}
+
 /// The desktop as the policy holds it at one moment: what a consumer needs to say where every
 /// window is and which one a click at a point reaches.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -669,6 +706,8 @@ pub struct DesktopView {
     pub focus: Option<WindowId>,
     pub desktop_count: u32,
     pub current_desktop: u32,
+    /// The levels of the menu the policy has open, outermost first; empty with none open.
+    pub menus: Vec<MenuView>,
 }
 
 /// A window manager's decisions for the compositor; see the module documentation.

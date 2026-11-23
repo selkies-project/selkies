@@ -61,6 +61,7 @@ use crate::config::{
     self, BackgroundStyle, ButtonSide, COLOR_KEYS, Config, FILES_KEYS, Glyphs, MenuLayout, PANEL_KEYS,
     Surface, WALLPAPER_KEYS, WINDOW_KEYS, WallpaperMode,
 };
+use crate::describe::{self, Element};
 use crate::desktop::{Desktop, Geometry, Hover, PanelTarget, Popup};
 use crate::event::{Button, Modifiers, Request};
 use crate::geom::Rect;
@@ -3358,6 +3359,118 @@ fn draw_cap(d: &mut Desktop, canvas: &mut Canvas<'_>, cap: &Cap) {
         Align::Center,
         if cap.key { ui::text() } else { ui::text_dim() },
     );
+}
+
+/// The window's controls, as [`crate::describe`] reports them: the pages in the sidebar, then
+/// the page in reading order, its captions, notes, and values as labels and its controls under
+/// the name of the row they sit in; `None` while the window is closed. A control scrolled out
+/// of the page, or lying under the open color picker, is left out, as a click could not reach
+/// it.
+pub fn describe(d: &Desktop) -> Option<Element> {
+    d.settings.id?;
+    let layout = layout(d);
+    let page = scroll_rect_in(frame(d), view(d));
+    let first = layout.picker.map_or(layout.controls.len(), |picker| picker.first);
+    let names: Vec<&Text> = layout.texts.iter().filter(|t| t.tone == Tone::Name).collect();
+    let row_name = |r: Rect| -> String {
+        let cy = r.y + r.h / 2;
+        names
+            .iter()
+            .filter(|t| t.rect.y <= cy && t.rect.x <= r.x)
+            .max_by_key(|t| t.rect.y)
+            .map(|t| t.text.clone())
+            .unwrap_or_default()
+    };
+    let mut tabs = Vec::new();
+    let mut placed: Vec<(Rect, String, Element)> = Vec::new();
+    for (index, control) in layout.controls.iter().enumerate() {
+        let shown = control
+            .clip
+            .is_none_or(|clip| describe::shows_in(control.rect, clip))
+            && (index >= first
+                || layout
+                    .picker
+                    .is_none_or(|p| !describe::shows_in(control.rect, p.frame)));
+        if !shown {
+            continue;
+        }
+        let element = describe_control(control);
+        match control.kind {
+            Kind::Nav => tabs.push(element),
+            Kind::Switch | Kind::AppRow => placed.push((control.rect, String::new(), element)),
+            _ => placed.push((control.rect, row_name(control.rect), element)),
+        }
+    }
+    for text in layout.texts.iter().filter(|t| describe::shows_in(t.rect, page)) {
+        let (role, name) = match text.tone {
+            Tone::Name => continue,
+            Tone::Caption => ("heading", text.text.clone()),
+            Tone::Value => ("label", format!("{}: {}", row_name(text.rect), text.text)),
+            Tone::Hint | Tone::Warning | Tone::Note => ("label", text.text.clone()),
+        };
+        placed.push((text.rect, String::new(), describe::node(role, name, text.rect)));
+    }
+    placed.sort_by_key(|(rect, _, _)| (rect.y, rect.x));
+    let mut children = tabs;
+    let mut row: Option<(String, Vec<Element>, Rect)> = None;
+    for (bounds, name, element) in placed {
+        match row.as_mut() {
+            Some((open, members, area)) if !name.is_empty() && *open == name => {
+                members.push(element);
+                *area = area.union(&bounds);
+                continue;
+            }
+            _ => {}
+        }
+        if let Some((open, members, area)) = row.take() {
+            children.push(describe::holding("panel", open, area, members));
+        }
+        if name.is_empty() {
+            children.push(element);
+        } else {
+            row = Some((name, vec![element], bounds));
+        }
+    }
+    if let Some((open, members, area)) = row {
+        children.push(describe::holding("panel", open, area, members));
+    }
+    Some(describe::frame(tr("Settings"), d.settings.geometry, children))
+}
+
+/// One control as a reader is told of it.
+fn describe_control(control: &Control) -> Element {
+    let label = control.label.clone();
+    let (role, name) = match control.kind {
+        Kind::Nav => ("page tab", label),
+        Kind::Segment | Kind::Preset | Kind::Wallpaper => ("radio button", label),
+        Kind::Switch | Kind::AppRow => ("check box", label),
+        Kind::Text => ("text", String::new()),
+        Kind::Button if label == "+" => ("button", "Add".to_string()),
+        Kind::Button => ("button", label),
+        Kind::Swatch => ("radio button", control.color.map(hex).unwrap_or_default()),
+        Kind::Picker => ("button", "Custom color".to_string()),
+        Kind::Chip => ("button", format!("Remove {label}")),
+        Kind::Slider => ("slider", String::new()),
+        Kind::HueStrip => ("slider", "Hue".to_string()),
+        Kind::ColorArea => ("slider", "Saturation and brightness".to_string()),
+        Kind::Keys => ("button", "Change shortcut".to_string()),
+    };
+    let mut element = describe::node(role, name, control.rect);
+    match control.kind {
+        Kind::Nav => element.states.selected = control.active,
+        Kind::Text => {
+            element.text = Some(control.label.clone());
+            element.states.focused = control.active;
+            element.states.editable = true;
+        }
+        Kind::Slider | Kind::Keys => element.text = Some(control.label.clone()),
+        Kind::Picker => {
+            element.states.expandable = true;
+            element.states.expanded = control.active;
+        }
+        _ => element.states.checked = control.active,
+    }
+    element
 }
 
 /// Draws one control.

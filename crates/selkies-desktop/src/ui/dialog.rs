@@ -20,6 +20,7 @@
 
 use std::path::PathBuf;
 
+use crate::describe::{self, Element};
 use crate::desktop::{Desktop, Geometry, Hover};
 use crate::desktop_folder::Cell;
 use crate::entries;
@@ -84,6 +85,8 @@ pub struct DialogState {
     pub suggested: bool,
     /// Why the last attempt failed.
     pub error: Option<String>,
+    /// The window's title.
+    pub title: String,
 }
 
 impl DialogState {
@@ -128,6 +131,7 @@ fn open(d: &mut Desktop, kind: Kind, text: String, title: &str, icon_name: &'sta
         suggested: !text.is_empty(),
         text,
         dirty: true,
+        title: title.to_string(),
         ..DialogState::default()
     };
     let icon = d.icons.get(icon_name, 48).map(|icon| Box::new((*icon).clone()));
@@ -339,13 +343,9 @@ pub fn key(d: &mut Desktop, key: Key) {
     d.dialog.dirty = true;
 }
 
-/// Draws the dialog: the prompt, the field with its caret or the deletion's question, the
-/// error, and the buttons.
-pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
-    let geometry = d.dialog.geometry;
-    let whole = Rect::new(0, 0, geometry.width, geometry.height);
-    canvas.fill_rect(whole, ui::popup_bg());
-    let (prompt, action) = match &d.dialog.kind {
+/// The dialog's prompt and its action's label; `None` with nothing open.
+fn wording(kind: &Kind) -> Option<(String, &'static str)> {
+    Some(match kind {
         Kind::NewFolder { .. } => (tr("Folder name").to_string(), tr("Create")),
         Kind::Rename { .. } => (tr("Name").to_string(), tr("Rename")),
         Kind::Delete { paths } if paths.len() == 1 => (
@@ -356,7 +356,56 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
             trf("Delete {n} items?", &[("n", &paths.len().to_string())]),
             tr("Delete"),
         ),
-        Kind::Closed => return,
+        Kind::Closed => return None,
+    })
+}
+
+/// The dialog's controls, as [`crate::describe`] reports them: the prompt, the name field, the
+/// error, and the buttons; `None` with nothing open.
+pub fn describe(d: &Desktop) -> Option<Element> {
+    let (prompt, action) = wording(&d.dialog.kind)?;
+    let geometry = d.dialog.geometry;
+    let field = field_rect(geometry);
+    let mut children = vec![describe::node(
+        "label",
+        prompt,
+        Rect::new(PAD, PAD, geometry.width - 2 * PAD, 20),
+    )];
+    if d.dialog.has_field() {
+        let mut text = describe::node("text", "", field);
+        text.text = Some(d.dialog.text.clone());
+        text.states.focused = true;
+        text.states.editable = true;
+        children.push(text);
+    }
+    if let Some(error) = &d.dialog.error {
+        children.push(describe::node(
+            "label",
+            error.clone(),
+            Rect::new(PAD, field.bottom() + 6, geometry.width - 2 * PAD, 20),
+        ));
+    }
+    children.push(describe::node(
+        "button",
+        tr("Cancel"),
+        button_rect(geometry, Part::Cancel),
+    ));
+    children.push(describe::node(
+        "button",
+        action,
+        button_rect(geometry, Part::Confirm),
+    ));
+    Some(describe::frame(&d.dialog.title, geometry, children))
+}
+
+/// Draws the dialog: the prompt, the field with its caret or the deletion's question, the
+/// error, and the buttons.
+pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
+    let geometry = d.dialog.geometry;
+    let whole = Rect::new(0, 0, geometry.width, geometry.height);
+    canvas.fill_rect(whole, ui::popup_bg());
+    let Some((prompt, action)) = wording(&d.dialog.kind) else {
+        return;
     };
     ui::label(
         canvas,

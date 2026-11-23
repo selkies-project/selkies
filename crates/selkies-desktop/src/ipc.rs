@@ -1,11 +1,14 @@
 //! The control socket: a second invocation of the binary sends a one-line
 //! command to the running desktop, which is how a compositor keybinding opens
-//! the menu.
+//! the menu. One command is answered on the same connection: `describe`, which
+//! the server's Pelorus sends for the desktop's controls ([`crate::describe`]);
+//! a client sends its lines, shuts its side for writing, and reads the answer.
 
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
 
 /// A command another process sent.
@@ -29,6 +32,8 @@ pub enum Command {
     /// whether each display's floating bar attaches to the edge, each display named by where
     /// its top-left corner sits.
     BarsAttached(Vec<((i32, i32), bool)>),
+    /// Describe every control the desktop shows, answered on the connection.
+    Describe,
     /// Exit the desktop.
     Quit,
 }
@@ -55,6 +60,7 @@ impl Command {
             "settings" => Some(Command::Settings((!rest.is_empty()).then(|| rest.to_string()))),
             "new-folder" => Some(Command::NewFolder),
             "bar-attached" => Some(Command::BarsAttached(parse_bar_edges(rest))),
+            pelorus::shell::DESCRIBE => Some(Command::Describe),
             "quit" | "exit" => Some(Command::Quit),
             _ => None,
         }
@@ -79,6 +85,7 @@ impl Command {
                     .collect();
                 format!("bar-attached {}", list.join(" "))
             }
+            Command::Describe => pelorus::shell::DESCRIBE.to_string(),
             Command::Quit => "quit".to_string(),
         }
     }
@@ -129,16 +136,18 @@ impl Server {
         self.listener.as_raw_fd()
     }
 
-    /// Accepts every waiting connection and reads its command.
-    pub fn drain(&self) -> Vec<Command> {
+    /// Accepts every waiting connection and reads its commands, each with the connection it
+    /// came on, which [`answer`] replies on.
+    pub fn drain(&self) -> Vec<(Command, Rc<UnixStream>)> {
         let mut commands = Vec::new();
         while let Ok((mut stream, _)) = self.listener.accept() {
             let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
             let mut text = String::new();
             if stream.read_to_string(&mut text).is_ok() || !text.is_empty() {
+                let stream = Rc::new(stream);
                 for line in text.lines() {
                     if let Some(command) = Command::parse(line) {
-                        commands.push(command);
+                        commands.push((command, stream.clone()));
                     }
                 }
             }
@@ -151,6 +160,14 @@ impl Drop for Server {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+/// Writes an answer on a connection a command came on, as one line, giving up on a reader
+/// that does not take it within a moment rather than holding the desktop up.
+pub fn answer(mut stream: &UnixStream, text: &str) {
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.write_all(text.as_bytes());
+    let _ = stream.write_all(b"\n");
 }
 
 /// Sends a command to the running desktop.
@@ -210,6 +227,7 @@ mod tests {
             Command::parse("--files /tmp/my dir"),
             Some(Command::Files(Some(PathBuf::from("/tmp/my dir"))))
         );
+        assert_eq!(Command::parse("describe"), Some(Command::Describe));
         assert_eq!(Command::parse("dance"), None);
     }
 
@@ -224,7 +242,8 @@ mod tests {
         let server = Server::bind().expect("bind");
         send(Command::ShowDesktop).expect("send");
         std::thread::sleep(Duration::from_millis(50));
-        assert_eq!(server.drain(), vec![Command::ShowDesktop]);
+        let commands: Vec<Command> = server.drain().into_iter().map(|(c, _)| c).collect();
+        assert_eq!(commands, vec![Command::ShowDesktop]);
         drop(server);
         assert!(!socket_path().exists());
         let _ = std::fs::remove_dir_all(dir);

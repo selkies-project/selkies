@@ -17,6 +17,7 @@
 //! grid and among the tiles alike.
 
 use crate::config::MenuLayout;
+use crate::describe::{self, Element};
 use crate::desktop::{Desktop, Hover, Popup};
 use crate::entries;
 use crate::event::Button;
@@ -974,6 +975,91 @@ pub fn hit(d: &mut Desktop, x: f64, y: f64) -> Option<Hover> {
         }
     }
     Some(Hover::None)
+}
+
+/// The menu's controls, as [`crate::describe`] reports them: the search field, the Settings
+/// button, the sections, and the applications listed, or the rows of an application's
+/// right-click menu while one is open, since a click anywhere else only closes it; `None`
+/// where the menu has no room on the bar.
+pub fn describe(d: &mut Desktop) -> Option<Element> {
+    ensure_items(d);
+    let layout = layout(d);
+    if layout.frame.w <= 0 || layout.frame.h <= 0 {
+        return None;
+    }
+    let mut children = Vec::new();
+    if let Some((index, _, _)) = d.menu.context
+        && let Some(rect) = context_rect(d)
+    {
+        for (row, (label, _, _)) in context_rows(d, index).into_iter().enumerate() {
+            let item = Rect::new(
+                rect.x + 6,
+                rect.y + 6 + row as i32 * CONTEXT_ROW,
+                rect.w - 12,
+                CONTEXT_ROW,
+            );
+            children.push(describe::node("menu item", label, item));
+        }
+        return Some(describe::holding("panel", "", rect, children));
+    }
+    let mut search = describe::node("text", "Search", layout.search);
+    search.text = Some(d.menu.query.clone());
+    search.states.focused = true;
+    search.states.editable = true;
+    children.push(search);
+    if layout.settings.w > 0 {
+        children.push(describe::node("button", tr("Settings"), layout.settings));
+    }
+    if layout.categories.w > 0 {
+        for (row, item) in category_rows(d).iter().enumerate() {
+            let CategoryRow::Section(section) = item else {
+                continue;
+            };
+            let y = layout.categories.y + row as i32 * CATEGORY_ROW - d.menu.category_scroll as i32;
+            let rect = Rect::new(
+                layout.categories.x,
+                y,
+                content_width(layout.categories),
+                CATEGORY_ROW,
+            );
+            if describe::shows_in(rect, layout.categories) {
+                let mut tab = describe::node("page tab", section_name(d, *section), rect);
+                tab.states.selected = d.menu.section == *section;
+                children.push(tab);
+            }
+        }
+    }
+    let arrangement = arrangement(d);
+    for (row, index) in d.menu.items.iter().enumerate() {
+        let rect = match arrangement {
+            Arrangement::Grid { w, h, .. } => grid_cell(d, layout.apps, row, w, h),
+            Arrangement::Rows => Rect::new(
+                layout.apps.x,
+                layout.apps.y + row as i32 * ROW - d.menu.app_scroll as i32,
+                content_width(layout.apps),
+                ROW,
+            ),
+        };
+        if let Some(entry) = d.apps.entries.get(*index)
+            && describe::shows_in(rect, layout.apps)
+        {
+            let mut app = describe::node("list item", entry.name.clone(), rect);
+            app.states.selected = d.menu.selected == Some(row);
+            children.push(app);
+        }
+    }
+    if layout.tiles.w > 0 {
+        for (position, index) in favorite_entries(d).iter().enumerate() {
+            let rect = tile_rect(layout.tiles, position);
+            if let Some(entry) = d.apps.entries.get(*index)
+                && describe::shows_in(rect, layout.tiles)
+            {
+                children.push(describe::node("list item", entry.name.clone(), rect));
+            }
+        }
+    }
+    children.push(describe::node("label", d.menu.identity.clone(), layout.footer));
+    Some(describe::holding("panel", "", layout.frame, children))
 }
 
 /// The entry index a hover target names, if it is an application.

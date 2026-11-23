@@ -1498,6 +1498,19 @@ impl Backend for WaylandBackend {
         (0, y, 1)
     }
 
+    fn surface_origin(&self, surface: SurfaceId) -> Option<(i32, i32)> {
+        let (output, (x, y, _)) = match surface {
+            SurfaceId::Panel => (self.state.outputs.first()?, self.panel_origin()),
+            SurfaceId::Bar(bar) => (
+                self.state.outputs.iter().find(|o| o.name == bar)?,
+                self.bar_origin(bar),
+            ),
+            _ => return None,
+        };
+        let (ox, oy) = output.origin?;
+        Some((ox + x, oy + y))
+    }
+
     fn panel_origin(&self) -> (i32, i32, i32) {
         let Some(panel) = self.state.panel.as_ref() else {
             return (0, 0, 1);

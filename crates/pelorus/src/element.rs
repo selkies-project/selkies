@@ -26,10 +26,10 @@
 //! answers window coordinates that are no coordinates at all, which is why an X11 window takes
 //! the screen ones wherever a toolkit gives them.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// An integer rectangle in screen pixels.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -114,7 +114,8 @@ impl Placement {
 }
 
 /// The states of a control a reader acts on, from the accessibility state set.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct States {
     pub showing: bool,
     pub enabled: bool,
@@ -128,7 +129,8 @@ pub struct States {
 }
 
 /// One control: what it is, what it says, and where a click reaches it.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Element {
     /// The accessibility role's name, as the toolkit spells it (`button`, `menu item`).
     pub role: String,

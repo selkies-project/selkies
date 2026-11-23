@@ -15,7 +15,9 @@
 //!
 //! What is inside a window comes from the applications over the accessibility bus, read and
 //! placed by the `pelorus` crate; this module joins the two per request and serves the result
-//! as an outline, the text a model reads, or as the tree it was written from.
+//! as an outline, the text a model reads, or as the tree it was written from. What Selkies draws
+//! itself, the window manager's menus and the desktop shell's bar, popups, and windows, is
+//! described by them directly instead ([`surfaces`]).
 //!
 //! Everything is in the pixels the Computer Use actions take: the window manager's logical
 //! layout coordinates multiplied by the output's scale. A caller here holds what the session's
@@ -26,6 +28,7 @@ mod agent;
 pub mod apps;
 mod configs;
 mod model;
+mod surfaces;
 mod tools;
 
 use std::sync::Mutex;
@@ -119,13 +122,21 @@ async fn handle_window(ceiling: Ceiling, Path((id, verb)): Path<(u32, String)>) 
     }
 }
 
-/// `GET /pelorus/api/desktop`: the outputs and every window, bottom of the stack first.
+/// `GET /pelorus/api/desktop`: the outputs and every window, bottom of the stack first, and
+/// the menu and desktop surfaces Selkies draws itself, top first.
 async fn handle_desktop(ceiling: Ceiling) -> Response {
     if ceiling.is_viewer() {
         return refused();
     }
-    match tokio::task::spawn_blocking(crate::wm::desktop_view).await {
-        Ok(view) => axum::Json(desktop_json(view.as_ref())).into_response(),
+    let read = tokio::task::spawn_blocking(|| {
+        let view = crate::wm::desktop_view()?;
+        let listed = surfaces::surfaces(&view, surfaces::read_shell().as_ref());
+        Some((view, listed))
+    });
+    match read.await {
+        Ok(read) => {
+            axum::Json(desktop_json(read.as_ref().map(|(v, l)| (v, l.as_slice())))).into_response()
+        }
         Err(_) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "the desktop could not be read",
@@ -228,13 +239,28 @@ struct WindowRead {
 /// over it, then the application's tree placed by that. Blocks; runs on a blocking thread.
 fn read_window(id: u32) -> Result<WindowRead, Unreadable> {
     let view = crate::wm::desktop_view().ok_or(Unreadable::NoWindowManager)?;
+    let shell = surfaces::read_shell();
+    let mut listed = surfaces::surfaces(&view, shell.as_ref());
+    if surfaces::is_surface(id) {
+        let index = listed
+            .iter()
+            .position(|s| s.id == id)
+            .ok_or(Unreadable::NoWindow)?;
+        let above = listed[..index].iter().map(|s| s.clip).collect();
+        let surface = listed.swap_remove(index);
+        return Ok(WindowRead {
+            title: surface.title,
+            tree: surface.tree,
+            clip: surface.clip,
+            above,
+        });
+    }
     let index = view
         .windows
         .iter()
         .position(|w| w.info.id == id)
         .ok_or(Unreadable::NoWindow)?;
     let window = &view.windows[index];
-    let pid = window.info.pid.ok_or(Unreadable::NoProcess)?;
     let scale = scale_at(&view.outputs, window.rect.x, window.rect.y);
     let placement = placement(window, scale);
     let above = view.windows[index + 1..]
@@ -246,7 +272,20 @@ fn read_window(id: u32) -> Result<WindowRead, Unreadable> {
                 scale_at(&view.outputs, w.rect.x, w.rect.y),
             )
         })
+        .chain(listed.iter().map(|s| s.clip))
         .collect();
+    if let Some(tree) = shell
+        .as_ref()
+        .and_then(|shell| surfaces::shell_window(window, scale, shell))
+    {
+        return Ok(WindowRead {
+            title: window.info.title.clone(),
+            tree,
+            clip: placement.rect,
+            above,
+        });
+    }
+    let pid = window.info.pid.ok_or(Unreadable::NoProcess)?;
     let bus = accessibility_bus()?;
     match bus.window_tree(pid, &window.info.title, &placement, TREE_BUDGET) {
         Ok(tree) => Ok(WindowRead {
@@ -398,8 +437,8 @@ fn window_json(window: &WindowView, focus: Option<u32>, outputs: &[OutputInfo]) 
 }
 
 /// The desktop as JSON; `{"wm": false}` where no window manager answers.
-fn desktop_json(view: Option<&DesktopView>) -> Json {
-    let Some(view) = view else {
+fn desktop_json(read: Option<(&DesktopView, &[surfaces::Surface])>) -> Json {
+    let Some((view, listed)) = read else {
         return json!({"wm": false});
     };
     let outputs: Vec<Json> = view
@@ -420,10 +459,18 @@ fn desktop_json(view: Option<&DesktopView>) -> Json {
         .iter()
         .map(|w| window_json(w, view.focus, &view.outputs))
         .collect();
+    let listed: Vec<Json> = listed
+        .iter()
+        .map(|s| {
+            let r = s.clip;
+            json!({"id": s.id, "title": s.title, "rect": [r.x, r.y, r.w, r.h]})
+        })
+        .collect();
     json!({
         "wm": true,
         "outputs": outputs,
         "windows": windows,
+        "surfaces": listed,
         "focus": view.focus,
         "desktops": {"count": view.desktop_count, "current": view.current_desktop},
     })
@@ -472,8 +519,9 @@ mod tests {
             focus: Some(7),
             desktop_count: 1,
             current_desktop: 0,
+            menus: Vec::new(),
         };
-        let json = desktop_json(Some(&view));
+        let json = desktop_json(Some((&view, &[])));
         let window = &json["windows"][0];
         assert_eq!(window["rect"], json!([200, 100, 600, 400]));
         assert_eq!(window["frame"], json!([192, 40, 616, 468]));

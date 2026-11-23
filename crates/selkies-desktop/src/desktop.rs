@@ -862,6 +862,11 @@ impl Desktop {
         })
     }
 
+    /// Whether the open popup is drawn on the bar standing in for the panel at the moment.
+    pub fn popup_on_current_bar(&self) -> bool {
+        self.popup != Popup::None && self.popup_bar == self.current_bar
+    }
+
     /// Whether the panel is itself rather than a display's bar standing in for it.
     pub fn is_primary_bar(&self) -> bool {
         self.current_bar.is_none()
@@ -875,7 +880,7 @@ impl Desktop {
     }
 
     /// The surface of the bar standing in for the panel at the moment.
-    fn current_bar_surface(&self) -> SurfaceId {
+    pub fn current_bar_surface(&self) -> SurfaceId {
         self.current_bar.map_or(SurfaceId::Panel, SurfaceId::Bar)
     }
 
