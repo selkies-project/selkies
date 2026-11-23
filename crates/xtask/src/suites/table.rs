@@ -72,6 +72,7 @@ pub static SUITES: &[Suite] = &[
     suite("tools/audio_worklet_audit.ts", "unit", 120),
     suite("tools/socket_worker_audio_audit.ts", "unit", 120),
     suite("tools/socket_worker_sent_probe_audit.ts", "unit", 120),
+    suite("tools/socket_worker_ack_stamp_audit.ts", "unit", 120),
     suite("tools/audio_decoder_worker_audit.ts", "unit", 120),
     suite("tools/audio_multistream_audit.ts", "unit", 120),
     suite("tools/opus_wasm_fallback_audit.ts", "unit", 120),

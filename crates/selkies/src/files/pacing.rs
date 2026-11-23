@@ -269,14 +269,18 @@ impl Window {
 
     /// Give the window back as it was found: the buffer no smaller than it was, or than a
     /// process may size one (`net.core.rmem_max`, past which only the kernel's own tuning
-    /// grows it back), its sizing the kernel's, the clamp its value. Whether or not the
-    /// last hold took: one loosened or refused leaves the buffer where a hold before it
-    /// sized it.
+    /// grows it back), its sizing the kernel's, the clamp its value. A hold loosened since
+    /// leaves the buffer where it sized it, or where the kernel's tuning has grown it from
+    /// there, which is left as it is.
     fn release(&mut self) {
         if self.set == 0 {
             return;
         }
-        set_socket_option(self.fd, libc::SOL_SOCKET, libc::SO_RCVBUF, self.was.1 / 2);
+        let smaller = socket_option(self.fd, libc::SOL_SOCKET, libc::SO_RCVBUF)
+            .is_some_and(|buffer| buffer < self.was.1);
+        if self.held || smaller {
+            set_socket_option(self.fd, libc::SOL_SOCKET, libc::SO_RCVBUF, self.was.1 / 2);
+        }
         self.loosen();
         self.set = 0;
     }
@@ -852,6 +856,9 @@ struct PacerState {
     drained: f64,
     drains: VecDeque<(f64, f64)>,
     used_bps: Option<f64>,
+    /// Whether the transfers paused for longer than that window since the last reading: they
+    /// have not shown the allowance filled, whatever they showed before the pause.
+    paused: bool,
 }
 
 /// Rate pacing for bulk traffic, one instance per allowance.
@@ -916,6 +923,7 @@ impl TransferPacer {
                 drained: 0.0,
                 drains: VecDeque::new(),
                 used_bps: None,
+                paused: false,
             }),
         }
     }
@@ -1009,6 +1017,9 @@ impl TransferPacer {
         if self.adaptive
             && let Some(congested) = congested
         {
+            // A pause since the last piece is read before the verdict is: the reading from
+            // before it is no longer what the transfers fill.
+            Self::note_pause(&mut self.inner.lock(), monotonic());
             let step = (8.0 * 1024.0f64).max((self.rate_bps() * 0.03).floor());
             let share =
                 share_bps.filter(|_| inflation_us.is_some_and(|i| i <= BESIDE_INFLATION_US));
@@ -1020,16 +1031,29 @@ impl TransferPacer {
     }
 
     /// Drain `nbytes` from the token bucket; the overdraw to sleep off, if any.
+    /// Fold the transfers' pause since the last piece, if they took one, into the reading at
+    /// `now`: one longer than [`TransferPacer::USED_SECONDS`] is no rate of theirs, and the
+    /// reading starts over, the allowance not shown filled until it is read again; one as
+    /// long as [`TransferPacer::RESTART_SECONDS`] ends the transfers, and the next start
+    /// afresh, as the allowance's ramp does.
+    fn note_pause(s: &mut PacerState, now: f64) {
+        let idle = now - s.ts;
+        if idle > Self::USED_SECONDS {
+            s.drains.clear();
+            s.used_bps = None;
+            s.paused = idle < Self::RESTART_SECONDS;
+        }
+        if idle > Self::RESTART_SECONDS {
+            s.slow_start = true;
+        }
+    }
+
     fn bucket(&self, nbytes: usize) -> Option<Duration> {
         let now = monotonic();
         let mut s = self.inner.lock();
-        // What the transfers moved up to now, the piece drained here moving after it. A pause
-        // within a transfer is time it moved nothing in, read into the rate like any other;
-        // one as long as the restart's is a new transfer, whose reading starts over.
-        if self.adaptive && now - s.ts > Self::RESTART_SECONDS {
-            s.slow_start = true;
-            s.drains.clear();
-            s.used_bps = None;
+        // What the transfers moved up to now, the piece drained here moving after it.
+        if self.adaptive {
+            Self::note_pause(&mut s, now);
         }
         if s.drains
             .back()
@@ -1049,6 +1073,7 @@ impl TransferPacer {
             && now - at >= Self::USED_SECONDS / 2.0
         {
             s.used_bps = Some((s.drained - before) / (now - at));
+            s.paused = false;
         }
         s.drained += nbytes as f64;
         let limit = s.rate_bps.min(self.ceiling());
@@ -1177,8 +1202,9 @@ impl TransferPacer {
             ceiling = None;
         }
         let bound = ceiling.unwrap_or(s.rate_bps * 4.0).min(self.ceiling());
-        if s.used_bps
-            .is_some_and(|used| used < Self::FILLED * s.rate_bps)
+        if s.paused
+            || s.used_bps
+                .is_some_and(|used| used < Self::FILLED * s.rate_bps)
         {
             return;
         }
@@ -1616,34 +1642,48 @@ mod tests {
             .expect("half the window was read");
         let most = 8192.0 / half;
         assert!(used > 0.5 * most && used <= most, "{used} of {most}");
-        // A pause longer than the window is time the transfers moved nothing in.
-        let pause = TransferPacer::USED_SECONDS + 0.05;
-        tokio::time::sleep(Duration::from_secs_f64(pause)).await;
+        // A pause longer than the window is no rate of the transfers': the reading starts
+        // over, the allowance not shown filled until it is read again.
+        tokio::time::sleep(Duration::from_secs_f64(TransferPacer::USED_SECONDS + 0.05)).await;
         pacer.pace(8192).await;
-        let after = pacer.inner.lock().used_bps.expect("the pause was read");
-        assert!(after <= 8192.0 / pause, "{after} after {used}");
-        // One as long as the restart's is a new transfer, read afresh.
+        let state = |pacer: &TransferPacer| {
+            let s = pacer.inner.lock();
+            (s.used_bps, s.paused)
+        };
+        assert_eq!(state(&pacer), (None, true), "{used} before the pause");
+        tokio::time::sleep(Duration::from_secs_f64(half + 0.05)).await;
+        pacer.pace(8192).await;
+        assert!(matches!(state(&pacer), (Some(_), false)), "read again");
+        // One as long as the restart's ends the transfers: the next start afresh.
         pacer.inner.lock().ts -= TransferPacer::RESTART_SECONDS;
         pacer.pace(8192).await;
-        assert_eq!(pacer.inner.lock().used_bps, None, "the reading starts over");
+        assert_eq!(state(&pacer), (None, false), "a new transfer");
     }
 
     #[tokio::test]
     async fn an_allowance_is_not_raised_across_a_pause_in_its_transfers() {
         let pacer = TransferPacer::adaptive();
         set_rate(&pacer, 1_000_000.0);
-        // A download read by a slow client in large pieces: a piece, then a pause longer than
-        // the window while the client reads, then the next.
+        // The transfers filled the allowance, then paused longer than the window, as a
+        // download read by a slow client in large pieces does: the clear verdicts that come
+        // with the next pieces, the first of them included, find it not shown filled.
         pacer.pace(8192).await;
+        set_used(&pacer, 1_000_000.0);
         tokio::time::sleep(Duration::from_secs_f64(TransferPacer::USED_SECONDS + 0.05)).await;
-        pacer.pace(8192).await;
         for _ in 0..4 {
-            pacer.gauge_backoff(false, true, 0.65, DEFAULT_STEP, None);
+            pacer.pace_verdict(8192, Some(false), None).await;
         }
         assert_eq!(
             pacer.rate_bps(),
             1_000_000.0,
-            "clear verdicts on an unfilled allowance"
+            "clear verdicts across a pause"
+        );
+        // A congested one cuts it once, as on any path, not down to the pause's rate too.
+        pacer.pace_verdict(8192, Some(true), None).await;
+        assert!(
+            (pacer.rate_bps() - 650_000.0).abs() < 1.0,
+            "{}",
+            pacer.rate_bps()
         );
     }
 

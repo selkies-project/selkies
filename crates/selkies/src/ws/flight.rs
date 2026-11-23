@@ -107,8 +107,7 @@
 //! the path kept, until the history forgets that stamp. A clock that stepped, or a stamp
 //! that was nonsense, shows in a frame that reached the page before it was written, and the
 //! history starts over there. What its first stamp's way back held is unknown, an upload's
-//! hold perhaps, so the way back goes unsaid to an upload's gauge until a stamp arrives
-//! sooner by more than that gauge acts on, or `FLIGHT_RESEED_S` passes.
+//! hold perhaps, so the way back goes unsaid to an upload's gauge for `FLIGHT_RESEED_S`.
 //!
 //! The page's count is its script's: what its engine holds and has not yet handed over reads
 //! as on its way, so a page too busy to take its messages is paced as a late path is, and
@@ -116,7 +115,6 @@
 
 use std::collections::VecDeque;
 
-use crate::files::pacing::UplinkGauge;
 use crate::ws::uplink::FloorHistory;
 
 /// How far past the least round trip a frame stands on its way out before the path is late,
@@ -156,11 +154,11 @@ pub const FLIGHT_SLACK_MAX_S: f64 = 0.4;
 pub const FLIGHT_STAMP_S: f64 = 0.05;
 /// The stamps the way back's standing delay is read over.
 const BACKS: usize = 4;
-/// How long after the stamps' history starts over the way back goes unsaid, short of a
-/// stamp that arrives under the one the history restarted at by more than an upload's
-/// gauge acts on (`UplinkGauge::INFLATION_US`): an upload's own hold may stand in that
-/// stamp, and the gauge reads the round trip meanwhile, whose verdicts cut the upload and
-/// let its hold drain within this.
+/// How long after the stamps' history starts over the way back goes unsaid to an upload's
+/// gauge: an upload's own hold may stand in the stamp it restarted at, and the gauge reads
+/// the round trip meanwhile, whose verdicts cut the upload and let its hold drain within
+/// this, the history taking the lower lags as it does. A stamp that arrives sooner says
+/// nothing by itself: the hold's own unsteadiness brings one at any moment.
 const FLIGHT_RESEED_S: f64 = 5.0;
 /// The bulk frames kept as out at most: past that the oldest are let go uncounted.
 const OUT_MAX: usize = 1024;
@@ -279,9 +277,8 @@ pub struct Flight {
     /// What the way back held the last few stamps: the least of it stands on that way
     /// whatever one piece is held more than the next.
     backs: VecDeque<f64>,
-    /// Since when, and from what lag, the stamps' history started over, until a stamp shows
-    /// what that lag held (`FLIGHT_RESEED_S`).
-    reseeded: Option<(f64, f64)>,
+    /// When the stamps' history last started over, for `FLIGHT_RESEED_S`.
+    reseeded: Option<f64>,
 }
 
 impl Flight {
@@ -346,12 +343,6 @@ impl Flight {
             return false;
         }
         let lag = now - stamp;
-        if let Some((at, seeded)) = self.reseeded
-            && (seeded - lag > f64::from(UplinkGauge::INFLATION_US) / 1e6
-                || now - at > FLIGHT_RESEED_S)
-        {
-            self.reseeded = None;
-        }
         // The least is read while the page's count moves, as the least round trip is: over
         // a still screen, where the page's acks go on and no frame does, neither history
         // moves, and the two forget a way back that has grown longer together.
@@ -413,7 +404,7 @@ impl Flight {
             self.backs.clear();
             self.backs.push_back(0.0);
             self.arrivals.clear();
-            self.reseeded = Some((now, lag));
+            self.reseeded = Some(now);
             left = now;
         }
         if named {
@@ -569,17 +560,27 @@ impl Flight {
     /// How long the way back holds what the page sends, past the least it took: the least
     /// its last few stamps were held, while one says.
     pub fn held_back(&self, now: f64) -> f64 {
-        self.way_back_holds(now).unwrap_or(0.0)
+        if self.mark(now).is_some() {
+            self.least_back()
+        } else {
+            0.0
+        }
     }
 
-    /// [`Flight::held_back`] for a reader that tells a way back free from one no stamp
-    /// says anything of: `None` once none has come for `FLIGHT_DISTRUST_S`, and while the
-    /// history that started over has yet to show what its first stamp held
-    /// (`FLIGHT_RESEED_S`).
+    /// The least of what the way back held the last few stamps.
+    fn least_back(&self) -> f64 {
+        self.backs.iter().copied().reduce(f64::min).unwrap_or(0.0)
+    }
+
+    /// [`Flight::held_back`] for an upload's gauge, which tells a way back free from one no
+    /// stamp says anything of: `None` once none has come for `FLIGHT_DISTRUST_S`, and for
+    /// `FLIGHT_RESEED_S` after the history started over, whose first stamp an upload's hold
+    /// may stand in. The video's own readers take the history as it stands: a hold shows in
+    /// it within a few stamps, and the gauge's round trip is no reading of theirs.
     pub fn way_back_holds(&self, now: f64) -> Option<f64> {
         self.mark(now)
-            .filter(|_| self.reseeded.is_none())
-            .map(|_| self.backs.iter().copied().reduce(f64::min).unwrap_or(0.0))
+            .filter(|_| self.reseeded.is_none_or(|at| now - at > FLIGHT_RESEED_S))
+            .map(|_| self.least_back())
     }
 
     /// The path's least round trip is `floor` from `now` on.
@@ -1244,17 +1245,19 @@ mod tests {
     }
 
     #[test]
-    fn a_history_started_over_behind_an_upload_says_nothing_of_the_way_back_until_it_drains() {
-        // An upload holds the page's acks 300 ms on their way back from 12 s, the page's
-        // clock steps back half a minute at 13 s, and the upload's hold drains at 16 s. The
-        // history that starts over at the step starts at a lag the hold stands in, and read
-        // from there the way back is free while the upload fills it: until a stamp shows
-        // the hold, it says nothing, and an upload's gauge reads the round trip instead.
+    fn a_history_started_over_behind_an_upload_says_nothing_of_the_way_back_for_a_while() {
+        // An upload holds the page's acks 300 ms on their way back from 12 s, unevenly as a
+        // modem's queue does, the page's clock steps back half a minute at 13 s, and the
+        // upload's hold drains at 16 s. The history that starts over at the step starts at a
+        // lag the hold stands in, and read from there the way back is free while the upload
+        // fills it: it says nothing to an upload's gauge for a while, which reads the round
+        // trip instead, and once it says again it is from the drained hold.
         let mut flight = Flight::default();
         let mut path = Path::new(2_500_000.0, 0.02);
+        path.jitter = 0.03;
         let (mut waiting, mut due, mut now) = (0usize, 10.0, 10.0);
         let (mut before, mut stepped, mut drained) = (None, Vec::new(), None);
-        while now < 18.0 {
+        while now < 19.0 {
             path.up = 0.01
                 + if (12.0..16.0).contains(&now) {
                     0.3
@@ -1280,7 +1283,7 @@ mod tests {
             if (13.5..15.9).contains(&now) {
                 stepped.push(holds);
             }
-            if (17.9..17.901).contains(&now) {
+            if (18.9..18.901).contains(&now) {
                 drained = holds;
             }
             now += 0.001;
@@ -1294,7 +1297,7 @@ mod tests {
             "{:?}",
             stepped.iter().flatten().next()
         );
-        assert!(drained.is_some_and(|held| held < 0.05), "{drained:?}");
+        assert!(drained.is_some_and(|held| held < 0.06), "{drained:?}");
     }
 
     #[test]
