@@ -3837,8 +3837,9 @@ fn sized_pixmap(kept: Option<Pixmap>, w: u32, h: u32) -> Option<(Pixmap, bool)> 
 
 #[cfg(test)]
 mod tests {
-    use super::{Desktop, edge_display};
-    use std::time::Instant;
+    use super::{Desktop, Geometry, edge_display};
+    use crate::notify::{CloseReason, Notification, Urgency};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn a_restyle_with_no_notification_on_screen_leaves_nothing_due() {
@@ -3846,6 +3847,48 @@ mod tests {
         d.notifications.invalidate();
         assert!(d.render_notifications().is_none());
         assert_eq!(d.notifications.next_deadline(Instant::now()), None);
+    }
+
+    #[test]
+    fn a_card_that_faded_out_mid_frame_leaves_nothing_due() {
+        let mut d = Desktop::load(false);
+        let shown = Instant::now() - Duration::from_secs(1);
+        d.notifications.receive(
+            Notification {
+                id: 1,
+                app_name: "App".to_string(),
+                summary: "Summary".to_string(),
+                body: String::new(),
+                actions: Vec::new(),
+                urgency: Urgency::Normal,
+                image: None,
+                icon_name: None,
+                desktop_entry: None,
+                transient: true,
+                resident: false,
+                progress: None,
+                timeout: None,
+            },
+            shown,
+        );
+        d.tick(shown);
+        let (width, height) = d.notifications.surface_size();
+        d.notify_geometry = Geometry {
+            width,
+            height,
+            scale: 1,
+            configured: true,
+        };
+        d.notifications.close(1, CloseReason::Dismissed, Instant::now());
+        assert!(d.render_notifications().is_some(), "the fade draws a frame");
+        assert!(
+            d.notifications.next_deadline(Instant::now()).is_some(),
+            "the frame is drawn mid-fade, owing the settled one"
+        );
+        let gone = Instant::now() + Duration::from_secs(1);
+        d.tick(gone);
+        assert!(d.render_notifications().is_none(), "nothing is left to draw");
+        assert_eq!(d.notifications.next_deadline(gone), None);
     }
 
     #[test]

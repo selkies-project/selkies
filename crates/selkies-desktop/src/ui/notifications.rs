@@ -373,9 +373,11 @@ impl NotificationState {
     }
 
     /// Drops a pending redraw that no surface can take, so it is not left
-    /// due on every wake.
+    /// due on every wake: the mark, and the settled frame owed after one
+    /// drawn mid-animation, which a card that faded out leaves behind.
     pub fn drop_redraw(&mut self) {
         self.dirty = false;
+        self.settling = false;
     }
 
     /// Drops every layout and body, after a theme, font, or scale change.
