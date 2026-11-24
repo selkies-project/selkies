@@ -90,7 +90,8 @@ pub struct InputConfig {
     /// The compositor apps run under when it differs from the capture compositor; empty
     /// auto-detects.
     pub app_wayland_display: String,
-    pub wayland_socket_index: i64,
+    /// The socket the compositor was asked to listen on (`Settings::wayland_socket`).
+    pub wayland_socket: Option<String>,
     pub command_enabled: bool,
     pub enable_collab: bool,
     /// Whether a master token is set.
@@ -111,7 +112,7 @@ impl Default for InputConfig {
             cursor_debug: false,
             uinput_mouse_socket: String::new(),
             app_wayland_display: String::new(),
-            wayland_socket_index: 0,
+            wayland_socket: None,
             command_enabled: false,
             enable_collab: true,
             secure: false,
@@ -133,7 +134,7 @@ impl InputConfig {
             cursor_debug: false,
             uinput_mouse_socket: s.uinput_mouse_socket().to_string(),
             app_wayland_display: s.app_wayland_display().to_string(),
-            wayland_socket_index: s.wayland_socket_index(),
+            wayland_socket: s.wayland_socket(),
             command_enabled: s.command_enabled().on,
             enable_collab: s.enable_collab().on,
             secure: !s.master_token().is_empty(),
@@ -1416,7 +1417,7 @@ impl Dispatcher {
     }
 
     /// The compositor's real socket name: the running backend is authoritative, the process
-    /// env is next, and `wayland_socket_index` survives only as a legacy hint.
+    /// env is next, then the socket the compositor was asked for; empty where none says.
     fn wayland_display_name(&self) -> String {
         if let Some(name) = pixelflux::wayland_display_name()
             && !name.is_empty()
@@ -1426,7 +1427,8 @@ impl Dispatcher {
         std::env::var("WAYLAND_DISPLAY")
             .ok()
             .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| format!("wayland-{}", self.cfg.wayland_socket_index))
+            .or_else(|| self.cfg.wayland_socket.clone())
+            .unwrap_or_default()
     }
 
     /// Socket of the compositor applications run under, the target for input injection and the
@@ -1435,7 +1437,8 @@ impl Dispatcher {
     /// aimed at the capture compositor never reach them. Resolution order: the explicit
     /// `app_wayland_display` setting; else the single other live `wayland-*` socket in
     /// `XDG_RUNTIME_DIR` besides the capture compositor's (a numbered `wayland-<N>` over a
-    /// differently named relay); else the capture socket. A distinct result is cached
+    /// differently named relay); else the capture socket. With no capture socket known there is
+    /// nothing to tell a nested compositor from, so nothing is detected. A distinct result is cached
     /// permanently; the capture fallback is negative-cached with a short TTL, so a nested
     /// compositor that appears after startup is still picked up within a couple of seconds
     /// without relisting per call.
@@ -1456,6 +1459,9 @@ impl Dispatcher {
         let override_ = self.cfg.app_wayland_display.trim();
         if !override_.is_empty() {
             return self.adopt_app_wl_display(override_, &capture, "configured");
+        }
+        if capture.is_empty() {
+            return capture;
         }
         let resolved = detect_app_compositor(&capture);
         if let Some(resolved) = resolved

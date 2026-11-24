@@ -101,9 +101,11 @@ async fn shutdown_signal() -> &'static str {
 }
 
 /// Bring the pixelflux compositor socket up on Wayland before any session app starts, so an
-/// early-launched app finds `WAYLAND_DISPLAY`.
+/// early-launched app finds `WAYLAND_DISPLAY`. The socket is `wayland-<N>` where
+/// `wayland_socket_index` names one, so an image can give its applications the `wayland-0`
+/// they look for.
 fn bring_up_wayland() {
-    let (width, height, render, auto_gpu, cursor, host) = {
+    let (width, height, render, auto_gpu, cursor, host, socket) = {
         let s = settings();
         if !s.wayland().on {
             return;
@@ -115,9 +117,10 @@ fn bring_up_wayland() {
             s.auto_gpu().to_string(),
             s.cursor_size() as i32,
             s.wayland_host_display().to_string(),
+            s.wayland_socket(),
         )
     };
-    match pixelflux::ensure_wayland_display(width, height, render, auto_gpu, cursor) {
+    match pixelflux::ensure_wayland_display(width, height, render, auto_gpu, cursor, socket) {
         Ok(name) if !name.is_empty() => {
             let shown = if host.is_empty() { name.clone() } else { host };
             // Before any task reads the environment: nothing else runs yet.

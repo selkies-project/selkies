@@ -72,7 +72,7 @@ fn screenshots_answer_at_each_displays_size_and_leave_its_geometry_readable() {
             std::env::remove_var(name);
         }
     }
-    let socket = ensure_wayland_display(WIDTH, HEIGHT, String::new(), String::new(), 0)
+    let socket = ensure_wayland_display(WIDTH, HEIGHT, String::new(), String::new(), 0, None)
         .expect("the compositor starts");
     assert!(!socket.is_empty(), "the compositor names its socket");
     let control = ScreenCapture::new();

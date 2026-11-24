@@ -497,13 +497,14 @@ impl PyWaylandBackend {
     /// loop, and — on the zero-copy path — the encode itself, all on this single thread, so any
     /// scheduling starvation here surfaces directly as dropped or late frames.
     #[new]
-    #[pyo3(signature = (width, height, dri_node, auto_gpu_selected = false, cursor_size = -1))]
+    #[pyo3(signature = (width, height, dri_node, auto_gpu_selected = false, cursor_size = -1, socket_name = None))]
     fn new(
         width: i32,
         height: i32,
         dri_node: String,
         auto_gpu_selected: bool,
         cursor_size: i32,
+        socket_name: Option<String>,
     ) -> Self {
         Self(Arc::new(Compositor::new(
             width,
@@ -511,6 +512,7 @@ impl PyWaylandBackend {
             dri_node,
             auto_gpu_selected,
             cursor_size,
+            socket_name,
         )))
     }
 
@@ -1958,7 +1960,7 @@ fn py_recording_status(py: Python<'_>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction(name = "ensure_wayland_display")]
-#[pyo3(signature = (width = 0, height = 0, render_node = String::new(), auto_gpu = String::new(), cursor_size = -1))]
+#[pyo3(signature = (width = 0, height = 0, render_node = String::new(), auto_gpu = String::new(), cursor_size = -1, socket_name = None))]
 fn py_ensure_wayland_display(
     py: Python<'_>,
     width: i32,
@@ -1966,9 +1968,19 @@ fn py_ensure_wayland_display(
     render_node: String,
     auto_gpu: String,
     cursor_size: i32,
+    socket_name: Option<String>,
 ) -> PyResult<String> {
-    py.detach(|| super::ensure_wayland_display(width, height, render_node, auto_gpu, cursor_size))
-        .map_err(PyErr::from)
+    py.detach(|| {
+        super::ensure_wayland_display(
+            width,
+            height,
+            render_node,
+            auto_gpu,
+            cursor_size,
+            socket_name,
+        )
+    })
+    .map_err(PyErr::from)
 }
 
 #[pyfunction(name = "probe_wayland_gpu")]

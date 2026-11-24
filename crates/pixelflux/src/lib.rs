@@ -6787,6 +6787,8 @@ struct WaylandThreadConfig {
     auto_gpu_selected: bool,
     cursor_size: i32,
     pointer_share: Arc<crate::wayland::frontend::PointerShare>,
+    /// The socket to listen on, the first free from `wayland-1` where `None` or taken.
+    socket_name: Option<String>,
 }
 
 /// The library smithay opens for its EGL calls, by the name it opens it by.
@@ -7001,6 +7003,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         auto_gpu_selected,
         cursor_size,
         pointer_share,
+        socket_name,
     } = cfg;
     let width: i32 = if initial_width > 0 {
         initial_width
@@ -8363,7 +8366,14 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         })
         .unwrap();
 
-    let source = match ListeningSocketSource::new_auto() {
+    let named = socket_name.as_deref().and_then(|name| {
+        ListeningSocketSource::with_name(name)
+            .inspect_err(|e| {
+                eprintln!("[Wayland] Socket {name} could not be bound ({e}); listening on the first free one instead.")
+            })
+            .ok()
+    });
+    let source = match named.map_or_else(ListeningSocketSource::new_auto, Ok) {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
@@ -8648,12 +8658,16 @@ impl Compositor {
     /// strongest scheduling edge (nice -15) because it drives the calloop, input dispatch, the render
     /// loop, and — on the zero-copy path — the encode itself, all on this single thread, so any
     /// scheduling starvation here surfaces directly as dropped or late frames.
+    ///
+    /// `socket_name` is the socket it listens on, such as `wayland-0`; `None`, or a name another
+    /// compositor holds, takes the first free from `wayland-1`.
     pub fn new(
         width: i32,
         height: i32,
         dri_node: String,
         auto_gpu_selected: bool,
         cursor_size: i32,
+        socket_name: Option<String>,
     ) -> Self {
         let (tx, rx) = smithay::reexports::calloop::channel::channel();
         let (wake_tx, wake_rx) = smithay::reexports::calloop::channel::channel();
@@ -8674,6 +8688,7 @@ impl Compositor {
                 auto_gpu_selected,
                 cursor_size,
                 pointer_share,
+                socket_name,
             });
         });
         Compositor {
@@ -9550,6 +9565,28 @@ pub fn ensure_compositor(
     fallback_node: String,
     cursor_size: i32,
 ) -> Result<Arc<Compositor>, Error> {
+    ensure_named_compositor(
+        width,
+        height,
+        explicit_node,
+        auto_gpu,
+        fallback_node,
+        cursor_size,
+        None,
+    )
+}
+
+/// [`ensure_compositor`] listening on `socket_name` where it creates the compositor
+/// ([`Compositor::new`]); a compositor already running keeps its socket.
+fn ensure_named_compositor(
+    width: i32,
+    height: i32,
+    explicit_node: String,
+    auto_gpu: String,
+    fallback_node: String,
+    cursor_size: i32,
+    socket_name: Option<String>,
+) -> Result<Arc<Compositor>, Error> {
     let slot = WAYLAND_BACKEND.get_or_init(|| Mutex::new(None));
     let mut g = slot.lock().unwrap();
     if g.is_none() {
@@ -9578,6 +9615,7 @@ pub fn ensure_compositor(
             node,
             auto_gpu_selected,
             cursor_size,
+            socket_name,
         ));
         if let Some(cb) = PENDING_CURSOR_CALLBACK.lock().unwrap().take() {
             let _ = be.set_cursor_sink(Some(cb));
@@ -11041,21 +11079,24 @@ pub fn recording_status() -> Option<crate::recorder::RecordingStatus> {
 
 /// Bring up the process-wide compositor (`ensure_compositor`) and return its socket name, so a
 /// consumer can place `WAYLAND_DISPLAY` for the clients it starts; empty where the compositor
-/// published no socket within five seconds.
+/// published no socket within five seconds. `socket_name` is the socket a compositor this call
+/// creates listens on, as [`Compositor::new`] takes it.
 pub fn ensure_wayland_display(
     width: i32,
     height: i32,
     render_node: String,
     auto_gpu: String,
     cursor_size: i32,
+    socket_name: Option<String>,
 ) -> Result<String, Error> {
-    ensure_compositor(
+    ensure_named_compositor(
         width,
         height,
         render_node,
         auto_gpu,
         String::new(),
         cursor_size,
+        socket_name,
     )?;
     Ok(wait_socket_name(Duration::from_secs(5)).unwrap_or_default())
 }

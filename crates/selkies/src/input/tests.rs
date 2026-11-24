@@ -2132,7 +2132,7 @@ async fn the_configured_socket_wins_and_the_session_hears() {
     let cfg = InputConfig {
         is_wayland: true,
         app_wayland_display: "wayland-2".into(),
-        wayland_socket_index: 1,
+        wayland_socket: Some("wayland-1".into()),
         ..Default::default()
     };
     let (h, rec) = dispatcher(cfg, Some(seat as Arc<dyn WaylandSeat>));
