@@ -79,6 +79,9 @@ const CID_INSERT_VUI: u32 = 0x0099_0b22;
 const CID_MAX_PERFORMANCE: u32 = 0x0099_0b2a;
 const CID_POC_TYPE: u32 = 0x0099_0b33;
 const CID_FORCE_IDR_FRAME: u32 = 0x0099_0b37;
+/// `V4L2_CID_MPEG_MFC51_VIDEO_FORCE_FRAME_TYPE`, used by `NvVideoEncoder::forceIDR`.
+/// Its I-frame value (1) requests an H.264 IDR while streaming.
+const CID_FORCE_FRAME_TYPE: u32 = 0x0099_1103;
 /// External reference-picture-set control (`V4L2_CID_MPEG_BASE` + 532, 541, and 542): the
 /// session names, with each frame, which pictures the encoder may predict from.
 const CID_NUM_REFERENCE_FRAMES: u32 = 0x0099_0b14;
@@ -1663,7 +1666,12 @@ impl TegraEncoder {
         if let Some(layout) = self.rps {
             self.queue_references(layout, slot, frame_number, force_idr)?;
         } else if force_idr {
-            self.set_control(CID_FORCE_IDR_FRAME, 1, "force IDR")?;
+            let control = if self.codec == Codec::H264 {
+                CID_FORCE_FRAME_TYPE
+            } else {
+                CID_FORCE_IDR_FRAME
+            };
+            self.set_control(control, 1, "force IDR")?;
         }
         let mut planes = [Plane::default(); 2];
         planes[0].m = self.nv12_fd[slot] as u64;
@@ -2082,6 +2090,38 @@ mod tests {
                 types.contains(&32) && types.contains(&33)
             }
             _ => crate::encoders::sps::h264_frame_num_range(unit).is_some(),
+        }
+    }
+
+    /// H.264 clients can start on a key frame requested after delta frames are streaming.
+    #[test]
+    #[ignore = "requires a Jetson H.264 encoder"]
+    fn tegra_h264_emits_parameter_sets_with_on_demand_idrs() {
+        use crate::encoders::bits::annexb_nals;
+
+        let (w, h) = (1280, 720);
+        let Some(mut enc) = session(Codec::H264, w, h, 10.0) else {
+            return;
+        };
+        let (first, _) = encode_one(&mut enc, 0, w, h, false);
+        assert_eq!(enc.frame_type(&first), FRAME_KEY);
+
+        for i in 1..=8 {
+            let request_idr = matches!(i, 3 | 7);
+            let (unit, _) = encode_one(&mut enc, i, w, h, request_idr);
+            assert_eq!(
+                enc.frame_type(&unit) == FRAME_KEY,
+                request_idr,
+                "frame {i}: on-demand IDR"
+            );
+            if request_idr {
+                for nal_type in [7, 8] {
+                    assert!(
+                        annexb_nals(&unit).any(|nal| nal[0] & 0x1f == nal_type),
+                        "frame {i}: requested IDR is missing H.264 NAL unit type {nal_type}"
+                    );
+                }
+            }
         }
     }
 
