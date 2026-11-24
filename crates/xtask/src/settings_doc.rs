@@ -188,6 +188,7 @@ const SECTIONS: &[Section] = &[
             "publish_input_devices",
             "keyboard_shortcuts",
             "mac_cmd_as_ctrl",
+            "mac_ctrl_click_as_right_click",
         ],
     },
     Section {

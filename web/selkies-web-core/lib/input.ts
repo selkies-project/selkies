@@ -451,6 +451,22 @@ function _wireButtons(buttons: number): number {
     return (buttons & ~0x6) | ((buttons & 0x2) << 1) | ((buttons & 0x4) >> 1);
 }
 
+/**
+ * Whether a press is the one macOS takes for a right click: the primary button
+ * of a mouse or trackpad with Control and no other modifier held. Blink and
+ * WebKit report it as the primary button, Gecko as the secondary while
+ * `buttons` holds the primary alone (`Input._pressedButton`). A pen's press
+ * is not one, and neither is Control+Shift+click, the pointer lock chord.
+ * @param event
+ * @returns
+ */
+function _isMacControlClick(event: MouseEvent): boolean {
+    if (!event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) return false;
+    if ('pointerType' in event && event.pointerType !== 'mouse') return false;
+    if (event.button === 2) return (event.buttons & 0x3) === 0x1;
+    return event.button === 0;
+}
+
 /** Physical code to `getModifierState()` name, for every modifier tracked in `_keyDownList`. */
 const MODIFIER_STATE_BY_CODE: Record<string, string> = {
     ShiftLeft: 'Shift', ShiftRight: 'Shift',
@@ -1794,6 +1810,7 @@ export class Input {
     listeners_context!: (ListenerRecord | null)[];
     _queue!: Queue<number>;
     _primaryAsSecondary!: boolean;
+    _controlClickHeld!: boolean;
     _allowThreshold!: boolean;
     _wheelClassified!: boolean;
     _smallestDeltaY!: number;
@@ -1963,6 +1980,8 @@ export class Input {
         this._queue = new Queue();
         /** A press reported as the secondary button is the primary's, and so is its release (`_pressedButton`). */
         this._primaryAsSecondary = false;
+        /** A Control-click that went out as the secondary button is held (`_takesControlClick`). */
+        this._controlClickHeld = false;
         /**
          * Whether wheel input is classified as a trackpad, which takes a fixed
          * 100px notch (`_wheelNotches`). Starts true until the detector has its
@@ -2114,6 +2133,17 @@ export class Input {
      * Ctrl+Return and its Cmd+C interrupts the foreground program.
      */
     static macCmdAsCtrl = true;
+
+    /**
+     * Whether a macOS Control-click reaches the session as the right click it
+     * is on the Mac: the `mac_ctrl_click_as_right_click` setting, which the
+     * core pushes through `setMacCtrlClickAsRightClick`. Off by default, which
+     * sends the press as the hand made it, Control held and the primary button
+     * (`_pressedButton`), what an application that binds Ctrl+click needs. On,
+     * it goes out as a plain secondary click, so the session's context menus
+     * open the way the Mac's own do, and a Ctrl+click can no longer be sent.
+     */
+    static macCtrlClickAsRightClick = false;
 
     /**
      * Set the first time an engine refuses raw movement, so the option costs one
@@ -2489,6 +2519,7 @@ export class Input {
         this._trackpadReleaseTimer = null;
         if (this._trackpadTouches) this._trackpadTouches.clear();
         this._trackpadGestureMode = null;
+        this._controlClickHeld = false;
         if (this.buttonMask !== 0) {
             this.buttonMask = 0;
             this._sendMouseState();
@@ -3247,17 +3278,74 @@ export class Input {
      * press would add a secondary to the primary the motion before it stated
      * and the release would leave that primary held. The press is read from
      * `buttons` there and its release follows it, so every engine sends
-     * Control and the primary button.
+     * Control and the primary button. Under `macCtrlClickAsRightClick` an
+     * Apple device's Control-click is the secondary button instead
+     * (`_takesControlClick`).
      * @param event
      * @param down 1 for a press, 0 for a release.
      * @returns The button, as `MouseEvent.button` counts.
      */
     _pressedButton(event: MouseEvent, down: number): number {
+        if (this._takesControlClick(event, down)) return 2;
         if (event.button !== 2) return event.button;
         if (down) this._primaryAsSecondary = event.ctrlKey && (event.buttons & 0x3) === 0x1;
         if (!this._primaryAsSecondary) return 2;
         if (!down) this._primaryAsSecondary = false;
         return 0;
+    }
+
+    /**
+     * Whether a press or release is of a macOS Control-click sent as the
+     * secondary button, as macOS itself makes it, under
+     * `macCtrlClickAsRightClick` on an Apple device. The Control the session
+     * holds is released before the press goes out, since an application takes
+     * a secondary click with Control held for a chord of its own. It stays
+     * released until the key goes down again, as one the page never saw
+     * would: a key chord or a wheel turn made while it is still down adds it
+     * for itself (`_missingChordModifiers`, `_mouseWheelWrapper`). The release
+     * that ends the press is the secondary button's too, whichever button the
+     * engine names, and motion in between carries it (`_controlClickButtons`).
+     * @param event
+     * @param down 1 for a press, 0 for a release.
+     * @returns
+     */
+    _takesControlClick(event: MouseEvent, down: number): boolean {
+        if (event.button !== 0 && event.button !== 2) return false;
+        if (!down) {
+            const held = this._controlClickHeld;
+            this._controlClickHeld = false;
+            return held;
+        }
+        this._controlClickHeld = Input.macCtrlClickAsRightClick && browser.isMac() && _isMacControlClick(event);
+        if (this._controlClickHeld) this._releaseControl();
+        return this._controlClickHeld;
+    }
+
+    /** Releases every key the session holds as Control, by the keysym it went down with. */
+    _releaseControl(): void {
+        for (const code of Object.keys(this._keyDownList)) {
+            const keysym = this._keyDownList[code];
+            if (MODIFIER_STATE_BY_KEYSYM[keysym] === 'Control') this._sendKeyEvent(keysym, code, false);
+        }
+    }
+
+    /**
+     * The buttons motion over the stream reports, with the primary of a held
+     * Control-click carried as the secondary button it went out as
+     * (`_takesControlClick`): the hand still holds the primary, and a drag
+     * stating it would add a second button to the press. Motion with the
+     * primary up ends the press, so one whose release went elsewhere does not
+     * turn a later drag into a secondary one.
+     * @param buttons Held buttons, in the wire's numbering.
+     * @returns
+     */
+    _controlClickButtons(buttons: number): number {
+        if (!this._controlClickHeld) return buttons;
+        if ((buttons & 0x1) === 0) {
+            this._controlClickHeld = false;
+            return buttons;
+        }
+        return (buttons & ~0x1) | 0x4;
     }
 
     /**
@@ -3390,7 +3478,7 @@ export class Input {
             // one that never sees the release; the buttons the event reports
             // are the physical state either way. A pen cancel arrives here
             // too, ending contact with no pointerup to follow.
-            this.buttonMask = _wireButtons(event.buttons);
+            this.buttonMask = this._controlClickButtons(_wireButtons(event.buttons));
         }
         const outX = (mtype === "m2") ? relX : this.x;
         const outY = (mtype === "m2") ? relY : this.y;
@@ -4579,16 +4667,16 @@ export class Input {
         });
     }
 
-    /**
-     * Applies the Command-as-Control setting. Any Control this swapped in is
-     * released first, so the change cannot leave one held.
-     * @param enabled
-     */
     /** Whether the client keeps its own chords rather than passing them on. */
     setShortcutsEnabled(enabled: boolean): void {
         this.shortcutsEnabled = !!enabled;
     }
 
+    /**
+     * Applies the Command-as-Control setting. Any Control this swapped in is
+     * released first, so the change cannot leave one held.
+     * @param enabled
+     */
     setMacCmdAsCtrl(enabled: boolean): void {
         const want = !!enabled;
         if (Input.macCmdAsCtrl === want) return;
@@ -4599,6 +4687,18 @@ export class Input {
                 this._sendKeyEvent(KeyTable.XK_Control_L, command, false);
             }
         }
+    }
+
+    /**
+     * Applies the Control-click-as-right-click setting. A press already sent as
+     * the secondary button still ends as one.
+     * @param enabled
+     */
+    setMacCtrlClickAsRightClick(enabled: boolean): void {
+        const want = !!enabled;
+        if (Input.macCtrlClickAsRightClick === want) return;
+        Input.macCtrlClickAsRightClick = want;
+        console.log(`Input: macOS Control-click sent as ${want ? 'a right click' : 'Control and a left click'}.`);
     }
 
     /** Switches between the CSS cursor and the page-drawn cursor canvas. */
