@@ -79,7 +79,7 @@ FROM ${TOOLCHAIN_REPOSITORY}:glibc-aarch64 AS toolchain-arm64
 FROM toolchain-${TARGETARCH} AS bundle-build
 ARG SELKIES_VERSION=""
 WORKDIR /repo
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock pyproject.toml README.md LICENSE ./
 COPY crates ./crates
 COPY infra ./infra
 COPY addons/base/patches ./addons/base/patches
