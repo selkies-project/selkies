@@ -223,7 +223,7 @@ fn a_window_crosses_the_seam_between_two_displays() {
     std::fs::set_permissions(&startup, std::fs::Permissions::from_mode(0o755)).expect("executable");
 
     let mut res = Results::default();
-    let socket = ensure_wayland_display(WIDTH, HEIGHT, String::new(), String::new(), -1)
+    let socket = ensure_wayland_display(WIDTH, HEIGHT, String::new(), String::new(), -1, None)
         .expect("the compositor starts");
     let (left_cap, right_cap) = (ScreenCapture::new(), ScreenCapture::new());
     // The primary's screen carries its view from the start; the second display is a screen of

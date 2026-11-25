@@ -1912,12 +1912,12 @@ pub static DEFINITIONS: &[SettingDef] = &[
     SettingDef {
         name: "wayland_socket_index",
         kind: Kind::Int,
-        default: "0",
-        help: "Index for the Wayland command socket (e.g. 0 for wayland-0).",
+        default: "-1",
+        help: "Socket the built-in Wayland compositor listens on, by index (0 for wayland-0), where no other compositor holds it; -1 takes the first free from wayland-1.",
         env_vars: &[],
         allowed: &[],
         value_range: None,
-        min: Some(0.0),
+        min: Some(-1.0),
         max: None,
         default_value: None,
         sensitive: false,
@@ -3305,8 +3305,12 @@ impl Settings {
         self.int_value("watermark_location")
     }
 
-    pub fn wayland_socket_index(&self) -> i64 {
-        self.int_value("wayland_socket_index")
+    /// The socket `wayland_socket_index` asks the built-in compositor to listen on,
+    /// `wayland-<N>`; `None` where it is negative, leaving the compositor the first free one.
+    pub fn wayland_socket(&self) -> Option<String> {
+        u32::try_from(self.int_value("wayland_socket_index"))
+            .ok()
+            .map(|index| format!("wayland-{index}"))
     }
 
     pub fn rtc_config_json(&self) -> &str {

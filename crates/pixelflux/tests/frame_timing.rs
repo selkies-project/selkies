@@ -137,7 +137,7 @@ fn every_frame_carries_ordered_capture_and_encode_instants() {
         "x11 h264 software",
         collect(settings(false, true)),
     );
-    ensure_wayland_display(WIDTH, HEIGHT, String::new(), String::new(), 0)
+    ensure_wayland_display(WIDTH, HEIGHT, String::new(), String::new(), 0, None)
         .expect("the compositor starts");
     judge(&mut res, "wayland h264", collect(settings(true, false)));
     judge(

@@ -66,7 +66,7 @@ fn a_nested_compositors_screens_land_on_their_own_outputs() {
     // SAFETY: the only test of this binary, before any capture or compositor thread starts.
     unsafe { common::isolate(&runtime, None) };
     let mut res = Results::default();
-    let socket = ensure_wayland_display(WIDTH, HEIGHT, String::new(), String::new(), -1)
+    let socket = ensure_wayland_display(WIDTH, HEIGHT, String::new(), String::new(), -1, None)
         .expect("the compositor starts");
     let capture = ScreenCapture::new();
 

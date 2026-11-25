@@ -23,8 +23,9 @@ shopt -s nullglob
 
 # Selkies is the only other compositor here, so the socket that exists before
 # this one starts is the capture socket. The name is recorded rather than
-# derived: Smithay numbers from wayland-1 and wlroots from wayland-0, so the
-# nested socket sorts FIRST and picking by order would invert the two. Each
+# derived: the capture socket is the one SELKIES_WAYLAND_SOCKET_INDEX names,
+# else the first free from wayland-1, and wlroots takes the first free from
+# wayland-0, so the order of the two says nothing about which is which. Each
 # socket sits beside a wayland-N.lock of the same stem, so only sockets count.
 # A restart is the exception: this compositor may have left its own socket
 # behind, so the name recorded earlier wins while it still answers.
