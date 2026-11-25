@@ -7,8 +7,8 @@
 //! A most-significant-bit-first writer for the headers a VA-API session packs itself: the
 //! fixed-width and Exp-Golomb fields of H.264, HEVC, and AV1 syntax, the RBSP trailing bits,
 //! and the emulation prevention an H.26x NAL unit needs on its way out; and the split of an
-//! Annex-B stream into its NAL units on the way in. Nothing here reaches outside the module,
-//! so a fuzz build (`fuzz/`) compiles it on its own.
+//! Annex-B stream into NAL units or an IVF frame into OBUs on the way in. Nothing here reaches
+//! outside the module, so a fuzz build (`fuzz/`) compiles it on its own.
 
 /// Bits appended most significant first.
 #[derive(Default)]
@@ -152,9 +152,49 @@ pub(crate) fn annexb_nals(au: &[u8]) -> impl Iterator<Item = &[u8]> {
     nals.into_iter()
 }
 
+/// Expose the AV1 OBUs in one capture buffer. The IVF file header identifies streams whose
+/// buffers carry a 12-byte frame header. Raw OBU streams pass through unchanged.
+pub(crate) fn av1_obus<'a>(unit: &'a [u8], ivf: &mut bool) -> Option<&'a [u8]> {
+    let unit = if unit.starts_with(b"DKIF") {
+        let (header, frame) = unit.split_first_chunk::<32>()?;
+        if !header.starts_with(b"DKIF\0\0\x20\0AV01") {
+            return None;
+        }
+        *ivf = true;
+        frame
+    } else {
+        unit
+    };
+    if !*ivf {
+        return Some(unit);
+    }
+    let (header, obus) = unit.split_first_chunk::<12>()?;
+    let size = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+    (size != 0 && size == u32::try_from(obus.len()).ok()?).then_some(obus)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn av1_ivf_headers_leave_only_the_obus() {
+        let obus = b"\x12\x00\x32\x01\x10";
+        let mut ivf = false;
+        assert_eq!(av1_obus(obus, &mut ivf), Some(&obus[..]));
+        assert!(!ivf);
+
+        let mut frame = [0; 17];
+        frame[0] = 5;
+        frame[12..].copy_from_slice(obus);
+        let mut first = [0; 49];
+        first[..12].copy_from_slice(b"DKIF\0\0\x20\0AV01");
+        first[32..].copy_from_slice(&frame);
+        assert_eq!(av1_obus(&first, &mut ivf), Some(&obus[..]));
+        assert!(ivf);
+        assert_eq!(av1_obus(&frame, &mut ivf), Some(&obus[..]));
+        assert_eq!(av1_obus(&frame[..16], &mut ivf), None);
+    }
 
     #[test]
     fn exp_golomb_and_fixed_fields_pack_as_the_standards_read_them() {
