@@ -95,6 +95,12 @@ All messages sent to the client must be JavaScript objects with a `type` propert
 *   **`setRawPointerMotion`**
     *   **Payload:** `{ type: 'setRawPointerMotion', value: <boolean> }`
     *   **Description:** Whether pointer lock asks the browser for unaccelerated (raw) movement. Persisted as the user's `raw_pointer_motion` choice; a lock already held is switched in place where the engine allows it.
+*   **`setMacCmdAsCtrl`**
+    *   **Payload:** `{ type: 'setMacCmdAsCtrl', value: <boolean> }`
+    *   **Description:** Whether a macOS Command chord is sent as its Control chord. Persisted as the user's `mac_cmd_as_ctrl` choice.
+*   **`setMacCtrlClickAsRightClick`**
+    *   **Payload:** `{ type: 'setMacCtrlClickAsRightClick', value: <boolean> }`
+    *   **Description:** Whether a macOS Control-click is sent as a right click, with Control released, rather than as Control and the left button. Persisted as the user's `mac_ctrl_click_as_right_click` choice.
 *   **`touchinput:trackpad` / `touchinput:touch`**
     *   **Payload:** `{ type: 'touchinput:trackpad' }` or `{ type: 'touchinput:touch' }`
     *   **Description:** Switches touch interaction between relative trackpad mode and absolute touch mode.

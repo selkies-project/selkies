@@ -215,6 +215,11 @@ export function DisplaySettings() {
           title={t(s.macCmdAsCtrl ? 'sections.screen.macCmdAsCtrlDisableTitle' : 'sections.screen.macCmdAsCtrlEnableTitle')}
           checked={s.macCmdAsCtrl} onToggle={s.toggleMacCmdAsCtrl} />
       )}
+      {s.show.macCtrlClickAsRightClick && (
+        <SwitchRow id="macCtrlClickAsRightClickToggle" label={t('sections.screen.macCtrlClickAsRightClickLabel')}
+          title={t(s.macCtrlClickAsRightClick ? 'sections.screen.macCtrlClickAsRightClickDisableTitle' : 'sections.screen.macCtrlClickAsRightClickEnableTitle')}
+          checked={s.macCtrlClickAsRightClick} onToggle={s.toggleMacCtrlClickAsRightClick} />
+      )}
       {s.show.hidpi && (
         <SwitchRow id="hidpiToggle" label={t('sections.screen.hidpiLabel')} title={s.hidpiDisabledReason ? t(s.hidpiDisabledReason) : undefined}
           checked={s.hidpiEnabled} onToggle={s.toggleHidpi} disabled={s.hidpiDisabledReason !== null} />

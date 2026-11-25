@@ -248,6 +248,8 @@ export function computeRenderableSettings(serverSettings: ServerSettings | null)
   r.rawPointerMotion = isSettingRenderable(s.raw_pointer_motion);
   // Offered only where Command exists to remap.
   r.macCmdAsCtrl = isSettingRenderable(s.mac_cmd_as_ctrl) && isMacDesktop();
+  // Offered only where Control-click is the right click.
+  r.macCtrlClickAsRightClick = isSettingRenderable(s.mac_ctrl_click_as_right_click) && isMacDesktop();
   r.videoBitrate = isSettingRenderable(s.video_bitrate);
   r.audioBitrate = isSettingRenderable(s.audio_bitrate);
   // The HiDPI toggle drives use_css_scaling, inverted.

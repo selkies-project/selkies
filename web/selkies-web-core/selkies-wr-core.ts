@@ -68,7 +68,7 @@
  * `gamepadControl`, `clipboardUpdateFromUI`, `clipboardImageUpdate`,
  * `clipboardCopySecret`, `audioDeviceSelected`, `requestFullscreen`, `setSynth`,
  * `showVirtualKeyboard`, `setAntiAliasing`, `setUseBrowserCursors`, `setRawPointerMotion`,
- * `setTrackpadSpeed`, `setGamepadRumble`, `touchinput:trackpad`, `touchinput:touch`, `statsOpen`,
+ * `setMacCmdAsCtrl`, `setMacCtrlClickAsRightClick`, `setTrackpadSpeed`, `setGamepadRumble`, `touchinput:trackpad`, `touchinput:touch`, `statsOpen`,
  * `setColorScheme` (lib/color-scheme.ts, which takes it itself), plus the `requestFileUpload` DOM
  * event. Window messages posted: `sidebarButtonStatusUpdate`,
  * `pipelineStatusUpdate`, `effectiveCursorState`, `scalingDpiFollowed`,
@@ -97,7 +97,7 @@ import { installAuthGuard } from './lib/auth-guard.ts';
 import { getSessionToken, installSessionCookie, sessionAuthHeaders } from './lib/session-token.ts';
 import { urlFragmentKeyword } from './lib/page-url.ts';
 import { titleFromSettings } from './lib/page-title.ts';
-import { storageKeyForServerKey, resolveSpec, resolveBoolean, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.ts';
+import { storageKeyForServerKey, resolveSpec, resolveBoolean, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC, MAC_CTRL_CLICK_AS_RIGHT_CLICK_SPEC } from './lib/conditional-settings.ts';
 import { getRoutePrefix, getStorageAppName, canDecodeFullColor, canDecodeTenBit, tenBitFormat, canReceiveEncoder, isCaptureRefusal, isMacDesktop, displayLabel, entryPageTag, serverAnswers, rememberCcStart, forgetCcStart } from './lib/util.ts';
 import { keyboardAssist, showVirtualKeyboard } from './lib/virtual-keyboard.ts';
 import { codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit } from './lib/wire-codecs.ts';
@@ -812,6 +812,19 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			input.setMacCmdAsCtrl(macCmdAsCtrl);
 		}
 	}
+
+	/**
+	 * Whether a macOS Control-click is sent as a right click, resolved off the
+	 * shared ladder on every settings payload, then updated by a dashboard
+	 * pick (persisted) or a server-pushed value (not persisted).
+	 */
+	let macCtrlClickAsRightClick = false;
+	/** Applies the Control-click-as-right-click setting to the input handler. */
+	function applyMacCtrlClickAsRightClick(): void {
+		if (input && typeof input.setMacCtrlClickAsRightClick === 'function') {
+			input.setMacCtrlClickAsRightClick(macCtrlClickAsRightClick);
+		}
+	}
 	/** Whether the client keeps its own chords rather than passing them on. */
 	let keyboardShortcuts = true;
 	let printJobs: PrintJobs | null = null;
@@ -844,6 +857,19 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 	 */
 	function resolvedMacCmdAsCtrl(serverSettings: Record<string, ServerSettingEntry>): boolean {
 		return resolveBoolean(MAC_CMD_AS_CTRL_SPEC, serverSettings, { macDesktop: isMacDesktop() },
+			(key: string): string | null => getStringParam(key, null));
+	}
+
+	/**
+	 * The `mac_ctrl_click_as_right_click` the deployment implies, off the
+	 * shared ladder, resolved here for the reason `mac_cmd_as_ctrl` is: the
+	 * pointer is taken from the stream, whether or not a settings panel ever
+	 * mounts.
+	 * @param serverSettings The `server_settings` payload.
+	 * @returns
+	 */
+	function resolvedMacCtrlClickAsRightClick(serverSettings: Record<string, ServerSettingEntry>): boolean {
+		return resolveBoolean(MAC_CTRL_CLICK_AS_RIGHT_CLICK_SPEC, serverSettings, { macDesktop: isMacDesktop() },
 			(key: string): string | null => getStringParam(key, null));
 	}
 
@@ -2304,6 +2330,15 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 					console.warn("Invalid value received for setMacCmdAsCtrl:", message.value);
 				}
 				break;
+			case 'setMacCtrlClickAsRightClick':
+				if (typeof message.value === 'boolean') {
+					macCtrlClickAsRightClick = message.value;
+					setBoolParam('mac_ctrl_click_as_right_click', message.value);
+					applyMacCtrlClickAsRightClick();
+				} else {
+					console.warn("Invalid value received for setMacCtrlClickAsRightClick:", message.value);
+				}
+				break;
 			case 'touchinput:trackpad':
 				if (input && typeof input.setTrackpadMode === 'function') {
 					trackpadMode = true;
@@ -2455,6 +2490,11 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			// Never persisted: only the setMacCmdAsCtrl message persists.
 			macCmdAsCtrl = !!settings.mac_cmd_as_ctrl;
 			applyMacCmdAsCtrl();
+		}
+		if (settings.mac_ctrl_click_as_right_click !== undefined) {
+			// Never persisted: only the setMacCtrlClickAsRightClick message persists.
+			macCtrlClickAsRightClick = !!settings.mac_ctrl_click_as_right_click;
+			applyMacCtrlClickAsRightClick();
 		}
 		if (settings.rate_control_mode !== undefined) {
 			rateControlMode = String(settings.rate_control_mode);
@@ -3275,6 +3315,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			applyEffectiveCursorSetting();
 			applyRawPointerMotion();
 			applyMacCmdAsCtrl();
+			applyMacCtrlClickAsRightClick();
 			applyTrackpadSpeed();
 			applyGamepadRumble();
 			window.postMessage({ type: 'trackpadModeUpdate', enabled: trackpadMode }, window.location.origin);
@@ -3812,6 +3853,11 @@ perms = parsed;
 				if (cmdAsCtrl !== macCmdAsCtrl) {
 					macCmdAsCtrl = cmdAsCtrl;
 					applyMacCmdAsCtrl();
+				}
+				const ctrlClickAsRightClick = resolvedMacCtrlClickAsRightClick(obj.settings);
+				if (ctrlClickAsRightClick !== macCtrlClickAsRightClick) {
+					macCtrlClickAsRightClick = ctrlClickAsRightClick;
+					applyMacCtrlClickAsRightClick();
 				}
 				const cssScaling = resolvedCssScaling(obj.settings);
 				if (cssScaling !== useCssScaling) {

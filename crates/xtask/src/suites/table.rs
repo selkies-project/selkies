@@ -97,6 +97,7 @@ pub static SUITES: &[Suite] = &[
     },
     suite("tools/key_palette_audit.ts", "unit", 120),
     suite("tools/pointer_cadence_audit.ts", "unit", 120),
+    suite("tools/mac_ctrl_click_audit.ts", "unit", 120),
     suite("tools/gamepad_poll_audit.ts", "unit", 120),
     suite("tools/gamepad_slots_audit.ts", "unit", 120),
     suite("tools/touch_gamepad_audit.ts", "unit", 120),

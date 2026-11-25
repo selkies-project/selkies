@@ -69,7 +69,8 @@
  * Dashboards talk to the core over same-origin window messages. The core
  * handles `setVolume`, `setMute`, `setScaleLocally`, `setSynth`,
  * `showVirtualKeyboard`, `setUseCssScaling`, `setAntiAliasing`,
- * `setUseBrowserCursors`, `setRawPointerMotion`, `setTrackpadSpeed`,
+ * `setUseBrowserCursors`, `setRawPointerMotion`, `setMacCmdAsCtrl`,
+ * `setMacCtrlClickAsRightClick`, `setTrackpadSpeed`,
  * `setGamepadRumble`, `setManualResolution`, `resetResolutionToWindow`,
  * `settings`, `getStats`, `clipboardUpdateFromUI`, `clipboardImageUpdate`,
  * `clipboardCopySecret`, `pipelineStatusUpdate`, `pipelineControl`, `audioDeviceSelected`,
@@ -136,7 +137,7 @@ import { workersBlocked } from './lib/worker-block.ts';
 import { getSessionToken, installSessionCookie, sessionAuthHeaders, sessionTokenProtocols } from './lib/session-token.ts';
 import { urlFragmentKeyword } from './lib/page-url.ts';
 import { titleFromSettings } from './lib/page-title.ts';
-import { storageKeyForServerKey, resolveSpec, resolveBoolean, isEncoderBackends, tenBitStream, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.ts';
+import { storageKeyForServerKey, resolveSpec, resolveBoolean, isEncoderBackends, tenBitStream, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC, MAC_CTRL_CLICK_AS_RIGHT_CLICK_SPEC } from './lib/conditional-settings.ts';
 import { CRASH_SAFE_SETTINGS, holdKeys, holdDisplaySettings, releaseHeldSettings, restoreHeldPicks } from './lib/held-settings.ts';
 import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, canDecodeTenBit, tenBitDecoded, DECODER_PROBE_TIMEOUT_MS, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, isSkiaWebKit, displayLabel, entryPageTag, pageTabId, serverAnswers, rememberCcStart, recalledCcStart, forgetCcStart } from './lib/util.ts';
 import { keyboardAssist, showVirtualKeyboard } from './lib/virtual-keyboard.ts';
@@ -918,6 +919,18 @@ let macCmdAsCtrl = true;
 function applyMacCmdAsCtrl(): void {
     if (window.webrtcInput && typeof window.webrtcInput.setMacCmdAsCtrl === 'function') {
         window.webrtcInput.setMacCmdAsCtrl(macCmdAsCtrl);
+    }
+}
+/**
+ * Whether a macOS Control-click is sent as a right click, resolved off the
+ * shared ladder on every settings payload, then updated by a dashboard pick
+ * (persisted) or a server-pushed value (not persisted).
+ */
+let macCtrlClickAsRightClick = false;
+/** Applies the Control-click-as-right-click setting to the input handler. */
+function applyMacCtrlClickAsRightClick(): void {
+    if (window.webrtcInput && typeof window.webrtcInput.setMacCtrlClickAsRightClick === 'function') {
+        window.webrtcInput.setMacCtrlClickAsRightClick(macCtrlClickAsRightClick);
     }
 }
 /**
@@ -1812,6 +1825,18 @@ function resolvedRawPointerMotion(serverSettings: Record<string, ServerSettingEn
  */
 function resolvedMacCmdAsCtrl(serverSettings: Record<string, ServerSettingEntry>): boolean {
   return resolveBoolean(MAC_CMD_AS_CTRL_SPEC, serverSettings, { macDesktop: isMacDesktop() },
+    (key: string): string | null => getStringParam(key, null));
+}
+
+/**
+ * The `mac_ctrl_click_as_right_click` the deployment implies, off the shared
+ * ladder, resolved here for the reason `mac_cmd_as_ctrl` is: the pointer is
+ * taken from the stream, whether or not a settings panel ever mounts.
+ * @param serverSettings The `server_settings` payload.
+ * @returns
+ */
+function resolvedMacCtrlClickAsRightClick(serverSettings: Record<string, ServerSettingEntry>): boolean {
+  return resolveBoolean(MAC_CTRL_CLICK_AS_RIGHT_CLICK_SPEC, serverSettings, { macDesktop: isMacDesktop() },
     (key: string): string | null => getStringParam(key, null));
 }
 
@@ -5061,6 +5086,7 @@ const initializeInput = (): void => {
   applyEffectiveCursorSetting();
   applyRawPointerMotion();
   applyMacCmdAsCtrl();
+  applyMacCtrlClickAsRightClick();
   applyTrackpadSpeed();
   applyGamepadRumble();
 
@@ -5558,6 +5584,16 @@ function receiveMessage(event: Pick<MessageEvent<DashboardMessage>, 'origin' | '
         applyMacCmdAsCtrl();
       } else {
         console.warn("Invalid value received for setMacCmdAsCtrl:", message.value);
+      }
+      break;
+    case 'setMacCtrlClickAsRightClick':
+      if (typeof message.value === 'boolean') {
+        macCtrlClickAsRightClick = message.value;
+        setBoolParam('mac_ctrl_click_as_right_click', macCtrlClickAsRightClick);
+        console.log(`Set mac_ctrl_click_as_right_click to ${macCtrlClickAsRightClick} and persisted.`);
+        applyMacCtrlClickAsRightClick();
+      } else {
+        console.warn("Invalid value received for setMacCtrlClickAsRightClick:", message.value);
       }
       break;
     case 'setManualResolution': {
@@ -6207,6 +6243,11 @@ function handleSettingsMessage(settings: Record<string, unknown>, fromServer?: b
     // Only the setMacCmdAsCtrl message persists this value.
     macCmdAsCtrl = !!settings.mac_cmd_as_ctrl;
     applyMacCmdAsCtrl();
+  }
+  if (settings.mac_ctrl_click_as_right_click !== undefined) {
+    // Only the setMacCtrlClickAsRightClick message persists this value.
+    macCtrlClickAsRightClick = !!settings.mac_ctrl_click_as_right_click;
+    applyMacCtrlClickAsRightClick();
   }
   if (settings.debug !== undefined) {
     debug = settings.debug === true;
@@ -8891,6 +8932,11 @@ class WorkerWebSocket {
               if (cmdAsCtrl !== macCmdAsCtrl) {
                   macCmdAsCtrl = cmdAsCtrl;
                   applyMacCmdAsCtrl();
+              }
+              const ctrlClickAsRightClick = resolvedMacCtrlClickAsRightClick(obj.settings);
+              if (ctrlClickAsRightClick !== macCtrlClickAsRightClick) {
+                  macCtrlClickAsRightClick = ctrlClickAsRightClick;
+                  applyMacCtrlClickAsRightClick();
               }
               // After the gates above, so the one-time initial push honors them.
               maybeSendInitialClipboard();

@@ -720,6 +720,20 @@ pub static DEFINITIONS: &[SettingDef] = &[
         client_excluded: false,
     },
     SettingDef {
+        name: "mac_ctrl_click_as_right_click",
+        kind: Kind::Bool,
+        default: "False",
+        help: "Send an Apple client's Control-click as the right click macOS makes of it, with Control released, so the session's context menus open the way the Mac's own do. Off, the press arrives as the hand made it, Control held and the left button, which is what an application that binds Ctrl+click needs; on, a Ctrl+click can no longer be sent from a Mac. A real right click, a pen, and Control+Shift+click keep their meaning either way. Only Apple clients read it. Clients may override per user unless the value is locked.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: false,
+    },
+    SettingDef {
         name: "use_css_scaling",
         kind: Kind::Bool,
         default: "False",
@@ -2949,6 +2963,10 @@ impl Settings {
 
     pub fn mac_cmd_as_ctrl(&self) -> BoolSetting {
         self.bool_setting("mac_cmd_as_ctrl")
+    }
+
+    pub fn mac_ctrl_click_as_right_click(&self) -> BoolSetting {
+        self.bool_setting("mac_ctrl_click_as_right_click")
     }
 
     pub fn use_css_scaling(&self) -> BoolSetting {

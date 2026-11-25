@@ -44,7 +44,8 @@ import { resolveSpec, resolveBoolean, resolveString, isEncoderBackends, isSettin
     USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_10BIT_SPEC, VIDEO_STREAMING_MODE_SPEC,
     USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
     tenBitStream, CPU_ENCODE_THREADING_SPEC, cpuEncodeThreadingApplies,
-    RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC, type SettingSpec } from "../../../selkies-web-core/lib/conditional-settings.ts";
+    RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC, MAC_CTRL_CLICK_AS_RIGHT_CLICK_SPEC,
+    type SettingSpec } from "../../../selkies-web-core/lib/conditional-settings.ts";
 import { getPrefixedKey, computeRenderableSettings, getLastServerSettings,
     getLastEffectiveCursorState, getLastAudioDevices, isSecondaryDisplay, onCoreMessage, serverSettingsOf, type ServerSetting, type ServerSettings } from "@/utils";
 import { t } from "@/i18n";
@@ -426,6 +427,7 @@ export function useStreamSettings() {
     const [useBrowserCursors, setUseBrowserCursors] = useConditionalSetting(USE_BROWSER_CURSORS_SPEC, serverSettings, conditionalCtx, resolveBoolean);
     const [rawPointerMotion, setRawPointerMotion] = useConditionalSetting(RAW_POINTER_MOTION_SPEC, serverSettings, conditionalCtx, resolveBoolean);
     const [macCmdAsCtrl, setMacCmdAsCtrl] = useConditionalSetting(MAC_CMD_AS_CTRL_SPEC, serverSettings, conditionalCtx, resolveBoolean);
+    const [macCtrlClickAsRightClick, setMacCtrlClickAsRightClick] = useConditionalSetting(MAC_CTRL_CLICK_AS_RIGHT_CLICK_SPEC, serverSettings, conditionalCtx, resolveBoolean);
     /**
      * The cursor mode the core reports as actually in effect (multi-monitor
      * forces browser cursors on), null until reported; the toggle shows it
@@ -785,6 +787,7 @@ export function useStreamSettings() {
         useBrowserCursors: renderable.useBrowserCursors,
         rawPointerMotion: renderable.rawPointerMotion,
         macCmdAsCtrl: renderable.macCmdAsCtrl,
+        macCtrlClickAsRightClick: renderable.macCtrlClickAsRightClick,
         resolutionControls: !serverSettings?.manual_resolution?.locked && (isSecondaryDisplay || serverSettings?.enable_resize?.value !== false),
         videoPanel: renderable.videoSettings,
         audioPanel: renderable.audioSettings,
@@ -846,6 +849,7 @@ export function useStreamSettings() {
         toggleBrowserCursors: () => writeConditional(USE_BROWSER_CURSORS_SPEC, !(effectiveCursor ?? useBrowserCursors), setUseBrowserCursors, { persist: false }),
         rawPointerMotion, toggleRawPointerMotion: () => writeConditional(RAW_POINTER_MOTION_SPEC, !rawPointerMotion, setRawPointerMotion, { persist: false }),
         macCmdAsCtrl, toggleMacCmdAsCtrl: () => writeConditional(MAC_CMD_AS_CTRL_SPEC, !macCmdAsCtrl, setMacCmdAsCtrl, { persist: false }),
+        macCtrlClickAsRightClick, toggleMacCtrlClickAsRightClick: () => writeConditional(MAC_CTRL_CLICK_AS_RIGHT_CLICK_SPEC, !macCtrlClickAsRightClick, setMacCtrlClickAsRightClick, { persist: false }),
         hidpiEnabled, toggleHidpi,
         hidpiDisabledReason: serverSettings?.enable_resize?.value === false ? 'sections.screen.hidpiDisabledNoResizeTitle'
             : conditionalCtx.manualActive ? 'sections.screen.hidpiDisabledManualTitle' : null,
