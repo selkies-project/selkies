@@ -27,10 +27,10 @@
 # them alone: its context is the list `toolchain.sh files` prints, never the
 # tree.
 ARG TARGET
-FROM quay.io/pypa/manylinux2014_x86_64:2026.11.14-1@sha256:e6a785657009c612fe2a85fa933051d03a50ba62b1c5e47d62abcab546a2e423 AS glibc-x86_64
-FROM quay.io/pypa/manylinux_2_28_aarch64:2026.11.14-1@sha256:34a5e614a4eb26f73f8bf44cbbf2acf8011620453d03ea35a58537bb3cde44de AS glibc-aarch64
-FROM quay.io/pypa/musllinux_1_2_x86_64:2026.11.14-1@sha256:c564755a06228cc28fe8383fc5fde4468f6cea91b9d35a38eaf853018bb3b320 AS musl-x86_64
-FROM quay.io/pypa/musllinux_1_2_aarch64:2026.11.14-1@sha256:202c3e7e9a872d4e8d712621d3f63f02e4760a9b958679506841c452ad91f959 AS musl-aarch64
+FROM quay.io/pypa/manylinux2014_x86_64:2026.11.21-1@sha256:8a79ff36ce155d8f242dc8013d73c5e8bbe937defb15de7d7afb342c1ab537f4 AS glibc-x86_64
+FROM quay.io/pypa/manylinux_2_28_aarch64:2026.11.21-1@sha256:126d9eea9d6b1717f3e17b2b3ac51da04ef159a5f935dac36fe92d621dc8f246 AS glibc-aarch64
+FROM quay.io/pypa/musllinux_1_2_x86_64:2026.11.21-1@sha256:43f81b5440015302cd0b0671d3d05d1961a2a0995cb7ff3d1725ce62990498a8 AS musl-x86_64
+FROM quay.io/pypa/musllinux_1_2_aarch64:2026.11.21-1@sha256:83734eadb0172f639c75221229f42298568e63ea74e6d827ee3f91fb3a17e5b3 AS musl-aarch64
 
 FROM ${TARGET} AS tools
 ENV SELKIES_TOOLCHAIN="/opt/selkies-toolchain" RUSTUP_HOME="/opt/rust/rustup" CARGO_HOME="/opt/rust/cargo"
