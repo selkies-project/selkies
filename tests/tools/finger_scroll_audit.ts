@@ -362,4 +362,32 @@ setPlatform(...LINUX);
           fingers(sent).length > 0, JSON.stringify(sent));
 }
 
+// Gecko on GTK reports a high-resolution wheel in fractions of its three-line
+// notch, an eighth (0.375 lines) a step, as Blink's 15 px of 120.
+setPlatform('Linux x86_64', 'Mozilla/5.0 (X11; Linux x86_64; rv:161.0) Gecko/20100101 Firefox/161.0');
+for (const finger of [true, false]) {
+    const session = finger ? 'finger scroll' : 'no finger scroll';
+    {
+        const { input, sent } = makeInput(finger);
+        for (let i = 0; i < 4; i++) {
+            for (const d of [1.5, 0.75, 0.75]) wheel(input, d, { deltaMode: 1, ms: i && d === 1.5 ? 300 : 16 });
+        }
+        check(`Gecko, ${session}: a high-resolution wheel's notches of fractional lines are a notch each`,
+              downs(sent) === 4 && fingers(sent).length === 0, JSON.stringify(sent));
+    }
+    {
+        const { input, sent } = makeInput(finger);
+        for (const d of [1.5, 0.75, 3]) wheel(input, d, { deltaMode: 1, ms: 300 });
+        check(`Gecko, ${session}: a fraction of a line counts, and does not shrink the notch`,
+              downs(sent) === 1, JSON.stringify(sent));
+    }
+    {
+        const { input, sent } = makeInput(finger);
+        for (const d of [3, 0.75, 0.75, 0.75, 0.75, 3]) wheel(input, d, { deltaMode: 1, ms: 100 });
+        check(`Gecko, ${session}: fractions go against a whole-line notch already learned`,
+              downs(sent) === 3, JSON.stringify(sent));
+    }
+}
+setPlatform(...LINUX);
+
 process.exit(failed ? 1 : 0);

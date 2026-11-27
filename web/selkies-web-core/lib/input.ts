@@ -333,6 +333,12 @@ const TRACKPAD_SPEED_MAX = 4;
  */
 const WHEEL_NOTCH_MIN_PX = 80;
 
+/**
+ * Lines in a wheel notch where no whole-line delta has given one yet: Gecko's
+ * notch on GTK, which a high-resolution wheel reports in fractions of a line.
+ */
+const WHEEL_LINES_PER_NOTCH = 3;
+
 /** Pixels Blink and WebKit report for a line a macOS wheel turned (`_isDetentWheel`). */
 const MAC_WHEEL_LINE_PX = 40;
 
@@ -5315,19 +5321,27 @@ export class Input {
      * not notches, so they take a fixed 100px notch like the horizontal axis
      * (the learned quantum would be the gesture's tiniest ramp-up sample);
      * the quantum keeps learning meanwhile for a wheel classified later in
-     * the session.
+     * the session. A fraction of a line is part of a high-resolution wheel's
+     * notch: it teaches no quantum and counts against the learned one, or
+     * `WHEEL_LINES_PER_NOTCH` before there is one.
      * @param deltaY
      * @param deltaMode
      * @returns
      */
     _wheelNotches(deltaY: number, deltaMode: number): number {
-        const magnitude = Math.abs(Math.trunc(deltaY));
-        if (magnitude === 0) { return 0; }
         // DOM_DELTA_LINE.
         if (deltaMode === 1) {
-            if (magnitude < this._smallestLineDeltaY) { this._smallestLineDeltaY = magnitude; }
-            return magnitude / this._smallestLineDeltaY;
+            const lines = Math.abs(deltaY);
+            if (lines === 0) { return 0; }
+            if (!Number.isInteger(lines)) {
+                const learned = this._smallestLineDeltaY < 10000;
+                return lines / (learned ? this._smallestLineDeltaY : WHEEL_LINES_PER_NOTCH);
+            }
+            if (lines < this._smallestLineDeltaY) { this._smallestLineDeltaY = lines; }
+            return lines / this._smallestLineDeltaY;
         }
+        const magnitude = Math.abs(Math.trunc(deltaY));
+        if (magnitude === 0) { return 0; }
         // DOM_DELTA_PAGE: at least one full notch per page.
         if (deltaMode === 2) {
             return Math.max(1, magnitude);
