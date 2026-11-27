@@ -646,10 +646,7 @@ impl Agent {
         remote_ufrag: String,
         remote_pwd: String,
     ) -> Result<()> {
-        debug!(
-            "Started agent: isControlling? {}, remoteUfrag: {}, remotePwd: {}",
-            is_controlling, remote_ufrag, remote_pwd
-        );
+        debug!("Started agent: isControlling? {is_controlling}");
         self.set_remote_credentials(remote_ufrag, remote_pwd)?;
         self.is_controlling = is_controlling;
         self.start(now);

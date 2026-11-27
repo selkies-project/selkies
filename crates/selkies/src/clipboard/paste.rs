@@ -91,7 +91,7 @@ impl Clipboard {
         keys: &dyn PasteKeys,
     ) -> Result<bool, String> {
         let previous = self.read(true).await;
-        if !self.write(Payload::secret(text), None).await {
+        if !self.write(Payload::concealed(text), None).await {
             return Ok(false);
         }
         tokio::time::sleep(OFFER_SETTLE).await;

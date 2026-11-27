@@ -7879,9 +7879,10 @@ class WorkerWebSocket {
     const direct = new WebSocket(websocketEndpointURL.href, tokenProtocols);
     direct.binaryType = 'arraybuffer';
     let received = 0;
-    direct.addEventListener('message', (event: MessageEvent) => {
+    const countReceived = (event: MessageEvent): void => {
       if (event.data instanceof ArrayBuffer) received += event.data.byteLength;
-    });
+    };
+    direct.addEventListener('message', countReceived);
     directReceived = () => received;
     websocket = asSessionSocket(direct);
   };

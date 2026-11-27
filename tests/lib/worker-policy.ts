@@ -101,6 +101,12 @@ export async function workerPolicyProxy(upstreamUrl: string, restricted: boolean
 
     const onRequest = (req: IncomingMessage, res: ServerResponse): void => {
         const path = req.url ?? '/';
+        // Only an origin-form target is forwarded: the upstream is always this proxy's.
+        if (!(/^\/[^\0]*$/.test(path) && !path.split('/').includes('..'))) {
+            res.writeHead(400);
+            res.end();
+            return;
+        }
         const up = request({
             host: upstream.hostname,
             port: upstreamPort,

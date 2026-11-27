@@ -199,8 +199,8 @@ impl Payload {
         }
     }
 
-    /// Text its owner marked secret.
-    pub fn secret(text: impl Into<String>) -> Payload {
+    /// Text its owner marked secret, concealed from the clients' views and logs.
+    pub fn concealed(text: impl Into<String>) -> Payload {
         Payload {
             mime: "text/plain".into(),
             bytes: Bytes::from(text.into()),
@@ -623,11 +623,11 @@ impl Clipboard {
                     .is_some_and(|v| secret_hint(&v))
             {
                 let Some(source) = APP_TEXT_MIMES.iter().find(|m| has(m)) else {
-                    return Ok(Some(Payload::secret("")));
+                    return Ok(Some(Payload::concealed("")));
                 };
                 return Ok(comp
                     .clipboard_read_app(display, source)?
-                    .map(|d| Payload::secret(String::from_utf8_lossy(&d).into_owned())));
+                    .map(|d| Payload::concealed(String::from_utf8_lossy(&d).into_owned())));
             }
             let html = if has("text/html") {
                 comp.clipboard_read_app(display, "text/html")?
@@ -1089,7 +1089,7 @@ pub fn native_payload(entries: &[Entry], use_binary: bool) -> Option<Payload> {
         let text = plain
             .map(|d| String::from_utf8_lossy(d).into_owned())
             .unwrap_or_default();
-        return Some(Payload::secret(text));
+        return Some(Payload::concealed(text));
     }
     let html = entries
         .iter()

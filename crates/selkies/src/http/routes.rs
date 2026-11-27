@@ -47,6 +47,15 @@ pub fn api_router(state: &AppState) -> Router<AppState> {
     router.route_layer(DefaultBodyLimit::max(JSON_BODY_LIMIT))
 }
 
+/// A request body read as JSON, untyped: nothing in it chooses a type to build, and serde_json
+/// refuses nesting past 128 levels. Every route that takes a JSON body reads it here.
+pub fn json_body(body: &[u8]) -> serde_json::Result<Json> {
+    let mut reader = serde_json::Deserializer::from_slice(body);
+    let value = <Json as serde::Deserialize>::deserialize(&mut reader)?;
+    reader.end()?;
+    Ok(value)
+}
+
 /// A JSON error body of the shape the dashboards read: `{"status": "error", "message"}`.
 pub fn json_error(status: StatusCode, message: &str) -> Response {
     (
@@ -91,7 +100,7 @@ async fn handle_switch(State(state): State<AppState>, ceiling: Ceiling, body: By
     if !state.config.enable_dual_mode {
         return json_error(StatusCode::FORBIDDEN, "Dual streaming mode disabled");
     }
-    let parsed: Result<Json, _> = serde_json::from_slice(&body);
+    let parsed = json_body(&body);
     let mode = match parsed {
         Ok(Json::Object(map)) => match map.get("mode") {
             Some(Json::String(mode)) => mode.clone(),
@@ -151,7 +160,7 @@ async fn handle_session_mode_switch(ceiling: Ceiling, body: Bytes) -> Response {
             "View-only credentials cannot switch the session's mode",
         );
     }
-    let on = match serde_json::from_slice(&body) {
+    let on = match json_body(&body) {
         Ok(Json::Object(map)) => match map.get("desktop") {
             Some(Json::Bool(on)) => *on,
             _ => {

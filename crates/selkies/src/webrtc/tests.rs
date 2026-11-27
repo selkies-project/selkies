@@ -2267,7 +2267,7 @@ async fn clipboard_a_viewer_is_announced_nothing_and_answered_what_it_asked() {
     let (_conn, mut controller) = clip_peer(&rig, "peer", ClientType::Controller).await;
     let (viewer_conn, mut viewer) = clip_peer(&rig, "viewer", ClientType::Viewer).await;
     rig.clipboard
-        .send(Payload::secret("hunter2"), None, None)
+        .send(Payload::concealed("hunter2"), None, None)
         .await;
     rig.clipboard
         .send(Payload::text("ordinary"), None, None)
@@ -2287,13 +2287,13 @@ async fn clipboard_a_secret_carries_its_mark() {
     let rig = clip_rig();
     let (_conn, mut rx) = clip_peer(&rig, "peer", ClientType::Controller).await;
     rig.clipboard
-        .send(Payload::secret("hunter2"), None, None)
+        .send(Payload::concealed("hunter2"), None, None)
         .await;
     let got = typed(&mut rx);
     assert_eq!(got[0]["type"], "clipboard-msg");
     assert_eq!(got[0]["data"]["secret"], true);
 
-    rig.clipboard.send(Payload::secret(""), None, None).await;
+    rig.clipboard.send(Payload::concealed(""), None, None).await;
     let got = typed(&mut rx);
     assert_eq!(
         got[0]["data"]["secret"], true,
@@ -2302,7 +2302,7 @@ async fn clipboard_a_secret_carries_its_mark() {
     assert_eq!(got[0]["data"]["content"], "");
 
     rig.clipboard
-        .send(Payload::secret("x".repeat(70_000)), None, None)
+        .send(Payload::concealed("x".repeat(70_000)), None, None)
         .await;
     let got = typed(&mut rx);
     let start = got

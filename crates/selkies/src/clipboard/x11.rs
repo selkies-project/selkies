@@ -610,10 +610,12 @@ pub fn read_selection(
         && bytes(convert(*hint)).is_some_and(|v| secret_hint(&v))
     {
         let Some((atom, _)) = atoms.texts.iter().find(|(a, _)| has(*a)) else {
-            return Some(Payload::secret(""));
+            return Some(Payload::concealed(""));
         };
         let text = bytes(convert(*atom))?;
-        return Some(Payload::secret(String::from_utf8_lossy(&text).into_owned()));
+        return Some(Payload::concealed(
+            String::from_utf8_lossy(&text).into_owned(),
+        ));
     }
     let html = if has(atoms.html) {
         bytes(convert(atoms.html)).filter(|h| !h.is_empty())

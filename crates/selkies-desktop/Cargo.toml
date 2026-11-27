@@ -46,3 +46,7 @@ futures-core = "0.3"
 serde_json = "1"
 # The description of the desktop's controls it answers on its control socket for Pelorus.
 pelorus = { path = "../pelorus" }
+
+[dev-dependencies]
+# Scratch directories for the tests.
+tempfile = "3"

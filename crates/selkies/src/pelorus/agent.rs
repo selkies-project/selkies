@@ -346,7 +346,7 @@ pub async fn handle_run(ceiling: Ceiling, body: Bytes) -> Response {
     if ceiling.is_viewer() {
         return refused();
     }
-    let Ok(request) = serde_json::from_slice::<Json>(&body) else {
+    let Ok(request) = crate::http::routes::json_body(&body) else {
         return json_error(StatusCode::BAD_REQUEST, "the body must be JSON");
     };
     let Some(prompt) = request

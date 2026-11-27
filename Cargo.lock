@@ -4135,6 +4135,7 @@ dependencies = [
  "pelorus",
  "selkies-draw",
  "serde_json",
+ "tempfile",
  "tiny-skia",
  "wayland-client",
  "wayland-cursor",

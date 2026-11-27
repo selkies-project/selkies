@@ -281,8 +281,8 @@ mod tests {
     /// reads beneath it, is left as it was.
     #[test]
     fn the_file_managers_entry_lands_in_the_quarantine_alone() {
-        let root = std::env::temp_dir().join(format!("selkies-desktop-entries-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path();
         let user = root.join("home/.config");
         std::fs::create_dir_all(&user).unwrap();
         let mine = "[Default Applications]\ntext/plain=mine.desktop\n";
@@ -297,7 +297,6 @@ mod tests {
         ));
         assert_eq!(std::fs::read_to_string(user.join("mimeapps.list")).unwrap(), mine);
         assert!(!root.join("home/.local").exists());
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

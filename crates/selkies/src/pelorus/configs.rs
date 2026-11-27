@@ -430,7 +430,7 @@ fn fixed() -> Response {
 
 /// The body of a request as JSON; `None` where it is not JSON.
 fn parsed(body: &Bytes) -> Option<Json> {
-    serde_json::from_slice(body).ok()
+    crate::http::routes::json_body(body).ok()
 }
 
 /// The answer to a body that is not JSON.

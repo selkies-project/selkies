@@ -32,7 +32,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createServer, type Server } from 'node:https';
 import { connect, type AddressInfo, type Socket } from 'node:net';
@@ -104,8 +104,14 @@ async function ephemeralIdentity(): Promise<Identity> {
     return { key, cert };
 }
 
-/** The SHA-256 of `text`, which the credential is compared by so that its length is not. */
-const digest = (text: string): Buffer => createHash('sha256').update(text).digest();
+/** This process's salt for `digest`. */
+const SALT = randomBytes(16);
+
+/**
+ * A password hash of `text`, which the credential is compared by so that its
+ * length is not; the cost is a test's, every request of a run paying it.
+ */
+const digest = (text: string): Buffer => scryptSync(text, SALT, 32, { N: 1024 });
 
 /** The proxy, listening on a port of its own on loopback. */
 export class AuthProxy {
@@ -241,9 +247,17 @@ export class AuthProxy {
             res.end();
             return;
         }
+        // Only an origin-form target is forwarded: the upstream is always this proxy's.
+        const path = req.url ?? '/';
+        if (!(/^\/[^\0]*$/.test(path) && !path.split('/').includes('..'))) {
+            req.resume();
+            res.writeHead(400, { 'Content-Length': '0', Connection: 'close' });
+            res.end();
+            return;
+        }
         this.served++;
         const up = httpRequest({
-            host: '127.0.0.1', port: this.upstream, method: req.method, path: req.url, agent: false,
+            host: '127.0.0.1', port: this.upstream, method: req.method, path, agent: false,
             headers: [...this.headersFor(req, false), 'Connection', 'close'],
         });
         up.on('socket', (socket) => { this.track(socket); });

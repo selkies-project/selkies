@@ -342,7 +342,7 @@ mod tests {
         if *c.mode.lock() == "stall" {
             c.release.notified().await;
         }
-        let parsed: Json = serde_json::from_slice(&body).unwrap();
+        let parsed: Json = crate::http::routes::json_body(&body).unwrap();
         if *c.mode.lock() == "reject" {
             return StatusCode::INTERNAL_SERVER_ERROR;
         }

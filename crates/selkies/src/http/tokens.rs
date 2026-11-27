@@ -313,7 +313,7 @@ pub async fn handle_tokens(State(state): State<AppState>, body: Bytes) -> Respon
         )
             .into_response();
     }
-    let parsed: Result<Json, _> = serde_json::from_slice(&body);
+    let parsed = crate::http::routes::json_body(&body);
     let error = match &parsed {
         Ok(table) => token_table_error(table).map(str::to_string),
         Err(e) => Some(e.to_string()),

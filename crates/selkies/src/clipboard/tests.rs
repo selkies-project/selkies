@@ -150,7 +150,7 @@ impl FakeHost {
                     let data = BASE64.decode(parts.next().unwrap_or("")).unwrap();
                     let text = String::from_utf8_lossy(&data).into_owned();
                     out.push(if secret {
-                        Payload::secret(text)
+                        Payload::concealed(text)
                     } else {
                         Payload::text(text)
                     });
@@ -175,7 +175,7 @@ impl FakeHost {
                         if mime == "text/plain" {
                             let text = String::from_utf8_lossy(&buf).into_owned();
                             out.push(if secret {
-                                Payload::secret(text)
+                                Payload::concealed(text)
                             } else {
                                 Payload::text(text)
                             });
@@ -885,7 +885,7 @@ async fn a_push_of_the_sessions_own_text_is_left_to_its_owner() {
     );
 
     let (h, comp) = with_baseline(Some((b"some text", "text/plain")));
-    h.write(Payload::secret("some text"), None).await;
+    h.write(Payload::concealed("some text"), None).await;
     assert_eq!(
         comp.offers.lock().len(),
         1,
@@ -1387,7 +1387,7 @@ async fn the_monitor_retracts_a_secret_the_session_let_go() {
 
     let comp = FakeCompositor::new();
     let h = wayland_handler(controller(), comp.clone(), true);
-    h.set_clipboard(Payload::secret(HIDDEN_TEXT), None, false)
+    h.set_clipboard(Payload::concealed(HIDDEN_TEXT), None, false)
         .await;
     let offered: HashMap<String, Vec<u8>> = comp.offers.lock()[0].0.iter().cloned().collect();
     assert_eq!(
@@ -1413,21 +1413,22 @@ async fn the_monitor_retracts_a_secret_the_session_let_go() {
 async fn a_secret_is_marked_ahead_of_its_frames_and_never_announced_to_a_viewer() {
     let host = controller();
     let h = wayland_handler(host.clone(), FakeCompositor::new(), true);
-    h.send(Payload::secret(HIDDEN_TEXT), None, None).await;
+    h.send(Payload::concealed(HIDDEN_TEXT), None, None).await;
     assert_eq!(
         host.verbs(1),
         vec!["clipboard_secret", "clipboard"],
         "a secret's payload follows a clipboard_secret frame"
     );
     host.clear();
-    h.send(Payload::secret(""), None, None).await;
+    h.send(Payload::concealed(""), None, None).await;
     assert_eq!(
         host.frames(1),
         vec!["clipboard_secret", "clipboard,"],
         "an empty secret goes out, marked"
     );
     host.clear();
-    h.send(Payload::secret("x".repeat(40000)), None, None).await;
+    h.send(Payload::concealed("x".repeat(40000)), None, None)
+        .await;
     assert_eq!(
         &host.verbs(1)[..2],
         &["clipboard_secret", "clipboard_start"],
@@ -1442,7 +1443,7 @@ async fn a_secret_is_marked_ahead_of_its_frames_and_never_announced_to_a_viewer(
     );
     host.clear();
     host.clients.lock().push((2, Role::Viewer));
-    h.send(Payload::secret(HIDDEN_TEXT), None, None).await;
+    h.send(Payload::concealed(HIDDEN_TEXT), None, None).await;
     h.send(Payload::text("ordinary"), None, None).await;
     h.send(Payload::text("asked for"), Some("cr"), Some(2))
         .await;
@@ -2746,7 +2747,7 @@ async fn a_nested_compositor_moves_copies_through_the_real_data_control_client()
         "the selection reads as the same envelope"
     );
 
-    assert!(h.write(Payload::secret(HIDDEN_TEXT), None).await);
+    assert!(h.write(Payload::concealed(HIDDEN_TEXT), None).await);
     assert_eq!(
         wl_paste(&dir, "wayland-0", HINTS[0]).await,
         b"secret",

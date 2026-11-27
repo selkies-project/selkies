@@ -225,12 +225,12 @@ impl Xclip {
         {
             let text = String::from_utf8_lossy(&text).into_owned();
             return Ok(Some(if secret {
-                Payload::secret(text)
+                Payload::concealed(text)
             } else {
                 Payload::text(text)
             }));
         }
-        Ok(secret.then(|| Payload::secret("")))
+        Ok(secret.then(|| Payload::concealed("")))
     }
 
     /// Offer `payload` on the CLIPBOARD selection through `xclip -i`; true when it took it.

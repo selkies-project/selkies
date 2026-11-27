@@ -422,7 +422,7 @@ impl Clipboard {
                 reread_pending = REREAD_ATTEMPTS;
             }
             if current.is_none() && secret_out && reread_pending == 0 {
-                current = Some(Payload::secret(""));
+                current = Some(Payload::concealed(""));
             }
             // A watch reports this server's own write back as a selection change like any
             // other, so that write spends one edge, whatever the edge read, and every later
