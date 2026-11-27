@@ -2304,9 +2304,9 @@ fn scroll_notches(carry: &mut f64, delta: f64) -> i32 {
 impl HostSession {
     /// A finger's scroll by (dx, dy) pixels of the stream on the host, in the logical pixels of
     /// the output under the pointer as the nested compositor takes it: smooth, as a finger
-    /// source ended by `pointer_scroll_end`, through libei, the portal or the virtual pointer,
-    /// and in whole wheel notches with the remainder carried on uinput, whose wheels have no
-    /// other.
+    /// source ended by `pointer_scroll_end`, through libei or the portal in those pixels or the
+    /// virtual pointer in axis units (`FINGER_PX_PER_AXIS`), and in whole wheel notches with the
+    /// remainder carried on uinput, whose wheels have no other.
     pub fn pointer_scroll(&self, dx: f64, dy: f64) {
         if dx == 0.0 && dy == 0.0 {
             return;
@@ -2348,7 +2348,7 @@ impl HostSession {
             (wl_pointer::Axis::HorizontalScroll, dx),
         ] {
             if value != 0.0 {
-                vp.axis(time, axis, value);
+                vp.axis(time, axis, value / crate::wayland::FINGER_PX_PER_AXIS);
             }
         }
         vp.frame();

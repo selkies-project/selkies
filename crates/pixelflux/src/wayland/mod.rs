@@ -49,6 +49,11 @@ pub mod workspace;
 /// XWayland and Smithay's X11 window manager, driven by the window policy.
 pub mod xwm;
 
+/// A finger's scroll in a browser page's pixels per Wayland axis unit: Chromium and GTK 3 take
+/// 10 units as one wheel step, which a page reads as 120 pixels. A touchpad's stroke sent in
+/// axis units at this rate scrolls their windows as far as it scrolled the page.
+pub const FINGER_PX_PER_AXIS: f64 = 12.0;
+
 /// An enabled screen as clients see it: name, layout position, and the size of
 /// the mode it currently holds.
 pub type AppScreen = (String, i32, i32, i32, i32);

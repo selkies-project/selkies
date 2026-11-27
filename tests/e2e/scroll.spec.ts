@@ -8,8 +8,8 @@
 // X11 and Wayland. Verifies REL_WHEEL buttons reach the X server (X11) or the
 // compositor seat sees scroll (Wayland, through the observer). On Wayland a
 // touchpad's stroke reaches the seat as a finger's: fractional values from a
-// finger source, as far as the page scrolled, then an axis stop once the
-// stroke pauses.
+// finger source, in axis units of twelve page pixels (Chromium and GTK 3 take ten
+// as a 120 px wheel step), then an axis stop once the stroke pauses.
 import { test } from '@playwright/test';
 
 import { Checks } from '../lib/checks.ts';
@@ -91,9 +91,10 @@ async function wheelBlock(host: Host, mode: string, wayland: boolean, tag: strin
             seen.forEach((l, i) => { if (l.kind === 'ptr_axis') lastAxis = i; });
             const stopped = seen.slice(lastAxis + 1).some((l) => l.kind === 'ptr_axis_stop');
             res.check("Wayland: a touchpad's stroke comes from a finger source", sources.size === 1 && sources.has(1), seen.slice(0, 4));
-            const total = stroke.reduce((a, b) => a + b, 0);
-            res.check('Wayland: in fractional values, as far as the page scrolled',
-                values.some((v) => v !== Math.trunc(v)) && Math.abs(values.reduce((a, b) => a + b, 0) - total) < 0.1, `${JSON.stringify(values)} against ${total}`);
+            // Twelve page pixels to the axis unit; wl_fixed carries 1/256 of one per event.
+            const total = stroke.reduce((a, b) => a + b, 0) / 12;
+            res.check('Wayland: in fractional values, a twelfth of the pixels the page scrolled',
+                values.some((v) => v !== Math.trunc(v)) && Math.abs(values.reduce((a, b) => a + b, 0) - total) < 0.03, `${JSON.stringify(values)} against ${total}`);
             res.check('Wayland: and stops once the stroke pauses', stopped, seen.slice(-3));
         }
         const real = realConsole(consoleErrors, notFound).errors;

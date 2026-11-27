@@ -8071,6 +8071,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                         return;
                     }
                     let (_, _, scale) = state.layout_logical_to_physical_scaled(pos);
+                    let scale = scale * wayland::FINGER_PX_PER_AXIS;
                     let mut frame = AxisFrame::new(time).source(AxisSource::Finger);
                     if dx != 0.0 {
                         frame = frame.value(Axis::Horizontal, dx / scale);
@@ -9071,7 +9072,8 @@ impl Compositor {
     }
 
     /// Scroll by a finger's travel of (dx, dy) physical pixels, the way a touchpad does:
-    /// fractional, with no wheel steps, until `inject_finger_scroll_end`.
+    /// fractional, with no wheel steps, until `inject_finger_scroll_end`. The seat takes them
+    /// in axis units (`wayland::FINGER_PX_PER_AXIS`).
     pub fn inject_finger_scroll(&self, dx: f64, dy: f64) -> Result<(), Error> {
         self.send(ThreadCommand::PointerScroll { dx, dy })
             .map_err(|e| Error::Compositor(format!("Failed to inject finger scroll: {e}")))?;
