@@ -14,7 +14,7 @@
 # workflow files, which is left to CI because it needs its own download.
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.17.5
+    rev: v0.17.6
     hooks:
       # Rule selection lives in ruff.toml
       - id: ruff-check
