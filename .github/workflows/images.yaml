@@ -101,7 +101,7 @@ jobs:
           path: bundle
       - name: Free disk space
         # The tool cache is kept: setup-python and setup-node resolve from it
-        uses: endersonmenezes/free-disk-space@8b8cd4e2277836962939a8f3b4ea0ee4bc006156 # v4
+        uses: endersonmenezes/free-disk-space@8ffcdf1b35c974f0b10496711e9a22bcb0ff3790 # v4
         with:
           remove_android: true
           remove_dotnet: true
@@ -401,7 +401,7 @@ jobs:
     # A prune that hits a rate limit must not fail the publish
     continue-on-error: true
     steps:
-      - uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1
+      - uses: dataaxiom/ghcr-cleanup-action@ac45a8c04b1eb4b27974ca79a0a74f344c93664b # v1
         with:
           packages: selkies/base,selkies/desktop,selkies/coturn,selkies/turn-rest,selkies/bundle-toolchain
           delete-untagged: true
