@@ -598,6 +598,15 @@ impl Device {
             .collect()
     }
 
+    /// The memory types a configuration's surfaces may be created over
+    /// (`VA_SURFACE_ATTRIB_MEM_TYPE_*`), None where it lists none.
+    fn memory_types(&self, config: VAConfigID) -> Option<u32> {
+        self.surface_attributes(config)
+            .iter()
+            .find(|a| a.type_ == VASurfaceAttribMemoryType)
+            .map(|a| unsafe { a.value.value.i } as u32)
+    }
+
     /// The surface alignment a configuration asks for, as `(width, height)`, one where it
     /// asks none.
     fn surface_alignment(&self, config: VAConfigID) -> (u32, u32) {
@@ -1099,6 +1108,9 @@ pub struct VaapiEncoder {
     /// The surface over each dmabuf a zero-copy session encoded, by fd, oldest first, at most
     /// `DMABUF_IMPORTS` (`dmabuf_surface`).
     imports: Vec<(i32, DmaBufIdentity, VASurfaceID)>,
+    /// Whether a dmabuf is imported through the PRIME 2 descriptor (`import_dmabuf`): where the
+    /// video processor's configuration lists that memory type, or lists none at all.
+    imports_prime2: bool,
     coded: VABufferID,
     arm: Arm,
     references: Option<References>,
@@ -1456,6 +1468,7 @@ impl VaapiEncoder {
             key_count: 0,
             surfaces_of: HashMap::new(),
             imports: Vec::new(),
+            imports_prime2: true,
             last_reference: Reference::Untracked,
             rate,
             qp: codec.hardware_quantizer(device.hardware(), settings.video_crf),
@@ -1717,6 +1730,9 @@ impl VaapiEncoder {
             color_standard(&input_standards, ColorDescription::SRGB_SOURCE),
             color_standard(&output_standards, self.declared_color()),
         );
+        self.imports_prime2 = device
+            .memory_types(self.vpp_config)
+            .is_none_or(|types| types & VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2 != 0);
         if let Input::Host { rgba } = input {
             let fourcc = if rgba { VA_FOURCC_RGBA } else { VA_FOURCC_BGRA };
             let surface = device.create_surfaces(
@@ -2379,7 +2395,10 @@ impl VaapiEncoder {
 
     /// A VA surface over a dmabuf: through the PRIME 2 descriptor, which carries the format
     /// modifier, else the older external-buffer one where it reads the buffer as laid out
-    /// (`legacy_descriptor_reads`).
+    /// (`legacy_descriptor_reads`). The PRIME 2 descriptor is tried only where the driver lists
+    /// it (`imports_prime2`): Intel's i965 lists it for no configuration, yet answers an import
+    /// through it with a new blank surface rather than an error, which a Haswell session encodes
+    /// as black frames; the older descriptor reads the buffer's tiling from the kernel there.
     fn import_dmabuf(&mut self, dmabuf: &Dmabuf) -> Result<VASurfaceID, String> {
         let api = self.device.api;
         let display = self.device.display;
@@ -2439,7 +2458,7 @@ impl VaapiEncoder {
         attribs[1].flags = VA_SURFACE_ATTRIB_SETTABLE;
         attribs[1].value.type_ = VAGenericValueTypePointer;
         let mut prime2 = None;
-        if modifier != DRM_FORMAT_MOD_INVALID {
+        if modifier != DRM_FORMAT_MOD_INVALID && self.imports_prime2 {
             let mut desc: VADRMPRIMESurfaceDescriptor = unsafe { std::mem::zeroed() };
             desc.fourcc = fourcc;
             desc.width = width;

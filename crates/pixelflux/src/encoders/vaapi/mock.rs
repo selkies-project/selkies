@@ -28,6 +28,10 @@ pub(crate) struct Driver {
     pub entrypoint_attributes: Vec<(VAEntrypoint, VAConfigAttribType, u32)>,
     /// The surface formats a configuration's surfaces may take.
     pub surface_fourccs: Vec<u32>,
+    /// The memory types a configuration's surfaces may be created over, None to list none.
+    pub memory_types: Option<u32>,
+    /// The memory type of every surface created over an external buffer.
+    pub imported: Vec<u32>,
     /// Whether `vaDeriveImage` answers.
     pub derive: bool,
     /// Whether `vaCreateImage` refuses.
@@ -434,17 +438,26 @@ unsafe extern "C" fn query_surface_attributes(
     count: *mut c_uint,
 ) -> VAStatus {
     with(|d| unsafe {
+        let listed = d.surface_fourccs.len() + usize::from(d.memory_types.is_some());
         if list.is_null() {
-            *count = d.surface_fourccs.len() as c_uint;
+            *count = listed as c_uint;
             return;
         }
-        for (i, &fourcc) in d.surface_fourccs.iter().enumerate() {
+        let attribs = d
+            .surface_fourccs
+            .iter()
+            .map(|&fourcc| (VASurfaceAttribPixelFormat, fourcc))
+            .chain(
+                d.memory_types
+                    .map(|types| (VASurfaceAttribMemoryType, types)),
+            );
+        for (i, (kind, value)) in attribs.enumerate() {
             let attrib = &mut *list.add(i);
-            attrib.type_ = VASurfaceAttribPixelFormat;
+            attrib.type_ = kind;
             attrib.value.type_ = VAGenericValueTypeInteger;
-            attrib.value.value.i = fourcc as i32;
+            attrib.value.value.i = value as i32;
         }
-        *count = d.surface_fourccs.len() as c_uint;
+        *count = listed as c_uint;
     });
     VA_STATUS_SUCCESS as VAStatus
 }
@@ -465,6 +478,9 @@ unsafe extern "C" fn create_surfaces(
             let attrib = &*list.add(i);
             if attrib.type_ == VASurfaceAttribPixelFormat {
                 fourcc = attrib.value.value.i as u32;
+            }
+            if attrib.type_ == VASurfaceAttribMemoryType {
+                d.imported.push(attrib.value.value.i as u32);
             }
             if attrib.type_ == VASurfaceAttribExternalBufferDescriptor
                 && attrib.value.value.p.is_null()
