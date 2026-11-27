@@ -8,6 +8,7 @@
 //! it a key frame or not before a decoder sees it (`sniff_keyframe` in `src/webcam/decode.rs`,
 //! the per-codec reads in `src/encoders/codec.rs`): the H.264 and H.265 NAL and slice headers,
 //! the VP8 frame tag, the VP9 uncompressed header, and the AV1 OBU walk with its leb128 sizes.
+//! The AV1 path also reads the optional IVF framing in Tegra encoder output.
 //! Nothing panics or reads past the input. The input's first byte picks the codec, as the wire
 //! type byte does (`parse_video_type`); the rest is the frame.
 #![no_main]
@@ -36,6 +37,7 @@ mod ledger {
     pub const REFRESH_FINER: u32 = 3;
 }
 
+use encoders::bits::av1_obus;
 use encoders::codec::{
     av1_is_key, h264_frame_type, h265_frame_type, parse_video_type, vp8_is_key, vp9_is_key,
 };
@@ -59,7 +61,10 @@ fuzz_target!(|data: &[u8]| {
             let _ = vp9_is_key(frame);
         }
         _ => {
-            let _ = av1_is_key(frame);
+            let mut ivf = pick & 0x80 != 0;
+            if let Some(obus) = av1_obus(frame, &mut ivf) {
+                let _ = av1_is_key(obus);
+            }
         }
     }
 });

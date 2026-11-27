@@ -32,6 +32,7 @@ use std::sync::OnceLock;
 
 use libloading::{Library, Symbol};
 
+use super::bits::av1_obus;
 use super::codec::{
     Codec, FRAME_KEY, VIDEO_HEADER_LEN, av1_is_key, frame_type_from_key, h264_dpb_frames,
     h264_frame_type, h265_dpb_frames, h265_frame_type, push_video_header,
@@ -71,14 +72,15 @@ const CID_IDR_INTERVAL: u32 = 0x0099_0b02;
 /// on its own whatever the IDR interval says.
 const CID_GOP_SIZE: u32 = 0x0099_09cb;
 const CID_VBV_SIZE: u32 = 0x0099_0b13;
+/// Repeats the parameter sets for H.26x and the sequence header OBU for AV1.
 const CID_INSERT_SPS_PPS_AT_IDR: u32 = 0x0099_0b17;
-/// AV1 carries no parameter sets; its sequence header rides the frame under its own control.
-const CID_AV1_HEADERS_WITH_FRAME: u32 = 0x0099_0b39;
 const CID_HW_PRESET: u32 = 0x0099_0b1c;
 const CID_INSERT_VUI: u32 = 0x0099_0b22;
 const CID_MAX_PERFORMANCE: u32 = 0x0099_0b2a;
 const CID_POC_TYPE: u32 = 0x0099_0b33;
-const CID_FORCE_IDR_FRAME: u32 = 0x0099_0b37;
+/// `V4L2_CID_MPEG_MFC51_VIDEO_FORCE_FRAME_TYPE`, used by `NvVideoEncoder::forceIDR`.
+/// Its I-frame value (1) requests a key frame while streaming.
+const CID_FORCE_FRAME_TYPE: u32 = 0x0099_1103;
 /// External reference-picture-set control (`V4L2_CID_MPEG_BASE` + 532, 541, and 542): the
 /// session names, with each frame, which pictures the encoder may predict from.
 const CID_NUM_REFERENCE_FRAMES: u32 = 0x0099_0b14;
@@ -809,6 +811,8 @@ pub struct TegraEncoder {
     held: Option<(u64, usize)>,
     scratch: Vec<u8>,
     codec: Codec,
+    /// Whether the AV1 capture plane prefixes its OBUs with IVF headers.
+    av1_ivf: bool,
     omit_headers: bool,
     bitrate_bps: u32,
     fps: f64,
@@ -891,6 +895,7 @@ impl TegraEncoder {
             held: None,
             scratch: Vec::new(),
             codec,
+            av1_ivf: false,
             omit_headers: settings.omit_stripe_headers,
             bitrate_bps,
             fps,
@@ -1435,14 +1440,7 @@ impl TegraEncoder {
         }
         self.set_control(CID_HW_PRESET, HW_PRESET_ULTRAFAST as i64, "preset")?;
         self.set_control(CID_MAX_PERFORMANCE, 1, "max performance")?;
-        // Every IDR carries what a client needs to start on it: parameter sets for H.264 and
-        // H.265, the sequence header for AV1, which the vendor puts behind its own control. VUI
-        // is an H.264 and H.265 construct, and AV1 declares its color in that sequence header.
-        let headers = match self.codec {
-            Codec::Av1 => CID_AV1_HEADERS_WITH_FRAME,
-            _ => CID_INSERT_SPS_PPS_AT_IDR,
-        };
-        self.set_control(headers, 1, "sequence headers at IDR")?;
+        self.set_control(CID_INSERT_SPS_PPS_AT_IDR, 1, "headers at key frames")?;
         if self.codec != Codec::Av1 {
             self.set_control(CID_INSERT_VUI, 1, "VUI")?;
         }
@@ -1647,6 +1645,10 @@ impl TegraEncoder {
     /// Queue the staging frame and take what the engine has ready, waiting for it where a unit
     /// is expected. A wait that runs out raises the number in flight one is expected from, so a
     /// deeper engine costs one wait per depth rather than one per frame.
+    ///
+    /// Sessions without an external reference set request key frames through the runtime
+    /// frame-type control. On R39.2.1 the setup-time `V4L2_CID_MPEG_VIDEOENC_FORCE_IDR_FRAME`
+    /// can succeed during streaming and still leave the requested picture as a delta frame.
     fn submit(
         &mut self,
         frame_number: u64,
@@ -1663,7 +1665,7 @@ impl TegraEncoder {
         if let Some(layout) = self.rps {
             self.queue_references(layout, slot, frame_number, force_idr)?;
         } else if force_idr {
-            self.set_control(CID_FORCE_IDR_FRAME, 1, "force IDR")?;
+            self.set_control(CID_FORCE_FRAME_TYPE, 1, "force key frame")?;
         }
         let mut planes = [Plane::default(); 2];
         planes[0].m = self.nv12_fd[slot] as u64;
@@ -1743,7 +1745,8 @@ impl TegraEncoder {
         }
     }
 
-    /// Take the access units the encoder has ready.
+    /// Take the access units the encoder has ready. The AV1 wire payload and frame-type
+    /// reader use raw OBUs, so take the IVF framing off where the capture plane supplies it.
     fn collect(&mut self) -> Result<Vec<u8>, String> {
         let mut out = Vec::new();
         self.last_reference = Reference::Untracked;
@@ -1787,6 +1790,11 @@ impl TegraEncoder {
             if length > 0 {
                 let (data, _) = self.capture[index];
                 let unit = unsafe { std::slice::from_raw_parts(data as *const u8, length) };
+                let unit = if self.codec == Codec::Av1 {
+                    av1_obus(unit, &mut self.av1_ivf).ok_or("invalid AV1 IVF capture buffer")?
+                } else {
+                    unit
+                };
                 let number = buffer.timestamp[0] as u64;
                 let reference = self.reference_of(number);
                 let frame_type = self.frame_type(unit);
@@ -1874,6 +1882,7 @@ impl Drop for TegraEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoders::bits::annexb_nals;
 
     /// The capture format is the vendor library's spelling, which is not the one a mainline V4L2
     /// encoder uses: NVIDIA's header defines HEVC as `H265` where the kernel defines `HEVC`, and
@@ -2069,20 +2078,69 @@ mod tests {
         (out, enc.last_reference())
     }
 
-    /// Test helper: whether a unit carries the parameter sets a client starts on — the SPS, and
-    /// for H.265 the VPS ahead of it.
-    fn carries_parameter_sets(codec: Codec, unit: &[u8]) -> bool {
+    /// Whether a unit carries the parameter sets or sequence header a new decoder needs.
+    fn carries_decoder_headers(codec: Codec, unit: &[u8]) -> bool {
         match codec {
-            Codec::H265 => {
-                let types: Vec<u8> = unit
-                    .windows(4)
-                    .filter(|w| w[..3] == [0, 0, 1])
-                    .map(|w| (w[3] >> 1) & 0x3f)
-                    .collect();
-                types.contains(&32) && types.contains(&33)
+            Codec::H264 => [7, 8]
+                .into_iter()
+                .all(|kind| annexb_nals(unit).any(|nal| nal[0] & 0x1f == kind)),
+            Codec::H265 => [32, 33, 34]
+                .into_iter()
+                .all(|kind| annexb_nals(unit).any(|nal| (nal[0] >> 1) & 0x3f == kind)),
+            Codec::Av1 => {
+                let mut header = std::mem::MaybeUninit::uninit();
+                // SAFETY: dav1d can read the whole unit and write one sequence header.
+                unsafe {
+                    codec_sys::dav1d::dav1d_parse_sequence_header(
+                        header.as_mut_ptr(),
+                        unit.as_ptr(),
+                        unit.len(),
+                    ) == 0
+                }
             }
-            _ => crate::encoders::sps::h264_frame_num_range(unit).is_some(),
+            _ => false,
         }
+    }
+
+    /// Clients of every served codec can start on a requested key frame while streaming.
+    #[test]
+    #[ignore = "requires a Jetson hardware encoder"]
+    fn tegra_emits_headers_with_on_demand_key_frames() {
+        let (w, h) = (1280, 720);
+        let mut failures = Vec::new();
+        for codec in served() {
+            let Some(mut enc) = session(codec, w, h, 10.0) else {
+                failures.push(format!("{codec:?}: could not open the encoder"));
+                continue;
+            };
+            for i in 0..=8 {
+                let request = matches!(i, 3 | 7);
+                let (unit, _) = encode_one(&mut enc, i, w, h, request);
+                let frame_type = enc.frame_type(&unit);
+                let key = frame_type == FRAME_KEY;
+                if key != (i == 0 || request) {
+                    failures.push(format!(
+                        "{codec:?} frame {i}: unexpected type {frame_type:#04x}"
+                    ));
+                }
+                if request {
+                    let headers = carries_decoder_headers(codec, &unit);
+                    let refresh = key
+                        && (codec != Codec::H265
+                            || annexb_nals(&unit)
+                                .any(|nal| matches!((nal[0] >> 1) & 0x3f, 19 | 20)));
+                    println!(
+                        "{codec:?} frame {i}: type={frame_type:#04x}, refresh={refresh}, headers={headers}"
+                    );
+                    if !refresh || !headers {
+                        failures.push(format!(
+                            "{codec:?} frame {i}: expected a refresh with headers"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     /// A frame a client lost is left out of the encoder's predictions: the next frame predicts
@@ -2168,7 +2226,7 @@ mod tests {
             );
             assert_eq!(enc.frame_type(&key), FRAME_KEY, "{codec:?}");
             assert!(
-                carries_parameter_sets(codec, &key),
+                carries_decoder_headers(codec, &key),
                 "{codec:?}: the key frame the session asked for carries its parameter sets"
             );
             let mut fresh = VideoDecoder::new(codec).unwrap();
