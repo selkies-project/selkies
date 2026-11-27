@@ -361,7 +361,12 @@ for (const modeName of MODES) {
                 const owners: Held[] = [];
                 try {
                     page.on('console', (m) => { consoleLines.push(`${m.type()}: ${m.text()}`); });
-                    page.on('pageerror', (e) => { pageErrors.push(`${e.name}: ${e.message}`); });
+                    // Firefox, driven over WebDriver BiDi, reports the policy's own refusal of a
+                    // worker as a page error, however the page handles the worker's error event.
+                    page.on('pageerror', (e) => {
+                        if (restrict && e.name === 'Content-Security-Policy' && e.message.includes('(worker-src)')) return;
+                        pageErrors.push(`${e.name}: ${e.message}`);
+                    });
                     page.on('websocket', (ws) => { sockets.push(ws.url()); });
                     page.on('response', (r) => {
                         const entry: Seen = { url: r.url(), kind: r.request().resourceType(), status: r.status(), policy: null };

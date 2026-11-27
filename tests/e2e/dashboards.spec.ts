@@ -435,10 +435,12 @@ async function sidebarLayoutCheck(page: Page, res: Checks): Promise<void> {
     await sidebarMenuItem(page, '.fullscreen-button');
     const popup = '.sidebar-menu-popup';
     const items = await page.locator(`${popup} :is(.fullscreen-button, .gaming-mode-button, .keyboard-toggle-button, .trackpad-mode-button)`).count();
+    // One layout is allowed here, so the layout toggle stays out of the menu
+    // (layoutToggleBlock has it). An open menu sets focus guards beside its trigger.
     const appearance = await page.locator(`${popup} :is(.layout-toggle, .translucency-button, .theme-toggle)`).count();
-    const header = await page.locator('.sidebar-header .header-controls > *').count();
-    res.check("the header carries one menu, holding the four modes and the layout, translucency, and theme controls",
-        header === 1 && items === 4 && appearance === 3, { header, items, appearance });
+    const header = await page.locator('.sidebar-header .header-controls > :not([data-base-ui-focus-guard], [aria-owns])').count();
+    res.check("the header carries one menu, holding the four modes and the translucency and theme controls",
+        header === 1 && items === 4 && appearance === 2, { header, items, appearance });
     const icons = await within(page.evaluate((): { fs: Ink; gm: Ink } | null => {
         const ink = (svg: SVGSVGElement, strokeUnits: number): Ink => {
             const b = svg.getBBox();
@@ -1232,14 +1234,16 @@ async function secondScreenBlock(host: Host, dashboard: string): Promise<Checks>
 /**
  * The placement arrows are the theme's filled button in either theme: a stale
  * color here would be the one control on the page that never follows the theme.
+ * The arrows' overlay is modal over the header menu, so the theme flips with the
+ * system's scheme, which the page follows until a theme is picked.
  */
 async function arrowThemeCheck(page: Page, res: Checks): Promise<void> {
     const seen = new Map<string, string>();
     for (const flip of [false, true]) {
         if (flip) {
-            await (await sidebarMenuItem(page, '.theme-toggle'))?.click();
+            const dark = await ev<boolean>(page, "document.documentElement.classList.contains('dark')");
+            await page.emulateMedia({ colorScheme: dark ? 'light' : 'dark' });
             await sleep(500);
-            await sidebarMenuClose(page);
         }
         const theme = await ev<string>(page, "document.documentElement.classList.contains('light') ? 'light' : 'dark'");
         const colors = await within(page.evaluate(() => {

@@ -47,6 +47,7 @@ export async function sidebarOpen(page: Page): Promise<void> {
  */
 export async function sidebarClose(page: Page): Promise<void> {
     if (await page.locator('.sidebar.is-open').count()) {
+        await sidebarMenuClose(page);
         await page.locator('.toggle-handle').first().click();
         await sleep(800);
     }
@@ -87,8 +88,15 @@ export async function sidebarMenuItem(page: Page, selector: string): Promise<Loc
  * @param page The dashboard.
  */
 export async function sidebarMenuClose(page: Page): Promise<void> {
-    if (await page.locator(SIDEBAR_MENU_POPUP).count()) {
-        await page.keyboard.press('Escape');
+    const popup = page.locator(SIDEBAR_MENU_POPUP);
+    if (!(await popup.count())) return;
+    // Escape reaches the menu only from inside it: the stream takes the keys
+    // elsewhere. A press outside it closes it too, past the backdrop it holds.
+    await popup.first().focus().catch(() => {});
+    await page.keyboard.press('Escape');
+    await sleep(300);
+    if (await popup.count()) {
+        await page.mouse.click(1, 1);
         await sleep(300);
     }
 }

@@ -255,10 +255,15 @@ async function transportBlock(host: Host, res: Checks, mode: string): Promise<vo
                 await toggle(page, false);
                 res.check(`${engine}: webcam reports inactive`, await waitStatus(page, false), await statusText(page));
                 // Frames already in flight (RTP jitter buffer, decoder queue)
-                // land for a moment after the stop; the device must then go quiet.
+                // land for a moment after the stop. The device then keeps its
+                // readers fed at the keepalive's pace, two a second, with the last
+                // picture, and with black once the five-second hold has passed.
                 await sleep(1500);
-                const after = await device.probe(10, 3000);
-                res.check(`${engine}: no frames after disable`, after.rc !== 0 && (Number(after.fields.frames ?? '0') || 0) < 3, after.fields.frames ?? null);
+                const kept = await device.probe(4, 4000, [CENTER]);
+                res.check(`${engine}: after disable the device repeats a picture at the keepalive's pace`, kept.rc === 0 && fps(kept) > 0 && fps(kept) <= 3, `${framesText(kept)} fps=${field(kept, 'fps')}`);
+                await sleep(4000);
+                const held = await device.probe(2, 3000, [CENTER]);
+                res.check(`${engine}: and black once the hold has passed`, held.rc === 0 && near(sampleAt(held, ...CENTER), BLACK), samplesText(held));
                 res.check(`${engine}: no page errors`, c.errors.length === 0, errorsText(c));
             } finally {
                 await c.close();
