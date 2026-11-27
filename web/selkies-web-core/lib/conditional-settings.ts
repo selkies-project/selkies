@@ -350,10 +350,20 @@ export const RAW_POINTER_MOTION_SPEC: SettingSpec = {
 export const MAC_CMD_AS_CTRL_SPEC: SettingSpec = boolSpec("mac_cmd_as_ctrl", true,
     (value, _ctx, io) => io.postToCore({ type: "setMacCmdAsCtrl", value }));
 
+/**
+ * Whether a macOS Control-click is sent as a right click. Off unless chosen or
+ * set otherwise, which sends Control and the left button; only Apple clients
+ * read it, and only a macOS panel offers it. The core owns it, applying and
+ * persisting it on the propagated message.
+ */
+export const MAC_CTRL_CLICK_AS_RIGHT_CLICK_SPEC: SettingSpec = boolSpec("mac_ctrl_click_as_right_click", false,
+    (value, _ctx, io) => io.postToCore({ type: "setMacCtrlClickAsRightClick", value }));
+
 const SETTING_SPECS: SettingSpec[] = [
     HIDPI_SPEC, RATE_CONTROL_SPEC, USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_10BIT_SPEC,
     VIDEO_STREAMING_MODE_SPEC, USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, CPU_ENCODE_THREADING_SPEC,
     FORCE_ALIGNED_RESOLUTION_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC,
+    MAC_CTRL_CLICK_AS_RIGHT_CLICK_SPEC,
 ];
 
 /**
