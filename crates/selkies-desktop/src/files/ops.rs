@@ -1,6 +1,10 @@
 //! Background work for the file manager: copies, moves and deletions on one
-//! thread, image thumbnails on another, both reporting through a channel and
-//! a pipe the main loop polls so the desktop never blocks on the disk.
+//! thread, image thumbnails on another, and the measurements a properties
+//! window shows (a folder's contents, an image's dimensions) on a third, all
+//! reporting through a channel and a pipe the main loop polls so the desktop
+//! never blocks on the disk. The measurements have a thread of their own
+//! because walking a large tree takes as long as the tree is big, and neither
+//! a copy nor a thumbnail should wait behind it.
 
 use std::collections::HashSet;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -31,6 +35,9 @@ pub enum Job {
     Delete { id: u64, paths: Vec<PathBuf> },
     /// Decode an image at a size.
     Thumbnail { key: ThumbKey },
+    /// Measure an item for a properties window: what a folder holds, or an
+    /// image's dimensions where `image` is set.
+    Inspect { window: u32, path: PathBuf, image: bool },
 }
 
 /// Identifies a thumbnail: the file, its modification time and the pixel size.
@@ -57,12 +64,36 @@ pub enum Message {
     Done { id: u64, errors: Vec<String> },
     /// A thumbnail was decoded, or could not be.
     Thumb { key: ThumbKey, image: Option<Pixmap> },
+    /// An item a properties window asked about was measured.
+    Inspected { window: u32, inspection: Inspection },
+}
+
+/// What a folder holds, counted through its subfolders without following links.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Contents {
+    /// The bytes of every file and link inside.
+    pub bytes: u64,
+    /// Files and links inside.
+    pub files: u64,
+    /// Folders inside, not counting the folder itself.
+    pub folders: u64,
+}
+
+/// The measurements of an item that take reading more than its own metadata.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Inspection {
+    /// What a folder holds; `None` for anything else.
+    pub contents: Option<Contents>,
+    /// An image's width and height in pixels, read from its header; `None` for
+    /// anything else or a format the decoder does not know.
+    pub dimensions: Option<(u32, u32)>,
 }
 
 /// The channel to the workers and the pipe they wake the main loop with.
 pub struct Worker {
     ops: Sender<Job>,
     thumbs: Sender<Job>,
+    inspect: Sender<Job>,
     results: Receiver<Message>,
     wake_read: OwnedFd,
     pending: HashSet<ThumbKey>,
@@ -88,7 +119,8 @@ impl Worker {
         let (result_tx, results) = channel::<Message>();
         let (ops, ops_rx) = channel::<Job>();
         let (thumbs, thumbs_rx) = channel::<Job>();
-        for rx in [ops_rx, thumbs_rx] {
+        let (inspect, inspect_rx) = channel::<Job>();
+        for rx in [ops_rx, thumbs_rx, inspect_rx] {
             let tx = result_tx.clone();
             let wake = wake_write.clone();
             std::thread::spawn(move || {
@@ -100,6 +132,7 @@ impl Worker {
         Worker {
             ops,
             thumbs,
+            inspect,
             results,
             wake_read,
             pending: HashSet::new(),
@@ -134,6 +167,16 @@ impl Worker {
         if self.pending.insert(key.clone()) {
             let _ = self.thumbs.send(Job::Thumbnail { key });
         }
+    }
+
+    /// Queues the measurements of an item for a properties window.
+    ///
+    /// # Arguments
+    /// * `window` - The properties window the result goes to.
+    /// * `path` - The item.
+    /// * `image` - Whether to read the item's dimensions as an image.
+    pub fn inspect(&self, window: u32, path: PathBuf, image: bool) {
+        let _ = self.inspect.send(Job::Inspect { window, path, image });
     }
 
     /// Takes every message that arrived, clearing the wake pipe.
@@ -174,6 +217,13 @@ fn run(job: Job, tx: &Sender<Message>, wake: Option<&OwnedFd>) {
             let image = decode_thumbnail(&key);
             send(Message::Thumb { key, image });
         }
+        Job::Inspect { window, path, image } => {
+            let inspection = Inspection {
+                contents: path.is_dir().then(|| contents(&path)),
+                dimensions: if image { dimensions(&path) } else { None },
+            };
+            send(Message::Inspected { window, inspection });
+        }
         Job::Copy { id, sources, dest } => {
             let errors = transfer(id, &sources, &dest, false, &send);
             send(Message::Done { id, errors });
@@ -204,6 +254,42 @@ fn run(job: Job, tx: &Sender<Message>, wake: Option<&OwnedFd>) {
             send(Message::Done { id, errors });
         }
     }
+}
+
+/// Counts what a folder holds, through every subfolder it can read. A link is
+/// counted as the link, never followed, so a link to a parent cannot loop and a
+/// link to a large tree elsewhere does not add that tree.
+fn contents(dir: &Path) -> Contents {
+    let mut total = Contents::default();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(folder) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                total.folders += 1;
+                pending.push(entry.path());
+            } else {
+                total.files += 1;
+                total.bytes += metadata.len();
+            }
+        }
+    }
+    total
+}
+
+/// An image's width and height, read from its header without decoding it.
+fn dimensions(path: &Path) -> Option<(u32, u32)> {
+    image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
 }
 
 /// Decodes an image file scaled to a thumbnail.
@@ -402,6 +488,35 @@ pub fn file_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder's contents count every file and folder beneath it, and a link inside is counted
+    /// as itself, never followed, so a link back to the folder cannot loop.
+    #[test]
+    fn a_folder_counts_its_tree_without_following_links() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("a/b")).expect("mkdir");
+        std::fs::write(dir.path().join("one.txt"), b"12345").expect("write");
+        std::fs::write(dir.path().join("a/b/two.txt"), b"123").expect("write");
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("a/back")).expect("symlink");
+        let link_len = std::fs::symlink_metadata(dir.path().join("a/back"))
+            .expect("lstat")
+            .len();
+        let counted = contents(dir.path());
+        assert_eq!((counted.files, counted.folders), (3, 2));
+        assert_eq!(counted.bytes, 8 + link_len);
+    }
+
+    /// An image's dimensions come from its header, and a file that is no image has none.
+    #[test]
+    fn an_image_reports_its_dimensions_from_its_header() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let png = dir.path().join("picture.png");
+        image::RgbaImage::new(7, 3).save(&png).expect("save");
+        assert_eq!(dimensions(&png), Some((7, 3)));
+        let text = dir.path().join("picture.txt");
+        std::fs::write(&text, b"not an image").expect("write");
+        assert_eq!(dimensions(&text), None);
+    }
 
     #[test]
     fn splits_extensions() {

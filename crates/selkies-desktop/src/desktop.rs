@@ -377,6 +377,8 @@ pub enum Hover {
     DesktopIcon(usize),
     /// A button of the desktop's dialog.
     Dialog(ui::dialog::Part),
+    /// The Close button of a properties window, by the window's number.
+    Properties(u32),
     /// An item of the desktop icons' right-click menu.
     DesktopMenuItem(usize),
     /// A quick launch button, by position.
@@ -465,6 +467,8 @@ pub struct Desktop {
     pub settings: settings::SettingsState,
     /// The desktop's dialog: a new folder's name, an item's new name, or a deletion.
     pub dialog: ui::dialog::DialogState,
+    /// The open properties windows of files and folders.
+    pub properties: Vec<ui::properties::PropertiesWindow>,
     /// The Desktop folder's items, in listing order.
     pub desktop_items: Vec<crate::desktop_folder::DesktopItem>,
     /// The cells the layout file keeps, by file name.
@@ -694,6 +698,7 @@ impl Desktop {
             launcher: launcher::LauncherState::default(),
             settings: settings::SettingsState::default(),
             dialog: ui::dialog::DialogState::default(),
+            properties: Vec::new(),
             desktop_items: Vec::new(),
             desktop_layout: HashMap::new(),
             desktop_press: None,
@@ -1252,6 +1257,7 @@ impl Desktop {
         let mut ids = self.files.ids();
         ids.extend(self.settings.id);
         ids.extend(self.dialog.id);
+        ids.extend(self.properties.iter().map(|w| w.id));
         ids
     }
 
@@ -1263,6 +1269,11 @@ impl Desktop {
     /// Whether a window number is the desktop dialog's.
     fn is_dialog(&self, id: u32) -> bool {
         self.dialog.id == Some(id)
+    }
+
+    /// Whether a window number is a properties window's.
+    fn is_properties(&self, id: u32) -> bool {
+        self.properties.iter().any(|w| w.id == id)
     }
 
     /// Opens the settings window, on a page when one is asked for, as a
@@ -2342,6 +2353,7 @@ impl Desktop {
             } => match surface {
                 SurfaceId::Window(id) if self.is_settings(id) => settings::key(self, key),
                 SurfaceId::Window(id) if self.is_dialog(id) => ui::dialog::key(self, key),
+                SurfaceId::Window(id) if self.is_properties(id) => ui::properties::key(self, id, key),
                 SurfaceId::Window(id) => ui::files::key(self, id, key, modifiers),
                 _ => self.key(key),
             },
@@ -2367,6 +2379,8 @@ impl Desktop {
                     settings::close(self);
                 } else if self.is_dialog(window) {
                     ui::dialog::close(self);
+                } else if self.is_properties(window) {
+                    ui::properties::close(self, window);
                 } else {
                     ui::files::close(self, window);
                 }
@@ -2573,6 +2587,7 @@ impl Desktop {
                 self.dialog.pix = None;
                 self.dialog.dirty = true;
             }
+            SurfaceId::Window(id) if self.is_properties(id) => ui::properties::configure(self, id, geometry),
             SurfaceId::Window(id) if self.is_settings(id) => {
                 let current = self.settings.geometry;
                 if current.width == width
@@ -3084,6 +3099,7 @@ impl Desktop {
             }
             SurfaceId::Window(id) if self.is_settings(id) => settings::pointer_motion(self, x, y),
             SurfaceId::Window(id) if self.is_dialog(id) => ui::dialog::pointer_motion(self, x, y),
+            SurfaceId::Window(id) if self.is_properties(id) => ui::properties::pointer_motion(self, id, x, y),
             SurfaceId::Window(id) => ui::files::pointer_motion(self, id, x, y),
             SurfaceId::Notifications => {
                 let hover = notifications::hit(self, x, y)
@@ -3111,6 +3127,8 @@ impl Desktop {
                 settings::pointer_button(self, x, y, button, pressed);
             } else if self.is_dialog(id) {
                 ui::dialog::pointer_button(self, x, y, button, pressed);
+            } else if self.is_properties(id) {
+                ui::properties::pointer_button(self, id, x, y, button, pressed);
             } else {
                 ui::files::pointer_button(self, id, x, y, button, pressed, time, modifiers);
             }
@@ -3299,7 +3317,7 @@ impl Desktop {
         if let SurfaceId::Window(id) = surface {
             if self.is_settings(id) {
                 settings::pointer_axis(self, x, y, delta);
-            } else if !self.is_dialog(id) {
+            } else if !self.is_dialog(id) && !self.is_properties(id) {
                 ui::files::pointer_axis(self, id, x, y, delta);
             }
             return;
@@ -3344,6 +3362,7 @@ impl Desktop {
             }
             SurfaceId::Window(id) if self.is_settings(id) => settings::pointer_leave(self),
             SurfaceId::Window(id) if self.is_dialog(id) => ui::dialog::pointer_leave(self),
+            SurfaceId::Window(id) if self.is_properties(id) => ui::properties::pointer_leave(self, id),
             SurfaceId::Window(id) => ui::files::pointer_leave(self, id),
             SurfaceId::Notifications => {
                 if matches!(self.hover, Hover::Card(..)) {
@@ -3685,6 +3704,9 @@ impl Desktop {
         if self.is_dialog(id) {
             return self.render_dialog();
         }
+        if self.is_properties(id) {
+            return self.render_properties(id);
+        }
         let index = self.files.windows.iter().position(|w| w.id == id)?;
         let geometry = self.files.windows[index].geometry;
         if !geometry.configured || !self.files.windows[index].dirty {
@@ -3709,6 +3731,36 @@ impl Desktop {
         self.files.windows[index].pix = Some(pix);
         Some(Frame {
             pixmap: self.files.windows[index].pix.as_ref()?,
+            scale: geometry.scale,
+            damage: vec![whole],
+            input: vec![whole],
+            visible: vec![whole],
+            grab: false,
+            bar: None,
+        })
+    }
+
+    /// Renders a properties window when it changed.
+    fn render_properties(&mut self, id: u32) -> Option<Frame<'_>> {
+        let index = self.properties.iter().position(|w| w.id == id)?;
+        let geometry = self.properties[index].geometry;
+        if !geometry.configured || !self.properties[index].dirty {
+            return None;
+        }
+        self.properties[index].dirty = false;
+        let (w, h) = (
+            (geometry.width * geometry.scale) as u32,
+            (geometry.height * geometry.scale) as u32,
+        );
+        let (mut pix, _) = sized_pixmap(self.properties[index].pix.take(), w, h)?;
+        {
+            let mut canvas = Canvas::new(pix.as_mut(), geometry.scale);
+            ui::properties::draw(self, id, &mut canvas);
+        }
+        let whole = Rect::new(0, 0, geometry.width, geometry.height);
+        self.properties[index].pix = Some(pix);
+        Some(Frame {
+            pixmap: self.properties[index].pix.as_ref()?,
             scale: geometry.scale,
             damage: vec![whole],
             input: vec![whole],

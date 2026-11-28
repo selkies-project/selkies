@@ -90,6 +90,11 @@ pub fn describe(d: &mut Desktop, origin: impl Fn(SurfaceId) -> Option<(i32, i32)
     {
         surfaces.push(window(id, tree));
     }
+    for properties in &d.properties {
+        if let Some(tree) = ui::properties::describe(d, properties.id) {
+            surfaces.push(window(properties.id, tree));
+        }
+    }
     let ids: Vec<u32> = d.files.windows.iter().map(|w| w.id).collect();
     for id in ids {
         if let Some(tree) = ui::files::describe(d, id) {

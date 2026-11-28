@@ -482,6 +482,7 @@ fn run() -> i32 {
             if desktop.files.drain_worker() {
                 desktop.settings.dirty = true;
             }
+            ui::properties::receive(&mut desktop);
             desktop.files.drain_watch();
         }
         if debug {

@@ -32,7 +32,7 @@ x11rb = { version = "0.14", features = ["shape", "shm", "randr", "cursor", "reso
 # The rasterizer, shared with the window manager's frames and menus.
 selkies-draw = { path = "../selkies-draw" }
 tiny-skia = "0.12"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 # Keysym names and the characters they produce, for the menu's search box.
 xkeysym = "0.2"
 libc = "0.2"

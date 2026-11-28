@@ -204,6 +204,8 @@ pub enum MenuAction {
     Rename,
     /// Delete the selection after confirmation.
     Delete,
+    /// Open the item's properties window.
+    Properties,
     /// Create a folder.
     NewFolder,
     /// Toggle hidden files.
@@ -445,6 +447,9 @@ pub struct Manager {
     pub places: Vec<Place>,
     /// Operations in flight, by number, with the window they report to.
     operations: HashMap<u64, u32>,
+    /// Measurements the workers finished for properties windows, by window,
+    /// until the desktop hands them to their windows.
+    pub inspected: Vec<(u32, ops::Inspection)>,
 }
 
 impl Default for Manager {
@@ -468,6 +473,7 @@ impl Manager {
             drag: None,
             places: places(),
             operations: HashMap::new(),
+            inspected: Vec::new(),
         }
     }
 
@@ -770,6 +776,7 @@ impl Manager {
                         window.dirty = true;
                     }
                 }
+                Message::Inspected { window, inspection } => self.inspected.push((window, inspection)),
             }
         }
         changed

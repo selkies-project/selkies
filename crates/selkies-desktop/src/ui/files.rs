@@ -1164,6 +1164,12 @@ fn item_rows(d: &mut Desktop, id: u32) -> Vec<MenuRow> {
             true,
         ));
     }
+    rows.push(MenuRow::Separator);
+    rows.push(MenuRow::Action(
+        tr("Properties").to_string(),
+        MenuAction::Properties,
+        selected.len() == 1,
+    ));
     rows
 }
 
@@ -1298,6 +1304,13 @@ fn perform(d: &mut Desktop, id: u32, action: MenuAction) {
             let paths = w.selected_paths();
             if !paths.is_empty() {
                 w.confirm = Some(Confirm { paths });
+            }
+        }
+        MenuAction::Properties => {
+            if let [index] = w.selection.iter().copied().collect::<Vec<_>>().as_slice()
+                && let Some(item) = w.items.get(*index).cloned()
+            {
+                ui::properties::open(d, &item);
             }
         }
         MenuAction::NewFolder => new_folder(d, id),
@@ -1622,6 +1635,7 @@ pub fn key(d: &mut Desktop, id: u32, key: Key, modifiers: Modifiers) {
                 w.selection.clear();
             }
         }
+        Key::Enter if modifiers.alt => perform(d, id, MenuAction::Properties),
         Key::Enter => {
             if let Some(cursor) = w.cursor.filter(|c| w.selection.contains(c)) {
                 open_item(d, id, cursor);

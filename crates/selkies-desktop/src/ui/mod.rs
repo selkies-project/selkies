@@ -11,6 +11,7 @@ pub mod notifications;
 pub mod panel;
 pub mod popups;
 pub mod preview;
+pub mod properties;
 pub mod settings;
 pub mod tray_menu;
 

@@ -10,9 +10,9 @@
 //! A right click on an icon selects it unless it already is, so the menu acts on every
 //! selected icon: Open, Open with an application where they are files of one type, Cut and
 //! Copy onto the clipboard the file manager's windows share, Paste into folder on a single
-//! folder, Rename on a single item, and Delete. Rename is grayed out on a launcher, whose name
-//! is its application's, read from the file, rather than the file's own. The entries are worked
-//! out once as the menu opens, since Open with reads desktop entries.
+//! folder, Rename on a single item, Delete, and Properties on a single item. Rename is grayed out
+//! on a launcher, whose name is its application's, read from the file, rather than the file's
+//! own. The entries are worked out once as the menu opens, since Open with reads desktop entries.
 //!
 //! A drop on the desktop that would copy or move files, from a window onto it or onto one of
 //! its folders, opens the same menu with Copy here, Move here, and Cancel.
@@ -60,6 +60,8 @@ pub enum Action {
     Rename,
     /// Ask whether to delete the items.
     Delete,
+    /// Open the item's properties window.
+    Properties,
     /// Carry the drop waiting on the desktop out: a move where set, else a copy.
     Drop(bool),
     /// Leave the drop waiting on the desktop undone.
@@ -145,6 +147,12 @@ fn entries_for(d: &mut Desktop) -> Vec<Entry> {
         enabled: single && first.launcher.is_none(),
     });
     entries.push(Entry::item(tr("Delete"), Action::Delete));
+    entries.push(Entry::Separator);
+    entries.push(Entry::Item {
+        label: tr("Properties").to_string(),
+        action: Action::Properties,
+        enabled: single,
+    });
     entries
 }
 
@@ -353,6 +361,11 @@ fn perform(d: &mut Desktop, action: Action) {
             }
         }
         Action::Delete => ui::dialog::open_delete(d, paths),
+        Action::Properties => {
+            if let [item] = selected.as_slice() {
+                ui::properties::open(d, &item.item);
+            }
+        }
         Action::Drop(moving) => d.finish_desktop_drop(moving),
         Action::CancelDrop => d.desktop_drop = None,
     }
