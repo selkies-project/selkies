@@ -31,7 +31,8 @@
 //! verdict takes a download no lower than [`BESIDE_SHARE`] of an even split of what it and
 //! the stream moved over the last [`BESIDE_WINDOW`]: the steer then meets a path that
 //! delivers the stream its half and settles there. One over that share, as a slow start
-//! leaves it, the same verdict takes down to it. A download under that share is raised to
+//! leaves it, the same verdict takes down to it where a cut would, past the hold of the last
+//! one. A download under that share is raised to
 //! it a step a verdict, congested or not: against a floor from before the transfer the
 //! steer's own queue reads congested two verdicts in three, and a download each of them held
 //! would stay where its first seconds left it. Nor does a congested verdict act before its
@@ -1127,7 +1128,7 @@ impl TransferPacer {
     ///
     /// `share_bps` is what a congested verdict takes the allowance to, where there is one
     /// ([`UplinkGauge::share_bps`]): toward it a step a verdict from under it, and down to
-    /// it from over it.
+    /// it from over it past a hold, as a cut.
     fn gauge_backoff_beside(
         &self,
         congested: bool,
@@ -1157,18 +1158,19 @@ impl TransferPacer {
             }
             // Over its share, the same verdict takes it down to the share: what a slow start
             // or a clear stretch added over it is the stream's again once the steer's queue
-            // stands. The share is the split the two are measured at, not a cut for a queue,
-            // and is followed down through a hold too.
+            // stands. It does so where a cut would, past the hold: the share's dips inside
+            // one, followed down, were climbed back a step a verdict.
             if let Some(share) = share_bps.filter(|share| s.rate_bps > *share) {
+                if now < s.hold_until {
+                    return;
+                }
                 if !s.congested {
                     s.congested = true;
                     s.probe_ceiling = Some(s.rate_bps.max(2.0 * Self::RATE_FLOOR));
                 }
                 s.rate_bps = share.max(Self::RATE_FLOOR);
-                if now >= s.hold_until {
-                    s.hold_until = now + Self::HOLD_SECONDS;
-                    s.aligned = false;
-                }
+                s.hold_until = now + Self::HOLD_SECONDS;
+                s.aligned = false;
                 return;
             }
             // What the transfers moved, where they left a fifth of the allowance or more
@@ -2030,9 +2032,9 @@ mod tests {
             pacer.rate_bps()
         );
         pacer.inner.lock().used_bps = None;
-        // One with far more than its share, as a slow start leaves it, is taken down to it,
-        // and follows it down through the hold after: the share is read off what the two
-        // wrote, the download's own excess in it at first.
+        // One with far more than its share, as a slow start leaves it, is taken down to it
+        // and held there, as a cut holds: a dip of the share inside the hold is not followed,
+        // and one past it is.
         release_hold(&pacer);
         set_rate(&pacer, 1_000_000.0);
         pacer.gauge_backoff_beside(true, false, 0.65, DEFAULT_STEP, Some(40_000), share);
@@ -2041,14 +2043,15 @@ mod tests {
             "{}",
             pacer.rate_bps()
         );
-        pacer.gauge_backoff_beside(
-            true,
-            false,
-            0.65,
-            DEFAULT_STEP,
-            Some(40_000),
-            Some(300_000.0),
+        let dipped = Some(300_000.0);
+        pacer.gauge_backoff_beside(true, false, 0.65, DEFAULT_STEP, Some(40_000), dipped);
+        assert!(
+            (pacer.rate_bps() - 340_000.0).abs() < 1.0,
+            "{}",
+            pacer.rate_bps()
         );
+        release_hold(&pacer);
+        pacer.gauge_backoff_beside(true, false, 0.65, DEFAULT_STEP, Some(40_000), dipped);
         assert!(
             (pacer.rate_bps() - 300_000.0).abs() < 1.0,
             "{}",
