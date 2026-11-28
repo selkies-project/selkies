@@ -217,6 +217,9 @@ pub struct WlCapture {
     /// Whether the last frame was encoded from a client's buffer, else why it was composited,
     /// so only a change is logged; `None` before the first frame.
     pub direct: Option<Result<(), &'static str>>,
+    /// The ticks in a row whose zero-copy render target the renderer refused to bind
+    /// (`crate::note_target_bind`).
+    pub target_bind_refusals: u32,
     pub published: u64,
     /// The frame count of the last publish that encodes the retained host frame.
     pub host_retained_use: u64,
@@ -1177,6 +1180,9 @@ pub struct AppState {
     pub clock: Clock<Monotonic>,
 
     pub use_gpu: bool,
+    /// The GL renderer refused to bind a zero-copy capture's render targets, so every capture
+    /// starts on the readback path (`crate::demote_zero_copy_to_readback`).
+    pub zero_copy_targets_refused: bool,
 
     pub cursor_helper: Cursor,
 

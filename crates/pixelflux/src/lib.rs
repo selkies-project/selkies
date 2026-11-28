@@ -2383,6 +2383,43 @@ fn end_zero_copy(cap: &mut wayland::frontend::WlCapture) -> bool {
     true
 }
 
+/// Count a tick whose zero-copy render target the renderer refused to bind (`refused`) or
+/// bound. True once `HW_ERROR_RECOVERY_THRESHOLD` refusals in a row: a target refused that
+/// often publishes no frame, so the encode thread sees no failure to give the session up on.
+fn note_target_bind(cap: &mut wayland::frontend::WlCapture, refused: bool) -> bool {
+    if refused {
+        cap.target_bind_refusals += 1;
+    } else {
+        cap.target_bind_refusals = 0;
+    }
+    cap.target_bind_refusals >= HW_ERROR_RECOVERY_THRESHOLD
+}
+
+/// Move a capture whose zero-copy session cannot go on to the readback path, as one given up
+/// mid-stream: it composites into the display's own render target and reads it back for an
+/// encode thread that still tries a hardware encoder. The zero-copy encode thread ends after
+/// its frame in flight and hands the successor its place in the delivery order. False where
+/// no zero-copy session ran.
+fn demote_zero_copy_to_readback(
+    cap: &mut wayland::frontend::WlCapture,
+    display_id: u32,
+    reason: &str,
+) -> bool {
+    if !end_zero_copy(cap) {
+        return false;
+    }
+    cap.target_bind_refusals = 0;
+    let _report = report::enter(&cap.report);
+    report::capture("readback", false);
+    report::capture_reason(reason);
+    let predecessor = cap.encode_join.take();
+    let s = &cap.settings;
+    let try_gpu = s.codec.is_video() && !(s.use_cpu || s.encode_node_index == -1);
+    bootstrap_readback_pool(cap, display_id, true, try_gpu, None, predecessor);
+    cap.request_idr();
+    true
+}
+
 /// Keep `frame` as the display's host content. Under a zero-copy session the frame it replaces
 /// goes back to the host only once no frame in flight to the encode thread reads it.
 fn retain_host_frame(
@@ -3262,7 +3299,8 @@ fn bootstrap_zero_copy_pool(
 
 /// Consecutive encode failures before a hardware path recovers (~0.5s at 60fps): a hiccup
 /// outlasts it, anything longer starts to look like a dead session. Shared by every hardware
-/// encode path (Wayland zero-copy, Wayland readback, X11) so recovery timing matches.
+/// encode path (Wayland zero-copy, Wayland readback, X11), and by the Wayland render tick's
+/// refusals of a zero-copy target (`note_target_bind`), so recovery timing matches.
 pub(crate) const HW_ERROR_RECOVERY_THRESHOLD: u32 = 30;
 
 fn start_capture_on_display(
@@ -3741,6 +3779,7 @@ fn start_capture_on_display(
         host_inflight: Vec::new(),
         scanout_inflight: Vec::new(),
         direct: None,
+        target_bind_refusals: 0,
         published: 0,
         host_retained_use: 0,
         recording_sink,
@@ -3808,8 +3847,9 @@ fn start_capture_on_display(
         cap.deliver_join = Some(join);
     }
 
-    // A zero-copy session whose render targets cannot be allocated leaves the capture to a
-    // readback path that still tries the GPU, as one given up mid-stream does.
+    // A zero-copy session whose render targets cannot be allocated, or that the renderer has
+    // refused to bind, leaves the capture to a readback path that still tries the GPU, as one
+    // given up mid-stream does.
     let mut zero_copy_refused = false;
     if let Some(encoder) = video_encoder {
         cap.encode_stats.n_stripes.store(1, Ordering::Relaxed);
@@ -3821,12 +3861,17 @@ fn start_capture_on_display(
             .as_ref()
             .map(|r| r.egl_context().display().get_display_handle().handle)
             .unwrap_or(std::ptr::null());
-        match state
-            .gbm_device
-            .as_ref()
-            .and_then(|gbm| alloc_zero_copy_ring(gbm, &settings, display_id))
-        {
-            Some(ring) => bootstrap_zero_copy_pool(
+        let ring = if state.zero_copy_targets_refused && !host_capture {
+            Err("the renderer cannot bind the zero-copy render targets")
+        } else {
+            state
+                .gbm_device
+                .as_ref()
+                .and_then(|gbm| alloc_zero_copy_ring(gbm, &settings, display_id))
+                .ok_or("the zero-copy render targets could not be allocated")
+        };
+        match ring {
+            Ok(ring) => bootstrap_zero_copy_pool(
                 &mut cap,
                 ring,
                 display_id,
@@ -3834,14 +3879,14 @@ fn start_capture_on_display(
                 egl_display,
                 host_capture,
             ),
-            None => {
+            Err(why) => {
                 drop(encoder);
                 eprintln!(
-                    "[Wayland] Display {display_id}: zero-copy capture not started; using readback encode."
+                    "[Wayland] Display {display_id}: zero-copy capture not started ({why}); using readback encode."
                 );
                 zero_copy_refused = true;
                 report::capture("readback", false);
-                report::capture_reason("the zero-copy render targets could not be allocated");
+                report::capture_reason(why);
                 if host_capture && let Some(h) = state.host.as_ref() {
                     h.set_buffer_type(display_id, false);
                 }
@@ -5494,6 +5539,8 @@ fn render_node_tick(
     };
 
     if !host_mode && state.use_gpu {
+        // The zero-copy target the renderer refused often enough to give the session up.
+        let mut refused_target: Option<String> = None;
         if let Some(renderer) = state.gles_renderer.as_mut() {
             let mut cap = node.capture.as_mut();
             // A zero-copy target's age counts the renders since it last took one.
@@ -5588,6 +5635,9 @@ fn render_node_tick(
                         };
                         match renderer.bind(dmabuf) {
                             Ok(mut frame) => {
+                                if let Some(c) = cap.as_deref_mut() {
+                                    note_target_bind(c, false);
+                                }
                                 // What changed since the last frame, for the encoder,
                                 // whatever the target's age.
                                 let changed = slot_id
@@ -5734,10 +5784,44 @@ fn render_node_tick(
                                     );
                                 }
                             }
-                            Err(e) => eprintln!("Failed to bind buffer: {:?}", e),
+                            Err(e) => {
+                                eprintln!("Failed to bind buffer: {:?}", e);
+                                if slot_id.is_some()
+                                    && let Some(c) = cap
+                                    && note_target_bind(c, true)
+                                {
+                                    refused_target = Some(format!("{e:?}"));
+                                }
+                            }
                         }
                     }
                 }
+            }
+        }
+        // Nothing reaches the encoder while its target is refused, and the display's own
+        // target, which the readback path draws into, is one the renderer may still bind.
+        if let Some(error) = refused_target
+            && let Some((_, target)) = gpu_slot.as_ref()
+            && let Some(cap) = node.capture.as_mut()
+        {
+            let what = format!(
+                "{}x{} {:?} modifier {:#x} pitch {}",
+                target.width(),
+                target.height(),
+                target.format().code,
+                u64::from(target.format().modifier),
+                target.strides().next().unwrap_or(0)
+            );
+            if demote_zero_copy_to_readback(
+                cap,
+                node.id,
+                "the renderer cannot bind the zero-copy render targets",
+            ) {
+                eprintln!(
+                    "[Wayland] Output {}: the renderer refused the zero-copy render target ({what}) {HW_ERROR_RECOVERY_THRESHOLD} times in a row ({error}); switching to readback encode.",
+                    node.id
+                );
+                state.zero_copy_targets_refused = true;
             }
         }
     } else if !host_mode && let Some(renderer) = state.pixman_renderer.as_mut() {
@@ -7251,6 +7335,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         start_time: Instant::now(),
         clock: Clock::new(),
         use_gpu,
+        zero_copy_targets_refused: false,
         cursor_helper: Cursor::load(cursor_size),
         keymap_policy: wayland::keymap::KeymapPolicy::seat(),
         host: None,
@@ -11620,6 +11705,179 @@ mod wl_frame_pool_tests {
         assert!(p.try_begin().is_none());
         p.cancel(id, buf);
         assert!(p.try_begin().is_some(), "canceled reservation reusable");
+    }
+}
+
+#[cfg(test)]
+mod target_bind_fallback_tests {
+    //! A zero-copy capture whose render targets the renderer refuses to bind publishes no
+    //! frame, so its encode thread never fails and never gives the session up: the render
+    //! tick counts the refusals and moves the capture to the readback path, whose frames
+    //! still reach the consumer.
+    use super::*;
+    use smithay::backend::allocator::{Fourcc, Modifier, dmabuf::DmabufFlags};
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+
+    const W: i32 = 64;
+    const H: i32 = 64;
+
+    /// A render target over a memfd, as the ring's GBM targets are laid out.
+    fn target() -> Dmabuf {
+        let fd = crate::memfd_create(c"target", libc::MFD_CLOEXEC);
+        assert!(fd >= 0, "memfd_create");
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        assert_eq!(
+            unsafe { libc::ftruncate(fd.as_raw_fd(), libc::off_t::from(W * H * 4)) },
+            0
+        );
+        let mut builder = Dmabuf::builder(
+            (W, H),
+            Fourcc::Argb8888,
+            Modifier::Linear,
+            DmabufFlags::empty(),
+        );
+        builder.add_plane(fd, 0, (W * 4) as u32);
+        builder.build().unwrap()
+    }
+
+    /// A capture running a zero-copy session on two targets, the session's encode thread
+    /// standing in for the hardware one: it drains the targets until the pool shuts down.
+    fn zero_copy_capture(
+        settings: CaptureSettings,
+    ) -> (
+        wayland::frontend::WlCapture,
+        std::sync::mpsc::Receiver<Vec<EncodedStripe>>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<EncodedStripe>>(4);
+        let pool = Arc::new(WlFramePool::of(vec![target(), target()]));
+        let drain = pool.clone();
+        let encode_join = thread::spawn(move || {
+            while let Some(f) = drain.take() {
+                drain.recycle(f.id, f.buf);
+            }
+            None
+        });
+        let cap = wayland::frontend::WlCapture {
+            settings,
+            callback: None,
+            zero_copy: Some(Arc::new(Mutex::new(None))),
+            gpu_pool: Some(pool),
+            gpu_ring: Vec::new(),
+            host_still: None,
+            host_inflight: Vec::new(),
+            scanout_inflight: Vec::new(),
+            direct: None,
+            target_bind_refusals: 0,
+            published: 0,
+            host_retained_use: 0,
+            recording_sink: None,
+            deliver_tx: Some(tx),
+            deliver_join: None,
+            deliver_discard: None,
+            encode_pool: None,
+            encode_join: Some(encode_join),
+            encode_controls: Arc::new(WlEncodeControls::new(None)),
+            encode_stats: Arc::new(WlEncodeStats::new()),
+            report: report::StreamReport::new("wayland"),
+            pool_last_render: vec![0; WL_POOL_SURFACES],
+            render_seq: 0,
+            pool_content_gen: Vec::new(),
+            content_gen: 0,
+            frame_counter: 0,
+            pending_force_idr: false,
+            needs_full_render: true,
+            pace: FramePace::windowed(),
+            change_pending: false,
+            pending_commits: Vec::new(),
+            last_change: None,
+            merge_hold: None,
+            host_merged: None,
+            callbacks_at: None,
+            owed_callbacks: Vec::new(),
+            commit_rhythm: Vec::new(),
+            source: None,
+        };
+        (cap, rx)
+    }
+
+    /// A bound target clears the count, so only refusals in a row give the session up.
+    #[test]
+    fn only_refusals_in_a_row_give_the_targets_up() {
+        let (mut cap, _rx) = zero_copy_capture(CaptureSettings::default());
+        for _ in 1..HW_ERROR_RECOVERY_THRESHOLD {
+            assert!(!note_target_bind(&mut cap, true));
+        }
+        assert!(!note_target_bind(&mut cap, false), "a bound target");
+        for _ in 1..HW_ERROR_RECOVERY_THRESHOLD {
+            assert!(!note_target_bind(&mut cap, true));
+        }
+        assert!(note_target_bind(&mut cap, true), "the threshold in a row");
+        teardown_capture(&mut cap);
+    }
+
+    /// Refused targets move a video capture to the readback path, and a frame composited
+    /// into the display's own target then comes out of the encoder.
+    #[test]
+    fn a_capture_whose_targets_are_refused_streams_read_back_frames() {
+        let display_id = 987_653;
+        let settings = CaptureSettings {
+            width: W,
+            height: H,
+            codec: Codec::H264,
+            use_cpu: true,
+            target_fps: 30.0,
+            ..CaptureSettings::default()
+        };
+        let (mut cap, rx) = zero_copy_capture(settings);
+        let mut refusals = 0;
+        while !note_target_bind(&mut cap, true) {
+            refusals += 1;
+        }
+        assert_eq!(refusals + 1, HW_ERROR_RECOVERY_THRESHOLD);
+        assert!(demote_zero_copy_to_readback(
+            &mut cap,
+            display_id,
+            "the renderer cannot bind the zero-copy render targets"
+        ));
+        assert!(cap.gpu_pool.is_none() && cap.zero_copy.is_none());
+        assert_eq!(cap.target_bind_refusals, 0);
+        let info = cap.report.info();
+        assert_eq!(info.capture, "readback");
+        assert!(!info.zero_copy);
+        assert_eq!(
+            info.capture_reason,
+            "the renderer cannot bind the zero-copy render targets"
+        );
+        assert!(
+            !demote_zero_copy_to_readback(&mut cap, display_id, "again"),
+            "a readback capture has no session to give up"
+        );
+
+        let pool = cap.encode_pool.clone().expect("a readback pool");
+        let (id, mut buf) = pool.try_begin().expect("a free readback buffer");
+        for (i, px) in buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            *px = [(i % 251) as u8, (i / 64) as u8, 0x80, 0xff];
+        }
+        pool.publish(WlFrame {
+            id,
+            buf,
+            source: None,
+            scanout: false,
+            shm: None,
+            frame_id: 0,
+            damage: vec![Rectangle::from_size((W, H).into())],
+            is_animated: false,
+            captured_ns: 0,
+        });
+        let stripes = rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the readback encoder delivers the frame");
+        assert!(!stripes.is_empty());
+        assert!(stripes.iter().all(|s| s.codec == Codec::H264));
+        assert!(stripes.iter().any(|s| !s.as_bytes().is_empty()));
+        let (deliver, encode) = teardown_capture(&mut cap);
+        assert!(deliver.is_none());
+        encode.expect("the readback encode thread").join().unwrap();
     }
 }
 
