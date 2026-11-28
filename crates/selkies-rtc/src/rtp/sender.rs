@@ -2123,9 +2123,11 @@ impl RtpSender {
                     .map(|p| p.burst_probe_bytes())
                     .unwrap_or(0.0);
                 let steer = transport.twcc().process_feedback(&fb.fci, now, probe);
+                let queue_s = transport.twcc().feedback_queue_s();
                 if let (Some(steer), Some(pacer)) = (steer, transport.pacer()) {
                     pacer.set_goodput_bps(steer.goodput_bps, now);
                     pacer.set_link_bps(steer.link_bps, now);
+                    pacer.set_path_queue(queue_s, now);
                 }
                 if !self.unheld.is_empty() {
                     self.confirm(transport, now);

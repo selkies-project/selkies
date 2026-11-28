@@ -37,6 +37,21 @@ pub const CLEANUP_FRAME_S: f64 = 0.2;
 pub const CLEANUP_FRAME_OVERHEAD: f64 = 1.5;
 /// Between congestion ticks.
 const CONGESTION_TICK: Duration = Duration::from_secs(1);
+/// How often the peers' path queues are read between ticks.
+const QUEUE_PROBE: Duration = Duration::from_millis(100);
+/// A queue this deep, in s, standing on a peer's path runs the tick at once rather than at its
+/// next second: a link that narrowed fills its queue within a fraction of one.
+const EARLY_QUEUE_S: f64 = 0.15;
+/// The most an early tick's projected queue reads, in s.
+const EARLY_QUEUE_MAX_S: f64 = 2.0;
+
+/// The queue an early tick acts on, in s: the one its probe read, `queue_s`, is a queue-depth old,
+/// and meanwhile the stream went on at the target, `target_kbps`, the queue growing by what that sent
+/// past the path's delivery, `delivered_bps`, for as long (at most `EARLY_QUEUE_MAX_S`).
+fn early_queue_s(queue_s: f64, target_kbps: f64, delivered_bps: f64) -> f64 {
+    let over = (target_kbps * 1000.0 - delivered_bps).max(0.0) / delivered_bps.max(1.0);
+    (queue_s * (1.0 + over)).min(EARLY_QUEUE_MAX_S)
+}
 /// A rate cut by a queue the path showed whose bridge drops more than `FPS_SHED_SHARE` of the
 /// frames for its budget (content the coarsest quantizer cannot fit to the path) lowers the
 /// capture's rate by the share let through, to `FPS_FLOOR` at least (a target cut by loss alone, on
@@ -695,7 +710,11 @@ impl WebRtcService {
     /// owner on a slower link do not pull the owner's stream down; all of them otherwise. A CBR
     /// display's target and a CRF display's peak are steered and padded alike, the CRF one under
     /// its own ceiling (`peak_ceiling`). Each peer's own loss and queue set its sender's FlexFEC
-    /// repairs (`Peer::tick`).
+    /// repairs (`Peer::tick`). The tick runs once a second, and at once, at most once between two,
+    /// when a peer's feedback shows a queue of `EARLY_QUEUE_S` on a path its steer is not already
+    /// draining: a link that narrowed fills its queue within a fraction of a second. That tick reads
+    /// the path's rate from what it delivered while the queue stood, and the queue as it stands
+    /// past the feedback's lag (`early_queue_s`).
     ///
     /// The ceiling is the user-selected bitrate in CBR and, in CRF, the rate the display's
     /// largest frame asks for (`ws::steer::peak_ceiling_kbps`) within the configured range's high end
@@ -708,16 +727,82 @@ impl WebRtcService {
         debug!(target: "webrtc", "Congestion control loop started (range {lo}-{hi} kbps).");
         let mut interval = tokio::time::interval(CONGESTION_TICK);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut probe = tokio::time::interval(QUEUE_PROBE);
+        probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut ticked = tokio::time::Instant::now();
+        // At most one early tick between two regular ones: each still reads a second's worth.
+        let mut early_spent = false;
         loop {
-            interval.tick().await;
+            let early = tokio::select! {
+                _ = interval.tick() => {
+                    early_spent = false;
+                    None
+                }
+                _ = probe.tick() => {
+                    if early_spent || ticked.elapsed() < 2 * QUEUE_PROBE {
+                        continue;
+                    }
+                    let crossed = self.queues_crossed().await;
+                    if crossed.is_empty() {
+                        continue;
+                    }
+                    Some(crossed)
+                }
+            };
             if self.st.lock().shutdown {
                 return;
             }
-            self.congestion_tick(pacer_on, lo, hi).await;
+            self.congestion_tick(pacer_on, lo, hi, early.as_ref()).await;
+            if early.is_some() {
+                early_spent = true;
+                interval.reset();
+            }
+            ticked = tokio::time::Instant::now();
         }
     }
 
-    async fn congestion_tick(&self, pacer_on: bool, lo: f64, hi: f64) {
+    /// The peers whose path shows a queue of `EARLY_QUEUE_S` or more, with the queue and the
+    /// rate the path delivered while it stood, where their display's steer is not holding a
+    /// backoff already.
+    async fn queues_crossed(&self) -> HashMap<String, (f64, f64)> {
+        let now = clock::monotonic();
+        let mut crossed = HashMap::new();
+        let cc_on = self.policy.lock().congestion_control;
+        if !cc_on {
+            return crossed;
+        }
+        for (peer_id, display, queue_s, delivered) in self.engine.peer_queues().await {
+            if !self.steers(&display, cc_on) {
+                continue;
+            }
+            let Some(delivered) = delivered.filter(|d| *d > 0.0) else {
+                continue;
+            };
+            if queue_s < EARLY_QUEUE_S {
+                continue;
+            }
+            let holding = self
+                .st
+                .lock()
+                .congestion
+                .get(&display)
+                .is_some_and(|steer| steer.holding(now));
+            if !holding {
+                crossed.insert(peer_id, (queue_s, delivered));
+            }
+        }
+        crossed
+    }
+
+    /// One tick of the steer; `early` names the peers whose queue ran it ahead of its second,
+    /// with what their probe read (`queues_crossed`).
+    async fn congestion_tick(
+        &self,
+        pacer_on: bool,
+        lo: f64,
+        hi: f64,
+        early: Option<&HashMap<String, (f64, f64)>>,
+    ) {
         #[derive(Default)]
         struct Bucket {
             goodputs: Vec<f64>,
@@ -727,6 +812,8 @@ impl WebRtcService {
             sent_bps: f64,
             padding_bps: f64,
             pacer_dropped: bool,
+            /// Whether a peer's queue ran this tick early (`queues_crossed`).
+            early: bool,
             rooms: Vec<f64>,
             paces: Vec<f64>,
             peers: Vec<Peer>,
@@ -823,6 +910,21 @@ impl WebRtcService {
             let standing = window
                 .queue_ms
                 .map(|q| q.max(window.queue_rising_ms.unwrap_or(0.0)));
+            let mut depth_ms = window.queue_depth_ms.unwrap_or(0.0);
+            let mut ran_early = false;
+            // A tick the queue ran early reads the window since the last, mostly from before the
+            // queue: the path's rate is what it delivered while the queue stood.
+            let (video_goodput, standing) = match early.and_then(|e| e.get(&peer_id)) {
+                Some(&(queue_s, delivered)) => {
+                    ran_early = true;
+                    depth_ms = depth_ms.max(queue_s * 1000.0);
+                    (
+                        (delivered - audio_bps).max(1.0),
+                        Some(standing.unwrap_or(0.0).max(queue_s * 1000.0)),
+                    )
+                }
+                None => (video_goodput, standing),
+            };
             let note = |bucket: &mut Bucket| {
                 if video_goodput > 0.0 {
                     bucket.goodputs.push(video_goodput);
@@ -848,10 +950,11 @@ impl WebRtcService {
                     .max((window.sent_bps as f64 - audio_bps).max(0.0));
                 bucket.padding_bps = bucket.padding_bps.max(window.padding_bps as f64);
                 bucket.pacer_dropped |= tick.video_dropped > 0;
+                bucket.early |= ran_early;
                 bucket.worst_loss = bucket.worst_loss.max(window.loss_fraction);
                 if let Some(standing) = standing {
                     bucket.queue_ms = Some(bucket.queue_ms.unwrap_or(0.0).max(standing));
-                    bucket.depth_ms = bucket.depth_ms.max(window.queue_depth_ms.unwrap_or(0.0));
+                    bucket.depth_ms = bucket.depth_ms.max(depth_ms);
                 }
             };
             note(per_display.entry(display.clone()).or_default());
@@ -907,6 +1010,13 @@ impl WebRtcService {
                     0.0
                 }
             });
+            // An early tick reads a queue a queue-depth old: meanwhile the stream went on at the
+            // target, and the queue grew by what that sent past the delivery for as long.
+            let queue_s = if bucket.early {
+                queue_s.map(|q| early_queue_s(q, current, goodput))
+            } else {
+                queue_s
+            };
             let now = clock::monotonic();
             // The least any of the display's peers paces at: under the target, that peer's wire
             // carries the pace at most.
@@ -1316,6 +1426,16 @@ impl WebRtcService {
 #[cfg(test)]
 mod shed_tests {
     use super::*;
+
+    #[test]
+    fn an_early_queue_reads_what_the_lag_hid() {
+        // 0.24 s read while 8 Mbit/s met 0.88: the queue was full by the cut.
+        assert_eq!(early_queue_s(0.24, 8000.0, 880_000.0), EARLY_QUEUE_MAX_S);
+        // A stream the path carried grows no queue meanwhile.
+        assert!((early_queue_s(0.2, 1000.0, 1_000_000.0) - 0.2).abs() < 1e-9);
+        assert!((early_queue_s(0.2, 1500.0, 1_000_000.0) - 0.3).abs() < 1e-9);
+        assert_eq!(early_queue_s(0.2, 8000.0, 0.0), EARLY_QUEUE_MAX_S);
+    }
 
     const CEILING: f64 = 8000.0;
     const _: () = assert!(FPS_KEEP_SHARE < FPS_SHED_SHARE && FPS_RISE > 1.0);

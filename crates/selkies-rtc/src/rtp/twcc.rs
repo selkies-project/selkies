@@ -284,6 +284,10 @@ pub struct TwccSender {
     received_at: f64,
     sent_at: f64,
     stand: Option<Stand>,
+    /// What feedback acked while a queue stood on the path, and over how long: bytes, s.
+    queued_delivery: Option<(usize, f64)>,
+    /// The queue the newest feedback's least-delayed packet found, in s.
+    feedback_queue_s: f64,
 }
 
 impl TwccSender {
@@ -309,6 +313,8 @@ impl TwccSender {
             received_at: 0.0,
             sent_at: 0.0,
             stand: None,
+            queued_delivery: None,
+            feedback_queue_s: 0.0,
         }
     }
 
@@ -413,6 +419,20 @@ impl TwccSender {
             (Some(newest), Some(base)) => (newest - base).max(0.0),
             _ => 0.0,
         }
+    }
+
+    /// The queue the newest feedback found under every packet it reported, in s: its
+    /// least-delayed packet's delay over the path's own, which one late packet does not raise.
+    pub fn feedback_queue_s(&self) -> f64 {
+        self.feedback_queue_s
+    }
+
+    /// The rate the path delivered over the feedback that found a queue standing on it,
+    /// since the queue last cleared; `None` without enough of it to read a rate.
+    pub fn queued_delivery_bps(&self) -> Option<f64> {
+        self.queued_delivery
+            .filter(|(bytes, span)| *bytes >= MIN_GOODPUT_SAMPLE_BYTES && *span > 0.0)
+            .map(|(bytes, span)| bytes as f64 * 8.0 / span)
     }
 
     /// The latest feedback's estimate.
@@ -668,6 +688,18 @@ impl TwccSender {
                 self.delay_least = Some(delay_min);
             }
             self.window.feedback_mins.push(delay_min);
+            // While a queue stands, arrivals leave the bottleneck back to back: what they
+            // carried is the path's rate. Each packet of the feedback was queued, by its least
+            // delay, so one late packet does not count as a queue.
+            let base = self.delay_base.map(|(_, b)| b).or(self.delay_least);
+            self.feedback_queue_s = base.map_or(0.0, |base| (delay_min - base).max(0.0));
+            let queued = self.feedback_queue_s * 1000.0 > TWCC_QUEUE_MS;
+            if !queued {
+                self.queued_delivery = None;
+            } else if span_s > 0.0 && spanned > 0 {
+                let (bytes, span) = self.queued_delivery.unwrap_or((0, 0.0));
+                self.queued_delivery = Some((bytes + spanned, span + span_s));
+            }
         }
         // A brake sizes itself from a rate the wire limited. A window the wire delivered
         // whole, or one carrying almost no data, measured the pacer's own output instead.
@@ -1736,6 +1768,65 @@ mod tests {
         }
         tr.seq = (seq & 0xFFFF) as u16;
         (queues, depths, rising)
+    }
+
+    #[test]
+    fn a_standing_queue_reads_under_every_packet_and_dates_what_it_delivered() {
+        let mut tr = TwccSender::new(0.0);
+        let flat = |_t: f64| 0.020;
+        run_delay(&flat, 3.0, &mut tr, 0.0, 5_000_000.0);
+        assert!(tr.feedback_queue_s() < 0.005 && tr.queued_delivery_bps().is_none());
+
+        // One late packet in a feedback raises its newest delay, not the least.
+        let base = u32::from(tr.seq);
+        let mut arrivals = vec![];
+        for i in 0..30u32 {
+            let sent = 3.0 + f64::from(i) * 0.0005;
+            tr.seed_sent(((base + i) & 0xFFFF) as u16, PACKET_BYTES, sent);
+            let delay = if i == 29 { 0.200 } else { 0.020 };
+            arrivals.push(Some(5_000_000.0 + (sent + delay) * 1000.0));
+        }
+        tr.process_feedback(
+            &pack_twcc_fci((base & 0xFFFF) as u16, &arrivals, 0),
+            3.1,
+            12_500.0,
+        );
+        tr.seq = ((base + 30) & 0xFFFF) as u16;
+        assert!(tr.path_queue_s() > 0.1 && tr.feedback_queue_s() < 0.005);
+
+        // A 1.5 Mbit/s bottleneck under a 5.8 Mbit/s stream: a queue builds, and what feedback
+        // acked while it stood is the bottleneck's rate.
+        let mut seq = u32::from(tr.seq);
+        let (mut free_at, mut fb) = (0.0f64, vec![]);
+        let mut t = 3.2;
+        while t < 4.2 {
+            for i in 0..10 {
+                let sent = t + f64::from(i) * 0.0005;
+                tr.seed_sent((seq & 0xFFFF) as u16, PACKET_BYTES, sent);
+                free_at = free_at.max(sent + 0.020) + PACKET_BYTES as f64 * 8.0 / 1.5e6;
+                fb.push((seq, 5_000_000.0 + free_at * 1000.0));
+                seq += 1;
+            }
+            t += 1.0 / 60.0;
+            if fb.len() >= 30 {
+                let arr: Vec<Option<f64>> = fb.iter().map(|(_, a)| Some(*a)).collect();
+                tr.process_feedback(
+                    &pack_twcc_fci((fb[0].0 & 0xFFFF) as u16, &arr, 0),
+                    t,
+                    12_500.0,
+                );
+                fb.clear();
+            }
+        }
+        tr.seq = (seq & 0xFFFF) as u16;
+        assert!(tr.feedback_queue_s() > 0.5, "{}", tr.feedback_queue_s());
+        let rate = tr
+            .queued_delivery_bps()
+            .expect("a rate while the queue stood");
+        assert!((rate - 1.5e6).abs() < 0.05e6, "{rate}");
+
+        run_delay(&flat, 1.0, &mut tr, 6.0, 5_000_000.0);
+        assert!(tr.feedback_queue_s() < 0.005 && tr.queued_delivery_bps().is_none());
     }
 
     #[test]

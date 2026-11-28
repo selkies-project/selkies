@@ -183,6 +183,8 @@ enum Command {
     Padding(f64, f64),
     RequestUplinkKeyframe,
     Tick(oneshot::Sender<PeerTick>),
+    /// The path queue the newest feedback found, in s, and what the path delivered while it stood.
+    QueueProbe(oneshot::Sender<(f64, Option<f64>)>),
     Rtt(oneshot::Sender<Option<f64>>),
     Pace(oneshot::Sender<Option<u64>>),
     Close,
@@ -743,6 +745,14 @@ impl Peer {
         answer.await.ok()
     }
 
+    /// The path queue the newest feedback found, in s, and the rate the path delivered while
+    /// it stood.
+    pub async fn queue_probe(&self) -> Option<(f64, Option<f64>)> {
+        let (reply, answer) = oneshot::channel();
+        self.commands.send(Command::QueueProbe(reply)).ok()?;
+        answer.await.ok()
+    }
+
     /// The round trip the peer's receiver reports carry for its video.
     pub async fn rtt(&self) -> Option<f64> {
         let (reply, answer) = oneshot::channel();
@@ -1068,6 +1078,10 @@ impl Media {
                     audio_octets,
                     red_depth,
                 });
+            }
+            Command::QueueProbe(reply) => {
+                let twcc = self.paced.twcc_state();
+                let _ = reply.send((twcc.feedback_queue_s(), twcc.queued_delivery_bps()));
             }
             Command::Rtt(reply) => {
                 let _ = reply.send(self.video.rtt());

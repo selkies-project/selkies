@@ -1924,6 +1924,23 @@ impl RtcEngine {
         }
         out
     }
+
+    /// Each peer's display, its path queue in s, and what its path delivered while it stood.
+    pub async fn peer_queues(&self) -> Vec<(String, String, f64, Option<f64>)> {
+        let peers: Vec<(String, String, Peer)> = self
+            .peers
+            .lock()
+            .iter()
+            .map(|(id, p)| (id.clone(), p.display_id.clone(), p.peer.clone()))
+            .collect();
+        let mut out = Vec::with_capacity(peers.len());
+        for (id, display, peer) in peers {
+            if let Some((queue_s, delivered)) = peer.queue_probe().await {
+                out.push((id, display, queue_s, delivered));
+            }
+        }
+        out
+    }
 }
 
 /// `PeerEvents` onto the engine: hand each to a task, so none blocks a peer's own.

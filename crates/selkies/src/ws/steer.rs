@@ -444,6 +444,11 @@ impl CongestionSteer {
     }
 
     /// The target a standing queue of `queue_s` backs off to, with the drain it plans.
+    /// Whether a backoff's hold (its drain and settling) is still in force.
+    pub fn holding(&self, now: f64) -> bool {
+        now < self.hold_until
+    }
+
     fn queue_backoff(&mut self, current: f64, delivered_kbps: f64, queue_s: f64, now: f64) -> f64 {
         self.congested = true;
         self.landed_until = 0.0;

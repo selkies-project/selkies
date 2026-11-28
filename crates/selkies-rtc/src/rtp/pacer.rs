@@ -33,6 +33,12 @@
 //!   every keyframe under sustained congestion and breaks the reference chain permanently,
 //!   hence the sliding-window floor; the frame floor (`set_frame_floor`) lets a still
 //!   screen's cleanup frame in whole.
+//! - While the path holds a backlog, or a shallower queue whose wire feedback showed cut in
+//!   several places within `PATH_HOLD_LOSS_S`, the pace is a steered target itself rather than `PACE_FACTOR` of it, and the
+//!   budget's first term is `CAP_MIN_MS` of that pace (`set_path_queue`): what the encoder
+//!   sent past the target is dropped as stale here instead of queued on the path, which the
+//!   steer is draining. A hold lasts at most `PATH_HOLD_MAX_S` until the queue next clears,
+//!   and gives back the pace it found unless a brake took it meanwhile.
 //! - Overflow drops the whole GOP and requests a throttled keyframe rather than thinning
 //!   arbitrary packet tails; a timeout resurrects video if no keyframe arrives, so a stuck
 //!   encoder cannot kill the class permanently. Where the video sender can resync its peer
@@ -46,12 +52,15 @@
 //!   once one brake drops the pace below the encoder rate every further overflow is
 //!   self-inflicted. An overflow resets the GOP but sizes a brake only from a fresh goodput
 //!   estimate measured on a feedback window the wire cut in several places, at most one
-//!   brake per `BRAKE_HOLD_S`; recovery is +25%/s toward `PACE_FACTOR` x the steered target,
-//!   or the configured target without one, and only a brake resets its clock.
+//!   brake per `BRAKE_HOLD_S`; recovery is +25%/s toward `PACE_FACTOR` x the steered target
+//!   (the target itself under a hold), or the configured target without one, and only a brake
+//!   resets its clock.
 
 use std::collections::VecDeque;
 
 use bytes::Bytes;
+
+use super::twcc::TWCC_QUEUE_MS;
 
 /// The priority classes, lower winning. RTCP and audio share one and never queue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -99,6 +108,15 @@ pub const CLEANUP_PACE_SHARE: f64 = 0.8;
 pub const BURST_FLOOR_BYTES: f64 = 2048.0;
 /// Video queue budget floor, time-denominated.
 pub const CAP_MIN_MS: f64 = 120.0;
+/// A path queue deeper than this, in s, holds the wire to the target (`set_path_queue`): a backlog
+/// the steer drains rather than the queue it leaves standing at the link's rate.
+pub const PATH_HOLD_BACKLOG_S: f64 = 0.25;
+/// A shallower queue holds the wire too where feedback this recent, in s, showed the wire cut in
+/// several places (the goodput a brake may size from): its queue is too short for the pace's bursts.
+pub const PATH_HOLD_LOSS_S: f64 = 1.0;
+/// The longest one hold lasts, in s: past the steer's drain and settling, a queue still read is a
+/// path whose delay rose for good under a base not yet dated, and the hold waits for it to clear.
+pub const PATH_HOLD_MAX_S: f64 = 4.0;
 /// IDR-size floor for the video queue budget, over a rolling window of recent IDR sizes.
 pub const IDR_FLOOR_FACTOR: f64 = 2.2;
 pub const IDR_WINDOW: usize = 4;
@@ -200,6 +218,14 @@ pub struct Pacer {
     encoder_bps: u64,
     /// Congestion-controlled encoder target; the configured rate remains the capacity ceiling.
     steered_bps: Option<u64>,
+    /// Whether the wire is held to the target (`set_path_queue`).
+    path_hold: bool,
+    /// The pace the hold found, given back when it ends.
+    pace_before_hold: Option<u64>,
+    /// When the hold in force began.
+    hold_since: f64,
+    /// Whether a hold ran its `PATH_HOLD_MAX_S` since the queue last cleared.
+    hold_spent: bool,
     goodput_bps: Option<u64>,
     goodput_at: f64,
     brake_hold_until: f64,
@@ -248,6 +274,10 @@ impl Pacer {
         let mut pacer = Self {
             encoder_bps: encoder_bps.max(100_000),
             steered_bps: None,
+            path_hold: false,
+            pace_before_hold: None,
+            hold_since: 0.0,
+            hold_spent: false,
             goodput_bps: None,
             goodput_at: 0.0,
             brake_hold_until: 0.0,
@@ -321,8 +351,49 @@ impl Pacer {
         if bps.is_none() {
             self.ever_overflowed = false;
             self.last_pace_update_at = now;
+            self.path_hold = false;
+            self.pace_before_hold = None;
         }
         self.refresh_windows(now);
+    }
+
+    /// While a backlog stands on the path (`PATH_HOLD_BACKLOG_S`), or a shallower queue whose wire
+    /// cut feedback within `PATH_HOLD_LOSS_S`, the wire takes the target and no more, and the video
+    /// queue holds what the pace sends in `CAP_MIN_MS`: past that a frame is stale, and dropping
+    /// it here costs less than queueing it on the path. `queue_s` is the newest feedback's queue
+    /// under its least-delayed packet.
+    pub fn set_path_queue(&mut self, queue_s: f64, now: f64) {
+        let present = queue_s * 1000.0 > TWCC_QUEUE_MS;
+        if !present {
+            self.hold_spent = false;
+        }
+        // Without a steered target nothing drains the queue, and the hold would only shrink
+        // the video queue under the configured rate.
+        let mut hold = present
+            && self.steered_bps.is_some()
+            && !self.hold_spent
+            && (queue_s > PATH_HOLD_BACKLOG_S
+                || (self.goodput_at > 0.0 && now - self.goodput_at < PATH_HOLD_LOSS_S));
+        if hold && self.path_hold && now - self.hold_since > PATH_HOLD_MAX_S {
+            self.hold_spent = true;
+            hold = false;
+        }
+        if hold == self.path_hold {
+            return;
+        }
+        self.path_hold = hold;
+        if hold {
+            self.hold_since = now;
+            self.pace_before_hold = Some(self.pace_bps);
+        } else if let Some(before) = self.pace_before_hold.take() {
+            // The hold, not a brake, held the pace down: what it found comes back at once.
+            self.pace_bps = self.pace_bps.max(before);
+        }
+        self.refresh_windows(now);
+    }
+
+    fn pace_factor(&self) -> f64 {
+        if self.path_hold { 1.0 } else { PACE_FACTOR }
     }
 
     fn target_bps(&self) -> u64 {
@@ -452,6 +523,8 @@ impl Pacer {
             .max(est.saturating_sub(BYPASS_RESERVE_BPS))
             .max((AIMD_FLOOR_FACTOR * self.target_bps() as f64) as u64);
         if target < self.pace_bps {
+            // A brake within a hold keeps its pace when the hold ends.
+            self.pace_before_hold = None;
             self.ever_overflowed = true;
             self.brake_hold_until = now + BRAKE_HOLD_S;
             self.last_pace_update_at = now;
@@ -467,7 +540,7 @@ impl Pacer {
         if dt < 0.25 {
             return;
         }
-        let ceiling = PACE_FACTOR * self.target_bps() as f64;
+        let ceiling = self.pace_factor() * self.target_bps() as f64;
         self.last_pace_update_at = now;
         if self.link_bps.is_some_and(|l| l > 0.0) && now - self.link_at > LINK_MAX_AGE_S {
             self.link_bps = None;
@@ -524,7 +597,7 @@ impl Pacer {
     }
 
     fn refresh_windows(&mut self, now: f64) {
-        let ceiling = (PACE_FACTOR * self.target_bps() as f64) as u64;
+        let ceiling = (self.pace_factor() * self.target_bps() as f64) as u64;
         // Until the first brake the active target owns the pace; afterwards it can only
         // clamp the AIMD-controlled pace.
         self.pace_bps = if self.ever_overflowed {
@@ -537,7 +610,11 @@ impl Pacer {
     }
 
     fn video_cap_bytes(&self) -> usize {
-        let configured_pace = PACE_FACTOR * self.encoder_bps as f64;
+        let configured_pace = if self.path_hold {
+            self.pace_bps as f64
+        } else {
+            PACE_FACTOR * self.encoder_bps as f64
+        };
         let base = (configured_pace / 8.0 * CAP_MIN_MS / 1000.0) as usize;
         base.max(self.idr_floor_bytes).max(self.frame_floor_bytes)
     }
@@ -1124,6 +1201,132 @@ mod tests {
             p.padding_room(100, now),
             "and admits it again once video flows"
         );
+    }
+
+    #[test]
+    fn a_backlog_holds_the_wire_to_the_target_and_gives_the_pace_back() {
+        let now = 10.0;
+        let mut p = Pacer::new(ENCODER_BPS, now);
+        p.set_steered_bps(Some(1_000_000), now);
+        assert_eq!(
+            p.pace_bps(),
+            2_500_000,
+            "a steered target paces at PACE_FACTOR of it"
+        );
+        let open = p.video_cap_bytes();
+        p.set_path_queue(0.3, now);
+        assert_eq!(
+            p.pace_bps(),
+            1_000_000,
+            "a backlog holds the wire to the target"
+        );
+        assert!(
+            p.video_cap_bytes() < open
+                && p.video_cap_bytes()
+                    == ((1_000_000.0 / 8.0 * CAP_MIN_MS / 1000.0) as usize)
+                        .max(p.idr_floor_bytes)
+                        .max(p.frame_floor_bytes),
+            "and the video queue to what the pace sends in CAP_MIN_MS"
+        );
+        p.set_path_queue(0.01, now + 0.5);
+        assert_eq!(
+            p.pace_bps(),
+            2_500_000,
+            "a queue gone gives the pace back at once"
+        );
+        assert_eq!(p.video_cap_bytes(), open);
+    }
+
+    #[test]
+    fn a_shallow_queue_holds_the_wire_only_where_the_wire_cut() {
+        let start = 10.0;
+        let mut p = Pacer::new(ENCODER_BPS, start);
+        let now = start + GOODPUT_WARMUP_S + 1.0;
+        p.set_steered_bps(Some(1_000_000), now);
+        p.set_path_queue(0.1, now);
+        assert_eq!(
+            p.pace_bps(),
+            2_500_000,
+            "a queue the steer leaves standing keeps the bursts"
+        );
+        p.set_goodput_bps(Some(900_000), now + 0.1);
+        p.set_path_queue(0.1, now + 0.1);
+        assert_eq!(
+            p.pace_bps(),
+            1_000_000,
+            "one whose wire cut in several places is too short for them"
+        );
+        p.set_path_queue(0.1, now + 0.2 + PATH_HOLD_LOSS_S);
+        assert_eq!(p.pace_bps(), 2_500_000, "until that cut is past");
+    }
+
+    #[test]
+    fn a_hold_ends_after_its_longest_and_waits_for_the_queue_to_clear() {
+        let mut now = 10.0;
+        let mut p = Pacer::new(ENCODER_BPS, now);
+        p.set_steered_bps(Some(1_000_000), now);
+        p.set_path_queue(0.3, now);
+        while now < 10.0 + PATH_HOLD_MAX_S - 0.1 {
+            now += 0.1;
+            p.set_path_queue(0.3, now);
+            assert_eq!(p.pace_bps(), 1_000_000);
+        }
+        now += 0.2;
+        p.set_path_queue(0.3, now);
+        assert_eq!(
+            p.pace_bps(),
+            2_500_000,
+            "a queue past the longest hold is let go"
+        );
+        p.set_path_queue(0.3, now + 1.0);
+        assert_eq!(p.pace_bps(), 2_500_000, "and held no more while it stands");
+        p.set_path_queue(0.0, now + 2.0);
+        p.set_path_queue(0.3, now + 3.0);
+        assert_eq!(
+            p.pace_bps(),
+            1_000_000,
+            "a queue that cleared may hold again"
+        );
+    }
+
+    #[test]
+    fn a_brake_within_a_hold_keeps_its_pace_when_the_hold_ends() {
+        let start = 10.0;
+        let mut p = Pacer::new(ENCODER_BPS, start);
+        let now = start + GOODPUT_WARMUP_S + 1.0;
+        p.set_steered_bps(Some(1_000_000), now);
+        p.set_path_queue(0.3, now);
+        p.set_goodput_bps(Some(600_000), now);
+        p.on_overflow(now);
+        let braked = p.pace_bps();
+        assert!(
+            braked < 1_000_000,
+            "the brake goes under the held pace: {braked}"
+        );
+        p.set_path_queue(0.0, now + 0.5);
+        assert_eq!(
+            p.pace_bps(),
+            braked,
+            "and the hold ending gives back nothing the brake took"
+        );
+    }
+
+    #[test]
+    fn an_unsteered_target_is_never_held() {
+        let now = 10.0;
+        let mut p = Pacer::new(ENCODER_BPS, now);
+        let open = p.pace_bps();
+        p.set_path_queue(0.3, now);
+        assert_eq!(
+            p.pace_bps(),
+            open,
+            "with congestion control off nothing drains the queue"
+        );
+        p.set_steered_bps(Some(1_000_000), now);
+        p.set_path_queue(0.3, now + 0.1);
+        assert_eq!(p.pace_bps(), 1_000_000);
+        p.set_steered_bps(None, now + 0.2);
+        assert_eq!(p.pace_bps(), open, "and turning it off ends a hold");
     }
 
     fn drain_events(p: &mut Pacer) -> Vec<PacerEvent> {
