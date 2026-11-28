@@ -1175,6 +1175,16 @@ impl FrameEncoder {
         }
     }
 
+    /// Whether the session imports a client's dmabuf with its format modifier, so a tiled one
+    /// is read as laid out: every session but a VA-API one whose driver takes no PRIME 2
+    /// descriptor (`VaapiEncoder::imports_modifiers`).
+    pub fn imports_modifiers(&self) -> bool {
+        match self {
+            FrameEncoder::Vaapi(enc) => enc.imports_modifiers(),
+            _ => true,
+        }
+    }
+
     /// Whether the session negotiated 4:4:4 chroma.
     pub fn is_fullcolor(&self) -> bool {
         each!(self, enc => enc.is_fullcolor())

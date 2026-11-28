@@ -1415,6 +1415,10 @@ pub struct WlEncodeControls {
     /// (`FrameEncoder::dmabuf_planes`), published by the encode thread; a buffer of more planes
     /// is composited.
     scanout_planes: AtomicU32,
+    /// Whether the session's encoder imports a client dmabuf with its modifier
+    /// (`FrameEncoder::imports_modifiers`), published by the encode thread; a tiled buffer it
+    /// would not is composited.
+    scanout_modifiers: AtomicBool,
     reference_reports: Mutex<Vec<encoders::reference::ReferenceReport>>,
     /// Pending per-frame tunables for the encode thread (mutex, not atomics: one struct, set
     /// rarely, read only when the dirty flag says so).
@@ -1423,8 +1427,10 @@ pub struct WlEncodeControls {
 }
 
 impl WlEncodeControls {
-    fn new() -> Self {
-        Self {
+    /// The controls of a capture whose session opened on `encoder`, its scanout limits already
+    /// that encoder's, so the render tick deciding the capture's first frame reads them.
+    fn new(encoder: Option<&FrameEncoder>) -> Self {
+        let controls = Self {
             rate_dirty: AtomicBool::new(false),
             bitrate_kbps: AtomicI32::new(0),
             vbv_mult_milli: AtomicI32::new(0),
@@ -1433,10 +1439,25 @@ impl WlEncodeControls {
             force_idr: AtomicBool::new(false),
             scanout_refused: AtomicBool::new(false),
             scanout_planes: AtomicU32::new(1),
+            scanout_modifiers: AtomicBool::new(false),
             reference_reports: Mutex::new(Vec::new()),
             tunables_dirty: AtomicBool::new(false),
             tunables: Mutex::new(None),
-        }
+        };
+        controls.publish_scanout(encoder);
+        controls
+    }
+
+    /// Publish what a client buffer handed to `encoder` as it stands has to be
+    /// (`scanout_planes`, `scanout_modifiers`). No encoder takes none with a modifier, which
+    /// is the side a capture without a zero-copy session errs on.
+    fn publish_scanout(&self, encoder: Option<&FrameEncoder>) {
+        let planes = encoder.map_or(1, FrameEncoder::dmabuf_planes);
+        self.scanout_planes.store(planes as u32, Ordering::Relaxed);
+        self.scanout_modifiers.store(
+            encoder.is_some_and(FrameEncoder::imports_modifiers),
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -1732,10 +1753,7 @@ fn wayland_encode_loop<B: WlPayload>(
             pool.recycle(f.id, f.buf);
             break;
         }
-        let planes = video_encoder.as_ref().map_or(1, |e| e.dmabuf_planes());
-        cfg.controls
-            .scanout_planes
-            .store(planes as u32, Ordering::Relaxed);
+        cfg.controls.publish_scanout(video_encoder.as_ref());
         if cfg.controls.tunables_dirty.swap(false, Ordering::Acquire)
             && let Some(t) = cfg.controls.tunables.lock().unwrap().take()
         {
@@ -1981,6 +1999,7 @@ fn wayland_encode_loop<B: WlPayload>(
                                     None,
                                 ),
                             };
+                            cfg.controls.publish_scanout(video_encoder.as_ref());
                             if zero_copy.is_some() && video_encoder.is_none() {
                                 given_up = true;
                             } else {
@@ -2772,13 +2791,16 @@ where
 /// log, and a hold on the buffer, or why the session cannot take it: both hardware sessions
 /// import one of the four packed 8-bit RGB formats at their own width and height, so only a
 /// buffer of the capture's size qualifies, and of no more planes than the session's encoder
-/// imports (`planes`: VA-API maps a compressed layout's metadata plane, NVENC one plane). What
-/// the driver then makes of its modifier and pitch only the import says, and a refusal there
-/// ends the direct path for the capture (`WlEncodeControls::scanout_refused`).
+/// imports (`planes`: VA-API maps a compressed layout's metadata plane, NVENC one plane), and
+/// laid out linearly where the encoder takes no modifier with it (`modifiers`, false for i965,
+/// whose import reads a client's Y-tiled buffer as rows, a checkerboard). What the driver then
+/// makes of its modifier and pitch only the import says, and a refusal there ends the direct
+/// path for the capture (`WlEncodeControls::scanout_refused`).
 fn scanout_dmabuf<R: smithay::backend::renderer::Renderer + ImportAll>(
     surface: &WaylandSurfaceRenderElement<R>,
     size: (i32, i32),
     planes: usize,
+    modifiers: bool,
 ) -> Result<(Dmabuf, SurfaceBuffer, String), &'static str> {
     let buffer = surface.buffer();
     let dmabuf = get_dmabuf(buffer).map_err(|_| "the window's buffer is in system memory")?;
@@ -2794,6 +2816,9 @@ fn scanout_dmabuf<R: smithay::backend::renderer::Renderer + ImportAll>(
         Fourcc::Argb8888 | Fourcc::Xrgb8888 | Fourcc::Abgr8888 | Fourcc::Xbgr8888
     ) {
         return Err("the buffer's format is not one the encoder imports");
+    }
+    if !modifiers && !matches!(format.modifier, Modifier::Linear | Modifier::Invalid) {
+        return Err("the encoder takes no tiled buffer without its modifier");
     }
     let what = format!(
         "{:?} dmabuf (modifier {:#x})",
@@ -3724,7 +3749,7 @@ fn start_capture_on_display(
         deliver_discard: None,
         encode_pool: None,
         encode_join: None,
-        encode_controls: Arc::new(WlEncodeControls::new()),
+        encode_controls: Arc::new(WlEncodeControls::new(video_encoder.as_ref())),
         encode_stats: Arc::new(WlEncodeStats::new()),
         report: stream_report.clone(),
         pool_last_render: Vec::new(),
@@ -5446,6 +5471,10 @@ fn render_node_tick(
     let scanout_planes = node.capture.as_ref().map_or(1, |c| {
         c.encode_controls.scanout_planes.load(Ordering::Relaxed) as usize
     });
+    let scanout_modifiers = node
+        .capture
+        .as_ref()
+        .is_some_and(|c| c.encode_controls.scanout_modifiers.load(Ordering::Relaxed));
     // The hold on a client buffer encoded as it stands this tick, kept until the encode is
     // done with it: a dmabuf a zero-copy session imports, or an shm buffer whose rows the
     // readback encode reads in place.
@@ -5495,8 +5524,9 @@ fn render_node_tick(
             // Only a zero-copy session imports a client's buffer; the readback path composites.
             let direct = match (direct_wanted, slot_id) {
                 (Ok(()), Some(_)) => {
-                    scanout_candidate(&elements, (width, height), output_scale_val)
-                        .and_then(|s| scanout_dmabuf(s, (width, height), scanout_planes))
+                    scanout_candidate(&elements, (width, height), output_scale_val).and_then(|s| {
+                        scanout_dmabuf(s, (width, height), scanout_planes, scanout_modifiers)
+                    })
                 }
                 (Err(why), _) => Err(why),
                 (Ok(()), None) => Err("the readback path composites"),

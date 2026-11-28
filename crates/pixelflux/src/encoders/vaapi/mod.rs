@@ -2431,6 +2431,14 @@ impl VaapiEncoder {
         }
     }
 
+    /// Whether a dmabuf reaches the driver with its format modifier (`imports_prime2`): the
+    /// older descriptor carries none, and the driver takes the layout from what the kernel says
+    /// of the object, which is nothing for a buffer a client allocated with an explicit
+    /// modifier, such as the Y-tiled swapchain images of Mesa's Haswell Vulkan driver.
+    pub fn imports_modifiers(&self) -> bool {
+        self.imports_prime2
+    }
+
     /// A VA surface over a dmabuf: through the PRIME 2 descriptor, which carries the format
     /// modifier, else the older external-buffer one where it reads the buffer as laid out
     /// (`legacy_descriptor_reads`). The PRIME 2 descriptor is tried only where the driver lists
