@@ -583,6 +583,9 @@ pub struct H264EncoderWrapper {
     last_qp: Option<u32>,
     /// The live rate factor, which x264 reports a frame's mean quantizer against (`last_qp`).
     rf_constant: f64,
+    /// The parameters staged for the next frame by a reconfigure since the last one
+    /// (`H264EncoderWrapper::params`).
+    staged: Option<codec_sys::x264::x264_param_t>,
     /// A capped CRF session's peak (`PeakOffset`): x264's own cap, a VBV, changes how it codes
     /// every frame whether the peak binds or not (a 720p scroll's key frame at quantizer 27 for 22
     /// under a 100 Mbit/s peak it never reached), and is taken only at open, so the session opens
@@ -953,6 +956,7 @@ impl H264EncoderWrapper {
                     held_qp: None,
                     last_qp: None,
                     rf_constant: f64::from(param.rc.f_rf_constant),
+                    staged: None,
                     peak: (!cbr_mode && vbv_kbit > 0 && bitrate_kbps != 0).then(|| {
                         PeakOffset::new(bitrate_kbps.saturating_abs(), vbv_kbit, frame_rate.fps())
                     }),
@@ -990,24 +994,48 @@ impl H264EncoderWrapper {
         }
     }
 
-    /// Put the rate factor at `crf` plus a peak's `offset`, the quantizer ceiling at 51 while an
-    /// offset holds and at the session's own otherwise; true where x264 took it.
-    fn set_rate_factor(&mut self, crf: i32, offset: f64) -> bool {
+    /// The parameters a reconfigure starts from: those staged for the next frame where a
+    /// reconfigure since the last frame staged some, else the session's own.
+    /// `x264_encoder_reconfig` stages a change on top of the parameters in force, and
+    /// `x264_encoder_parameters` reads those in force until a frame takes the change, so a second
+    /// reconfigure before the next frame, started from the session's, would stage the first one's
+    /// fields back: a cleanup's larger VBV, staged and then overwritten by the floor lifted beside
+    /// it, stood unapplied while the tracked rate said it had been.
+    fn params(&self) -> codec_sys::x264::x264_param_t {
+        if let Some(staged) = self.staged {
+            return staged;
+        }
         unsafe {
             let mut param: codec_sys::x264::x264_param_t = std::mem::zeroed();
             codec_sys::x264::x264_encoder_parameters(self.encoder, &mut param);
-            param.rc.f_rf_constant = (f64::from(crf) + offset) as f32;
-            param.rc.i_qp_max = if offset > 0.0 {
-                51 + qp_offset(self.bit_depth)
-            } else {
-                self.open_qp_max
-            };
-            let taken = codec_sys::x264::x264_encoder_reconfig(self.encoder, &mut param) == 0;
-            if taken {
-                self.rf_constant = f64::from(param.rc.f_rf_constant);
-            }
-            taken
+            param
         }
+    }
+
+    /// Stage `param` for the next frame (`params`); true where x264 took it.
+    fn reconfig(&mut self, param: &mut codec_sys::x264::x264_param_t) -> bool {
+        let taken = unsafe { codec_sys::x264::x264_encoder_reconfig(self.encoder, param) == 0 };
+        if taken {
+            self.staged = Some(*param);
+        }
+        taken
+    }
+
+    /// Put the rate factor at `crf` plus a peak's `offset`, the quantizer ceiling at 51 while an
+    /// offset holds and at the session's own otherwise; true where x264 took it.
+    fn set_rate_factor(&mut self, crf: i32, offset: f64) -> bool {
+        let mut param = self.params();
+        param.rc.f_rf_constant = (f64::from(crf) + offset) as f32;
+        param.rc.i_qp_max = if offset > 0.0 {
+            51 + qp_offset(self.bit_depth)
+        } else {
+            self.open_qp_max
+        };
+        let taken = self.reconfig(&mut param);
+        if taken {
+            self.rf_constant = f64::from(param.rc.f_rf_constant);
+        }
+        taken
     }
 
     /// Retune bitrate/VBV (CBR, or a capped CRF's peak) and/or frame rate to match the live settings,
@@ -1063,16 +1091,13 @@ impl H264EncoderWrapper {
             }
             return;
         }
-        unsafe {
-            let mut param: codec_sys::x264::x264_param_t = std::mem::zeroed();
-            codec_sys::x264::x264_encoder_parameters(self.encoder, &mut param);
-            param.rc.i_bitrate = bk;
-            param.rc.i_vbv_max_bitrate = bk;
-            param.rc.i_vbv_buffer_size = vbv_kbit.max(1);
-            if codec_sys::x264::x264_encoder_reconfig(self.encoder, &mut param) == 0 {
-                self.current_bitrate = bk;
-                self.current_vbv = vbv_kbit;
-            }
+        let mut param = self.params();
+        param.rc.i_bitrate = bk;
+        param.rc.i_vbv_max_bitrate = bk;
+        param.rc.i_vbv_buffer_size = vbv_kbit.max(1);
+        if self.reconfig(&mut param) {
+            self.current_bitrate = bk;
+            self.current_vbv = vbv_kbit;
         }
     }
 
@@ -1187,17 +1212,14 @@ impl H264EncoderWrapper {
         if !self.is_cbr || min_qp == self.current_min_qp {
             return;
         }
-        unsafe {
-            let mut param: codec_sys::x264::x264_param_t = std::mem::zeroed();
-            codec_sys::x264::x264_encoder_parameters(self.encoder, &mut param);
-            param.rc.i_qp_min = if min_qp > 0 {
-                min_qp.min(51) + qp_offset(self.bit_depth)
-            } else {
-                0
-            };
-            if codec_sys::x264::x264_encoder_reconfig(self.encoder, &mut param) == 0 {
-                self.current_min_qp = min_qp;
-            }
+        let mut param = self.params();
+        param.rc.i_qp_min = if min_qp > 0 {
+            min_qp.min(51) + qp_offset(self.bit_depth)
+        } else {
+            0
+        };
+        if self.reconfig(&mut param) {
+            self.current_min_qp = min_qp;
         }
     }
 
@@ -1274,14 +1296,11 @@ impl H264EncoderWrapper {
 
     /// Put the session's own rate and VBV buffer back after a held key frame.
     fn restore_rate(&mut self) {
-        unsafe {
-            let mut param: codec_sys::x264::x264_param_t = std::mem::zeroed();
-            codec_sys::x264::x264_encoder_parameters(self.encoder, &mut param);
-            param.rc.i_bitrate = self.current_bitrate;
-            param.rc.i_vbv_max_bitrate = self.current_bitrate;
-            param.rc.i_vbv_buffer_size = self.current_vbv.max(1);
-            codec_sys::x264::x264_encoder_reconfig(self.encoder, &mut param);
-        }
+        let mut param = self.params();
+        param.rc.i_bitrate = self.current_bitrate;
+        param.rc.i_vbv_max_bitrate = self.current_bitrate;
+        param.rc.i_vbv_buffer_size = self.current_vbv.max(1);
+        self.reconfig(&mut param);
     }
 
     /// Take a frame just coded into a capped CRF's peak, and move the rate factor where the
@@ -1593,6 +1612,8 @@ impl H264EncoderWrapper {
             let mut nals: *mut codec_sys::x264::x264_nal_t = ptr::null_mut();
             let mut i_nals: i32 = 0;
 
+            // The frame takes what was staged for it, and the session's parameters are those.
+            self.staged = None;
             let frame_size = codec_sys::x264::x264_encoder_encode(
                 self.encoder,
                 &mut nals,
@@ -4984,6 +5005,62 @@ mod qp_bound_sweep {
         }
         let psnr = mean_psnr(std::slice::from_ref(&picture), std::slice::from_ref(&still));
         assert!(psnr > 35.0, "a still screen refined to {psnr:.1} dB");
+    }
+
+    /// A rate and a floor moved before the same frame both reach it: x264 stages a reconfigure on
+    /// the parameters in force, which a second one read from the session would stage back over
+    /// the first, leaving a cleanup's buffer unapplied while the floor beside it took.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_takes_a_rate_and_a_floor_moved_before_one_frame() {
+        const KBPS: i32 = 1000;
+        let session_vbv =
+            (crate::encoders::vbv_bits(KBPS as u32 * 1000, 60.0, 0.0, 0.0) / 1000) as i32;
+        let cleanup_vbv = session_vbv * 3 / 2;
+        let mut enc = H264EncoderWrapper::new(
+            W as i32,
+            H as i32,
+            25,
+            false,
+            60.0,
+            4,
+            true,
+            KBPS,
+            session_vbv,
+            0,
+            0,
+        )
+        .expect("x264 init");
+        let (u, v) = (vec![128u8; W * H / 4], vec![128u8; W * H / 4]);
+        let vbv_in_force = |enc: &H264EncoderWrapper| unsafe {
+            let mut param: codec_sys::x264::x264_param_t = std::mem::zeroed();
+            codec_sys::x264::x264_encoder_parameters(enc.encoder, &mut param);
+            param.rc.i_vbv_buffer_size
+        };
+        for i in 0..2u16 {
+            if i == 1 {
+                enc.reconfigure_rate(KBPS, cleanup_vbv, 60.0);
+                enc.reconfigure_floor(20);
+            }
+            let mut out = Vec::new();
+            enc.encode_with_headers(
+                &text_luma(usize::from(i)),
+                &u,
+                &v,
+                W as i32,
+                (W / 2) as i32,
+                (W / 2) as i32,
+                i,
+                i == 0,
+                true,
+                &mut out,
+            );
+        }
+        assert_eq!(
+            vbv_in_force(&enc),
+            cleanup_vbv,
+            "the cleanup's buffer reached the frame"
+        );
     }
 
     /// A capped CRF session under a peak its picture never reaches codes every frame as the
