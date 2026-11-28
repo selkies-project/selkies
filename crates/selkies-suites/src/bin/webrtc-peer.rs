@@ -51,7 +51,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Write as _;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -308,9 +308,17 @@ async fn rewrite_candidates(
         if f.len() < 8 || !f[2].eq_ignore_ascii_case("udp") || f[7] != "host" {
             continue;
         }
-        let far: SocketAddr = format!("{}:{}", f[4], f[5])
+        let ip: IpAddr = f[4]
             .parse()
-            .map_err(|e| format!("candidate address {}:{}: {e}", f[4], f[5]))?;
+            .map_err(|e| format!("candidate address {}: {e}", f[4]))?;
+        // The relay speaks IPv4; the host's IPv4 candidates carry the session through it.
+        if ip.is_ipv6() {
+            continue;
+        }
+        let port: u16 = f[5]
+            .parse()
+            .map_err(|e| format!("candidate port {}: {e}", f[5]))?;
+        let far = SocketAddr::new(ip, port);
         let at = relay(far, Arc::clone(up), Arc::clone(down))
             .await
             .map_err(|e| e.to_string())?;
