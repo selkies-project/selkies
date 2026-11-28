@@ -26,7 +26,6 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { request } from 'node:http';
 import { createServer, type AddressInfo } from 'node:net';
 import { join } from 'node:path';
 
@@ -42,17 +41,17 @@ const LOG = join(WORKDIR, 'jupyter.log');
 const PYTHON = 'python3';
 
 /** [status, body] of a GET with Jupyter's token; a redirect is reported, not followed (Jupyter refuses by sending the browser to its login page). */
-function get(url: string, token: string): Promise<[number, Buffer]> {
-    return new Promise((resolve) => {
-        const req = request(url, { headers: token ? { Authorization: `token ${token}` } : {}, timeout: 5000 }, (r) => {
-            const chunks: Buffer[] = [];
-            r.on('data', (c: Buffer) => chunks.push(c));
-            r.on('end', () => { resolve([r.statusCode ?? -1, (r.statusCode ?? 0) >= 300 && (r.statusCode ?? 0) < 400 ? Buffer.alloc(0) : Buffer.concat(chunks)]); });
-        });
-        req.on('error', () => { resolve([-1, Buffer.alloc(0)]); });
-        req.on('timeout', () => { req.destroy(); });
-        req.end();
-    });
+async function get(url: string, token: string): Promise<[number, Buffer]> {
+    try {
+        const r = await fetch(url, { headers: token ? { Authorization: `token ${token}` } : {}, redirect: 'manual', signal: AbortSignal.timeout(5000) });
+        if (r.status >= 300 && r.status < 400) {
+            await r.body?.cancel();
+            return [r.status, Buffer.alloc(0)];
+        }
+        return [r.status, Buffer.from(await r.arrayBuffer())];
+    } catch {
+        return [-1, Buffer.alloc(0)];
+    }
 }
 
 const parse = (body: Buffer): unknown => {

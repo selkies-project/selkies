@@ -19,7 +19,7 @@
  * @module
  */
 
-import { createServer, request, type IncomingMessage, type ServerResponse } from 'node:http';
+import { request, Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { connect, type Socket } from 'node:net';
 import { pipeline } from 'node:stream';
 
@@ -158,7 +158,7 @@ export async function workerPolicyProxy(upstreamUrl: string, restricted: boolean
         client.once('close', () => tunnel.destroy());
     };
 
-    const server = createServer(onRequest);
+    const server = new Server(onRequest);
     server.on('connection', track);
     server.on('upgrade', onUpgrade);
     server.on('clientError', (err, socket) => {

@@ -10,7 +10,7 @@
  * @module
  */
 
-import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
+import { type IncomingHttpHeaders, Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 import { fields, type Fields } from '../../web/selkies-web-core/lib/narrow.ts';
@@ -26,7 +26,7 @@ export class Collector {
     private readonly server: Server;
 
     private constructor() {
-        this.server = createServer((req, res) => {
+        this.server = new Server((req, res) => {
             const chunks: Buffer[] = [];
             req.on('data', (c: Buffer) => { chunks.push(c); });
             req.on('end', () => {

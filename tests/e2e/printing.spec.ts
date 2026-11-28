@@ -24,7 +24,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { request as httpRequest } from 'node:http';
 import { delimiter, join } from 'node:path';
 
 import type { Browser, Locator, Page } from '@playwright/test';
@@ -141,15 +140,10 @@ function lp(runtime: string, title: string, path: string): boolean {
 }
 
 /** The status `/api/print/<name>` answers with, refusals included. */
-function routeStatus(port: number, name: string): Promise<number> {
-    return new Promise((resolve, reject) => {
-        const req = httpRequest({ host: 'localhost', port, path: `/api/print/${encodeURIComponent(name)}`, timeout: 10_000 }, (res) => {
-            res.resume();
-            resolve(res.statusCode ?? 0);
-        });
-        req.on('error', reject);
-        req.end();
-    });
+async function routeStatus(port: number, name: string): Promise<number> {
+    const res = await fetch(`http://localhost:${port}/api/print/${encodeURIComponent(name)}`, { signal: AbortSignal.timeout(10_000) });
+    await res.body?.cancel();
+    return res.status;
 }
 
 interface Printed {

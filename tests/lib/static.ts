@@ -18,7 +18,7 @@
  */
 
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { createServer, type Server } from 'node:http';
+import { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { stripTypeScriptTypes } from 'node:module';
 import { extname, join, resolve, sep } from 'node:path';
@@ -100,7 +100,7 @@ export async function serveTypeScript(served: string, onPost?: (path: string, bo
     const realRoot = realpathSync(root);
     const inside = (p: string, base: string): boolean => p === base || p.startsWith(base + sep);
     const stripped = new Map<string, { stamp: number; body: Buffer }>();
-    const server = createServer((req, res) => {
+    const server = new Server((req, res) => {
         // Nothing served is ever read as another type: an error's text stays text.
         res.setHeader('X-Content-Type-Options', 'nosniff');
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');

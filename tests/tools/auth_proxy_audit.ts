@@ -29,7 +29,6 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto';
-import { request as httpRequest } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { AuthProxy } from '../lib/authproxy.ts';
 import { Checks } from '../lib/checks.ts';
@@ -239,14 +238,10 @@ async function auditIdentity(proxy: AuthProxy): Promise<void> {
 /** Check that a plain HTTP request to the proxy's port is not served as HTTP. */
 async function auditPlainRefused(proxy: AuthProxy, up: Upstream): Promise<void> {
     const before = up.seen.length;
-    const outcome = await new Promise<string>((resolve) => {
-        const req = httpRequest({ host: '127.0.0.1', port: portOf(proxy), path: '/', agent: false, signal: AbortSignal.timeout(WAIT) }, (res) => {
-            res.resume();
-            resolve(`served ${res.statusCode ?? 0}`);
-        });
-        req.on('error', () => { resolve('refused'); });
-        req.end();
-    });
+    const outcome = await fetch(`http://127.0.0.1:${portOf(proxy)}/`, { signal: AbortSignal.timeout(WAIT) }).then(
+        async (res) => { await res.body?.cancel(); return `served ${res.status}`; },
+        () => 'refused',
+    );
     await pause(SETTLE);
     checks.check('a plain HTTP request to the proxy is never served or forwarded', outcome === 'refused' && up.seen.length === before, outcome);
 }

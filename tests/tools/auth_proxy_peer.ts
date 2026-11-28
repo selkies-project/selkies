@@ -14,7 +14,7 @@
  * @module
  */
 
-import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
+import { type IncomingHttpHeaders, Server } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { createServer as createNetServer, type AddressInfo, type Socket } from 'node:net';
 import { checkServerIdentity, connect, type TLSSocket } from 'node:tls';
@@ -75,7 +75,7 @@ export interface Upstream {
  * @returns The listening upstream.
  */
 export async function startUpstream(): Promise<Upstream> {
-    const server = createServer();
+    const server = new Server();
     const up: Upstream = { server, port: 0, seen: [], upgrades: [], sockets: new Set(), errors: [] };
     server.on('connection', (socket) => {
         up.sockets.add(socket);

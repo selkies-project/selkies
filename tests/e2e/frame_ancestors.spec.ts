@@ -15,7 +15,7 @@
 //
 // A page on a second origin frames the client under each policy, and
 // Chromium's own verdict is read from what the frame ends up showing.
-import { createServer, type Server } from 'node:http';
+import { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 import type { Browser } from '@playwright/test';
@@ -53,7 +53,7 @@ test('frame_ancestors', async () => {
     const host = new Host(suiteOf(import.meta.filename));
     // A page on another origin (localhost rather than the client's 127.0.0.1) that frames the client.
     let target = '';
-    const embedder: Server = createServer((_req, reply) => {
+    const embedder = new Server((_req, reply) => {
         const body = `<html><body><iframe id="f" src="${target}/"></iframe></body></html>`;
         reply.writeHead(200, { 'Content-Type': 'text/html', 'Content-Length': Buffer.byteLength(body) });
         reply.end(body);
