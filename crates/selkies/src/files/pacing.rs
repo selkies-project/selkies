@@ -67,7 +67,9 @@
 //! (`TransferPacer::FILLED`). A clear verdict says the path carried what was sent, and of an
 //! allowance several times that it says nothing: doubled on each such verdict it stood at a
 //! gigabit a second before the first congested one, on a 6 Mbit/s uplink, and took half a
-//! minute of cuts to mean anything again.
+//! minute of cuts to mean anything again. One they leave a fifth of unfilled while a queue
+//! deeper than its chunk budget stands behind a clear verdict is over the path's rate, and
+//! comes down to what they move over four fifths (`TransferPacer::STANDING_US`).
 //!
 //! An upload is read against the uplink alone where the session's socket tells that apart
 //! ([`UplinkGauge::for_upload`], [`SessionPing::way_back`]): the round trip of a ping is the
@@ -897,6 +899,11 @@ impl TransferPacer {
     /// it within a quarter of that rate.
     const USED_SECONDS: f64 = 0.25;
     const FILLED: f64 = 0.8;
+    /// The queue an allowance at the path's rate stands, in microseconds: the chunk budget
+    /// its window and its bursts carry over the round trip ([`TRANSFER_CHUNK_DELAY_BUDGET`]).
+    /// An unfilled allowance with a deeper one behind a clear verdict is over the path's rate,
+    /// and comes down to its transfers' use ([`TransferPacer::gauge_backoff_beside`]).
+    const STANDING_US: u32 = (TRANSFER_CHUNK_DELAY_BUDGET * 1e6) as u32;
     /// The idle seconds after which the allowance is stale and the multiplicative ramp is
     /// re-entered (TCP's restart after idle), and the transfers' rate is read afresh.
     const RESTART_SECONDS: f64 = 10.0;
@@ -1124,7 +1131,12 @@ impl TransferPacer {
     /// slow start ends a doubling or two past the path's rate, and that excess stands in the
     /// path for as long as the allowance keeps it: on a round trip of 80 ms the cuts alone
     /// took six seconds to bring it under 6 Mbit/s from 16.8, with 110 ms of queue standing
-    /// meanwhile.
+    /// meanwhile. A clear verdict brings such an allowance down to what they moved over four
+    /// fifths where the round trip stands more than [`TransferPacer::STANDING_US`] over its
+    /// floor, and ends slow start: the path holds them under the allowance, and the excess
+    /// stands in it under what a verdict cuts for, 22.6 kB behind a 6 Mbit/s uplink where slow
+    /// start left 16.8 Mbit/s. With less standing it is the sender that fell short, as in a
+    /// transfer's first moments, and the allowance holds.
     ///
     /// `share_bps` is what a congested verdict takes the allowance to, where there is one
     /// ([`UplinkGauge::share_bps`]): toward it a step a verdict from under it, and down to
@@ -1209,10 +1221,14 @@ impl TransferPacer {
             ceiling = None;
         }
         let bound = ceiling.unwrap_or(s.rate_bps * 4.0).min(self.ceiling());
-        if s.paused
-            || s.used_bps
-                .is_some_and(|used| used < Self::FILLED * s.rate_bps)
-        {
+        if s.paused {
+            return;
+        }
+        if let Some(used) = s.used_bps.filter(|used| *used < Self::FILLED * s.rate_bps) {
+            if inflation_us.is_some_and(|i| i > Self::STANDING_US) {
+                s.rate_bps = (used / Self::FILLED).max(Self::RATE_FLOOR);
+                s.slow_start = false;
+            }
             return;
         }
         s.rate_bps = if s.slow_start {
@@ -1626,6 +1642,56 @@ mod tests {
         at(400_000.0 * 0.65 * 0.65 * 0.65);
         pacer.gauge_backoff(true, false, 0.65, DEFAULT_STEP, None);
         at(400_000.0 * 0.65 * 0.65 * 0.65);
+    }
+
+    #[test]
+    fn an_unfilled_allowance_over_a_standing_queue_comes_down_to_its_use() {
+        let pacer = TransferPacer::adaptive();
+        let start = pacer.rate_bps();
+        // An upload's first verdicts behind a 6 Mbit/s uplink: no reading yet, then the
+        // first tenth of a second against an allowance just doubled, no queue behind either.
+        // The sender is what fell short, and the ramp goes on.
+        pacer.gauge_backoff(false, true, 0.65, DEFAULT_STEP, Some(0));
+        assert_eq!(pacer.rate_bps(), 2.0 * start);
+        set_used(&pacer, 120_000.0);
+        pacer.gauge_backoff(false, true, 0.65, DEFAULT_STEP, Some(0));
+        assert_eq!(pacer.rate_bps(), 2.0 * start);
+        set_used(&pacer, 845_000.0);
+        pacer.gauge_backoff(false, true, 0.65, DEFAULT_STEP, Some(0));
+        assert_eq!(pacer.rate_bps(), 4.0 * start);
+        // Doubled once more on that reading, the allowance stands at 2.1 MB/s over a path
+        // that carries 750 kB/s, with 20 ms of queue behind each clear verdict: it comes down
+        // to what is carried over four fifths and stays near it, its slow start over, through
+        // the reading's noise.
+        let carried = 750_000.0;
+        set_rate(&pacer, 2_097_152.0);
+        set_used(&pacer, carried);
+        pacer.gauge_backoff(false, true, 0.65, DEFAULT_STEP, Some(20_000));
+        assert!(
+            (pacer.rate_bps() - carried / 0.8).abs() < 1.0,
+            "{}",
+            pacer.rate_bps()
+        );
+        assert!(!pacer.inner.lock().slow_start);
+        for i in 0..40u32 {
+            let noise = [0.97, 1.0, 1.03, 1.01, 0.99][i as usize % 5];
+            set_used(&pacer, carried * noise);
+            let inflation = Some(15_000 + 1_000 * (i % 6));
+            pacer.gauge_backoff(false, true, 0.65, DEFAULT_STEP, inflation);
+            let rate = pacer.rate_bps();
+            assert!(
+                rate >= 0.96 * carried / 0.8 && rate <= 1.1 * carried / 0.8,
+                "verdict {i}: {rate}"
+            );
+        }
+        // With no more than the chunk budget's queue behind the verdict, or none read, the
+        // allowance holds, as one a sender leaves unfilled.
+        set_rate(&pacer, 2_000_000.0);
+        set_used(&pacer, carried);
+        for inflation in [Some(TransferPacer::STANDING_US), None] {
+            pacer.gauge_backoff(false, true, 0.65, DEFAULT_STEP, inflation);
+            assert_eq!(pacer.rate_bps(), 2_000_000.0, "{inflation:?}");
+        }
     }
 
     #[tokio::test]
