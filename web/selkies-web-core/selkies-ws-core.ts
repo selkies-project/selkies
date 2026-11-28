@@ -42,7 +42,9 @@
  * `vp,<originX>,<originY>,<scaleX>,<scaleY>` (this page's stream box on the
  * user's desktop, relayed to the other displays), and the input verbs of
  * lib/input.ts, its trackpad mode's `_pointer_echo,<0|1>` among them, which
- * the server answers with `pointer,` system actions. The server sends
+ * the server answers with `pointer,` system actions; a Wayland session's
+ * `caret,` system actions place the IME's composition (`onCaret`, lib/input.ts).
+ * The server sends
  * `MODE websockets`, `AUTH_SUCCESS,{json}`,
  * `ROLE_UPDATE,{json}`, `MK_ACCESS,<0|1>`, `VIDEO_STARTED`, `VIDEO_STOPPED`,
  * `AUDIO_STARTED`, `AUDIO_STOPPED`, `AUDIO_DISABLED`, `MICROPHONE_DISABLED`,
@@ -9162,6 +9164,10 @@ class WorkerWebSocket {
             else if (typeof systemMsg.action === 'string' &&
                 systemMsg.action.startsWith('pointer,') && window.webrtcInput) {
               window.webrtcInput.onPointerEcho(systemMsg.action);
+            }
+            else if (typeof systemMsg.action === 'string' &&
+                systemMsg.action.startsWith('caret,') && window.webrtcInput) {
+              window.webrtcInput.onCaret(systemMsg.action);
             }
           } catch (e) {
             console.error('Error parsing system data:', e);

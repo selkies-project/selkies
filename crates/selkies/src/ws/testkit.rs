@@ -558,6 +558,9 @@ impl Input for FakeInput {
     async fn current_cursor(&self) -> Option<Json> {
         None
     }
+    fn current_caret(&self) -> Option<String> {
+        None
+    }
     fn set_system_dpi(&self, _dpi: f64) {}
     fn cursor_size_cap(&self) -> i32 {
         64

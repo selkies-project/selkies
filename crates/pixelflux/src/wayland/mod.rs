@@ -38,6 +38,8 @@ pub mod outclient;
 pub mod portal;
 /// PipeWire consumer turning a portal monitor stream into host frames.
 pub mod pwcapture;
+/// `zwp_text_input_v3`: the focused text field's caret, for a remote input method.
+pub mod text_input;
 /// Virtual-keyboard client for typing into a nested app compositor's socket.
 pub mod vkclient;
 /// Shared plumbing for outbound Wayland client connections.

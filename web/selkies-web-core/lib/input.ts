@@ -69,9 +69,11 @@
  * `js,d`, `js,b`, `js,a`, and `js,h` for gamepads, whose
  * rumble comes back as the system action `rumble,<slot>,<strong>,<weak>,<ms>`
  * (`rumble`); `_pointer_echo,<0|1>` in trackpad mode, answered by the system
- * action `pointer,<display>,<x>,<y>,<scale>,<seq>` or `pointer,none`; and,
+ * action `pointer,<display>,<x>,<y>,<scale>,<seq>` or `pointer,none`;
  * where the session takes a touchpad's scroll as a finger's, `sf,<dx>,<dy>`
- * in stream pixels and `sfe` at its end (`setFingerScroll`).
+ * in stream pixels and `sfe` at its end (`setFingerScroll`); and, from a
+ * session that knows the focused text field's caret, the system action
+ * `caret,<display>,<x>,<y>,<w>,<h>` or `caret,none` (`onCaret`).
  * @module
  */
 
@@ -1817,6 +1819,7 @@ export class Input {
     _latestMouseY!: number;
     displayId!: string;
     _echo!: { display: string; x: number; y: number; scale: number; seq: number; maxX: number; maxY: number; } | null;
+    _serverCaret!: { x: number; y: number; w: number; h: number; } | null;
     _echoDeltas!: EchoDelta[];
     _echoComposited!: boolean;
     fingerScroll!: boolean;
@@ -1973,6 +1976,8 @@ export class Input {
          */
         this._echo = null;
         this._echoDeltas = [];
+        /** The remote text caret on this page's display, in server pixels (`onCaret`). */
+        this._serverCaret = null;
         /** Whether this page has the server composite the cursor, where no echo came. */
         this._echoComposited = false;
         /** Whether the session takes a touchpad's scroll as a finger's (`setFingerScroll`). */
@@ -2469,14 +2474,15 @@ export class Input {
      * host's IME places its candidate window at the composition's caret, which
      * in an empty overlay is its top left corner, the stream's left edge, as
      * far as can be from the remote text caret, of which the page knows
-     * nothing; the last click on the stream is where a text field was most
-     * likely focused, and its caret is (selkies#667). The caret's line is
-     * `COMPOSITION_LINE_PX` tall, centered on the point. Left alone while a
-     * composition runs, whose window would jump.
+     * nothing unless the session reports it (`onCaret`); otherwise the last
+     * click on the stream is where a text field was most likely focused, and
+     * its caret is. The caret's line is `line` tall, centered on the point.
+     * Left alone while a composition runs, whose window would jump.
      * @param clientX
      * @param clientY
+     * @param line The line's height in CSS pixels.
      */
-    _anchorComposition(clientX: number, clientY: number): void {
+    _anchorComposition(clientX: number, clientY: number, line: number = COMPOSITION_LINE_PX): void {
         const el = this.element;
         if (this.isComposing || !el || !el.style || typeof el.getBoundingClientRect !== 'function') return;
         const rect = el.getBoundingClientRect();
@@ -2485,11 +2491,41 @@ export class Input {
         if (!(rect.width > 0 && rect.height > 0 && width > 0 && height > 0)) return;
         const x = Math.min(Math.max((clientX - rect.left) * width / rect.width, 0), width - 1);
         const y = (clientY - rect.top) * height / rect.height;
-        const top = Math.min(Math.max(y - COMPOSITION_LINE_PX / 2, 0), Math.max(height - COMPOSITION_LINE_PX, 0));
+        const top = Math.min(Math.max(y - line / 2, 0), Math.max(height - line, 0));
         el.style.setProperty('box-sizing', 'border-box');
-        el.style.setProperty('font-size', `${COMPOSITION_LINE_PX * 2 / 3}px`);
-        el.style.setProperty('line-height', `${COMPOSITION_LINE_PX}px`);
-        el.style.setProperty('padding', `${top}px 0 ${Math.max(height - top - COMPOSITION_LINE_PX, 0)}px ${x}px`);
+        el.style.setProperty('font-size', `${line * 2 / 3}px`);
+        el.style.setProperty('line-height', `${line}px`);
+        el.style.setProperty('padding', `${top}px 0 ${Math.max(height - top - line, 0)}px ${x}px`);
+    }
+
+    /**
+     * Takes the focused remote text field's caret: the system action
+     * `caret,<display>,<x>,<y>,<w>,<h>`, its cursor rectangle in that
+     * display's server pixels, or `caret,none` once no field reports one.
+     * While this page's display holds the caret, the overlay's caret covers it
+     * (`_placeServerCaret`) and a click leaves it there; otherwise a click
+     * places it again.
+     * @param action
+     */
+    onCaret(action: string): void {
+        const fields = action.split(',');
+        const [x, y, w, h] = fields.slice(2, 6).map(Number);
+        this._serverCaret = (fields.length >= 6 && fields[1] === this.displayId &&
+                             [x, y, w, h].every(Number.isFinite)) ? { x, y, w, h } : null;
+        this._placeServerCaret();
+    }
+
+    /**
+     * Pads the overlay so its caret covers the remote caret (`onCaret`),
+     * mapped from server to page pixels as the pointer echo is, its line as
+     * tall as the remote one and never under `COMPOSITION_LINE_PX / 3`.
+     */
+    _placeServerCaret(): void {
+        const caret = this._serverCaret;
+        const box = caret ? this._streamBox() : null;
+        if (!caret || !box || !(box.scaleX > 0) || !(box.scaleY > 0)) return;
+        this._anchorComposition(box.left + caret.x / box.scaleX, box.top + (caret.y + caret.h / 2) / box.scaleY,
+                                Math.max(caret.h / box.scaleY, COMPOSITION_LINE_PX / 3));
     }
 
     /** Focuses the overlay element so the IME composes there, unless a real form field (dashboard inputs) holds focus. */
@@ -3105,7 +3141,8 @@ export class Input {
      * Empties the overlay input once the IME is idle: committed text would
      * accumulate there, and some IMEs reconvert against that stale surrounding
      * text and corrupt later syllables. Never synchronously mid-composition,
-     * since mutating the value then aborts the active composition.
+     * since mutating the value then aborts the active composition. The
+     * overlay's caret then moves to where the remote caret went meanwhile.
      */
     _clearCompositionHostSoon(): void {
         setTimeout((): void => {
@@ -3115,6 +3152,7 @@ export class Input {
                 el.value = '';
             }
             this._resetAssist();
+            this._placeServerCaret();
         }, 0);
     }
 
@@ -3495,7 +3533,8 @@ export class Input {
         if (down && event.target === this.element && document.activeElement !== this.element) {
             this._focusCompositionHost();
         }
-        if (down && event.button === 0 && event.target === this.element && !this._isStreamLocked()) {
+        if (down && event.button === 0 && event.target === this.element && !this._isStreamLocked() &&
+            !this._serverCaret) {
             this._anchorComposition(event.clientX, event.clientY);
         }
         var mtype: 'm' | 'm2' = "m";

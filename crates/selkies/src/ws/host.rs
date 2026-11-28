@@ -95,6 +95,10 @@ pub trait Input: Send + Sync {
     /// The current cursor payload where the X11 cursor seed knows one.
     async fn current_cursor(&self) -> Option<Json>;
 
+    /// The last `caret,` system action, for a joining page; None where the session reports no
+    /// caret.
+    fn current_caret(&self) -> Option<String>;
+
     /// Scale the remote-cursor delivery cap with a new desktop DPI.
     fn set_system_dpi(&self, dpi: f64);
 

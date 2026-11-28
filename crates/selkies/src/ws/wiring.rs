@@ -517,6 +517,10 @@ impl Input for DispatcherInput {
             .and_then(|c| serde_json::to_value(c).ok())
     }
 
+    fn current_caret(&self) -> Option<String> {
+        self.0.current_caret()
+    }
+
     fn set_system_dpi(&self, dpi: f64) {
         self.0.set_system_dpi(dpi);
     }

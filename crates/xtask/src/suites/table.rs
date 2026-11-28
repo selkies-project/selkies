@@ -193,6 +193,13 @@ pub static SUITES: &[Suite] = &[
     suite("e2e/ime_composition.spec.ts", "e2e", 300),
     suite("e2e/wayland_virtual_keyboard.spec.ts", "e2e", 300),
     Suite {
+        path: "e2e/wayland_text_caret.spec.ts",
+        tier: "e2e",
+        timeout: 300,
+        selectors: &["ws", "wr", "wm"],
+        name: None,
+    },
+    Suite {
         path: "e2e/wayland_popups.spec.ts",
         tier: "e2e",
         timeout: 300,

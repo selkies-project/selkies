@@ -483,6 +483,7 @@ impl Connection {
         )
         .await;
         service.send_current_cursor(&self.client).await;
+        service.send_current_caret(&self.client).await;
         // Which display this socket renders is only known from its first SETTINGS; the primary's
         // live encoder is what a viewer renders and a later display seeds from.
         service.refresh_second_screen_capacity().await;

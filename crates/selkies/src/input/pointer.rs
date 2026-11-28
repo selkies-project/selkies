@@ -5,8 +5,9 @@
  */
 
 //! Where the pointer is and what the pages are told about it: the laid-out displays a desktop
-//! point falls on, the position the handler tracks between absolute messages, and one trackpad
-//! page's pointer echo ([`PointerEcho`]).
+//! point falls on, the position the handler tracks between absolute messages, one trackpad
+//! page's pointer echo ([`PointerEcho`]), and the focused text field's caret
+//! ([`caret_message`]).
 //!
 //! A trackpad page draws the pointer where the server echoes it, moved on by its own deltas and
 //! held inside that display after each, as the pointer is, so an echo that would leave it drawn
@@ -181,6 +182,25 @@ pub fn echo_message(display: &str, x: f64, y: f64, scale: f64, seq: u64) -> Stri
     format!("pointer,{display},{x:.1},{y:.1},{},{seq}", format_g(scale))
 }
 
+/// The text of one caret message, as the page reads it: `caret,<display>,<x>,<y>,<w>,<h>`, the
+/// cursor rectangle of the text field the Wayland compositor's keyboard focus is in, in the
+/// pixels of the display its top left corner lies on, or `caret,none` once no field reports
+/// one. A page of that display composes its input method's text there.
+pub fn caret_message(layouts: &Layouts, caret: Option<pixelflux::sink::TextCaret>) -> String {
+    let Some(caret) = caret else {
+        return "caret,none".to_string();
+    };
+    let point = display_at(layouts, f64::from(caret.x), f64::from(caret.y));
+    format!(
+        "caret,{},{},{},{},{}",
+        point.display,
+        point.x.round() as i64,
+        point.y.round() as i64,
+        caret.width,
+        caret.height
+    )
+}
+
 /// A float as `%g` prints it for the scales a display reports (1, 1.5, 2).
 pub fn format_g(value: f64) -> String {
     if value.fract() == 0.0 && value.abs() < 1e15 {
@@ -338,6 +358,33 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// A caret is told in the pixels of the display it lies on, and its absence as `none`.
+    #[test]
+    fn caret_message_names_the_display_the_caret_lies_on() {
+        use pixelflux::sink::TextCaret;
+        let l = layouts(&[
+            ("primary", 0, 0, 1920, 1080),
+            ("display2", 1920, 0, 1280, 720),
+        ]);
+        let caret = |x, y| {
+            Some(TextCaret {
+                x,
+                y,
+                width: 2,
+                height: 18,
+            })
+        };
+        assert_eq!(
+            caret_message(&l, caret(100, 40)),
+            "caret,primary,100,40,2,18"
+        );
+        assert_eq!(
+            caret_message(&l, caret(2000, 50)),
+            "caret,display2,80,50,2,18"
+        );
+        assert_eq!(caret_message(&l, None), "caret,none");
     }
 
     /// The extent of the laid-out displays.

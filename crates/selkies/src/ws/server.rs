@@ -1901,6 +1901,18 @@ impl WsService {
         }
     }
 
+    /// Tell one client where the focused text field's caret is, at connect, where the session
+    /// reports a caret.
+    pub(crate) async fn send_current_caret(&self, client: &Client) {
+        let Some(caret) = self.input().and_then(|input| input.current_caret()) else {
+            return;
+        };
+        let message = format!("system,{}", json!({"action": caret}));
+        if let Err(e) = client.send(Frame::text(message)).await {
+            warn!(target: "ws", "Failed to send the text caret to client {}: {e}", client.remote);
+        }
+    }
+
     /// Broadcast a cursor change from pixelflux's cursor thread, cached for late joiners.
     pub fn send_cursor_data(&self, payload: Json) {
         self.st.lock().last_cursor = Some(payload.clone());

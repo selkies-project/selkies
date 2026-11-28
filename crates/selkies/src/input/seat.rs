@@ -14,6 +14,9 @@
 //! (`type_keysyms_wayland`) runs a one-shot Wayland client to completion, so the handler runs
 //! those on a blocking thread; `inject_*` and the keymap swaps are channel sends.
 
+use std::sync::Arc;
+
+use pixelflux::sink::TextCaretSink;
 use pixelflux::{Error, ScreenCapture};
 
 /// What the handler needs from the compositor seat, in pixelflux's own terms.
@@ -59,6 +62,8 @@ pub trait WaylandSeat: Send + Sync {
     fn set_app_wayland_display(&self, display: String);
     /// Stop watching the app compositor's selection.
     fn clipboard_unwatch_app(&self, display: String);
+    /// Register the consumer of the focused text field's caret, replacing any before it.
+    fn set_text_caret_sink(&self, sink: Arc<dyn TextCaretSink>);
 }
 
 impl WaylandSeat for ScreenCapture {
@@ -131,5 +136,9 @@ impl WaylandSeat for ScreenCapture {
 
     fn clipboard_unwatch_app(&self, display: String) {
         ScreenCapture::clipboard_unwatch_app(self, &display)
+    }
+
+    fn set_text_caret_sink(&self, sink: Arc<dyn TextCaretSink>) {
+        ScreenCapture::set_text_caret_sink(self, Some(sink))
     }
 }

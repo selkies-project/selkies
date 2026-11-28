@@ -1758,15 +1758,20 @@ impl EngineHost for WebRtcService {
             // Its tab hidden may hand the display to a page beside it; an older page ignores it.
             channel.send_typed("page_visibility", &json!({}));
         }
-        // The cursor the input stack holds, read off this task, else the last one sent.
+        // The cursor the input stack holds, read off this task, else the last one sent, and the
+        // text caret where a field reports one.
         let (service, channel) = (self.arc(), channel.clone());
         tokio::spawn(async move {
-            if let Some(input) = service.input()
+            let input = service.input();
+            if let Some(input) = &input
                 && let Some(cursor) = input.current_cursor().await
             {
                 *service.engine.last_cursor.lock() = Some(cursor);
             }
             service.send_current_cursor(Some(&channel));
+            if let Some(caret) = input.and_then(|input| input.current_caret()) {
+                channel.send_system(&caret);
+            }
         });
     }
 

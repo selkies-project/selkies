@@ -6,14 +6,15 @@
 
 //! What a capture hands its consumer, and the traits a consumer implements to receive it:
 //! the encoded frames of a capture ([`FrameSink`]), the pointer's image as it changes
-//! ([`CursorSink`]), the clipboard a client application copies to ([`ClipboardSink`]), and
-//! the selection of an application compositor watched from outside ([`SelectionWatch`]).
+//! ([`CursorSink`]), the clipboard a client application copies to ([`ClipboardSink`]), the
+//! selection of an application compositor watched from outside ([`SelectionWatch`]), and the
+//! caret of the text field the compositor's keyboard focus is in ([`TextCaretSink`]).
 //!
 //! Every sink is called on a thread pixelflux owns and never on a capture or compositor
 //! thread: a capture's deliver thread hands frames one batch at a time with one batch in
 //! flight, so a consumer that blocks holds the encoder back by exactly one frame and loses
 //! none; cursor images come from the `wl-cursor` worker or the X11 cursor monitor,
-//! clipboard contents from a reader thread per copy. The Python bridge implements each
+//! clipboard contents from a reader thread per copy, the caret from the `wl-caret` thread. The Python bridge implements each
 //! trait by taking the GIL and calling the registered callable; a Rust host implements it
 //! directly, or hands a closure, which every trait here accepts.
 
@@ -81,5 +82,27 @@ pub trait SelectionWatch: Send + Sync + 'static {
 impl<F: Fn(Vec<String>) + Send + Sync + 'static> SelectionWatch for F {
     fn mimes(&self, mimes: Vec<String>) {
         self(mimes)
+    }
+}
+
+/// The cursor rectangle of the text field the Wayland compositor's keyboard focus is in, as the
+/// application reports it, in physical union-layout pixels: the space pointer motion is injected
+/// in, each output at its layout offset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextCaret {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// A consumer of the text caret: a [`TextCaret`] as it moves, None once no field reports one.
+pub trait TextCaretSink: Send + Sync + 'static {
+    fn caret(&self, caret: Option<TextCaret>);
+}
+
+impl<F: Fn(Option<TextCaret>) + Send + Sync + 'static> TextCaretSink for F {
+    fn caret(&self, caret: Option<TextCaret>) {
+        self(caret)
     }
 }

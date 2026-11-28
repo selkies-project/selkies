@@ -46,8 +46,9 @@
  * `mk_access,0|1`, `command_error,text`, the apps panel's `apps_job,{json}` and
  * `apps_state,{json}` (`lib/app-commands.ts`), `auth_success,{json}` /
  * `role_update,{json}`, `resolution,WxH`, `video_declined,mime`,
- * `capture_demand,<subject>,0|1`, and the `pointer,` echo trackpad mode asks
- * for with `_pointer_echo,0|1`, lib/input.ts).
+ * `capture_demand,<subject>,0|1`, the `pointer,` echo trackpad mode asks
+ * for with `_pointer_echo,0|1`, and the `caret,` a Wayland session reports to
+ * place the IME's composition, lib/input.ts).
  *
  * The page hash selects the role: none is the controller, `#shared` a strict
  * viewer, `#playerN` a viewer with gamepad slot N, and `#display2-<position>`
@@ -3614,6 +3615,10 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 				}
 				if (action.startsWith('pointer,')) {
 					if (input) input.onPointerEcho(action);
+					return;
+				}
+				if (action.startsWith('caret,')) {
+					if (input) input.onCaret(action);
 					return;
 				}
 				if (action.startsWith('video_declined,')) {

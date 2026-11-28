@@ -39,7 +39,7 @@ use super::keysyms::{
     is_level_modifier, is_modifier, is_printable, is_unicode_plane, keysym_to_character,
     printable_codepoint, text_to_wayland_keysyms, xkey_name,
 };
-use super::pointer::{PointerEcho, PointerTracker};
+use super::pointer::{PointerEcho, PointerTracker, caret_message};
 use super::seat::WaylandSeat;
 use super::wayland_keymap::WaylandKeymapOwner;
 use super::x11_link::X11Link;
@@ -184,6 +184,9 @@ pub(crate) struct State {
     /// The highest pointer message number each connection has sent.
     pub pointer_seq: HashMap<ConnId, u64>,
     pub pointer_echoes: HashMap<ConnId, PointerEcho>,
+    /// The last caret message the pages were told, `caret,none` among them, for a page that
+    /// joins after (`current_caret`).
+    pub caret: Option<String>,
     pub pointer_echo_at: Option<Instant>,
     pub pointer_moved_at: Option<Instant>,
     pub echo_trailing_scheduled: bool,
@@ -244,6 +247,7 @@ impl State {
             pointer: PointerTracker::new(),
             pointer_seq: HashMap::new(),
             pointer_echoes: HashMap::new(),
+            caret: None,
             pointer_echo_at: None,
             pointer_moved_at: None,
             echo_trailing_scheduled: false,
@@ -435,11 +439,36 @@ impl Dispatcher {
         }
         self.start_tasks();
         if self.cfg.is_wayland {
+            self.report_text_caret();
             self.push_wayland_base_layout(false).await;
             // After the worker starts: a Lock left engaged by a previous session inverts every
             // letter, and the reset rides the fresh worker.
             self.reset_keyboard().await;
         }
+    }
+
+    /// Tell every page where the focused text field's caret is, as the compositor reports it
+    /// (`caret_message`), so the page of its display composes its input method's text there.
+    /// The compositor's caret thread hands each report to the transport itself, since neither
+    /// waits to queue a system action.
+    fn report_text_caret(self: &Arc<Self>) {
+        let Some(seat) = &self.seat else { return };
+        let me = Arc::downgrade(self);
+        seat.set_text_caret_sink(Arc::new(
+            move |caret: Option<pixelflux::sink::TextCaret>| {
+                if let Some(h) = me.upgrade() {
+                    let message = caret_message(&h.host.display_layouts(), caret);
+                    h.state.lock().caret = Some(message.clone());
+                    h.host.send_system_action(None, &message);
+                }
+            },
+        ));
+    }
+
+    /// The caret message a page joining now needs, once the compositor has reported one: a
+    /// page reconnecting after the field lost the focus is told `caret,none`.
+    pub fn current_caret(&self) -> Option<String> {
+        self.state.lock().caret.clone()
     }
 
     /// Start the background tasks: the Wayland keyboard worker, the stale-key sweep, and the

@@ -7364,6 +7364,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         wm: None,
         foreign_toplevel: wayland::foreign_toplevel::ForeignToplevelState::new(&dh),
         workspace: wayland::workspace::WorkspaceState::new(&dh),
+        text_input: wayland::text_input::TextInputState::new(&dh),
         xwm: wayland::xwm::XwmState::new(
             smithay::wayland::xwayland_shell::XWaylandShellState::new::<AppState>(&dh),
         ),
@@ -8685,6 +8686,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         serve_changes(state);
         state.process_pending_clipboard_read();
         state.flush_pending_cursor();
+        wayland::text_input::publish(state);
         if state.host.is_none()
             && let Some(at) = state.pointer_shown_at()
         {
@@ -10631,6 +10633,12 @@ impl ScreenCapture {
     /// meta or where the host paints its cursor. An X11 session reads its pointer from the X server.
     pub fn pointer_location(&self) -> Option<(f64, f64, f64, u64)> {
         running_compositor().and_then(|be| be.pointer_location())
+    }
+
+    /// Register the consumer of the Wayland compositor's text caret (`wayland::text_input`),
+    /// `None` to withdraw it; a new one is told the caret at once. An X11 session reports none.
+    pub fn set_text_caret_sink(&self, sink: Option<Arc<dyn crate::sink::TextCaretSink>>) {
+        crate::wayland::text_input::set_sink(sink);
     }
 
     /// Toggle compositing the cursor into captured frames (the alternative to the

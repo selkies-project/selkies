@@ -721,6 +721,7 @@ pub(crate) mod testing {
         fn set_app_wayland_display(&self, _display: String) {}
 
         fn clipboard_unwatch_app(&self, _display: String) {}
+        fn set_text_caret_sink(&self, _sink: std::sync::Arc<dyn pixelflux::sink::TextCaretSink>) {}
     }
 }
 

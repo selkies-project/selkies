@@ -1265,6 +1265,8 @@ pub struct AppState {
     pub foreign_toplevel: crate::wayland::foreign_toplevel::ForeignToplevelState,
     /// The virtual desktops pagers read and switch (`ext_workspace_manager_v1`).
     pub workspace: crate::wayland::workspace::WorkspaceState,
+    /// The text inputs that report the focused field's caret (`zwp_text_input_v3`).
+    pub text_input: crate::wayland::text_input::TextInputState,
     /// Xwayland and its window manager, started under a window policy.
     pub xwm: crate::wayland::xwm::XwmState,
     /// The compositor's event loop, for sources started after it is up (Xwayland).
@@ -3797,7 +3799,7 @@ impl SeatHandler for AppState {
     /// Keep BOTH selections' focus following keyboard focus: without the data-device half,
     /// the focused client never receives wl_data_offer events and Ctrl+V paste is a silent
     /// no-op even while the compositor-side selection is correct (primary covers only
-    /// middle-click paste).
+    /// middle-click paste). The text inputs follow it too (`crate::wayland::text_input`).
     fn focus_changed(&mut self, seat: &Seat<AppState>, focus: Option<&Self::KeyboardFocus>) {
         let dh = &self.dh;
         let client = focus
@@ -3805,6 +3807,7 @@ impl SeatHandler for AppState {
             .and_then(|s| dh.get_client(s.id()).ok());
         set_data_device_focus(dh, seat, client.clone());
         set_primary_focus(dh, seat, client);
+        crate::wayland::text_input::focus_changed(self, focus);
         self.keyboard_focus = match focus {
             Some(FocusTarget::Window(window)) => window_meta(window).map(|m| m.id),
             _ => None,
