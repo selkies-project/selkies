@@ -210,12 +210,26 @@ unsafe extern "C" fn log_info(_user: *mut c_void, message: *const c_char) {
 /// tolerance holds an H.264 frame to three budgets, but leaves a still screen of dense text
 /// at 27 dB, every block skipped; a cap of six budgets cost HEVC 3 dB. Its VP9 refines in
 /// the default buffer and keeps it.
+///
+/// Intel's i965 codes the H.264 of the parts before Skylake (`reencodes_against_its_buffer`)
+/// through a rate control that codes a frame again, at a quantizer it predicts, for as long as
+/// the frame overflows or underflows the buffer, stopping only at the quantizer's bounds. A
+/// still screen's frame is a few skips at the quantizer the picture was coded at and a
+/// refinement of many budgets below it, so the frame overflows the buffer at one quantizer and
+/// underflows it at the next one tried, and the driver codes it forever: on Haswell at 1080p
+/// and 60 fps, 17.6 and 156 kbit at 51 and 46, alternating, at 8 Mbit/s in a buffer of a frame
+/// and a half, and a buffer of eight frames hung the same at 2 Mbit/s. A buffer of no size is
+/// one the driver checks no frame against, so there its rate control codes each frame once, at
+/// the quantizer the frames before it predict: one pass a frame at 2 to 20 Mbit/s, 17 ms at
+/// worst.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ConstantRate {
     /// The session's buffer, and the frame cap where the driver takes one.
     Buffer,
     /// No buffer and no cap.
     Unbounded,
+    /// A buffer of no size, which i965 checks no frame against, and no cap.
+    Unchecked,
     /// A buffer of this many seconds of the target and no cap.
     Seconds(f64),
 }
@@ -475,6 +489,24 @@ impl Device {
     /// iHD does (`ConstantRate`).
     fn starves_in_a_small_buffer(&self) -> bool {
         self.vendor.contains("iHD")
+    }
+
+    /// Whether the driver's H.264 rate control codes a frame again until it fits the buffer
+    /// (`ConstantRate::Unchecked`): i965 on the parts it encodes through its own rate control,
+    /// named in its vendor string, Sandy Bridge to Broadwell and CherryView. From Skylake on it
+    /// runs the rate control in a GPU kernel that codes a frame once.
+    fn reencodes_against_its_buffer(&self) -> bool {
+        self.vendor.contains("i965")
+            && [
+                "Sandybridge",
+                "Ivybridge",
+                "Bay Trail",
+                "Haswell",
+                "Broadwell",
+                "CherryView",
+            ]
+            .iter()
+            .any(|part| self.vendor.contains(part))
     }
 
     /// The highest H.264 `level_idc` the driver's sequence parameters may name
@@ -2042,6 +2074,9 @@ impl VaapiEncoder {
 
     /// How this driver's rate control is bounded (`ConstantRate`).
     fn constant_rate(&self) -> ConstantRate {
+        if matches!(self.arm, Arm::H264(_)) && self.device.reencodes_against_its_buffer() {
+            return ConstantRate::Unchecked;
+        }
         if !self.device.starves_in_a_small_buffer() {
             return ConstantRate::Buffer;
         }
@@ -2218,6 +2253,7 @@ impl VaapiEncoder {
                     Some((seconds(RESET_BUFFER_S), seconds(RESET_FULLNESS_S)))
                 }
                 ConstantRate::Unbounded => None,
+                ConstantRate::Unchecked => Some((0, 0)),
             };
             if let Some((size, fullness)) = buffer {
                 let hrd = VAEncMiscParameterHRD {

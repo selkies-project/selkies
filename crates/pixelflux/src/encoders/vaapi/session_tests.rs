@@ -2644,3 +2644,54 @@ fn a_dmabuf_takes_the_prime_2_descriptor_only_where_the_driver_lists_it() {
         );
     }
 }
+
+/// A constant-rate H.264 session on i965's own rate control, the parts before Skylake, hands
+/// the driver a buffer of no size with every sequence, so it codes each frame once rather than
+/// again until the frame fits, and the driver's own buffer, which it gives a sequence that
+/// names none, never returns; i965 on a later part, and every other driver, keeps the
+/// session's buffer.
+#[test]
+fn i965_before_skylake_codes_a_constant_rate_without_a_buffer() {
+    for (vendor, unchecked) in [
+        (
+            Some(c"Intel i965 driver for Intel(R) Haswell - 2.4.1"),
+            true,
+        ),
+        (
+            Some(c"Intel i965 driver for Intel(R) Ivybridge Desktop - 2.4.1"),
+            true,
+        ),
+        (
+            Some(c"Intel i965 driver for Intel(R) Broadwell - 2.4.1"),
+            true,
+        ),
+        (
+            Some(c"Intel i965 driver for Intel(R) Skylake - 2.4.1"),
+            false,
+        ),
+        (None, false),
+    ] {
+        let mut driver = Driver::generous();
+        driver.vendor = vendor;
+        mock::reset(driver);
+        let mut enc = session(Codec::H264, true);
+        for t in 0..2 {
+            encode(&mut enc, t, true);
+            mock::with(|d| {
+                let (_, bytes) = d
+                    .last_misc()
+                    .into_iter()
+                    .find(|m| m.0 == VAEncMiscParameterTypeHRD)
+                    .unwrap_or_else(|| panic!("{vendor:?}: no HRD"));
+                let hrd: VAEncMiscParameterHRD =
+                    unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
+                let size = (hrd.buffer_size, hrd.initial_buffer_fullness);
+                if unchecked {
+                    assert_eq!(size, (0, 0), "{vendor:?} frame {t}");
+                } else {
+                    assert_eq!(size, (200_000, 200_000), "{vendor:?} frame {t}");
+                }
+            });
+        }
+    }
+}
