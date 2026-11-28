@@ -5298,9 +5298,12 @@ export class Input {
 
     /**
      * Forgets everything learned about the current scroll device: notch
-     * quantums, classification samples, and fractional-notch carries. Called
-     * after a wheel-idle gap, since the learned state only holds for the
-     * device that produced it; afterwards behavior matches a fresh page load.
+     * quantums and classification samples. Called after a wheel-idle gap,
+     * since the learned state only holds for the device that produced it. The
+     * fractional-notch carries stay, a notch's worth of distance that has not
+     * scrolled yet: a high-resolution wheel turned seven of a notch's eight
+     * steps before a pause still scrolls that notch on the eighth. A turn the
+     * other way drops them (`_addWheelNotches`, `_accumulateWheelY`).
      */
     _resetWheelLearning(): void {
         this._smallestDeltaY = 10000;
@@ -5308,10 +5311,6 @@ export class Input {
         this._allowThreshold = true;
         this._wheelClassified = false;
         while (!this._queue.isEmpty()) { this._queue.dequeue(); }
-        this._wheelAccumY = 0;
-        this._wheelDirY = null;
-        this._wheelAccumX = 0;
-        this._wheelDirX = null;
         this._pinchCarry = 0;
     }
 

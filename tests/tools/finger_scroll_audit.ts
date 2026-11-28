@@ -365,6 +365,13 @@ for (const finger of [true, false]) {
               downs(sent) === 1 && fingers(sent).length === 0, JSON.stringify(sent));
     }
 }
+{
+    const { input, sent } = makeInput(true);
+    for (let i = 0; i < 7; i++) wheel(input, 8.875, { wheelDeltaY: -15, ms: 40 });
+    wheel(input, 8.875, { wheelDeltaY: -15, ms: 1500 });
+    check('WebKitGTK: a notch of eighth steps paused before its last still scrolls',
+          downs(sent) === 1 && fingers(sent).length === 0, JSON.stringify(sent));
+}
 view(640, 400);
 {
     const { input, sent } = makeInput(true);
