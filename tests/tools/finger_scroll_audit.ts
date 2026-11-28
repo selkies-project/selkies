@@ -397,4 +397,39 @@ for (const [os, platform] of [['GTK', GECKO_LINUX], ['Windows', GECKO_WINDOWS]] 
 }
 setPlatform(...LINUX);
 
+// One touchpad axis unit, as engines on a Linux host scroll it: 12 px in
+// Blink, which the session reads its strokes at, 4 in Gecko (Firefox 161: 5.25
+// and 1.75 px for one 0.4375 unit), 2.5 in WebKitGTK on GTK 4 and 4 on GTK 3,
+// whose pixels per 120 of legacy delta are 2.5 and 40.
+setPlatform(...GECKO_LINUX);
+{
+    const { input, sent } = makeInput(true);
+    for (const d of [3.52, 1.75, 1.75]) wheel(input, d);
+    check('Gecko on GTK: a touchpad\'s stroke goes out at Blink\'s pixels, three times its own',
+          JSON.stringify(fingers(sent)) === JSON.stringify(['sf,0.00,10.56', 'sf,0.00,5.25', 'sf,0.00,5.25']),
+          JSON.stringify(sent));
+}
+setPlatform(...MAC_GECKO);
+{
+    const { input, sent } = makeInput(true);
+    wheel(input, 1.75);
+    check('Gecko on macOS, with no axis to give back: its pixels go as they are',
+          fingers(sent)[0] === 'sf,0.00,1.75', JSON.stringify(sent));
+}
+setPlatform(...LINUX_WEBKIT);
+view(800, 600);
+{
+    const { input, sent } = makeInput(true);
+    wheel(input, 2.5 * 0.4375, { wheelDeltaY: -120 * 0.4375 });
+    check('WebKitGTK on GTK 4: a touchpad\'s stroke goes out at Blink\'s pixels, 4.8 times its own',
+          fingers(sent)[0] === 'sf,0.00,5.25', JSON.stringify(sent));
+}
+{
+    const { input, sent } = makeInput(true);
+    wheel(input, 40 * 0.04375, { wheelDeltaY: -120 * 0.04375 });
+    check('WebKitGTK on GTK 3: three times its own',
+          fingers(sent)[0] === 'sf,0.00,5.25', JSON.stringify(sent));
+}
+setPlatform(...LINUX);
+
 process.exit(failed ? 1 : 0);

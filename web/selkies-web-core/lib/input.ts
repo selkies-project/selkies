@@ -349,6 +349,23 @@ const MAC_WHEEL_LINE_PX = 40;
 const LEGACY_WHEEL_DELTA_PER_NOTCH = 120;
 
 /**
+ * Page pixels the session reads as one axis unit of a finger's scroll
+ * (pixelflux's `FINGER_PX_PER_AXIS`): Blink's on Linux, where 10 units are a
+ * wheel step of 120 px.
+ */
+const FINGER_PX_PER_AXIS = 12;
+
+/**
+ * Page pixels a Linux engine other than Blink scrolls a touchpad's axis unit:
+ * Gecko takes GTK's tenth of it at `apz.gtk.pangesture.pixel_delta_mode_multiplier`
+ * (40), and WebKitGTK scales GTK 4's unit by 2.5 and GTK 3's tenth by 40
+ * (`_fingerAxisScale`).
+ */
+const GECKO_GTK_PX_PER_AXIS = 4;
+const WEBKIT_GTK4_PX_PER_AXIS = 2.5;
+const WEBKIT_GTK3_PX_PER_AXIS = 4;
+
+/**
  * How long a touchpad's scroll may pause before it counts as ended (`sfe`), in
  * milliseconds: the page sees no lift, and a moving finger, or the client's own
  * momentum after one, sends its next wheel event within a frame or two. Past
@@ -5463,18 +5480,41 @@ export class Input {
 
     /**
      * Sends a touchpad's scroll as the finger's travel in stream pixels,
-     * `sf,<dx>,<dy>`, and `sfe` once no wheel event has come for
-     * `FINGER_SCROLL_END_MS`, the axis stop a finger's scroll ends with.
+     * `sf,<dx>,<dy>`, at Blink's pixels per axis unit (`_fingerAxisScale`),
+     * and `sfe` once no wheel event has come for `FINGER_SCROLL_END_MS`, the
+     * axis stop a finger's scroll ends with.
      * @param event
      */
     _fingerScroll(event: WheelEvent): void {
         const scale = this._pointerScale();
-        const dx = event.deltaX * scale.x;
-        const dy = event.deltaY * scale.y;
+        const axis = this._fingerAxisScale(event);
+        const dx = event.deltaX * scale.x * axis;
+        const dy = event.deltaY * scale.y * axis;
         if (dx === 0 && dy === 0) return;
         this.send(`sf,${dx.toFixed(2)},${dy.toFixed(2)}`);
         clearTimeout(this._fingerScrollTimer);
         this._fingerScrollTimer = setTimeout((): void => this._endFingerScroll(), FINGER_SCROLL_END_MS);
+    }
+
+    /**
+     * What a touchpad's pixels are multiplied by to be Blink's, which the
+     * session reads at `FINGER_PX_PER_AXIS` to the axis unit, so it gets the
+     * axis values the host had. On Linux, Gecko scrolls a unit
+     * `GECKO_GTK_PX_PER_AXIS`, and WebKitGTK `WEBKIT_GTK4_PX_PER_AXIS` on GTK 4
+     * or `WEBKIT_GTK3_PX_PER_AXIS` on GTK 3, told apart by its pixels per 120
+     * of legacy delta: 2.5 or 40 (`_webKitGtkWheelNotches`). Elsewhere the
+     * host has no axis to give back, and the pixels go as they are.
+     * @param event
+     * @returns
+     */
+    _fingerAxisScale(event: WheelEvent): number {
+        if (!browser.isLinux() || /Android/.test(navigator.userAgent)) return 1;
+        if (browser.isFirefox()) return FINGER_PX_PER_AXIS / GECKO_GTK_PX_PER_AXIS;
+        if (!browser.isSafari()) return 1;
+        const vertical = Math.abs(event.deltaY) >= Math.abs(event.deltaX);
+        const legacy = Math.abs((vertical ? event.wheelDeltaY : event.wheelDeltaX) || 0);
+        const perLegacyNotch = legacy ? Math.abs(vertical ? event.deltaY : event.deltaX) * 120 / legacy : 0;
+        return FINGER_PX_PER_AXIS / (perLegacyNotch > 10 ? WEBKIT_GTK3_PX_PER_AXIS : WEBKIT_GTK4_PX_PER_AXIS);
     }
 
     /** Ends a touchpad's scroll still going, if one is. */
