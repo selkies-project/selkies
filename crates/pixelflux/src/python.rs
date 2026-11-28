@@ -2025,6 +2025,23 @@ fn hardware_fullcolor(py: Python<'_>, encode_node_index: i32, auto_gpu: &str) ->
         .collect()
 }
 
+/// The codecs whose engine on the node keeps a constant rate only while every frame is coded
+/// (`Formats::constant_rate_streams`), so a caller runs their CBR sessions with
+/// `video_streaming_mode`.
+#[pyfunction]
+#[pyo3(signature = (encode_node_index = -2, auto_gpu = ""))]
+fn hardware_constant_rate_streams(
+    py: Python<'_>,
+    encode_node_index: i32,
+    auto_gpu: &str,
+) -> Vec<&'static str> {
+    py.detach(|| super::hardware_encoders(encode_node_index, auto_gpu))
+        .into_iter()
+        .filter(|&(_, _, formats)| formats.constant_rate_streams)
+        .map(|(codec, ..)| codec.name())
+        .collect()
+}
+
 #[pyfunction]
 #[pyo3(signature = (encode_node_index = -2, auto_gpu = ""))]
 fn hardware_formats(py: Python<'_>, encode_node_index: i32, auto_gpu: &str) -> PyResult<Py<PyAny>> {
@@ -2388,6 +2405,7 @@ fn pixelflux(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("SOFTWARE_FORMATS", formats)?;
     m.add_function(wrap_pyfunction!(py_hardware_encoders, m)?)?;
     m.add_function(wrap_pyfunction!(hardware_fullcolor, m)?)?;
+    m.add_function(wrap_pyfunction!(hardware_constant_rate_streams, m)?)?;
     m.add_function(wrap_pyfunction!(hardware_formats, m)?)?;
     m.add_function(wrap_pyfunction!(stripe_frame_from_buffer, m)?)?;
     m.add_function(wrap_pyfunction!(py_ensure_wayland_display, m)?)?;

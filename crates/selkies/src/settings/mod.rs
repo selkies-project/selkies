@@ -351,6 +351,9 @@ pub struct HardwareProbe {
     pub fullcolor: Vec<&'static str>,
     /// The formats the node encodes each codec in.
     pub formats: HashMap<&'static str, Vec<String>>,
+    /// The codecs whose engine keeps a constant rate only while every frame is coded
+    /// (pixelflux's `Formats::constant_rate_streams`).
+    pub constant_rate_streams: Vec<&'static str>,
 }
 
 /// Probe the hardware encoders of a render node (`AUTO_ENCODE_NODE` for pixelflux's pick).
@@ -362,6 +365,9 @@ pub fn hardware_probe(encode_node_index: i32, auto_gpu: &str) -> HardwareProbe {
             probe.fullcolor.push(codec.name());
         }
         probe.formats.insert(codec.name(), formats.names());
+        if formats.constant_rate_streams {
+            probe.constant_rate_streams.push(codec.name());
+        }
     }
     probe
 }
@@ -449,6 +455,9 @@ pub struct CodecBackends {
     pub software: Option<String>,
     pub fullcolor: Sides<Option<bool>>,
     pub ten_bit: Sides<Option<TenBit>>,
+    /// Whether a CBR session on the hardware engine runs under Turbo, which that engine's
+    /// constant rate needs (`Settings::cbr_streams`).
+    pub cbr_streams: bool,
 }
 
 /// A value for each side a codec may run on.
@@ -1071,6 +1080,8 @@ impl Settings {
                                 hardware: ten_bit(hw, &hardware.formats, codec),
                                 software: ten_bit(sw, &sw_formats, codec),
                             },
+                            cbr_streams: hw.is_some()
+                                && hardware.constant_rate_streams.contains(&codec),
                         },
                     )
                 })
@@ -1095,6 +1106,46 @@ impl Settings {
             return Some(true);
         }
         served.fullcolor.hardware
+    }
+
+    /// Whether a CBR session on this encoder runs under Turbo whatever `video_streaming_mode`
+    /// says: it runs on the encode node's engine, which keeps a constant rate only while every
+    /// frame is coded (`CodecBackends::cbr_streams`). A session the software encoder takes, as
+    /// a forced one does, or a 4:4:4 or 10-bit one the engine lacks and the software encoder
+    /// codes (`encoder_fullcolor`, `encoder_ten_bit`), streams as asked.
+    pub fn cbr_streams(
+        &self,
+        encoder: &str,
+        use_cpu: bool,
+        fullcolor: bool,
+        ten_bit: bool,
+    ) -> bool {
+        let Some(backends) = self.encoder_backends() else {
+            return false;
+        };
+        let Some(served) = backends.get(codec_for_encoder(&canonical_encoder(encoder))) else {
+            return false;
+        };
+        let software_takes = |hardware: Option<bool>, software: Option<bool>| {
+            hardware == Some(false) && software == Some(true)
+        };
+        let ten_bit_on = |table: &Option<TenBit>, side_fullcolor: Option<bool>| {
+            table.as_ref().map(|t| {
+                if fullcolor && side_fullcolor == Some(true) {
+                    t.chroma_444
+                } else {
+                    t.chroma_420
+                }
+            })
+        };
+        served.cbr_streams
+            && !use_cpu
+            && !(fullcolor && software_takes(served.fullcolor.hardware, served.fullcolor.software))
+            && !(ten_bit
+                && software_takes(
+                    ten_bit_on(&served.ten_bit.hardware, served.fullcolor.hardware),
+                    ten_bit_on(&served.ten_bit.software, served.fullcolor.software),
+                ))
     }
 
     /// Whether a `video_10bit` session on this encoder streams 10 bits from this host; each
@@ -2055,5 +2106,48 @@ mod tests {
             s.apps_catalog_source(),
             AppsCatalog::Repo("/mnt/apps".into())
         );
+    }
+
+    /// A CBR session runs under Turbo whatever the page asked only where it runs on an engine
+    /// whose constant rate needs every frame coded: not on an engine without the need, not
+    /// where software encoding is forced, and not where the software encoder takes a 4:4:4
+    /// the engine lacks.
+    #[test]
+    fn cbr_forces_turbo_only_on_an_engine_that_needs_every_frame() {
+        let mut s = parse(&[], &[]);
+        assert!(
+            !s.cbr_streams("h264enc", false, false, false),
+            "before the probe"
+        );
+        let probe = |streams: Vec<&'static str>| HardwareProbe {
+            encoders: HashMap::from([("h264", "vaapi"), ("h265", "vaapi")]),
+            fullcolor: Vec::new(),
+            formats: HashMap::from([
+                ("h264", vec!["420-8".to_string()]),
+                ("h265", vec!["420-8".to_string()]),
+            ]),
+            constant_rate_streams: streams,
+        };
+        s.hardware = Some(probe(vec!["h264"]));
+        assert!(s.cbr_streams("h264enc", false, false, false));
+        assert!(
+            !s.cbr_streams("h265enc", false, false, false),
+            "another codec's engine"
+        );
+        assert!(
+            !s.cbr_streams("h264enc", true, false, false),
+            "software forced"
+        );
+        assert_eq!(
+            s.cbr_streams("h264enc", false, true, false),
+            !software_fullcolor().contains(&"h264"),
+            "a 4:4:4 the software encoder takes"
+        );
+        assert!(
+            s.encoder_backends().unwrap()["h264"].cbr_streams,
+            "the payload the page reads"
+        );
+        s.hardware = Some(probe(Vec::new()));
+        assert!(!s.cbr_streams("h264enc", false, false, false));
     }
 }

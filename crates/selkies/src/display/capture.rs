@@ -185,6 +185,9 @@ pub struct DisplayCapture {
 /// the peak its rate factor spends up to, with a buffer of `CAPPED_VBV_FRAMES`, and the steer
 /// moves that peak live. An encoder opened uncapped would reopen, a key frame, to take a cap,
 /// so a CRF session is never left uncapped where congestion control may cap it later.
+///
+/// A CBR session on an engine whose constant rate holds only while every frame is coded runs
+/// under Turbo whatever the page asked (`Settings::cbr_streams`).
 pub fn populate_capture_settings(cs: &mut CaptureSettings, server: &Settings, p: &DisplayCapture) {
     cs.target_fps = p.framerate;
     cs.capture_cursor = p.capture_cursor;
@@ -199,7 +202,8 @@ pub fn populate_capture_settings(cs: &mut CaptureSettings, server: &Settings, p:
     cs.video_paintover_burst_frames = p.paintover_burst;
     cs.video_fullcolor = p.fullcolor;
     cs.video_bit_depth = if p.ten_bit { 10 } else { 8 };
-    cs.video_streaming_mode = p.streaming;
+    cs.video_streaming_mode =
+        p.streaming || (p.cbr && server.cbr_streams(&p.encoder, p.use_cpu, p.fullcolor, p.ten_bit));
     cs.video_cbr_mode = p.cbr;
     cs.video_bitrate_kbps = p.bitrate_kbps.round() as i32;
     cs.video_vbv_multiplier = if !p.cbr && server.congestion_control().on {

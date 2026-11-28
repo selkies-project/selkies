@@ -1479,7 +1479,7 @@ pub static DEFINITIONS: &[SettingDef] = &[
         name: "video_streaming_mode",
         kind: Kind::Bool,
         default: "False",
-        help: "Enable video streaming mode (Turbo: encode every frame like a traditional video encoder) for pixelflux encoders.",
+        help: "Enable video streaming mode (Turbo: encode every frame like a traditional video encoder) for pixelflux encoders. A CBR session on an engine whose constant rate holds only while every frame is coded (Intel's i965 VA-API driver for H.264 on the parts before Skylake) runs under Turbo whatever this says.",
         env_vars: &[],
         allowed: &[],
         value_range: None,

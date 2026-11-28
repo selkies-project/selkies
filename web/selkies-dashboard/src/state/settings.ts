@@ -43,7 +43,7 @@ import { FRAMERATE_DISPLAY, followsDisplay, framerateLabel, matchDisplay } from 
 import { resolveSpec, resolveBoolean, resolveString, isEncoderBackends, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
     USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_10BIT_SPEC, VIDEO_STREAMING_MODE_SPEC,
     USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
-    tenBitStream, CPU_ENCODE_THREADING_SPEC, cpuEncodeThreadingApplies,
+    tenBitStream, CPU_ENCODE_THREADING_SPEC, cpuEncodeThreadingApplies, cbrForcesTurbo,
     RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC, MAC_CTRL_CLICK_AS_RIGHT_CLICK_SPEC,
     type SettingSpec } from "../../../selkies-web-core/lib/conditional-settings.ts";
 import { getPrefixedKey, computeRenderableSettings, getLastServerSettings,
@@ -759,6 +759,7 @@ export function useStreamSettings() {
     const appliedRateControlMode: string = rateControlEnabled ? rateControlMode : String(serverSettings?.rate_control_mode?.value ?? rateControlMode);
     // Under CBR a video stream's still screen is cleaned up to the paint-over quality whatever the switch says.
     const cbrVideo = isVideoEncoder && appliedRateControlMode === 'cbr';
+    const turboForced = cbrVideo && cbrForcesTurbo(encoder, conditionalCtx.encoderBackends, useCpu, videoFullColor, video10Bit);
     const locked = (key: string) => !serverSettings || !!serverSettings[key]?.locked;
     const fixed = (key: string) => !serverSettings || serverSettings[key]?.min === serverSettings[key]?.max;
 
@@ -772,7 +773,7 @@ export function useStreamSettings() {
         rateControl: isVideoEncoder && rateControlEnabled,
         bitrate: isVideoEncoder && appliedRateControlMode === 'cbr' && renderable.videoBitrate,
         crf: isVideoEncoder && appliedRateControlMode === 'crf' && renderable.videoCRF,
-        turbo: isVideoEncoder && renderable.videoStreamingMode,
+        turbo: isVideoEncoder && renderable.videoStreamingMode && !turboForced,
         jpegQuality: showJpegOptions && renderable.jpegQuality,
         paintOver: ((isVideoEncoder && !cbrVideo) || encoder === 'jpeg') && renderable.usePaintOverQuality,
         paintoverCrf: isVideoEncoder && (usePaintOverQuality || cbrVideo) && renderable.videoPaintoverCRF,

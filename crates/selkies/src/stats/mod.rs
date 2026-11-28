@@ -703,6 +703,7 @@ mod tests {
                             hardware: None,
                             software: None,
                         },
+                        cbr_streams: false,
                     },
                 )
             })

@@ -84,13 +84,18 @@ pub struct SoftwareEncoder {
     pub library: &'static str,
 }
 
-/// The codecs a render node encodes in hardware, each with the backend's name.
 /// The formats past 8-bit 4:2:0 an engine encodes a codec in: 4:4:4 for a `video_fullcolor`
 /// session, and 10 bits for a `video_bit_depth` one at 4:2:0 and at 4:4:4.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Formats {
     pub fullcolor: bool,
     pub ten_bit: [bool; 2],
+    /// Whether the engine's constant rate holds only while every frame is coded, so a
+    /// constant-rate session there runs under `video_streaming_mode` (Turbo): i965's H.264
+    /// rate control on the parts before Skylake (`vaapi`'s `reencodes_against_its_buffer`)
+    /// starts over with every target it is handed, so after the frames stop and resume on a
+    /// screen that went still, the first motion runs over the target for seconds.
+    pub constant_rate_streams: bool,
 }
 
 impl Formats {
@@ -247,6 +252,7 @@ pub fn software_formats(codec: Codec) -> Formats {
     Formats {
         fullcolor,
         ten_bit: [ten_bit, ten_bit && fullcolor],
+        constant_rate_streams: false,
     }
 }
 

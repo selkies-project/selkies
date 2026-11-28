@@ -1197,6 +1197,7 @@ unsafe fn probe_session_codecs(
                 super::Formats {
                     fullcolor,
                     ten_bit: [ten_bit, ten_bit && fullcolor],
+                    constant_rate_streams: false,
                 },
             ))
         })

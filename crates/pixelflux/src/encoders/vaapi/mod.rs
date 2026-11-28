@@ -802,6 +802,8 @@ pub(crate) fn probe_codecs_on(device: &Device) -> Result<Vec<Served>, String> {
                 super::Formats {
                     fullcolor: carries(true, 8),
                     ten_bit: [carries(false, 10), carries(true, 10)],
+                    constant_rate_streams: codec == Codec::H264
+                        && device.reencodes_against_its_buffer(),
                 },
             )
         })

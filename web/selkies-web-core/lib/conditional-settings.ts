@@ -31,6 +31,8 @@ export interface CodecBackends {
   software: string | null;
   fullcolor?: Record<string, boolean | null | undefined>;
   ten_bit?: Record<string, Record<string, boolean>>;
+  /** Whether a CBR session on the hardware engine runs under Turbo, which its constant rate needs. */
+  cbr_streams?: boolean;
 }
 
 /** The server's `encoder_backends` payload entry, keyed by codec name. */
@@ -45,7 +47,8 @@ export function isEncoderBackends(value: unknown): value is EncoderBackends {
   const side = (v: unknown): boolean => v === null || typeof v === "string";
   return isRecord(value) && Object.values(value).every((b: unknown): boolean => isRecord(b) && side(b.hardware)
     && side(b.software) && (b.fullcolor === undefined || isRecord(b.fullcolor))
-    && (b.ten_bit === undefined || isRecord(b.ten_bit)));
+    && (b.ten_bit === undefined || isRecord(b.ten_bit))
+    && (b.cbr_streams === undefined || typeof b.cbr_streams === "boolean"));
 }
 
 /** A setting's IO for `propagate`. */
@@ -148,6 +151,30 @@ export function tenBitStream(encoder: string, encoderBackends: EncoderBackends |
         return carries("software");
     }
     return carries("hardware") || carries("software");
+}
+
+/**
+ * Whether a CBR session on an encoder runs under Turbo whatever the switch
+ * says, as the server runs it (`Settings::cbr_streams`): the session runs on
+ * the encode node's engine, whose constant rate holds only while every frame
+ * is coded. One the software encoder takes, forced or for a 4:4:4 or 10 bits
+ * the engine lacks, streams as asked.
+ * @param encoder Encoder wire value.
+ * @param encoderBackends The server's `encoder_backends` payload entry, keyed by codec name.
+ * @param useCpu Whether software encoding is forced.
+ * @param fullColor Whether full color is asked for.
+ * @param tenBit Whether 10-bit is asked for.
+ * @returns Whether the server runs a CBR session on this encoder under Turbo.
+ */
+export function cbrForcesTurbo(encoder: string, encoderBackends: EncoderBackends | undefined, useCpu: boolean, fullColor: boolean, tenBit: boolean): boolean {
+    if (encoder === "jpeg" || !encoderBackends || useCpu) return false;
+    const backends = encoderBackends[codecOfEncoder(encoder)];
+    if (!backends || !backends.hardware || !backends.cbr_streams) return false;
+    if (fullColor && backends.fullcolor && backends.fullcolor.hardware === false && backends.fullcolor.software) {
+        return false;
+    }
+    const stream = tenBit ? tenBitStream(encoder, encoderBackends, useCpu, fullColor) : null;
+    return !(stream && stream.software);
 }
 
 /** A `server_settings` entry. */
