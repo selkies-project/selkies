@@ -614,9 +614,12 @@ impl RtcEngine {
     }
 
     /// Account a display's frames against its steered rate, holding them to it where `hold`;
-    /// `None` lets every frame through and keeps no account.
-    pub fn set_video_budget(&self, display_id: &str, bps: Option<f64>, hold: bool) {
+    /// `None` lets every frame through and keeps no account. `fps` is the frame rate its
+    /// encoder was configured with, whose buffer the account allows for
+    /// (`Bridge::set_frame_rate`).
+    pub fn set_video_budget(&self, display_id: &str, bps: Option<f64>, hold: bool, fps: f64) {
         if let Some(graph) = self.displays.lock().get(display_id) {
+            graph.video_bridge.set_frame_rate(fps);
             graph.video_bridge.set_budget(bps, hold);
         }
     }

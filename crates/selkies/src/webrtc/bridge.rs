@@ -35,7 +35,7 @@
 //! down to the coarsest it has, and content the coarsest cannot fit (noise, film grain)
 //! overshoots, which a path sized for the rate queues and loses, and whatever repairs the loss
 //! adds more. The frames let through fill a bucket that drains at the rate, and while it holds
-//! more than `BUDGET_WINDOW_S` of the rate a delta frame that names what it predicts from is
+//! more than its window of the rate (`State::window_bytes`) a delta frame that names what it predicts from is
 //! dropped with the word to the encoder, so the frame rate falls instead of the latency rising,
 //! by no more than `BUDGET_RUN_MAX` frames in a row from an encoder that has sent no anchor: one
 //! predicting from its last frames only codes a key frame past a longer run, and the key frame
@@ -62,6 +62,8 @@ use selkies_rtc::rtp::clock;
 use selkies_rtc::rtp::codecs::Codec;
 use tokio::sync::Notify;
 
+use pixelflux::encoders::CAPPED_VBV_FRAMES;
+
 use crate::display::capture::{FRAME_NUM_WRAP, LOST_FRAME_MEMORY};
 
 /// Floor between key-frame requests for one display: a request inside it is served by the key
@@ -73,7 +75,8 @@ pub const GATE_TIMEOUT_S: f64 = 1.0;
 /// Frames without an encode instant a bridge holds back, predicting from one it let go, before it
 /// takes the encoder for one that never predicted past the drop.
 pub const LOST_CHAIN_FRAMES: u32 = 3;
-/// How far past its steered rate a bridge lets frames run, in seconds of that rate.
+/// How far past its steered rate a bridge lets frames run, in seconds of that rate, at the least
+/// (`State::window_bytes`).
 pub const BUDGET_WINDOW_S: f64 = 0.25;
 /// The most delta frames in a row the budget drops from a stream whose encoder keeps no long-term
 /// anchor (`BridgeItem::anchor`): such an encoder predicts from its last frames only, the dropped
@@ -162,6 +165,9 @@ struct State<T> {
     since_key: u32,
     /// Budget drops in a row, and whether the encoder has sent an anchor (`BUDGET_RUN_MAX`).
     budget_run: u32,
+    /// The seconds a frame of the display's encoder stands for at its configured rate, or 0
+    /// where it was not told (`Bridge::set_frame_rate`).
+    frame_s: f64,
     anchored: bool,
     /// Delta frames naming their reference let through, beside `over_budget`.
     passed: u64,
@@ -199,6 +205,7 @@ impl<T: BridgeItem> PipelineBridge<T> {
                 over_budget: 0,
                 since_key: 0,
                 budget_run: 0,
+                frame_s: 0.0,
                 anchored: false,
                 passed: 0,
                 largest: 0,
@@ -226,6 +233,13 @@ impl<T: BridgeItem> PipelineBridge<T> {
         }
     }
 
+    /// The frame rate the display's encoder was configured with: its rate control keeps a
+    /// buffer of `CAPPED_VBV_FRAMES` of its frames, which below about 28 fps runs longer than
+    /// `BUDGET_WINDOW_S`, and the window follows it (`State::window_bytes`).
+    pub fn set_frame_rate(&self, fps: f64) {
+        self.state.lock().frame_s = if fps > 0.0 { 1.0 / fps } else { 0.0 };
+    }
+
     /// Items discarded since construction, evicted for a newer one or held back behind a closed
     /// gate. None of them spent a sequence number, so they appear in no loss statistic on either
     /// side; this counter is what separates a lagging sender from a lossy link.
@@ -244,7 +258,7 @@ impl<T: BridgeItem> PipelineBridge<T> {
     pub fn budget_fill(&self) -> Option<f64> {
         let mut s = self.state.lock();
         let bps = s.budget_bps?;
-        Some(s.budget_level(bps) / (bps / 8.0 * BUDGET_WINDOW_S))
+        Some(s.budget_level(bps) / s.window_bytes(bps))
     }
 
     /// Frames over the steered rate: dropped where the bridge holds the stream to it, let
@@ -421,9 +435,19 @@ impl<T: BridgeItem> State<T> {
 
     fn budget_full(&mut self) -> bool {
         match self.budget_bps {
-            Some(bps) => self.budget_level(bps) > bps / 8.0 * BUDGET_WINDOW_S,
+            Some(bps) => self.budget_level(bps) > self.window_bytes(bps),
             None => false,
         }
+    }
+
+    /// The bucket's room, in bytes of `bps`: `BUDGET_WINDOW_S` of it, or the encoder's buffer
+    /// less a frame where that runs longer. An encoder meeting its rate within a buffer of
+    /// `CAPPED_VBV_FRAMES` frames leaves the frames it has sent up to that buffer past the
+    /// rate, and the bucket is read before a frame is charged, a frame interval after the last
+    /// one was: one frame fewer than the buffer lets every frame such an encoder kept within
+    /// its peak through. At 60 fps that is 0.12 s, and the window stands; at 20, 0.35 s.
+    fn window_bytes(&self, bps: f64) -> f64 {
+        bps / 8.0 * BUDGET_WINDOW_S.max((CAPPED_VBV_FRAMES - 1.0) * self.frame_s)
     }
 
     fn charge(&mut self, bytes: usize) {
@@ -1014,6 +1038,58 @@ mod tests {
         }
         assert_eq!(through, 600, "every frame let through");
         assert!(unheld.over_budget() > 300, "{}", unheld.over_budget());
+    }
+
+    /// An encoder meeting its rate within a buffer of `CAPPED_VBV_FRAMES` frames sends a burst
+    /// of up to that buffer past the rate: seven frames of nearly twice the rate's share, and
+    /// frames at the share after, keep it full. At 20 fps that is longer than
+    /// `BUDGET_WINDOW_S`, and a bridge told the frame rate lets every frame through, as one at
+    /// 60 fps does untold; untold at 20 fps, it drops frames the encoder kept within its peak.
+    #[test]
+    fn budget_follows_the_encoders_buffer_at_a_low_frame_rate() {
+        let rate = 80_000.0;
+        for (fps, told, dropping) in [
+            (20.0, false, true),
+            (20.0, true, false),
+            (60.0, false, false),
+        ] {
+            let rig = Rig::new();
+            let bridge = rig.bridge(true);
+            bridge.set_budget(Some(rate), true);
+            if told {
+                bridge.set_frame_rate(fps);
+            }
+            bridge.set_data(
+                F {
+                    size: 100,
+                    ..tracked(0, None)
+                },
+                true,
+            );
+            drain(&bridge);
+            let share = rate / 8.0 / fps;
+            let mut last = 0;
+            for fid in 1..=40u32 {
+                rig.step(1.0 / fps);
+                let size = if fid <= 7 { 1.97 * share } else { 0.99 * share };
+                bridge.set_data(
+                    F {
+                        size: size as usize,
+                        ..timed(fid, Some(last), rig.at())
+                    },
+                    false,
+                );
+                if bridge.try_take().is_some() {
+                    last = fid;
+                }
+            }
+            assert_eq!(
+                bridge.over_budget() > 0,
+                dropping,
+                "{fps} fps, told {told}: {} over",
+                bridge.over_budget()
+            );
+        }
     }
 
     #[test]

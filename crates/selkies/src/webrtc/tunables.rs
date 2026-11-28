@@ -424,6 +424,7 @@ impl WebRtcService {
             display,
             Some(ceiling.max(kbps / LinkAllowance::SHARE) * 1000.0),
             hold,
+            pipeline.framerate(),
         );
         for peer in owners {
             peer.set_frame_floor(
@@ -980,7 +981,8 @@ impl WebRtcService {
             if !self.steers(&did, cc_on) {
                 // A CRF display whose encoder reads no peak streams at the bitrate its client
                 // chose, which a device that runs at the bitrate whatever the mode codes at.
-                self.engine.set_video_budget(&did, None, false);
+                self.engine
+                    .set_video_budget(&did, None, false, pipeline.framerate());
                 for peer in &bucket.peers {
                     peer.set_steered_bps(None);
                 }
@@ -1140,6 +1142,7 @@ impl WebRtcService {
                 &did,
                 Some(target.max(allowance / LinkAllowance::SHARE) * 1000.0),
                 hold,
+                pipeline.framerate(),
             );
             for peer in &bucket.peers {
                 peer.set_frame_floor(
