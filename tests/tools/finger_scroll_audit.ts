@@ -124,6 +124,12 @@ function wheel(input: Input, deltaY: number, { deltaX = 0, deltaMode = 0, ms = 1
 
 const pulses = (sent: string[]): string[] => sent.filter((m) => m.startsWith('m,') || m.startsWith('m2,'));
 const fingers = (sent: string[]): string[] => sent.filter((m) => m.startsWith('sf,') || m === 'sfe');
+/** Notches sent on the buttons of `mask`: each pulse raises its bit once, carrying its count. */
+const notches = (sent: string[], mask: number): number => sent.map((m) => m.split(','))
+    .filter((f) => f[0] === 'm2' && (Number(f[3]) & mask))
+    .reduce((sum, f) => sum + Number(f[4]), 0);
+const downs = (sent: string[]): number => notches(sent, 8);
+const sideways = (sent: string[]): number => notches(sent, 192);
 
 {
     const { input, sent } = makeInput(true);
@@ -164,7 +170,40 @@ const fingers = (sent: string[]): string[] => sent.filter((m) => m.startsWith('s
     advance(200);
     check('a wheel\'s notches stay notch pulses, its first ones too',
           pulses(sent).length >= 6 && fingers(sent).length === 0, JSON.stringify(sent));
+    check('on Linux one each from the first', downs(sent) === 6, JSON.stringify(sent));
 }
+
+// Chromium 158 on Linux, a high-resolution wheel of eighth steps: a notch
+// after a pause is 30 px and six of 15, the next eight of 15; a touchpad's
+// pixels are 12 to its axis unit, fractions of a pixel, a flick's first ones
+// past a notch's size.
+const BLINK_HIRES_FIRST = [30, 15, 15, 15, 15, 15, 15];
+const BLINK_HIRES_NEXT = [15, 15, 15, 15, 15, 15, 15, 15];
+for (const finger of [true, false]) {
+    const session = finger ? 'finger scroll' : 'no finger scroll';
+    const { input, sent } = makeInput(finger);
+    for (const d of [...BLINK_HIRES_FIRST, ...Array.from({ length: 4 }, () => BLINK_HIRES_NEXT).flat()]) wheel(input, d, { ms: 12 });
+    advance(300);
+    check(`Blink on Linux, ${session}: a high-resolution wheel's notches of whole steps are a notch each`,
+          downs(sent) === 5 && fingers(sent).length === 0, JSON.stringify(sent));
+}
+{
+    const { input, sent } = makeInput(true);
+    const flick = [96.5625, 131.25, 88.125, 41.0625, 12.1875];
+    for (const d of flick) wheel(input, d);
+    advance(300);
+    check('Blink on Linux: a flick whose first fractional pixels pass a notch\'s size is a finger\'s from the first',
+          fingers(sent).filter((m) => m !== 'sfe').length === flick.length && pulses(sent).length === 0,
+          JSON.stringify(sent));
+}
+setPlatform(...MAC_BLINK);
+{
+    const { input, sent } = makeInput(true);
+    for (const d of [30, 15, 15, 15]) wheel(input, d, { ms: 12 });
+    check('Blink on macOS: whole pixels in steps of 15 stay a touchpad\'s',
+          fingers(sent).filter((m) => m !== 'sfe').length === 4 && pulses(sent).length === 0, JSON.stringify(sent));
+}
+setPlatform(...LINUX);
 
 {
     const { input, sent } = makeInput(true);
@@ -214,12 +253,6 @@ const fingers = (sent: string[]): string[] => sent.filter((m) => m.startsWith('s
 // the spin's speed made them.
 const MAC_SLOW = [4.000244140625, 4.000244140625, 4.000244140625];
 const MAC_SPIN = [4.000244140625, 21.70654296875, 67.843017578125, 132.9052734375, 211.6064453125, 361.2994384765625];
-/** Notches sent on the buttons of `mask`: each pulse raises its bit once, carrying its count. */
-const notches = (sent: string[], mask: number): number => sent.map((m) => m.split(','))
-    .filter((f) => f[0] === 'm2' && (Number(f[3]) & mask))
-    .reduce((sum, f) => sum + Number(f[4]), 0);
-const downs = (sent: string[]): number => notches(sent, 8);
-const sideways = (sent: string[]): number => notches(sent, 192);
 
 const MAC_ENGINES: Array<[engine: string, platform: Platform]> = [['Blink', MAC_BLINK], ['WebKit', MAC_WEBKIT]];
 for (const [engine, platform] of MAC_ENGINES) {

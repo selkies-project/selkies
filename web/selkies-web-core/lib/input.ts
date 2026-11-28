@@ -345,6 +345,15 @@ const WHEEL_LINES_PER_NOTCH = 3;
 /** Pixels Blink and WebKit report for a line a macOS wheel turned (`_isDetentWheel`). */
 const MAC_WHEEL_LINE_PX = 40;
 
+/**
+ * Blink's pixels for a wheel notch on Linux, which a high-resolution wheel
+ * reports in whole steps of `BLINK_WHEEL_STEP_PX` (`_isBlinkWheelStep`).
+ */
+const BLINK_LINUX_NOTCH_PX = 120;
+
+/** The finest step Blink on Linux is taken to report a wheel in: an eighth of its notch. */
+const BLINK_WHEEL_STEP_PX = 15;
+
 /** The legacy `wheelDelta` of one wheel notch (`_webKitGtkWheelNotches`). */
 const LEGACY_WHEEL_DELTA_PER_NOTCH = 120;
 
@@ -5161,16 +5170,24 @@ export class Input {
      * mouse wheel emits clean integer multiples of a base notch quantum
      * (uniform notches, or 2x and 3x on a fast spin); a trackpad emits finely
      * varying deltas that share no quantum. Matching on multiples rather than
-     * equality keeps fast, varying-magnitude spins classified as a wheel.
+     * equality keeps fast, varying-magnitude spins classified as a wheel. Blink
+     * on Linux reports a wheel in whole steps of its notch, a high-resolution
+     * one's under `WHEEL_NOTCH_MIN_PX`, and a touchpad in fractions of a pixel
+     * (`_isBlinkWheelStep`).
      * @returns
      */
     _isDiscreteWheel(): boolean {
         var vals = [];
+        var raw = [];
         while (!this._queue.isEmpty()) {
             var v = this._queue.dequeue()!;
-            if (v > 0) { vals.push(v); }
+            if (v > 0) { raw.push(v); vals.push(Math.trunc(v)); }
         }
         if (vals.length < 2) { return true; }
+        if (this._isLinuxBlink()) {
+            if (raw.every((d: number): boolean => this._isBlinkWheelStep(d))) { return true; }
+            if (raw.some((d: number): boolean => !Number.isInteger(d))) { return false; }
+        }
         var quantum = Math.min.apply(null, vals);
         // A wheel notch is a large pixel jump; small pixel deltas are a trackpad.
         if (quantum < WHEEL_NOTCH_MIN_PX) { return false; }
@@ -5179,6 +5196,24 @@ export class Input {
             if (Math.abs(ratio - Math.round(ratio)) > 0.15) { return false; }
         }
         return true;
+    }
+
+    /** Whether the engine is Blink on a Linux desktop. */
+    _isLinuxBlink(): boolean {
+        return browser.isLinux() && !/Android/.test(navigator.userAgent) && !browser.isFirefox() && !browser.isSafari();
+    }
+
+    /**
+     * Whether a pixel delta is a whole number of wheel steps from Blink on
+     * Linux: a notch there is `BLINK_LINUX_NOTCH_PX`, a high-resolution wheel
+     * reports it in steps of `BLINK_WHEEL_STEP_PX` or a multiple (15 px for a
+     * wheel of eighth steps, 30 for one of quarters), and a touchpad's axis
+     * unit is 12 px, which leaves its deltas fractions of a pixel.
+     * @param delta
+     * @returns
+     */
+    _isBlinkWheelStep(delta: number): boolean {
+        return this._isLinuxBlink() && Number.isInteger(delta) && delta % BLINK_WHEEL_STEP_PX === 0;
     }
 
     /**
@@ -5323,8 +5358,7 @@ export class Input {
             event.preventDefault();
             return;
         }
-        var deltaY = Math.trunc(Math.abs(event.deltaY));
-        if (deltaY !== 0 && this._queue.size() < 4) { this._queue.enqueue(deltaY); }
+        if (Math.trunc(event.deltaY) !== 0 && this._queue.size() < 4) { this._queue.enqueue(Math.abs(event.deltaY)); }
         if (this._queue.size() == 4) {
             this._allowThreshold = !this._isDiscreteWheel();
             this._wheelClassified = true;
@@ -5350,9 +5384,11 @@ export class Input {
      * not notches, so they take a fixed 100px notch like the horizontal axis
      * (the learned quantum would be the gesture's tiniest ramp-up sample);
      * the quantum keeps learning meanwhile for a wheel classified later in
-     * the session. A fraction of a line is part of a high-resolution wheel's
-     * notch: it teaches no quantum and counts against the learned one, or
-     * Gecko's notch before there is one (`_geckoLinesPerNotch`).
+     * the session. Blink's wheel steps on Linux count against its notch,
+     * `BLINK_LINUX_NOTCH_PX`, unless the device was found to be a touchpad. A
+     * fraction of a line is part of a high-resolution wheel's notch: it
+     * teaches no quantum and counts against the learned one, or Gecko's notch
+     * before there is one (`_geckoLinesPerNotch`).
      * @param deltaY
      * @param deltaMode
      * @returns
@@ -5377,6 +5413,9 @@ export class Input {
         }
         // DOM_DELTA_PIXEL
         if (magnitude < this._smallestDeltaY) { this._smallestDeltaY = magnitude; }
+        if (this._isBlinkWheelStep(deltaY) && !(this._wheelClassified && this._allowThreshold)) {
+            return magnitude / BLINK_LINUX_NOTCH_PX;
+        }
         if (this._allowThreshold) {
             return magnitude / 100;
         }
@@ -5529,7 +5568,10 @@ export class Input {
      * Whether a wheel event goes out as a finger's: pixel deltas, on a session
      * that takes one, from a device the detector calls a touchpad or, before
      * it has its samples, smaller than a notch's, so a wheel's first notches
-     * stay notches. A stroke under way stays one until it pauses, whatever its
+     * stay notches. Blink on Linux tells them apart before that by the
+     * fraction: a wheel's steps are whole (`_isBlinkWheelStep`), however small,
+     * and a touchpad's pixels fractions, however large a flick's first ones
+     * are. A stroke under way stays one until it pauses, whatever its
      * momentum reports.
      * @param event
      * @returns
@@ -5538,6 +5580,10 @@ export class Input {
         if (!this.fingerScroll || event.deltaMode !== 0) return false;
         if (this._fingerScrollTimer !== null) return true;
         if (this._wheelClassified) return this._allowThreshold;
+        if (this._isLinuxBlink()) {
+            if (this._isBlinkWheelStep(event.deltaX) && this._isBlinkWheelStep(event.deltaY)) return false;
+            if (!Number.isInteger(event.deltaX) || !Number.isInteger(event.deltaY)) return true;
+        }
         return Math.abs(event.deltaX) < WHEEL_NOTCH_MIN_PX && Math.abs(event.deltaY) < WHEEL_NOTCH_MIN_PX;
     }
 
