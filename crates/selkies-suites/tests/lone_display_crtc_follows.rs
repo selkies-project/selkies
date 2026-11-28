@@ -8,13 +8,13 @@
 //!
 //! MATE's panel lays itself out from the CRTCs of the connected outputs, re-read in an idle
 //! callback after GDK reports the screen or its monitors changed (mate-panel's
-//! panel-multimonitor.c). Where the server has no spare outputs, a lone display is a logical
-//! monitor over the one output, whose CRTC shows exactly that rectangle, and the WebSockets
-//! transport both swaps that monitor and sets the mode. GDK takes the screen's size from its
-//! monitors, so a swap ahead of the mode set reports the new size while the CRTC still has the old
-//! mode, and the mode set that follows changes no monitor, so nothing is reported again: the panel
-//! stayed laid out for the root the session started on, its bottom half off screen
-//! (jupyter-server-proxy#620).
+//! panel-multimonitor.c). Where the server has no spare outputs, a lone display uses the one
+//! output's own CRTC and automatic monitor, with any stale `selkies-*` monitors cleared in the
+//! same server grab as the mode set. GDK takes the screen's size from its monitors, so clearing
+//! or swapping a monitor ahead of the mode set reports the new size while the CRTC still has
+//! the old mode, and the mode set that follows changes no monitor, so nothing is reported
+//! again: the panel stayed laid out for the root the session started on, its bottom half off
+//! screen (jupyter-server-proxy#620).
 //!
 //! Driven against a private X server started larger than the page, as a session is, with no
 //! spare outputs, as a stock Xvfb has (the images' Xvfb offers them, unplugged here), by a GDK

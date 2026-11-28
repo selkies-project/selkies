@@ -1536,6 +1536,15 @@ impl X11 {
         Ok(())
     }
 
+    /// The primary RandR output id, or 0 when none is flagged primary.
+    pub fn output_primary(&self) -> Result<u32> {
+        Ok(self
+            .conn
+            .randr_get_output_primary(self.root)?
+            .reply()?
+            .output)
+    }
+
     /// Flag `output` as the primary; 0 clears the flag.
     pub fn set_output_primary(&self, output: u32) -> Result<()> {
         self.conn

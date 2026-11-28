@@ -336,13 +336,16 @@ Each is documented in full where named; read that before changing the subsystem.
   detected, never assumed, and a layout that both adds a display and moves the primary publishes the move first,
   because a desktop takes in a new screen before a moved one (`crates/selkies/src/display` module docblock,
   `apply_output_layout`, `output_layout_stage`). Everything a server without such outputs gets instead
-  lives in `display/monitors.rs` and runs nowhere else: every display a RandR logical monitor listing the
-  physical output, because a toolkit realizes a monitor only where one is listed; whether the server lets
-  several monitors share the output read back from the reply rather than assumed, since RandR 1.5 gives an
-  output to one monitor and servers before 21.1 enforce that (`set_selkies_layout`). A server whose driver
-  reports no display device has no output to list and no screen of its own: there the monitors are the only
-  screens the toolkits find, so they are published without one and clearing the layout leaves one covering the
-  framebuffer.
+  lives in `display/monitors.rs` and runs nowhere else: a lone primary display at the origin uses the
+  physical output's own CRTC and automatic RandR monitor directly (clearing any stale `selkies-*`
+  monitors so desktops like KDE Plasma 6 whose `libkscreen` matches monitor and output names never
+  meet `selkies-primary` over `screen`); when several displays share the output, every display is a
+  RandR logical monitor listing the physical output, because a toolkit realizes a monitor only where
+  one is listed; whether the server lets several monitors share the output read back from the reply
+  rather than assumed, since RandR 1.5 gives an output to one monitor and servers before 21.1 enforce
+  that (`set_selkies_layout`). A server whose driver reports no display device has no output to list
+  and no screen of its own: there the monitors are the only screens the toolkits find, so they are
+  published without one and clearing the layout leaves one covering the framebuffer.
 - One remote pointer is driven by an `Input` per display page, so a pointer message carries the buttons the
   event reports held, never the transitions one page happened to witness: a held drag crosses between pages,
   reaching one that never saw the press and leaving one that never sees the release
