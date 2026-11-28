@@ -11,16 +11,21 @@
 //! and nothing here runs on a server where it is:
 //!
 //! - An extended desktop as RandR 1.5 logical monitors over the one output a framebuffer
-//!   server has (`apply_monitor_layout`, `replace_selkies_monitors`). The whole set is
-//!   swapped under one server grab, every monitor asks for the physical output because GTK
-//!   realizes a monitor only where one is listed, whether the server lets them share it is
-//!   read back rather than assumed, and the swap is announced on an output property because
-//!   `RRSetMonitor` emits no RandR event of its own. Qt matches a monitor to its screen by
-//!   name and announces a new geometry only for a monitor that is exactly one CRTC, which no
-//!   display of several sharing the output is, so a display whose rectangle changes takes a
-//!   monitor named for the new rectangle (`monitor_names`) and Qt replaces that one screen.
-//!   A single display is shown whole by the output, its CRTC exactly the monitor rather than
-//!   the framebuffer rounded up to the CVT cell (`resize_display`'s `output_size`).
+//!   server has (`apply_monitor_layout`, `replace_selkies_monitors`). A lone primary display
+//!   at the origin uses the physical output's own CRTC and automatic monitor directly,
+//!   clearing any stale `selkies-*` monitors instead of masking the output name under
+//!   `selkies-primary` (which breaks desktops such as KDE Plasma 6 whose `libkscreen`
+//!   matches Qt's monitor name against the RandR output name), with the CRTC sized directly
+//!   to the display rather than to the framebuffer rounded up to the CVT cell
+//!   (`resize_display`'s `output_size`). When several displays share the output, the whole
+//!   `selkies-*` set is swapped under one server grab, every monitor asks for the physical
+//!   output because GTK realizes a monitor only where one is listed, whether the server lets
+//!   them share it is read back rather than assumed, and the swap is announced on an output
+//!   property because `RRSetMonitor` emits no RandR event of its own. Qt matches a monitor to
+//!   its screen by name and announces a new geometry only for a monitor that is exactly one
+//!   CRTC, which no display of several sharing the output is, so a display whose rectangle
+//!   changes takes a monitor named for the new rectangle (`monitor_names`) and Qt replaces
+//!   that one screen.
 //! - The window-manager restart that layout needs (`MultiMonitorWindowManager`): a manager
 //!   that reads the monitor set only as it starts has to be restarted once to tile against
 //!   it. A display that arrives as an output is a hotplug, which every manager follows, so
@@ -319,18 +324,38 @@ fn primary_first(layouts: &Layouts) -> Vec<(&String, &Layout)> {
     ordered
 }
 
+/// Whether `layouts` is a single primary display at the origin on a server with a connected
+/// physical output, so the output's own CRTC and automatic RandR monitor represent it directly
+/// without defining `selkies-primary`.
+///
+/// Defining `selkies-primary` over a single output hides the server's automatic monitor (named
+/// for the output, such as `screen`), causing desktops like KDE Plasma 6 -- where `libkscreen`
+/// matches Qt's `QScreen::name()` from `RRGetMonitors` against the RandR output name -- to
+/// leave the desktop and panels uncreated. A server with no connected output (`!has_output`)
+/// has no automatic monitor of its own and still requires the outputless logical monitor.
+fn uses_native_output(layouts: &Layouts, has_output: bool) -> bool {
+    has_output
+        && layouts.len() == 1
+        && layouts
+            .get(PRIMARY_DISPLAY)
+            .is_some_and(|l| l.x == 0 && l.y == 0)
+}
+
 /// Blocking swap of all `selkies-*` logical monitors to exactly `layouts`.
 ///
 /// The whole swap runs under one X server grab: `RRSetMonitor` cannot replace an existing
 /// name (BadValue), so a delete gap is unavoidable, and the grab makes it invisible: every
 /// event a window manager acts on is delivered after the final set is in place, so it never
-/// tiles against a monitor-less or half-defined screen. The set alone announces nothing a
-/// toolkit listens to, so `announce_monitor_change_sync` closes the grab. Foreign monitors
-/// are left untouched. A request matching the live set returns without touching the server:
-/// even that swap costs a delete+create and a re-tile. A live set whose outputs sit
-/// differently than this server was measured to allow never counts as a match: monitors
-/// outlive the client that set them, and a stale outputless set at the right geometry is
-/// invisible to GTK apps.
+/// tiles against a monitor-less or half-defined screen. A lone primary display at the origin
+/// on a server with a connected physical output uses that output's automatic monitor instead
+/// (`uses_native_output`): any stale `selkies-*` monitors are deleted and the output is
+/// flagged primary in the same grab. The set alone announces nothing a toolkit listens to, so
+/// `announce_monitor_change_sync` closes the grab whenever the logical monitor set changed.
+/// Foreign monitors are left untouched. A request matching the live set returns without
+/// touching the server: even that swap costs a delete+create and a re-tile. A live set whose
+/// outputs sit differently than this server was measured to allow never counts as a match:
+/// monitors outlive the client that set them, and a stale outputless set at the right geometry
+/// is invisible to GTK apps.
 ///
 /// `mode`, prepared on this connection, is applied first in the same grab, and an error
 /// applying it leaves the monitors as they were (`replace_selkies_monitors_at`). Its output
@@ -348,6 +373,39 @@ fn replace_selkies_monitors_sync(
         None => x.first_connected_output()?,
     };
     let live = selkies_monitors(x)?;
+    if uses_native_output(layouts, out_id.is_some()) {
+        let drop_monitors = !live.is_empty();
+        let set_primary = out_id.is_some_and(|out| x.output_primary().ok() != Some(out));
+        if !drop_monitors && !set_primary && mode.is_none() {
+            return Ok(());
+        }
+        x.grabbed(|x| {
+            if let Some(set) = mode {
+                x.apply_mode_set(set)?;
+            }
+            if drop_monitors {
+                drop_selkies_monitors(x)?;
+            }
+            if let Some(out) = out_id
+                && (drop_monitors || set_primary)
+            {
+                x.set_output_primary(out)?;
+            }
+            if drop_monitors {
+                announce_monitor_change_sync(x, out_id);
+            }
+            Ok(())
+        })?;
+        x.sync()?;
+        let remaining = selkies_monitors(x)?;
+        if !remaining.is_empty() {
+            let names: Vec<&str> = remaining.keys().map(String::as_str).collect();
+            return Err(DisplayError::Refused(format!(
+                "stale selkies monitor(s) remained after clear: {names:?}"
+            )));
+        }
+        return Ok(());
+    }
     let names = monitor_names(layouts, &live);
     let desired: BTreeMap<String, Rect> = layouts
         .iter()
@@ -423,6 +481,14 @@ pub async fn replace_selkies_monitors(layouts: &Layouts, screen_name: Option<&st
         }
     }
     clear_selkies_monitors().await;
+    if uses_native_output(layouts, screen_name.is_some()) {
+        let cleared = list_selkies_monitors().await.is_empty();
+        if cleared {
+            designate_primary_output(screen_name).await;
+            announce_monitor_change().await;
+        }
+        return cleared;
+    }
     let mut ok = true;
     let mut take_output = true;
     let names = monitor_names(layouts, &BTreeMap::new());
@@ -696,27 +762,41 @@ pub async fn clear_selkies_monitors() {
     }
 }
 
-/// Whether the extended layout needs a mode-set: the root is not `total_w` by `total_h`, or it
-/// is but the output's CRTC shows less of it. A framebuffer grown ahead of live captures
+/// Whether the layout needs a mode-set: the root is not `total_w` by `total_h`, or the
+/// output's CRTC disagrees with what it should show. A framebuffer grown ahead of live captures
 /// (`grow_framebuffer`) already has the layout's size while the output keeps its old mode, and
 /// the X server keeps the pointer inside what the outputs show, so a display beyond that mode
-/// could be captured but not pointed at. A CRTC wider than asked, as CVT alignment can leave
-/// it, needs nothing.
-fn needs_mode_set(info: &ResolutionInfo, total_w: i32, total_h: i32) -> bool {
+/// could be captured but not pointed at. For a lone display with an exact `output_size`, any
+/// CRTC size difference (including a resize within one 8-pixel CVT cell) needs a mode-set; for
+/// a multi-display union (`output_size == None`), a CRTC wider than asked, as CVT alignment
+/// can leave it, needs nothing.
+fn needs_mode_set(
+    info: &ResolutionInfo,
+    total_w: i32,
+    total_h: i32,
+    output_size: Option<(i32, i32)>,
+) -> bool {
     let root = info.current.to_lowercase().replace(' ', "");
-    root != format!("{total_w}x{total_h}")
-        || info
-            .shown
-            .as_deref()
-            .and_then(parse_wh)
-            .is_some_and(|(w, h)| w < total_w || h < total_h)
+    if root != format!("{total_w}x{total_h}") {
+        return true;
+    }
+    let Some((w, h)) = info.shown.as_deref().and_then(parse_wh) else {
+        return false;
+    };
+    match output_size {
+        Some((ow, oh)) => w != ow || h != oh,
+        None => w < total_w || h < total_h,
+    }
 }
 
 /// Drive the server into an extended-desktop framebuffer covering `layouts`.
 ///
 /// Ensures the total mode exists at `refresh`, the stream's frame rate (`resize_display`),
-/// sizes the framebuffer, and defines one `selkies-<id>` logical monitor per display so
-/// window managers tile against the per-display regions.
+/// sizes the framebuffer, and for multi-display or outputless layouts defines one
+/// `selkies-<id>` logical monitor per display so window managers tile against the per-display
+/// regions. A lone primary display at the origin on a server with a connected physical output
+/// uses that output's own CRTC and automatic monitor directly, clearing any stale `selkies-*`
+/// monitors (`uses_native_output`).
 ///
 /// The monitors and the mode go in under one server grab (`replace_selkies_monitors_at`),
 /// the monitors at their final rectangles: window managers re-tile maximized windows on every
@@ -767,14 +847,13 @@ pub async fn apply_monitor_layout(
         }
         Some(_) => {}
     }
-    let mode_set = needs_mode_set(&info, total_w, total_h);
-    // A lone display is shown whole by the output, its CRTC exactly its monitor: Qt
-    // announces a monitor's new geometry only where the two agree, and the framebuffer is
-    // the width rounded up to the CVT cell.
+    // A lone primary display at the origin is shown whole by the physical output, its CRTC
+    // sized directly to the display rather than to the framebuffer rounded up to the CVT cell.
     let output_size = match (layouts.len(), layouts.get(PRIMARY_DISPLAY)) {
-        (1, Some(l)) => Some((l.w, l.h)),
+        (1, Some(l)) if l.x == 0 && l.y == 0 => Some((l.w, l.h)),
         _ => None,
     };
+    let mode_set = needs_mode_set(&info, total_w, total_h, output_size);
     let together = mode_set
         && screen_name.is_some()
         && replace_selkies_monitors_at(layouts, total_w, total_h, refresh, output_size).await;
@@ -1097,8 +1176,10 @@ mod tests {
     use std::cell::RefCell;
 
     /// A root grown ahead of the mode-set already has the layout's size while the output shows
-    /// the primary alone, which still needs the mode-set; a CRTC covering the layout does not,
-    /// even one that CVT alignment left wider, and a root of another size does as before.
+    /// the primary alone, which still needs the mode-set; a CRTC covering a multi-display
+    /// layout does not, even one that CVT alignment left wider, while a lone display with an
+    /// exact `output_size` updates whenever the CRTC differs (including within one 8-pixel CVT
+    /// cell), and a root of another size does as before.
     #[test]
     fn the_mode_set_follows_what_the_output_shows() {
         let info = |current: &str, shown: Option<&str>| ResolutionInfo {
@@ -1109,7 +1190,7 @@ mod tests {
             output: Some("screen".into()),
             shown: shown.map(str::to_string),
         };
-        // The root, what the output shows, and whether a 4944x1612 layout needs a mode-set.
+        // The root, what the output shows, and whether a 4944x1612 union needs a mode-set.
         let cases = [
             ("4944x1612", Some("3024x1612"), true),
             ("4944x1612", Some("4944x1612"), false),
@@ -1120,11 +1201,57 @@ mod tests {
         ];
         for (root, shown, want) in cases {
             assert_eq!(
-                needs_mode_set(&info(root, shown), 4944, 1612),
+                needs_mode_set(&info(root, shown), 4944, 1612, None),
                 want,
                 "{root} {shown:?}"
             );
         }
+        // A lone display with an exact output size: resizing within one 8-pixel CVT cell
+        // (1368x768 <-> 1366x768) still needs a mode-set.
+        let lone_cases = [
+            ("1368x768", Some("1368x768"), Some((1366, 768)), true),
+            ("1368x768", Some("1366x768"), Some((1366, 768)), false),
+            ("1368x768", Some("1366x768"), Some((1368, 768)), true),
+            ("1368x768", None, Some((1366, 768)), false),
+        ];
+        for (root, shown, output_size, want) in lone_cases {
+            assert_eq!(
+                needs_mode_set(&info(root, shown), 1368, 768, output_size),
+                want,
+                "{root} {shown:?} {output_size:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lone_display_uses_native_output_only_at_origin_with_an_output() {
+        let alone: Layouts = [(PRIMARY_DISPLAY.to_string(), Layout::new(0, 0, 1920, 1080))]
+            .into_iter()
+            .collect();
+        assert!(uses_native_output(&alone, true));
+        assert!(
+            !uses_native_output(&alone, false),
+            "an outputless server still needs a logical monitor"
+        );
+        let offset: Layouts = [(
+            PRIMARY_DISPLAY.to_string(),
+            Layout::new(1280, 0, 1920, 1080),
+        )]
+        .into_iter()
+        .collect();
+        assert!(!uses_native_output(&offset, true));
+        let secondary_only: Layouts = [("display2".to_string(), Layout::new(0, 0, 1280, 720))]
+            .into_iter()
+            .collect();
+        assert!(!uses_native_output(&secondary_only, true));
+        let dual: Layouts = [
+            (PRIMARY_DISPLAY.to_string(), Layout::new(0, 0, 1280, 720)),
+            ("display2".to_string(), Layout::new(1280, 0, 800, 600)),
+        ]
+        .into_iter()
+        .collect();
+        assert!(!uses_native_output(&dual, true));
+        assert!(!uses_native_output(&Layouts::new(), true));
     }
 
     /// A manager advertising `name` from command line `cmdline`, recording what is started.
@@ -1375,6 +1502,12 @@ mod tests {
 
     /// Start a private Xvfb on a display nothing holds; `None` where none can.
     fn private_x_server() -> Option<(std::process::Child, String)> {
+        private_x_server_sized("640x480x24")
+    }
+
+    /// Start a private Xvfb sized to `screen` (`WxHxD`) on a display nothing holds; `None` where
+    /// none can.
+    fn private_x_server_sized(screen: &str) -> Option<(std::process::Child, String)> {
         if !super::super::xrandr::which("Xvfb") {
             return None;
         }
@@ -1390,7 +1523,7 @@ mod tests {
                     &display,
                     "-screen",
                     "0",
-                    "640x480x24",
+                    screen,
                     "-extension",
                     "GLX",
                     "-nolisten",
@@ -1418,6 +1551,163 @@ mod tests {
             let _ = child.wait();
         }
         None
+    }
+
+    /// A lone display on a server with a connected physical output keeps the output's own
+    /// automatic RandR monitor rather than masking it with `selkies-primary`, resizes exact
+    /// non-CVT widths including within the same 8-pixel cell, publishes `selkies-*` monitors
+    /// once a second display joins, and restores the native output monitor when it leaves.
+    #[test]
+    #[ignore = "starts a private Xvfb; sets DISPLAY for the process"]
+    fn live_lone_display_keeps_native_output_monitor() {
+        let Some((mut xvfb, display)) = private_x_server_sized("4096x2160x24") else {
+            eprintln!("no private X server could be started; skipping");
+            return;
+        };
+        let previous = std::env::var_os("DISPLAY");
+        // SAFETY: the test binary is single-threaded for this ignored test, run alone.
+        unsafe { std::env::set_var("DISPLAY", &display) };
+        x11::drop_connection();
+        let outcome = std::panic::catch_unwind(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            rt.block_on(async {
+                let output = with_x11(|x| x.query_randr())
+                    .expect("query")
+                    .output_name
+                    .expect("connected output");
+                let read_monitors = || -> Vec<(String, Rect, bool)> {
+                    with_x11(|x| {
+                        let mut out = Vec::new();
+                        for m in x.monitors()? {
+                            out.push((
+                                x.monitor_name(&m)?,
+                                (
+                                    i32::from(m.x),
+                                    i32::from(m.y),
+                                    i32::from(m.width),
+                                    i32::from(m.height),
+                                ),
+                                m.primary,
+                            ));
+                        }
+                        Ok(out)
+                    })
+                    .expect("monitors")
+                };
+
+                // First lone-display layout: native output monitor, no selkies-primary.
+                let mut lone: Layouts =
+                    [(PRIMARY_DISPLAY.to_string(), Layout::new(0, 0, 1280, 720))]
+                        .into_iter()
+                        .collect();
+                assert!(apply_monitor_layout(&mut lone, 1280, 720, Some(60.0)).await);
+                assert_eq!(
+                    read_monitors(),
+                    vec![(output.clone(), (0, 0, 1280, 720), true)],
+                    "lone display uses the physical output's automatic monitor"
+                );
+                assert_eq!(
+                    with_x11(|x| x.query_randr()).expect("query").shown,
+                    Some((1280, 720))
+                );
+
+                // Width off the 8-pixel CVT cell: root rounds up, CRTC and automatic monitor match
+                // the exact display width.
+                let mut odd: Layouts =
+                    [(PRIMARY_DISPLAY.to_string(), Layout::new(0, 0, 1366, 768))]
+                        .into_iter()
+                        .collect();
+                assert!(apply_monitor_layout(&mut odd, 1368, 768, Some(60.0)).await);
+                assert_eq!(
+                    read_monitors(),
+                    vec![(output.clone(), (0, 0, 1366, 768), true)],
+                    "odd width keeps the native output monitor at the exact display size"
+                );
+                let q = with_x11(|x| x.query_randr()).expect("query");
+                assert_eq!(q.current, (1368, 768));
+                assert_eq!(q.shown, Some((1366, 768)));
+
+                // Resize within the same 8-pixel CVT cell (1368 -> 1366) still updates the CRTC.
+                let mut cell: Layouts =
+                    [(PRIMARY_DISPLAY.to_string(), Layout::new(0, 0, 1368, 768))]
+                        .into_iter()
+                        .collect();
+                assert!(apply_monitor_layout(&mut cell, 1368, 768, Some(60.0)).await);
+                assert_eq!(
+                    read_monitors(),
+                    vec![(output.clone(), (0, 0, 1368, 768), true)]
+                );
+                assert!(apply_monitor_layout(&mut odd, 1368, 768, Some(60.0)).await);
+                assert_eq!(
+                    read_monitors(),
+                    vec![(output.clone(), (0, 0, 1366, 768), true)],
+                    "shrinking within one CVT cell updates the CRTC"
+                );
+
+                // Adding a second display publishes selkies-* logical monitors.
+                let mut dual: Layouts = [
+                    (PRIMARY_DISPLAY.to_string(), Layout::new(0, 0, 1280, 720)),
+                    ("display2".to_string(), Layout::new(1280, 0, 800, 600)),
+                ]
+                .into_iter()
+                .collect();
+                assert!(apply_monitor_layout(&mut dual, 2080, 720, Some(60.0)).await);
+                let dual_live = with_x11(|x| selkies_monitors(x)).expect("selkies monitors");
+                assert_eq!(dual_live.len(), 2, "{dual_live:?}");
+                assert_eq!(dual_live["selkies-primary"].rect, (0, 0, 1280, 720));
+                assert_eq!(dual_live["selkies-display2"].rect, (1280, 0, 800, 600));
+
+                // Returning to one display drops selkies-* and restores the native output monitor.
+                assert!(apply_monitor_layout(&mut lone, 1280, 720, Some(60.0)).await);
+                assert!(
+                    with_x11(|x| selkies_monitors(x))
+                        .expect("selkies monitors")
+                        .is_empty(),
+                    "stale selkies-* monitors are removed on return to a lone display"
+                );
+                assert_eq!(
+                    read_monitors(),
+                    vec![(output.clone(), (0, 0, 1280, 720), true)],
+                    "native output monitor is primary again after leaving dual display"
+                );
+
+                // Dual layout (clears primary output) -> teardown clear -> lone apply at the
+                // current root size (no mode change) still restores the primary output flag.
+                assert!(apply_monitor_layout(&mut dual, 2080, 720, Some(60.0)).await);
+                clear_selkies_monitors().await;
+                assert_eq!(
+                    with_x11(|x| x.output_primary()).expect("primary"),
+                    0,
+                    "teardown after dual leaves the physical output non-primary"
+                );
+                let mut same_size: Layouts =
+                    [(PRIMARY_DISPLAY.to_string(), Layout::new(0, 0, 2080, 720))]
+                        .into_iter()
+                        .collect();
+                assert!(apply_monitor_layout(&mut same_size, 2080, 720, Some(60.0)).await);
+                assert_eq!(
+                    read_monitors(),
+                    vec![(output, (0, 0, 2080, 720), true)],
+                    "lone apply without a mode change restores the primary output flag"
+                );
+            });
+        });
+        x11::drop_connection();
+        let _ = xvfb.kill();
+        let _ = xvfb.wait();
+        // SAFETY: as above.
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("DISPLAY", value),
+                None => std::env::remove_var("DISPLAY"),
+            }
+        }
+        if let Err(e) = outcome {
+            std::panic::resume_unwind(e);
+        }
     }
 
     /// The readers against a real Openbox on an X server of the test's own, and a real

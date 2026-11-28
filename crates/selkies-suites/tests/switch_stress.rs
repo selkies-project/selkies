@@ -98,19 +98,12 @@ async fn flip_under_a_page(wayland: bool) {
     let mut outputs = false;
     if !wayland {
         outputs = has_pluggable_outputs(&test_display());
-        if outputs {
-            checks.skip(
-                "the layout engine defined this client's monitor",
-                "displays are outputs; one display defines no monitor",
-            );
-        } else {
-            let monitors = layout_monitors(false);
-            checks.check(
-                "the layout engine defined this client's monitor",
-                !monitors.is_empty(),
-                format!("{monitors:?}"),
-            );
-        }
+        let monitors = layout_monitors(outputs);
+        checks.check(
+            "a lone display defines no layout monitor",
+            monitors.is_empty(),
+            format!("{monitors:?}"),
+        );
     }
 
     for (flip, target) in ["webrtc", "websockets"]
