@@ -335,7 +335,10 @@ const WHEEL_NOTCH_MIN_PX = 80;
 
 /**
  * Lines in a wheel notch where no whole-line delta has given one yet: Gecko's
- * notch on GTK, which a high-resolution wheel reports in fractions of a line.
+ * notch, which a high-resolution wheel reports in fractions of a line. Gecko
+ * doubles a wheel's lines where its system scroll override is on by default
+ * (`mousewheel.system_scroll_override`, factor 200 on GTK and Windows), so a
+ * notch there is twice this (`_geckoLinesPerNotch`).
  */
 const WHEEL_LINES_PER_NOTCH = 3;
 
@@ -5314,6 +5317,15 @@ export class Input {
     }
 
     /**
+     * Gecko's lines in a wheel notch: `WHEEL_LINES_PER_NOTCH`, doubled on GTK
+     * and Windows, where its system scroll override is on by default.
+     * @returns
+     */
+    _geckoLinesPerNotch(): number {
+        return (browser.isLinux() || browser.isWindows()) ? 2 * WHEEL_LINES_PER_NOTCH : WHEEL_LINES_PER_NOTCH;
+    }
+
+    /**
      * Normalizes a vertical wheel delta to a fractional count of notches,
      * learning the per-notch quantum per delta mode (the smallest observed
      * jump) so mice, high-resolution mice, and line-mode wheels all resolve to
@@ -5323,7 +5335,7 @@ export class Input {
      * the quantum keeps learning meanwhile for a wheel classified later in
      * the session. A fraction of a line is part of a high-resolution wheel's
      * notch: it teaches no quantum and counts against the learned one, or
-     * `WHEEL_LINES_PER_NOTCH` before there is one.
+     * Gecko's notch before there is one (`_geckoLinesPerNotch`).
      * @param deltaY
      * @param deltaMode
      * @returns
@@ -5335,7 +5347,7 @@ export class Input {
             if (lines === 0) { return 0; }
             if (!Number.isInteger(lines)) {
                 const learned = this._smallestLineDeltaY < 10000;
-                return lines / (learned ? this._smallestLineDeltaY : WHEEL_LINES_PER_NOTCH);
+                return lines / (learned ? this._smallestLineDeltaY : this._geckoLinesPerNotch());
             }
             if (lines < this._smallestLineDeltaY) { this._smallestLineDeltaY = lines; }
             return lines / this._smallestLineDeltaY;

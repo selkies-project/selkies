@@ -362,30 +362,37 @@ setPlatform(...LINUX);
           fingers(sent).length > 0, JSON.stringify(sent));
 }
 
-// Gecko on GTK reports a high-resolution wheel in fractions of its three-line
-// notch, an eighth (0.375 lines) a step, as Blink's 15 px of 120.
-setPlatform('Linux x86_64', 'Mozilla/5.0 (X11; Linux x86_64; rv:161.0) Gecko/20100101 Firefox/161.0');
-for (const finger of [true, false]) {
-    const session = finger ? 'finger scroll' : 'no finger scroll';
-    {
-        const { input, sent } = makeInput(finger);
-        for (let i = 0; i < 4; i++) {
-            for (const d of [1.5, 0.75, 0.75]) wheel(input, d, { deltaMode: 1, ms: i && d === 1.5 ? 300 : 16 });
+// Gecko on GTK doubles a wheel's three lines (its system scroll override), so
+// a notch is six, as an XTEST click into Firefox 161 reads, and a
+// high-resolution wheel reports it in fractions: an eighth (0.75 lines) a
+// step, as Blink's 15 px of 120, the notch's first two steps together (1.5).
+const GECKO_HIRES_NOTCH = [1.5, 0.75, 0.75, 0.75, 0.75, 0.75, 0.75];
+const GECKO_LINUX: Platform = ['Linux x86_64', 'Mozilla/5.0 (X11; Linux x86_64; rv:161.0) Gecko/20100101 Firefox/161.0'];
+const GECKO_WINDOWS: Platform = ['Win32', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:161.0) Gecko/20100101 Firefox/161.0'];
+for (const [os, platform] of [['GTK', GECKO_LINUX], ['Windows', GECKO_WINDOWS]] as const) {
+    setPlatform(...platform);
+    for (const finger of [true, false]) {
+        const session = finger ? 'finger scroll' : 'no finger scroll';
+        {
+            const { input, sent } = makeInput(finger);
+            for (let i = 0; i < 4; i++) {
+                GECKO_HIRES_NOTCH.forEach((d, j) => wheel(input, d, { deltaMode: 1, ms: i && !j ? 300 : 16 }));
+            }
+            check(`Gecko on ${os}, ${session}: a high-resolution wheel's notches of fractional lines are a notch each`,
+                  downs(sent) === 4 && fingers(sent).length === 0, JSON.stringify(sent));
         }
-        check(`Gecko, ${session}: a high-resolution wheel's notches of fractional lines are a notch each`,
-              downs(sent) === 4 && fingers(sent).length === 0, JSON.stringify(sent));
-    }
-    {
-        const { input, sent } = makeInput(finger);
-        for (const d of [1.5, 0.75, 3]) wheel(input, d, { deltaMode: 1, ms: 300 });
-        check(`Gecko, ${session}: a fraction of a line counts, and does not shrink the notch`,
-              downs(sent) === 1, JSON.stringify(sent));
-    }
-    {
-        const { input, sent } = makeInput(finger);
-        for (const d of [3, 0.75, 0.75, 0.75, 0.75, 3]) wheel(input, d, { deltaMode: 1, ms: 100 });
-        check(`Gecko, ${session}: fractions go against a whole-line notch already learned`,
-              downs(sent) === 3, JSON.stringify(sent));
+        {
+            const { input, sent } = makeInput(finger);
+            for (const d of [1.5, 0.75, 6]) wheel(input, d, { deltaMode: 1, ms: 300 });
+            check(`Gecko on ${os}, ${session}: a fraction of a line counts, and does not shrink the notch`,
+                  downs(sent) === 1, JSON.stringify(sent));
+        }
+        {
+            const { input, sent } = makeInput(finger);
+            for (const d of [6, 0.75, 0.75, 0.75, 0.75, 0.75, 0.75, 0.75, 0.75, 6]) wheel(input, d, { deltaMode: 1, ms: 100 });
+            check(`Gecko on ${os}, ${session}: fractions go against a whole-line notch already learned`,
+                  downs(sent) === 3, JSON.stringify(sent));
+        }
     }
 }
 setPlatform(...LINUX);
