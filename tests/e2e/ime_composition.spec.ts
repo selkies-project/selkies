@@ -271,12 +271,53 @@ async function runSoftChord(res: Checks, url: string): Promise<void> {
     }
 }
 
+/**
+ * The host IME places its candidates at the composition's caret, so a click on
+ * the stream moves the overlay's caret there (selkies#667): an IME composition
+ * started after a click at (900, 500) on a 1280x720 overlay laid out as the
+ * client lays it out has its caret at the click, not at the overlay's left
+ * edge. Read with caretPositionFromPoint, which Chromium answers inside a text
+ * control.
+ */
+async function runAnchor(res: Checks, url: string): Promise<void> {
+    const browser = await chromium.launch({ headless: true });
+    try {
+        const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+        await ready(page, url);
+        await page.addStyleTag({ content: 'body { margin: 0 } #overlayInput { position: absolute; top: 0; left: 0; width: 1280px; height: 720px; padding: 0; margin: 0; border: none; opacity: 0 }' });
+        await js(page, 'window.__input.attach_context()');
+        const caretAt = async (x: number, y: number): Promise<number[] | null> => {
+            const rect = await js(page, `(() => {
+                const p = document.caretPositionFromPoint(${x}, ${y});
+                const r = p && p.offsetNode && p.offsetNode.id === 'overlayInput' ? p.getClientRect() : null;
+                return r ? [Math.round(r.left), Math.round(r.top), Math.round(r.bottom)] : null;
+            })()`);
+            return Array.isArray(rect) ? rect.filter((n): n is number => typeof n === 'number') : null;
+        };
+        for (const [x, y] of [[900, 500], [200, 120]] as const) {
+            await page.mouse.click(x, y);
+            const cdp = await page.context().newCDPSession(page);
+            await cdp.send('Input.imeSetComposition', { text: '漢字', selectionStart: 2, selectionEnd: 2 });
+            await sleep(100);
+            const caret = await caretAt(x, y);
+            res.check(`a composition after a click at (${x}, ${y}) starts its caret there`,
+                      caret !== null && Math.abs(caret[0] - x) <= 2 && caret[1] <= y && y <= caret[2], `caret=${r(caret)}`);
+            await cdp.send('Input.insertText', { text: '' });
+            await js(page, "document.getElementById('overlayInput').value = ''");
+            await cdp.detach();
+        }
+    } finally {
+        await browser.close();
+    }
+}
+
 test('ime_composition', async () => {
     const res = new Checks('ime-client');
     const served = await serveTypeScript(REPO);
     try {
         const { url } = served;
         await runSoftChord(res, url);
+        await runAnchor(res, url);
         await runAssist(res, url, 'webkit');
         await runAssist(res, url, 'chromium');
         await runBranch(res, url, 'linux-ibus', null, null, [IBUS]);

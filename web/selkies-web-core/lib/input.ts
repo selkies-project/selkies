@@ -384,6 +384,13 @@ const WEBKIT_GTK3_PX_PER_AXIS = 4;
 const FINGER_SCROLL_END_MS = 200;
 
 /**
+ * The line, in CSS pixels, the overlay's caret spans around the last click on
+ * the stream (`_anchorComposition`): the host's IME opens its candidates under
+ * the caret, so they land under the remote text field clicked into.
+ */
+const COMPOSITION_LINE_PX = 24;
+
+/**
  * How long trackpad mode waits for the server's first pointer echo before it
  * has the cursor composited into the video instead, in milliseconds: a server
  * without the echo never answers.
@@ -2436,6 +2443,35 @@ export class Input {
         if (!_isChordModifierKeysym(keysym) && this._chordModifierHeld()) this._chordKeySent = true;
     }
 
+    /**
+     * Moves the overlay's caret to a point of the page, by padding the
+     * overlay rather than moving it, which keeps covering the stream. The
+     * host's IME places its candidate window at the composition's caret, which
+     * in an empty overlay is its top left corner, the stream's left edge, as
+     * far as can be from the remote text caret, of which the page knows
+     * nothing; the last click on the stream is where a text field was most
+     * likely focused, and its caret is (selkies#667). The caret's line is
+     * `COMPOSITION_LINE_PX` tall, centered on the point. Left alone while a
+     * composition runs, whose window would jump.
+     * @param clientX
+     * @param clientY
+     */
+    _anchorComposition(clientX: number, clientY: number): void {
+        const el = this.element;
+        if (this.isComposing || !el || !el.style || typeof el.getBoundingClientRect !== 'function') return;
+        const rect = el.getBoundingClientRect();
+        const width = el.offsetWidth || rect.width;
+        const height = el.offsetHeight || rect.height;
+        if (!(rect.width > 0 && rect.height > 0 && width > 0 && height > 0)) return;
+        const x = Math.min(Math.max((clientX - rect.left) * width / rect.width, 0), width - 1);
+        const y = (clientY - rect.top) * height / rect.height;
+        const top = Math.min(Math.max(y - COMPOSITION_LINE_PX / 2, 0), Math.max(height - COMPOSITION_LINE_PX, 0));
+        el.style.setProperty('box-sizing', 'border-box');
+        el.style.setProperty('font-size', `${COMPOSITION_LINE_PX * 2 / 3}px`);
+        el.style.setProperty('line-height', `${COMPOSITION_LINE_PX}px`);
+        el.style.setProperty('padding', `${top}px 0 ${Math.max(height - top - COMPOSITION_LINE_PX, 0)}px ${x}px`);
+    }
+
     /** Focuses the overlay element so the IME composes there, unless a real form field (dashboard inputs) holds focus. */
     _focusCompositionHost(): void {
         const el = this.element;
@@ -3438,6 +3474,9 @@ export class Input {
         }
         if (down && event.target === this.element && document.activeElement !== this.element) {
             this._focusCompositionHost();
+        }
+        if (down && event.button === 0 && event.target === this.element && !this._isStreamLocked()) {
+            this._anchorComposition(event.clientX, event.clientY);
         }
         var mtype: 'm' | 'm2' = "m";
         let relX = 0;
