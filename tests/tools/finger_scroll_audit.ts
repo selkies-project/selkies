@@ -472,4 +472,39 @@ view(800, 600);
 }
 setPlatform(...LINUX);
 
+// A flick: the finger lifts while moving, and the toolkits in the session add
+// its momentum from the speed they last saw only if the stroke ends inside
+// GTK's 150 ms and Chromium's 200 ms. On Linux the page is handed none of the
+// host's momentum; macOS and Windows hand it theirs, which ends slow.
+const sfeAt = (input: Input, sent: string[], stroke: number[], platform: Platform): number | null => {
+    setPlatform(...platform);
+    for (const d of stroke) wheel(input, d);
+    for (let ms = 1; ms <= 300; ms++) {
+        advance(1);
+        if (sent.includes('sfe')) return ms;
+    }
+    return null;
+};
+{
+    const { input, sent } = makeInput(true);
+    const at = sfeAt(input, sent, [20.25, 48.75, 72.375], LINUX);
+    check('Blink on Linux: a flick, stopping at 4.5 px/ms, ends 50 ms after its last event', at === 50, String(at));
+}
+{
+    const { input, sent } = makeInput(true);
+    const at = sfeAt(input, sent, [72.375, 30.5, 9.25, 3.125], LINUX);
+    check('Blink on Linux: a stroke that slows to a stop ends 200 ms after its last event', at === 200, String(at));
+}
+{
+    const { input, sent } = makeInput(true);
+    const at = sfeAt(input, sent, [6.75, 16.25, 24.125], GECKO_LINUX);
+    check('Gecko on GTK: a flick read at Blink\'s pixels ends as soon', at === 50, String(at));
+}
+{
+    const { input, sent } = makeInput(true);
+    const at = sfeAt(input, sent, [20, 48, 72], MAC_BLINK);
+    check('Blink on macOS, whose host hands the page its momentum: a fast stop still ends at 200 ms', at === 200, String(at));
+}
+setPlatform(...LINUX);
+
 process.exit(failed ? 1 : 0);

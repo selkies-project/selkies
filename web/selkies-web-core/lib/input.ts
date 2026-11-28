@@ -380,8 +380,25 @@ const WEBKIT_GTK3_PX_PER_AXIS = 4;
  * momentum after one, sends its next wheel event within a frame or two. Past
  * the 150 ms GTK 4 takes a fling's velocity over, so a toolkit adds no fling to
  * that momentum, nor to a finger held still or a wheel taken for a touchpad.
+ * A stroke on Linux that stops while fast ends sooner (`FLICK_END_MS`).
  */
 const FINGER_SCROLL_END_MS = 200;
+
+/**
+ * How soon a touchpad's stroke ends after an event moving at `FLICK_SPEED_PX_PER_MS` or more,
+ * on Linux, in milliseconds: a finger lifted while still moving, a flick, whose momentum the
+ * toolkits in the session add from the speed they last saw only if the stroke ends inside the
+ * 150 ms GTK takes a fling's velocity over and Chromium's 200 ms fling timeout. The page there
+ * is handed no momentum of the host's (`_fingerEndMs`). Three frames, so one late event does not
+ * end a stroke under way.
+ */
+const FLICK_END_MS = 50;
+
+/** The speed, in Blink's page pixels per millisecond, from which an event is a flick's (`FLICK_END_MS`). */
+const FLICK_SPEED_PX_PER_MS = 1;
+
+/** The interval an event's speed is read over where the one before it gave none: a frame at 60 Hz. */
+const FLICK_INTERVAL_MIN_MS = 16;
 
 /**
  * The line, in CSS pixels, the overlay's caret spans around the last click on
@@ -1804,6 +1821,7 @@ export class Input {
     _echoComposited!: boolean;
     fingerScroll!: boolean;
     _fingerScrollTimer!: ReturnType<typeof setTimeout> | null;
+    _fingerScrollAt!: number;
     _echoTimer!: ReturnType<typeof setTimeout> | null;
     _echoAsking!: boolean;
     useCssScaling!: boolean;
@@ -1960,6 +1978,8 @@ export class Input {
         /** Whether the session takes a touchpad's scroll as a finger's (`setFingerScroll`). */
         this.fingerScroll = false;
         this._fingerScrollTimer = null;
+        /** When the stroke under way sent its last travel (`_fingerEndMs`). */
+        this._fingerScrollAt = 0;
         this._echoTimer = null;
         this._echoAsking = false;
         this.useCssScaling = useCssScaling;
@@ -5569,8 +5589,29 @@ export class Input {
         const dy = event.deltaY * scale.y * axis;
         if (dx === 0 && dy === 0) return;
         this.send(`sf,${dx.toFixed(2)},${dy.toFixed(2)}`);
+        const endMs = this._fingerEndMs(Math.hypot(event.deltaX * axis, event.deltaY * axis));
         clearTimeout(this._fingerScrollTimer);
-        this._fingerScrollTimer = setTimeout((): void => this._endFingerScroll(), FINGER_SCROLL_END_MS);
+        this._fingerScrollTimer = setTimeout((): void => this._endFingerScroll(), endMs);
+    }
+
+    /**
+     * How long after an event of `travel` Blink page pixels its stroke ends unless another
+     * comes: `FINGER_SCROLL_END_MS`, or `FLICK_END_MS` on Linux where the event moved at
+     * `FLICK_SPEED_PX_PER_MS` or more since the one before it. A stroke that slows to a stop
+     * ends late, so no toolkit flings a finger held still; one that stops while fast is a
+     * finger lifted mid-motion. macOS and Windows hand the page the host's own momentum,
+     * which ends slow, and a touch that cuts it short reads as a fast stop: there every stroke
+     * ends late.
+     * @param travel
+     * @returns
+     */
+    _fingerEndMs(travel: number): number {
+        const now = performance.now();
+        const interval = this._fingerScrollTimer === null ? FLICK_INTERVAL_MIN_MS :
+            Math.max(now - this._fingerScrollAt, FLICK_INTERVAL_MIN_MS);
+        this._fingerScrollAt = now;
+        const linux = browser.isLinux() && !/Android/.test(navigator.userAgent);
+        return linux && travel / interval >= FLICK_SPEED_PX_PER_MS ? FLICK_END_MS : FINGER_SCROLL_END_MS;
     }
 
     /**
