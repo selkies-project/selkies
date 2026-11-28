@@ -129,7 +129,7 @@ impl Case {
             // Every test of a target is ignored until a run names the target, as here: `cargo
             // test --workspace` runs on hosts with no display. A selector filters the target's
             // tests by name, which spells its hyphens as underscores.
-            let mut cmd = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+            let mut cmd = Command::new(env!("CARGO"));
             cmd.args([
                 "test",
                 "--locked",

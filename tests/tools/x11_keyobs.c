@@ -70,34 +70,23 @@ int main(int argc, char **argv)
     printf("{\"kind\": \"ready\"}\n");
     fflush(stdout);
 
+    /* Unbuffered: a line read leaves what follows it in the pipe, where poll sees it. */
+    setvbuf(stdin, NULL, _IONBF, 0);
     struct pollfd fds[2] = {{ConnectionNumber(dpy), POLLIN, 0}, {STDIN_FILENO, POLLIN, 0}};
     char line[64];
-    size_t have = 0;
     for (;;) {
         drain(dpy);
         if (poll(fds, 2, 100) < 0)
             break;
         if (fds[1].revents & (POLLIN | POLLHUP)) {
-            ssize_t n = read(STDIN_FILENO, line + have, sizeof line - 1 - have);
-            if (n <= 0)
+            if (!fgets(line, sizeof line, stdin))
                 break;
-            have += (size_t)n;
-            line[have] = '\0';
-            char *nl;
-            while ((nl = strchr(line, '\n')) != NULL) {
-                *nl = '\0';
-                if (strcmp(line, "sync") == 0) {
-                    XSync(dpy, False);
-                    drain(dpy);
-                    printf("{\"kind\": \"synced\"}\n");
-                    fflush(stdout);
-                }
-                size_t rest = have - (size_t)(nl + 1 - line);
-                memmove(line, nl + 1, rest + 1);
-                have = rest;
+            if (strcmp(line, "sync\n") == 0) {
+                XSync(dpy, False);
+                drain(dpy);
+                printf("{\"kind\": \"synced\"}\n");
+                fflush(stdout);
             }
-            if (have == sizeof line - 1)
-                have = 0;
         }
     }
     XDestroyWindow(dpy, win);

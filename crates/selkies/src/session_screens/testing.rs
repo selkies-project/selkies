@@ -25,7 +25,7 @@ pub(crate) fn isolated() -> bool {
 /// Run one ignored test of this binary in a process of its own, over `env` on this one's, and
 /// fail with its output when it fails.
 pub(crate) fn run_isolated(test: &str, env: &[(&str, &str)]) {
-    let output = Command::new(std::env::current_exe().expect("the test binary"))
+    let output = Command::new("/proc/self/exe")
         .args([
             "--exact",
             test,
